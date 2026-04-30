@@ -1,8 +1,8 @@
 package com.zlt.aps.lh.engine.chain.validators;
 
 import com.zlt.aps.lh.api.constant.LhDataValidationGroupConstant;
-import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.ValidationPolicyEnum;
+import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.chain.IDataValidator;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import lombok.extern.slf4j.Slf4j;
@@ -25,7 +25,7 @@ import java.util.stream.Collectors;
 public class SkuCapacityValidator implements IDataValidator {
     private static final String VALIDATOR_KEY = "skuCapacityValidator";
     private static final String SKU_DELIMITER = "、";
-    private static final String INVALID_TIME_ERROR_TEMPLATE = "[%s] 物料编码 %s 对应的硫化时间无效(须为正数)";
+    private static final String INVALID_TIME_ERROR_TEMPLATE = "[%s] 物料编码 %s 对应的标准产能无效";
 
     @Override
     public boolean validate(LhScheduleContext context) {
@@ -55,13 +55,13 @@ public class SkuCapacityValidator implements IDataValidator {
                     if (Objects.isNull(skuLhCapacity)) {
                         return true;
                     }
-                    return Objects.isNull(skuLhCapacity.getVulcanizationTime())
-                            || skuLhCapacity.getVulcanizationTime() <= 0;
+                    return Objects.isNull(skuLhCapacity.getStandardCapacity())
+                            || skuLhCapacity.getStandardCapacity() <= 0;
                 })
                 .collect(Collectors.toList());
         if (!invalidSkuList.isEmpty()) {
             String invalidSkuText = String.join(SKU_DELIMITER, invalidSkuList);
-            log.warn("月计划SKU硫化时间无效, 工厂: {}, 物料编码: {}", context.getFactoryCode(), invalidSkuText);
+            log.warn("月计划SKU标准产能无效, 工厂: {}, 物料编码: {}", context.getFactoryCode(), invalidSkuText);
             context.addValidationError(String.format(INVALID_TIME_ERROR_TEMPLATE, getValidatorName(), invalidSkuText));
             return false;
         }

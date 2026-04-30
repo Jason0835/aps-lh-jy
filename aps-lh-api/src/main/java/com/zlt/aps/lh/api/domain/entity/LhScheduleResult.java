@@ -159,7 +159,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
      * 排程日期
      */
     @Excel(name = "ui.data.column.lhScheduleResult.scheduleDate")
-    @JsonFormat(pattern = "yyyy-MM-dd", timezone = "GMT+8")
+    @JsonFormat(pattern = "yyyy-MM-dd")
     @ApiModelProperty(value = "排程日期", name = "scheduleDate")
     @TableField(value = "SCHEDULE_DATE")
     private Date scheduleDate;
