@@ -46,16 +46,28 @@ INSERT INTO T_LH_PARAMS (FACTORY_CODE, PARAM_CODE, PARAM_VALUE, PARAM_NAME, REMA
 
 -- ======================== 干冰清洗规则 ========================
 ('116', 'DRY_ICE_INTERVAL_DAYS', '25', '干冰清洗间隔天数', '每 25 天清洗一次'),
-('116', 'DRY_ICE_WARNING_DAYS', '20', '干冰清洗预警天数', '提前 20 天预警'),
-('116', 'DRY_ICE_ADVANCE_DAYS', '7', '干冰清洗提前天数', '提前 7 天安排'),
+('116', 'DRY_ICE_WARNING_DAYS', '7', '干冰清洗预警天数', '提前 7 天预警'),
+('116', 'DRY_ICE_ADVANCE_DAYS', '2', '干冰清洗提前天数', '最多提前 2 天安排'),
 ('116', 'DRY_ICE_DURATION_HOURS', '3', '干冰清洗耗时', '单位：小时'),
 ('116', 'DRY_ICE_LOSS_QTY', '6', '干冰清洗损失数量', '清洗过程损失的产品数量'),
 ('116', 'DRY_ICE_DAILY_LIMIT', '3', '每日干冰清洗上限', '每天最多 3 台'),
+('116', 'DRY_ICE_MORNING_SHIFT_LIMIT', '2', '干冰早班清洗上限', '早班最多 2 台'),
+('116', 'DRY_ICE_AFTERNOON_SHIFT_LIMIT', '1', '干冰中班清洗上限', '中班最多 1 台'),
+('116', 'DRY_ICE_WORK_START_TIME', '07:30', '干冰清洗允许开始时间', 'HH:mm'),
+('116', 'DRY_ICE_WORK_END_TIME', '17:00', '干冰清洗允许结束时间', 'HH:mm'),
 
 -- ======================== 喷砂清洗规则 ========================
 ('116', 'SAND_BLAST_DURATION_HOURS', '10', '喷砂清洗耗时', '单位：小时'),
 ('116', 'SAND_BLAST_WITH_INSPECTION_HOURS', '12', '喷砂清洗含首检耗时', '单位：小时'),
 ('116', 'SAND_BLAST_DAILY_LIMIT', '1', '每日喷砂清洗上限', '每天最多 1 台'),
+('116', 'SAND_BLAST_WARNING_DAYS', '25', '喷砂清洗预警天数', '提前 25 天预警'),
+('116', 'SAND_BLAST_ADVANCE_DAYS', '2', '喷砂清洗提前天数', '最多提前 2 天安排'),
+('116', 'SAND_BLAST_SKIP_SUNDAY_ENABLED', '1', '喷砂是否跳过周日', '1-跳过，0-不跳过'),
+('116', 'SAND_BLAST_SKIP_HOLIDAY_ENABLED', '1', '喷砂是否跳过节假日', '1-跳过，0-不跳过'),
+('116', 'SAND_BLAST_MAINTENANCE_DATES', '15,28', '喷砂机维保日期', '逗号分隔的每月日期'),
+('116', 'SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE', '0', '维保日是否允许喷砂', '1-允许，0-不允许'),
+('116', 'SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED', '0', '是否允许手工周日喷砂', '1-允许，0-不允许'),
+('116', 'SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT', '2', '周日喷砂交替计划阈值', '低于该条数时允许手工周日喷砂'),
 ('116', 'SAND_BLAST_MAINTENANCE_DAY_MID', '15', '喷砂保养日 -月中', '每月 15 日'),
 ('116', 'SAND_BLAST_MAINTENANCE_DAY_END', '28', '喷砂保养日 -月末', '每月 28 日'),
 
@@ -72,6 +84,7 @@ INSERT INTO T_LH_PARAMS (FACTORY_CODE, PARAM_CODE, PARAM_VALUE, PARAM_NAME, REMA
 
 -- ======================== 停机超时阈值 ========================
 ('116', 'MACHINE_STOP_TIMEOUT_HOURS', '24', '停机超时阈值', '单位：小时'),
+('116', 'MOULD_CLEANING_ADVANCE_DAYS', '2', '模具清洗提前天数', '最多提前 2 天'),
 
 -- ======================== 胶囊相关规则 ========================
 ('116', 'CAPSULE_WARNING_COUNT', '430', '胶囊预警次数', '达到 430 次预警'),

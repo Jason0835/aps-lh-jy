@@ -1,11 +1,15 @@
 package com.zlt.aps.lh.handler;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
+import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.component.IncrSerialGenerator;
@@ -25,11 +29,13 @@ import org.springframework.util.CollectionUtils;
 import javax.annotation.Resource;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -51,6 +57,8 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
     private static final AtomicInteger ORDER_SEQ = new AtomicInteger(0);
     private static final AtomicInteger CHG_SEQ = new AtomicInteger(0);
+    private static final int ENABLED = 1;
+    private static final String CLEANING_DATA_SOURCE_MANUAL = "0";
 
     @Override
     protected void doHandle(LhScheduleContext context) {
@@ -61,6 +69,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
             // S4.6.2 生成模具交替计划
             generateMouldChangePlan(context);
+            validateManualSundaySandBlastThreshold(context);
 
             // S4.6.3 补全工单号和发布状态
             assignOrderNumbers(context);
@@ -192,7 +201,212 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             updateRollingState(state, result);
         }
 
+        planOrder = appendCleaningMouldChangePlans(context, plans, planOrder, changeResults);
         log.info("生成模具交替计划完成, 共 {} 条", plans.size());
+    }
+
+    /**
+     * 基于清洗窗口追加模具清洗交替计划。
+     *
+     * @param context 排程上下文
+     * @param plans 模具交替计划列表
+     * @param planOrder 当前计划顺序
+     * @return 下一个计划顺序
+     */
+    private int appendCleaningMouldChangePlans(LhScheduleContext context,
+                                               List<LhMouldChangePlan> plans,
+                                               int planOrder,
+                                               List<LhScheduleResult> changeResults) {
+        List<Map.Entry<MachineScheduleDTO, MachineCleaningWindowDTO>> cleaningPlanItems = collectCleaningPlanItems(context);
+        for (Map.Entry<MachineScheduleDTO, MachineCleaningWindowDTO> item : cleaningPlanItems) {
+            MachineScheduleDTO machine = item.getKey();
+            MachineCleaningWindowDTO cleaningWindow = item.getValue();
+            String machineCode = resolveCleaningMachineCode(machine, cleaningWindow);
+            RollingMachineState cleaningState = resolveCleaningMaterialState(context, changeResults,
+                    machineCode, cleaningWindow.getCleanStartTime());
+            LhMouldChangePlan plan = new LhMouldChangePlan();
+            plan.setFactoryCode(context.getFactoryCode());
+            plan.setLhResultBatchNo(context.getBatchNo());
+            plan.setOrderNo(generateChangePlanOrderNo(context));
+            plan.setScheduleDate(context.getScheduleTargetDate());
+            plan.setPlanDate(cleaningWindow.getCleanStartTime());
+            plan.setPlanOrder(planOrder++);
+            plan.setClassIndex(resolvePlanShiftCode(context, cleaningWindow.getCleanStartTime()));
+            plan.setLhMachineCode(machineCode);
+            plan.setLhMachineName(machine != null ? machine.getMachineName() : null);
+            plan.setLeftRightMould(LeftRightMouldUtil.resolveLeftRightMould(
+                    cleaningWindow.getLeftRightMould(), machineCode));
+            plan.setBeforeMaterialCode(cleaningState.getCurrentMaterialCode());
+            plan.setBeforeMaterialDesc(cleaningState.getCurrentMaterialDesc());
+            plan.setAfterMaterialCode(cleaningState.getCurrentMaterialCode());
+            plan.setAfterMaterialDesc(cleaningState.getCurrentMaterialDesc());
+            plan.setChangeMouldType(resolveCleaningMouldChangeType(cleaningWindow));
+            plan.setChangeTime(cleaningWindow.getCleanStartTime());
+            plan.setMouldCode(cleaningWindow.getMouldCode());
+            plan.setIsRelease("0");
+            plan.setMouldStatus("0");
+            plan.setRemark(cleaningWindow.getRemark());
+            plan.setIsDelete(0);
+            plans.add(plan);
+        }
+        return planOrder;
+    }
+
+    /**
+     * 按清洗发生时点回放机台物料状态。
+     *
+     * @param context 排程上下文
+     * @param changeResults 换模结果
+     * @param machineCode 机台编码
+     * @param cleaningStartTime 清洗开始时间
+     * @return 清洗发生时的机台状态
+     */
+    private RollingMachineState resolveCleaningMaterialState(LhScheduleContext context,
+                                                             List<LhScheduleResult> changeResults,
+                                                             String machineCode,
+                                                             Date cleaningStartTime) {
+        RollingMachineState state = buildInitialState(context, machineCode);
+        if (StringUtils.isEmpty(machineCode) || cleaningStartTime == null || CollectionUtils.isEmpty(changeResults)) {
+            return state;
+        }
+        for (LhScheduleResult result : changeResults) {
+            if (!StringUtils.equals(machineCode, result.getLhMachineCode())) {
+                continue;
+            }
+            Date plannedMouldChangeStartTime = resolvePlannedMouldChangeStartTime(result);
+            if (plannedMouldChangeStartTime == null || !plannedMouldChangeStartTime.before(cleaningStartTime)) {
+                continue;
+            }
+            updateRollingState(state, result);
+        }
+        return state;
+    }
+
+    /**
+     * 校验周日手工喷砂是否满足交替计划条数阈值。
+     *
+     * @param context 排程上下文
+     */
+    private void validateManualSundaySandBlastThreshold(LhScheduleContext context) {
+        if (context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED,
+                LhScheduleConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED) != ENABLED
+                || context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED,
+                LhScheduleConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED) != ENABLED) {
+            return;
+        }
+        int threshold = context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT,
+                LhScheduleConstant.SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT);
+        for (Map.Entry<MachineScheduleDTO, MachineCleaningWindowDTO> item : collectCleaningPlanItems(context)) {
+            MachineCleaningWindowDTO cleaningWindow = item.getValue();
+            if (cleaningWindow == null
+                    || !StringUtils.equals(CleaningTypeEnum.SAND_BLAST.getCode(), cleaningWindow.getCleanType())
+                    || !StringUtils.equals(CLEANING_DATA_SOURCE_MANUAL, cleaningWindow.getDataSource())
+                    || cleaningWindow.getCleanStartTime() == null
+                    || !isSunday(cleaningWindow.getCleanStartTime())) {
+                continue;
+            }
+            String dateKey = LhScheduleTimeUtil.formatDate(cleaningWindow.getCleanStartTime());
+            long alternatePlanCount = context.getMouldChangePlanList().stream()
+                    .filter(plan -> Objects.nonNull(plan.getPlanDate())
+                            && StringUtils.equals(dateKey, LhScheduleTimeUtil.formatDate(plan.getPlanDate()))
+                            && !isCleaningMouldChangePlan(plan))
+                    .count();
+            if (alternatePlanCount >= threshold) {
+                throw new ScheduleException(ScheduleStepEnum.S4_6_RESULT_VALIDATION,
+                        ScheduleErrorCode.RESULT_VALIDATION_FAILED,
+                        context.getFactoryCode(), context.getBatchNo(),
+                        "周日手工喷砂交替计划数量超限, 日期: " + dateKey
+                                + ", 机台: " + resolveCleaningMachineCode(item.getKey(), cleaningWindow)
+                                + ", 阈值: " + threshold
+                                + ", 实际条数: " + alternatePlanCount);
+            }
+        }
+    }
+
+    /**
+     * 判断是否为清洗类交替计划。
+     *
+     * @param plan 模具交替计划
+     * @return true-清洗类；false-非清洗类
+     */
+    private boolean isCleaningMouldChangePlan(LhMouldChangePlan plan) {
+        return Objects.nonNull(plan)
+                && (StringUtils.equals(MouldChangeTypeEnum.SAND_BLAST.getCode(), plan.getChangeMouldType())
+                || StringUtils.equals(MouldChangeTypeEnum.DRY_ICE.getCode(), plan.getChangeMouldType()));
+    }
+
+    /**
+     * 判断指定日期是否为周日。
+     *
+     * @param date 日期
+     * @return true-周日；false-非周日
+     */
+    private boolean isSunday(Date date) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(date);
+        return calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY;
+    }
+
+    /**
+     * 收集清洗计划项。
+     *
+     * @param context 排程上下文
+     * @return 清洗计划项
+     */
+    private List<Map.Entry<MachineScheduleDTO, MachineCleaningWindowDTO>> collectCleaningPlanItems(LhScheduleContext context) {
+        List<Map.Entry<MachineScheduleDTO, MachineCleaningWindowDTO>> itemList = new ArrayList<>();
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (machine == null || CollectionUtils.isEmpty(machine.getCleaningWindowList())) {
+                continue;
+            }
+            for (MachineCleaningWindowDTO cleaningWindow : machine.getCleaningWindowList()) {
+                if (cleaningWindow == null
+                        || cleaningWindow.getCleanStartTime() == null
+                        || StringUtils.isEmpty(resolveCleaningMouldChangeType(cleaningWindow))) {
+                    continue;
+                }
+                itemList.add(new java.util.AbstractMap.SimpleEntry<>(machine, cleaningWindow));
+            }
+        }
+        itemList.sort(Comparator
+                .comparing((Map.Entry<MachineScheduleDTO, MachineCleaningWindowDTO> item) -> item.getValue().getCleanStartTime(),
+                        Comparator.nullsLast(Date::compareTo))
+                .thenComparing(item -> resolveCleaningMachineCode(item.getKey(), item.getValue()),
+                        Comparator.nullsLast(String::compareTo)));
+        return itemList;
+    }
+
+    /**
+     * 解析清洗计划对应机台。
+     *
+     * @param machine 机台
+     * @param cleaningWindow 清洗窗口
+     * @return 机台编码
+     */
+    private String resolveCleaningMachineCode(MachineScheduleDTO machine, MachineCleaningWindowDTO cleaningWindow) {
+        if (cleaningWindow != null && StringUtils.isNotEmpty(cleaningWindow.getLhCode())) {
+            return cleaningWindow.getLhCode();
+        }
+        return machine != null ? machine.getMachineCode() : null;
+    }
+
+    /**
+     * 解析清洗交替类型。
+     *
+     * @param cleaningWindow 清洗窗口
+     * @return 模具交替类型
+     */
+    private String resolveCleaningMouldChangeType(MachineCleaningWindowDTO cleaningWindow) {
+        if (Objects.isNull(cleaningWindow)) {
+            return null;
+        }
+        if (CleaningTypeEnum.SAND_BLAST.getCode().equals(cleaningWindow.getCleanType())) {
+            return MouldChangeTypeEnum.SAND_BLAST.getCode();
+        }
+        if (CleaningTypeEnum.DRY_ICE.getCode().equals(cleaningWindow.getCleanType())) {
+            return MouldChangeTypeEnum.DRY_ICE.getCode();
+        }
+        return null;
     }
 
     /**

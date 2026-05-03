@@ -29,7 +29,7 @@ import java.util.Map;
 public class LhScheduleConfigResolver {
 
     /** 参数 Map 预估容量，减少扩容开销 */
-    private static final int DEFAULT_PARAM_CAPACITY = 48;
+    private static final int DEFAULT_PARAM_CAPACITY = 64;
 
     @Resource
     private LhParamsMapper lhParamsMapper;
@@ -116,9 +116,43 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.DEFAULT_ENDING_TIME_TOLERANCE_MINUTES);
 
         // 清洗与保养参数
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_WARNING_DAYS,
+                LhScheduleConstant.DRY_ICE_WARNING_DAYS, 0);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_ADVANCE_DAYS,
+                LhScheduleConstant.DRY_ICE_ADVANCE_DAYS, 0);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_DAILY_LIMIT,
+                LhScheduleConstant.DRY_ICE_DAILY_LIMIT, 1);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_MORNING_SHIFT_LIMIT,
+                LhScheduleConstant.DRY_ICE_MORNING_SHIFT_LIMIT, 0);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT,
+                LhScheduleConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT, 0);
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_WORK_START_TIME,
+                LhScheduleConstant.DRY_ICE_WORK_START_TIME);
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DRY_ICE_WORK_END_TIME,
+                LhScheduleConstant.DRY_ICE_WORK_END_TIME);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_DURATION_HOURS,
+                LhScheduleConstant.SAND_BLAST_DURATION_HOURS);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_WITH_INSPECTION_HOURS,
                 LhScheduleConstant.SAND_BLAST_WITH_INSPECTION_HOURS);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_DAILY_LIMIT,
+                LhScheduleConstant.SAND_BLAST_DAILY_LIMIT, 1);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_WARNING_DAYS,
+                LhScheduleConstant.SAND_BLAST_WARNING_DAYS, 0);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_ADVANCE_DAYS,
+                LhScheduleConstant.SAND_BLAST_ADVANCE_DAYS, 0);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED,
+                LhScheduleConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_SKIP_HOLIDAY_ENABLED,
+                LhScheduleConstant.SAND_BLAST_SKIP_HOLIDAY_ENABLED);
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_MAINTENANCE_DATES,
+                LhScheduleConstant.SAND_BLAST_MAINTENANCE_DATES);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE,
+                LhScheduleConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED,
+                LhScheduleConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT,
+                LhScheduleConstant.SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT, 0);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS,
                 LhScheduleConstant.MAINTENANCE_DURATION_HOURS);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MAINTENANCE_START_HOUR,
@@ -150,6 +184,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.MACHINE_ONLINE_LOOKBACK_DAYS, 1);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS,
                 LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MOULD_CLEANING_ADVANCE_DAYS,
+                LhScheduleConstant.MOULD_CLEANING_ADVANCE_DAYS, 0);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_LOCAL_SEARCH,
                 LhScheduleConstant.ENABLE_LOCAL_SEARCH);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.LOCAL_SEARCH_MACHINE_THRESHOLD,
@@ -235,5 +271,19 @@ public class LhScheduleConfigResolver {
             }
         }
         resolvedParamMap.put(paramCode, BigDecimal.valueOf(resolvedValue).stripTrailingZeros().toPlainString());
+    }
+
+    /**
+     * 解析并写入字符串参数。
+     *
+     * @param resolvedParamMap 解析后参数
+     * @param lhParamsMap      原始参数
+     * @param paramCode        参数编码
+     * @param defaultValue     默认值
+     */
+    private void putStringValue(Map<String, String> resolvedParamMap, Map<String, String> lhParamsMap,
+            String paramCode, String defaultValue) {
+        String value = lhParamsMap.get(paramCode);
+        resolvedParamMap.put(paramCode, StringUtils.isNotEmpty(value) ? value.trim() : defaultValue);
     }
 }

@@ -628,7 +628,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                             .lt(LhMouldCleanPlan::getCleanTime, endDate)
                             .and(w -> w.eq(LhMouldCleanPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
                                     .or()
-                                    .isNull(LhMouldCleanPlan::getIsDelete)));
+                                    .isNull(LhMouldCleanPlan::getIsDelete))
+                            .orderByAsc(LhMouldCleanPlan::getCleanTime));
         }
         context.setCleaningPlanList(cleaningPlanList != null ? cleaningPlanList : context.getCleaningPlanList());
         log.debug("模具清洗计划加载完成, 数量: {}", context.getCleaningPlanList().size());

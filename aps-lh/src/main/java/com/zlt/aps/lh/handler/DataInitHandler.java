@@ -24,6 +24,8 @@ import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -32,11 +34,15 @@ import org.springframework.util.CollectionUtils;
 import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * S4.2 基础数据初始化处理器
@@ -47,6 +53,21 @@ import java.util.Map;
 @Slf4j
 @Component
 public class DataInitHandler extends AbsScheduleStepHandler {
+
+    /** 手工录入清洗计划 */
+    private static final String CLEANING_DATA_SOURCE_MANUAL = "0";
+    /** 工作日历停产标记 */
+    private static final String WORK_CALENDAR_STOP_FLAG = "0";
+    /** 启用配置值 */
+    private static final int ENABLED = 1;
+    /** 小时分钟分隔数量 */
+    private static final int TIME_PART_COUNT = 2;
+    /** 每小时分钟数 */
+    private static final int MINUTES_PER_HOUR = 60;
+    /** 时间分隔符 */
+    private static final String TIME_SEPARATOR = ":";
+    /** 多值分隔符 */
+    private static final String VALUE_SEPARATOR = ",";
 
     @Resource
     private DataValidationChain dataValidationChain;
@@ -98,6 +119,12 @@ public class DataInitHandler extends AbsScheduleStepHandler {
             log.warn("数据校验未通过，共 {} 条错误，明细: {}", result.getErrors().size(), result.getFormattedErrors());
             ScheduleDomainExceptionHelper.interrupt(context, ScheduleStepEnum.S4_2_DATA_INIT,
                     ScheduleErrorCode.DATA_INCOMPLETE, result.getSummaryMessage(), result.getErrors());
+            return;
+        }
+
+        // S4.2.3.1 校验清洗计划配置约束，仅校验表数据，不生成或回写清洗计划。
+        validateCleaningPlanRules(context);
+        if (context.isInterrupted()) {
             return;
         }
 
@@ -361,10 +388,12 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         String cleanType = cleaningPlan.getCleanType();
         int cleanDurationHours = 0;
         int readyDurationHours = 0;
+        Date originalCleanStartTime = cleaningPlan.getCleanTime();
         if (CleaningTypeEnum.DRY_ICE.getCode().equals(cleanType)) {
             cleanDurationHours = context.getParamIntValue(LhScheduleParamConstant.DRY_ICE_DURATION_HOURS,
                     LhScheduleConstant.DRY_ICE_DURATION_HOURS);
             readyDurationHours = cleanDurationHours;
+            originalCleanStartTime = resolveDryIceWindowStartTime(context, cleaningPlan.getCleanTime());
         } else if (CleaningTypeEnum.SAND_BLAST.getCode().equals(cleanType)) {
             cleanDurationHours = context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_WITH_INSPECTION_HOURS,
                     LhScheduleConstant.SAND_BLAST_WITH_INSPECTION_HOURS);
@@ -378,15 +407,349 @@ public class DataInitHandler extends AbsScheduleStepHandler {
 
         // 清洗计划与设备计划停机重叠时，清洗必须顺延到停机结束后执行。
         Date adjustedCleanStartTime = resolveAdjustedCleaningStartTime(
-                context, cleaningPlan.getLhCode(), cleaningPlan.getCleanTime(), cleanDurationHours);
+                context, cleaningPlan.getLhCode(), originalCleanStartTime, cleanDurationHours);
 
         MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setLhCode(cleaningPlan.getLhCode());
         cleaningWindow.setCleanType(cleanType);
         cleaningWindow.setLeftRightMould(cleaningPlan.getLeftRightMould());
+        cleaningWindow.setMouldCode(resolveCleaningMouldCode(context, cleaningPlan.getLhCode()));
         cleaningWindow.setCleanStartTime(adjustedCleanStartTime);
         cleaningWindow.setCleanEndTime(LhScheduleTimeUtil.addHours(adjustedCleanStartTime, cleanDurationHours));
         cleaningWindow.setReadyTime(LhScheduleTimeUtil.addHours(adjustedCleanStartTime, readyDurationHours));
+        cleaningWindow.setDataSource(cleaningPlan.getDataSource());
+        cleaningWindow.setRemark(cleaningPlan.getRemark());
         return cleaningWindow;
+    }
+
+    /**
+     * 校验模具清洗计划约束。
+     *
+     * @param context 排程上下文
+     */
+    private void validateCleaningPlanRules(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getCleaningPlanList())) {
+            return;
+        }
+        List<String> errorList = new ArrayList<>();
+        validateDryIceCleaningLimit(context, errorList);
+        validateSandBlastCleaningLimit(context, errorList);
+        if (!CollectionUtils.isEmpty(errorList)) {
+            ScheduleDomainExceptionHelper.interrupt(context, ScheduleStepEnum.S4_2_DATA_INIT,
+                    ScheduleErrorCode.DATA_INCOMPLETE, "模具清洗计划不满足排程约束", errorList);
+        }
+    }
+
+    /**
+     * 校验干冰清洗台数约束。
+     *
+     * @param context 排程上下文
+     * @param errorList 错误列表
+     */
+    private void validateDryIceCleaningLimit(LhScheduleContext context, List<String> errorList) {
+        Map<String, List<LhMouldCleanPlan>> datePlanMap = new HashMap<>(16);
+        Map<String, List<LhMouldCleanPlan>> morningPlanMap = new HashMap<>(16);
+        Map<String, List<LhMouldCleanPlan>> afternoonPlanMap = new HashMap<>(16);
+        for (LhMouldCleanPlan cleaningPlan : context.getCleaningPlanList()) {
+            if (!isValidCleaningPlan(cleaningPlan, CleaningTypeEnum.DRY_ICE.getCode())) {
+                continue;
+            }
+            Date windowStartTime = resolveDryIceWindowStartTime(context, cleaningPlan.getCleanTime());
+            String dateKey = LhScheduleTimeUtil.formatDate(windowStartTime);
+            datePlanMap.computeIfAbsent(dateKey, key -> new ArrayList<>()).add(cleaningPlan);
+            if (LhScheduleTimeUtil.isMorningShift(context, windowStartTime)) {
+                morningPlanMap.computeIfAbsent(dateKey, key -> new ArrayList<>()).add(cleaningPlan);
+            } else if (LhScheduleTimeUtil.isAfternoonShift(context, windowStartTime)) {
+                afternoonPlanMap.computeIfAbsent(dateKey, key -> new ArrayList<>()).add(cleaningPlan);
+            }
+        }
+        appendLimitErrors(errorList, datePlanMap,
+                context.getParamIntValue(LhScheduleParamConstant.DRY_ICE_DAILY_LIMIT, LhScheduleConstant.DRY_ICE_DAILY_LIMIT),
+                "干冰清洗同日数量超过上限");
+        appendLimitErrors(errorList, morningPlanMap,
+                context.getParamIntValue(LhScheduleParamConstant.DRY_ICE_MORNING_SHIFT_LIMIT,
+                        LhScheduleConstant.DRY_ICE_MORNING_SHIFT_LIMIT),
+                "干冰清洗早班数量超过上限");
+        appendLimitErrors(errorList, afternoonPlanMap,
+                context.getParamIntValue(LhScheduleParamConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT,
+                        LhScheduleConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT),
+                "干冰清洗中班数量超过上限");
+    }
+
+    /**
+     * 校验喷砂清洗约束。
+     *
+     * @param context 排程上下文
+     * @param errorList 错误列表
+     */
+    private void validateSandBlastCleaningLimit(LhScheduleContext context, List<String> errorList) {
+        Map<String, List<LhMouldCleanPlan>> datePlanMap = new HashMap<>(16);
+        for (LhMouldCleanPlan cleaningPlan : context.getCleaningPlanList()) {
+            if (!isValidCleaningPlan(cleaningPlan, CleaningTypeEnum.SAND_BLAST.getCode())) {
+                continue;
+            }
+            String dateKey = LhScheduleTimeUtil.formatDate(cleaningPlan.getCleanTime());
+            datePlanMap.computeIfAbsent(dateKey, key -> new ArrayList<>()).add(cleaningPlan);
+            validateSandBlastForbiddenDate(context, cleaningPlan, errorList);
+        }
+        appendLimitErrors(errorList, datePlanMap,
+                context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_DAILY_LIMIT,
+                        LhScheduleConstant.SAND_BLAST_DAILY_LIMIT),
+                "喷砂清洗同日数量超过上限");
+    }
+
+    /**
+     * 校验喷砂清洗禁排日期。
+     *
+     * @param context 排程上下文
+     * @param cleaningPlan 清洗计划
+     * @param errorList 错误列表
+     */
+    private void validateSandBlastForbiddenDate(LhScheduleContext context,
+                                                LhMouldCleanPlan cleaningPlan,
+                                                List<String> errorList) {
+        Date cleanTime = cleaningPlan.getCleanTime();
+        boolean manualPlan = StringUtils.equals(CLEANING_DATA_SOURCE_MANUAL, cleaningPlan.getDataSource());
+        boolean maintenanceDateAllowed = manualPlan
+                && context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE,
+                LhScheduleConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE) == ENABLED;
+        if (isSandBlastMaintenanceDate(context, cleanTime) && !maintenanceDateAllowed) {
+            errorList.add(buildCleaningError("喷砂清洗命中喷砂机维保日", cleaningPlan));
+        }
+        if (isSunday(cleanTime)
+                && context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED,
+                LhScheduleConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED) == ENABLED
+                && !isManualSundaySandBlastAllowed(context, manualPlan, cleanTime)) {
+            errorList.add(buildCleaningError("喷砂清洗命中周日", cleaningPlan));
+        }
+        if (isHoliday(context, cleanTime)
+                && context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_SKIP_HOLIDAY_ENABLED,
+                LhScheduleConstant.SAND_BLAST_SKIP_HOLIDAY_ENABLED) == ENABLED) {
+            errorList.add(buildCleaningError("喷砂清洗命中节假日", cleaningPlan));
+        }
+    }
+
+    /**
+     * 判断手工周日喷砂是否允许。
+     *
+     * @param context 排程上下文
+     * @param manualPlan 是否手工计划
+     * @param cleanTime 清洗时间
+     * @return true-允许；false-不允许
+     */
+    private boolean isManualSundaySandBlastAllowed(LhScheduleContext context, boolean manualPlan, Date cleanTime) {
+        if (!manualPlan || context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED,
+                LhScheduleConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED) != ENABLED) {
+            return false;
+        }
+        // 当前阶段尚未生成本批次交替计划，周日喷砂阈值改在结果校验阶段按真实交替计划数量执行。
+        return true;
+    }
+
+    /**
+     * 追加数量上限错误。
+     *
+     * @param errorList 错误列表
+     * @param datePlanMap 日期计划Map
+     * @param limit 上限
+     * @param errorPrefix 错误前缀
+     */
+    private void appendLimitErrors(List<String> errorList,
+                                   Map<String, List<LhMouldCleanPlan>> datePlanMap,
+                                   int limit,
+                                   String errorPrefix) {
+        for (Map.Entry<String, List<LhMouldCleanPlan>> entry : datePlanMap.entrySet()) {
+            List<LhMouldCleanPlan> planList = entry.getValue();
+            if (CollectionUtils.isEmpty(planList) || planList.size() <= limit) {
+                continue;
+            }
+            errorList.add(errorPrefix + ", 日期: " + entry.getKey()
+                    + ", 上限: " + limit
+                    + ", 机台: " + formatMachineCodes(planList));
+        }
+    }
+
+    /**
+     * 判断清洗计划是否为指定类型。
+     *
+     * @param cleaningPlan 清洗计划
+     * @param cleanType 清洗类型
+     * @return true-有效；false-无效
+     */
+    private boolean isValidCleaningPlan(LhMouldCleanPlan cleaningPlan, String cleanType) {
+        return Objects.nonNull(cleaningPlan)
+                && Objects.nonNull(cleaningPlan.getCleanTime())
+                && StringUtils.equals(cleanType, cleaningPlan.getCleanType());
+    }
+
+    /**
+     * 生成干冰清洗窗口开始时间。
+     *
+     * @param context 排程上下文
+     * @param cleanTime 清洗计划时间
+     * @return 清洗窗口开始时间
+     */
+    private Date resolveDryIceWindowStartTime(LhScheduleContext context, Date cleanTime) {
+        int startMinutes = parseTimeMinutes(context.getParamValue(LhScheduleParamConstant.DRY_ICE_WORK_START_TIME,
+                LhScheduleConstant.DRY_ICE_WORK_START_TIME));
+        int endMinutes = parseTimeMinutes(context.getParamValue(LhScheduleParamConstant.DRY_ICE_WORK_END_TIME,
+                LhScheduleConstant.DRY_ICE_WORK_END_TIME));
+        int currentMinutes = resolveDayMinutes(cleanTime);
+        if (currentMinutes < startMinutes) {
+            return buildTimeByMinutes(cleanTime, startMinutes);
+        }
+        if (currentMinutes > endMinutes) {
+            return buildTimeByMinutes(LhScheduleTimeUtil.addDays(cleanTime, 1), startMinutes);
+        }
+        return cleanTime;
+    }
+
+    /**
+     * 解析机台当前在机模具号。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编号
+     * @return 模具号
+     */
+    private String resolveCleaningMouldCode(LhScheduleContext context, String machineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)) {
+            return null;
+        }
+        LhMachineOnlineInfo onlineInfo = context.getMachineOnlineInfoMap().get(machineCode);
+        if (Objects.isNull(onlineInfo) || StringUtils.isEmpty(onlineInfo.getMaterialCode())) {
+            return null;
+        }
+        List<MdmSkuMouldRel> mouldRelList = context.getSkuMouldRelMap().get(onlineInfo.getMaterialCode());
+        if (CollectionUtils.isEmpty(mouldRelList)) {
+            return null;
+        }
+        return mouldRelList.stream()
+                .map(MdmSkuMouldRel::getMouldCode)
+                .filter(StringUtils::isNotEmpty)
+                .distinct()
+                .collect(Collectors.joining(VALUE_SEPARATOR));
+    }
+
+    /**
+     * 判断是否为喷砂机维保日。
+     *
+     * @param context 排程上下文
+     * @param cleanTime 清洗时间
+     * @return true-维保日；false-非维保日
+     */
+    private boolean isSandBlastMaintenanceDate(LhScheduleContext context, Date cleanTime) {
+        String maintenanceDates = context.getParamValue(LhScheduleParamConstant.SAND_BLAST_MAINTENANCE_DATES,
+                LhScheduleConstant.SAND_BLAST_MAINTENANCE_DATES);
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(cleanTime);
+        String dayOfMonth = String.valueOf(calendar.get(Calendar.DAY_OF_MONTH));
+        for (String maintenanceDate : maintenanceDates.split(VALUE_SEPARATOR)) {
+            if (StringUtils.equals(dayOfMonth, maintenanceDate.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断是否为周日。
+     *
+     * @param cleanTime 清洗时间
+     * @return true-周日；false-非周日
+     */
+    private boolean isSunday(Date cleanTime) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(cleanTime);
+        return calendar.get(Calendar.DAY_OF_WEEK) == Calendar.SUNDAY;
+    }
+
+    /**
+     * 判断是否为节假日。
+     *
+     * @param context 排程上下文
+     * @param cleanTime 清洗时间
+     * @return true-节假日；false-非节假日
+     */
+    private boolean isHoliday(LhScheduleContext context, Date cleanTime) {
+        if (CollectionUtils.isEmpty(context.getWorkCalendarList())) {
+            return false;
+        }
+        String cleanDate = LhScheduleTimeUtil.formatDate(cleanTime);
+        for (MdmWorkCalendar workCalendar : context.getWorkCalendarList()) {
+            if (Objects.isNull(workCalendar)
+                    || Objects.isNull(workCalendar.getProductionDate())
+                    || !StringUtils.equals(cleanDate, LhScheduleTimeUtil.formatDate(workCalendar.getProductionDate()))) {
+                continue;
+            }
+            return StringUtils.equals(WORK_CALENDAR_STOP_FLAG, workCalendar.getDayFlag());
+        }
+        return false;
+    }
+
+    /**
+     * 构建清洗计划错误提示。
+     *
+     * @param reason 原因
+     * @param cleaningPlan 清洗计划
+     * @return 错误提示
+     */
+    private String buildCleaningError(String reason, LhMouldCleanPlan cleaningPlan) {
+        return reason + ", 日期: " + LhScheduleTimeUtil.formatDate(cleaningPlan.getCleanTime())
+                + ", 机台: " + cleaningPlan.getLhCode();
+    }
+
+    /**
+     * 格式化机台编码列表。
+     *
+     * @param planList 清洗计划列表
+     * @return 机台编码文本
+     */
+    private String formatMachineCodes(List<LhMouldCleanPlan> planList) {
+        return planList.stream()
+                .map(LhMouldCleanPlan::getLhCode)
+                .filter(StringUtils::isNotEmpty)
+                .collect(Collectors.joining(VALUE_SEPARATOR));
+    }
+
+    /**
+     * 解析 HH:mm 为当天分钟数。
+     *
+     * @param timeText 时间文本
+     * @return 当天分钟数
+     */
+    private int parseTimeMinutes(String timeText) {
+        if (StringUtils.isEmpty(timeText)) {
+            throw new IllegalArgumentException("干冰清洗时间范围配置为空");
+        }
+        String[] parts = timeText.trim().split(TIME_SEPARATOR);
+        if (parts.length != TIME_PART_COUNT) {
+            throw new IllegalArgumentException("干冰清洗时间范围配置格式错误: " + timeText);
+        }
+        return Integer.parseInt(parts[0]) * MINUTES_PER_HOUR + Integer.parseInt(parts[1]);
+    }
+
+    /**
+     * 获取指定时间的当天分钟数。
+     *
+     * @param date 时间
+     * @return 当天分钟数
+     */
+    private int resolveDayMinutes(Date date) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(date);
+        return calendar.get(Calendar.HOUR_OF_DAY) * MINUTES_PER_HOUR + calendar.get(Calendar.MINUTE);
+    }
+
+    /**
+     * 按当天分钟数构建时间。
+     *
+     * @param baseDate 基准日期
+     * @param minutes 当天分钟数
+     * @return 时间
+     */
+    private Date buildTimeByMinutes(Date baseDate, int minutes) {
+        return LhScheduleTimeUtil.buildTime(
+                baseDate, minutes / MINUTES_PER_HOUR, minutes % MINUTES_PER_HOUR, 0);
     }
 
     /**

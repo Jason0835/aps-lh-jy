@@ -3,15 +3,19 @@
  */
 package com.zlt.aps.lh.engine.strategy.impl;
 
+import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import lombok.extern.slf4j.Slf4j;
@@ -41,6 +45,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
     /** 定点机台不可作业标记 */
     private static final String JOB_TYPE_FORBIDDEN = "1";
+    /** 每小时毫秒数 */
+    private static final long MILLIS_PER_HOUR = 60L * 60L * 1000L;
 
     @Override
     public List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku) {
@@ -58,6 +64,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 4. 过滤候选机台：状态启用 + 寸口范围匹配 + 模具兼容 + 模具未被占用
         BigDecimal skuInch = parseInch(sku.getProSize());
         List<MachineScheduleDTO> candidates = new ArrayList<>();
+        List<MachineScheduleDTO> stopTimeoutCandidates = new ArrayList<>();
         MachineFilterTrace trace = new MachineFilterTrace(context.getMachineScheduleMap().size());
 
         for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
@@ -67,12 +74,24 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 continue;
             }
             MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
-                    sku, skuMouldCodes, occupiedMouldCodes, skuInch, machine);
+                    context, sku, skuMouldCodes, occupiedMouldCodes, skuInch, machine);
             if (MachineAvailabilityReason.AVAILABLE != availabilityReason) {
                 trace.recordAvailabilityReason(machine, availabilityReason);
                 continue;
             }
+            // 长时间停机只在存在其他可用机台时才触发换机，避免唯一候选机台被提前误排除。
+            if (hasPlanStopExceededTimeout(context, machine)) {
+                stopTimeoutCandidates.add(machine);
+                continue;
+            }
             candidates.add(machine);
+        }
+        if (CollectionUtils.isEmpty(candidates) && !CollectionUtils.isEmpty(stopTimeoutCandidates)) {
+            candidates.addAll(stopTimeoutCandidates);
+        } else {
+            for (MachineScheduleDTO machine : stopTimeoutCandidates) {
+                trace.recordAvailabilityReason(machine, MachineAvailabilityReason.STOP_TIMEOUT);
+            }
         }
 
         // 5. 按多维度排序
@@ -80,10 +99,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         traceMachineCandidates(context, sku, candidates, trace);
 
         if (CollectionUtils.isEmpty(candidates)) {
-            log.warn("SKU候选机台为空, materialCode: {}, 规格: {}, 寸口: {}, 机台总数: {}, 定点过滤: {}, 禁用过滤: {}, 寸口过滤: {}, 模具过滤: {}",
+            log.warn("SKU候选机台为空, materialCode: {}, 规格: {}, 寸口: {}, 机台总数: {}, 定点过滤: {}, 禁用过滤: {}, 超时停机过滤: {}, 寸口过滤: {}, 模具过滤: {}",
                     sku.getMaterialCode(), sku.getSpecCode(), sku.getProSize(), trace.totalMachineCount,
-                    trace.allowedMachineFilteredCount, trace.disabledCount, trace.inchMismatchCount,
-                    trace.mouldConflictCount);
+                    trace.allowedMachineFilteredCount, trace.disabledCount, trace.stopTimeoutCount,
+                    trace.inchMismatchCount, trace.mouldConflictCount);
         }
         log.debug("SKU: {} 匹配到 {} 台候选机台", sku.getMaterialCode(), candidates.size());
         return candidates;
@@ -171,6 +190,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     /**
      * 判断机台是否满足当前排程可用条件。
      *
+     * @param context 排程上下文
      * @param sku 待排SKU
      * @param skuMouldCodes SKU模具列表
      * @param occupiedMouldCodes 已占用模具
@@ -178,7 +198,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param machine 候选机台
      * @return true-可用，false-不可用
      */
-    private MachineAvailabilityReason resolveMachineAvailabilityReason(SkuScheduleDTO sku, List<String> skuMouldCodes,
+    private MachineAvailabilityReason resolveMachineAvailabilityReason(LhScheduleContext context, SkuScheduleDTO sku, List<String> skuMouldCodes,
                                                                       Set<String> occupiedMouldCodes, BigDecimal skuInch,
                                                                       MachineScheduleDTO machine) {
         if (!MachineStatusUtil.isEnabled(machine.getStatus())) {
@@ -190,6 +210,94 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         return isMouldCompatible(sku, skuMouldCodes, machine, occupiedMouldCodes)
                 ? MachineAvailabilityReason.AVAILABLE
                 : MachineAvailabilityReason.MOULD_CONFLICT;
+    }
+
+    /**
+     * 判断机台计划停机是否超过自动换机阈值。
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @return true-超过阈值，false-未超过阈值
+     */
+    private boolean hasPlanStopExceededTimeout(LhScheduleContext context, MachineScheduleDTO machine) {
+        int timeoutHours = context.getParamIntValue(LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS,
+                LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
+        Date candidateReferenceTime = resolveCandidateReferenceTime(context, machine);
+        Date candidateWindowEndTime = resolveCandidateWindowEndTime(context, candidateReferenceTime);
+        for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
+            if (planShut == null || StringUtils.isEmpty(planShut.getMachineCode())
+                    || !StringUtils.equals(planShut.getMachineCode(), machine.getMachineCode())) {
+                continue;
+            }
+            if (planShut.getBeginDate() == null || planShut.getEndDate() == null
+                    || !planShut.getEndDate().after(planShut.getBeginDate())) {
+                continue;
+            }
+            long stopMillis = planShut.getEndDate().getTime() - planShut.getBeginDate().getTime();
+            if (stopMillis > (long) timeoutHours * MILLIS_PER_HOUR
+                    && isPlanStopOverlapCandidateWindow(planShut, candidateReferenceTime, candidateWindowEndTime)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析候选机台的待排起点。
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @return 待排起点
+     */
+    private Date resolveCandidateReferenceTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (machine.getEstimatedEndTime() != null) {
+            return machine.getEstimatedEndTime();
+        }
+        if (context.getScheduleDate() != null) {
+            return context.getScheduleDate();
+        }
+        return context.getScheduleTargetDate();
+    }
+
+    /**
+     * 解析候选机台可排窗口结束时间。
+     *
+     * @param context 排程上下文
+     * @param referenceTime 待排起点
+     * @return 可排窗口结束时间
+     */
+    private Date resolveCandidateWindowEndTime(LhScheduleContext context, Date referenceTime) {
+        Date windowEndTime = null;
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (shift == null || shift.getShiftEndDateTime() == null) {
+                continue;
+            }
+            if (windowEndTime == null || shift.getShiftEndDateTime().after(windowEndTime)) {
+                windowEndTime = shift.getShiftEndDateTime();
+            }
+        }
+        if (windowEndTime != null && (referenceTime == null || windowEndTime.after(referenceTime))) {
+            return windowEndTime;
+        }
+        return referenceTime;
+    }
+
+    /**
+     * 判断长停机是否与机台待排窗口重叠。
+     *
+     * @param planShut 停机计划
+     * @param referenceTime 待排起点
+     * @param windowEndTime 待排窗口结束
+     * @return true-重叠；false-不重叠
+     */
+    private boolean isPlanStopOverlapCandidateWindow(MdmDevicePlanShut planShut, Date referenceTime, Date windowEndTime) {
+        if (referenceTime == null) {
+            return false;
+        }
+        if (windowEndTime == null || !windowEndTime.after(referenceTime)) {
+            return !referenceTime.before(planShut.getBeginDate()) && referenceTime.before(planShut.getEndDate());
+        }
+        return planShut.getBeginDate().before(windowEndTime) && planShut.getEndDate().after(referenceTime);
     }
 
     /**
@@ -567,6 +675,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 "候选过滤概况: 机台总数=" + trace.totalMachineCount
                         + ", 定点限制过滤=" + trace.allowedMachineFilteredCount
                         + ", 机台禁用过滤=" + trace.disabledCount
+                        + ", 超时停机过滤=" + trace.stopTimeoutCount
                         + ", 寸口不符过滤=" + trace.inchMismatchCount
                         + ", 模具占用过滤=" + trace.mouldConflictCount
                         + ", 候选数=" + PriorityTraceLogHelper.sizeOf(candidates));
@@ -601,6 +710,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private enum MachineAvailabilityReason {
         AVAILABLE,
         DISABLED,
+        STOP_TIMEOUT,
         INCH_MISMATCH,
         MOULD_CONFLICT
     }
@@ -615,6 +725,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         private int allowedMachineFilteredCount;
         /** 禁用过滤数 */
         private int disabledCount;
+        /** 超时停机过滤数 */
+        private int stopTimeoutCount;
         /** 寸口不符过滤数 */
         private int inchMismatchCount;
         /** 模具冲突过滤数 */
@@ -634,6 +746,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             if (MachineAvailabilityReason.DISABLED == reason) {
                 disabledCount++;
                 recordFilteredMachine(machine, "机台禁用");
+            } else if (MachineAvailabilityReason.STOP_TIMEOUT == reason) {
+                stopTimeoutCount++;
+                recordFilteredMachine(machine, "停机超过阈值");
             } else if (MachineAvailabilityReason.INCH_MISMATCH == reason) {
                 inchMismatchCount++;
                 recordFilteredMachine(machine, "寸口不匹配");

@@ -100,10 +100,10 @@ public final class LhScheduleConstant {
     public static final int DRY_ICE_INTERVAL_DAYS = 25;
 
     /** 干冰清洗预警天数 */
-    public static final int DRY_ICE_WARNING_DAYS = 20;
+    public static final int DRY_ICE_WARNING_DAYS = 7;
 
     /** 干冰清洗提前天数 */
-    public static final int DRY_ICE_ADVANCE_DAYS = 7;
+    public static final int DRY_ICE_ADVANCE_DAYS = 2;
 
     /** 干冰清洗耗时（小时） */
     public static final int DRY_ICE_DURATION_HOURS = 3;
@@ -113,6 +113,18 @@ public final class LhScheduleConstant {
 
     /** 每日干冰清洗上限 */
     public static final int DRY_ICE_DAILY_LIMIT = 3;
+
+    /** 干冰清洗早班上限 */
+    public static final int DRY_ICE_MORNING_SHIFT_LIMIT = 2;
+
+    /** 干冰清洗中班上限 */
+    public static final int DRY_ICE_AFTERNOON_SHIFT_LIMIT = 1;
+
+    /** 干冰清洗允许开始时间 */
+    public static final String DRY_ICE_WORK_START_TIME = "07:30";
+
+    /** 干冰清洗允许结束时间 */
+    public static final String DRY_ICE_WORK_END_TIME = "17:00";
 
     // ======================== 喷砂清洗相关 ========================
 
@@ -124,6 +136,30 @@ public final class LhScheduleConstant {
 
     /** 每日喷砂清洗上限 */
     public static final int SAND_BLAST_DAILY_LIMIT = 1;
+
+    /** 喷砂清洗预警天数 */
+    public static final int SAND_BLAST_WARNING_DAYS = 25;
+
+    /** 喷砂清洗提前天数 */
+    public static final int SAND_BLAST_ADVANCE_DAYS = 2;
+
+    /** 喷砂是否跳过周日（1-跳过） */
+    public static final int SAND_BLAST_SKIP_SUNDAY_ENABLED = 1;
+
+    /** 喷砂是否跳过节假日（1-跳过） */
+    public static final int SAND_BLAST_SKIP_HOLIDAY_ENABLED = 1;
+
+    /** 喷砂机维保日期 */
+    public static final String SAND_BLAST_MAINTENANCE_DATES = "15,28";
+
+    /** 喷砂机维保日是否允许安排（1-允许） */
+    public static final int SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE = 0;
+
+    /** 是否允许手工周日喷砂（1-允许） */
+    public static final int SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED = 0;
+
+    /** 周日允许喷砂的最小交替计划条数阈值 */
+    public static final int SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT = 2;
 
     /** 喷砂保养日-月中 */
     public static final int SAND_BLAST_MAINTENANCE_DAY_MID = 15;
@@ -164,6 +200,9 @@ public final class LhScheduleConstant {
 
     /** 停机超时阈值（小时） */
     public static final int MACHINE_STOP_TIMEOUT_HOURS = 24;
+
+    /** 模具清洗提前天数 */
+    public static final int MOULD_CLEANING_ADVANCE_DAYS = 2;
 
     // ======================== 胶囊相关 ========================
 
