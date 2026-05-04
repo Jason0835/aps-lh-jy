@@ -9,9 +9,9 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
-import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
+import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
@@ -43,8 +43,6 @@ import java.util.stream.Collectors;
 @Component
 public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
-    /** 定点机台不可作业标记 */
-    private static final String JOB_TYPE_FORBIDDEN = "1";
     /** 每小时毫秒数 */
     private static final long MILLIS_PER_HOUR = 60L * 60L * 1000L;
 
@@ -52,8 +50,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     public List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku) {
         log.debug("匹配可用硫化机台, SKU: {}", sku.getMaterialCode());
 
-        // 1. 从硫化定点机台获取SKU可用机台编号集合（排除不可作业的）
-        Set<String> allowedMachineCodes = getAllowedMachineCodes(context, sku);
+        // 1. 从硫化定点机台获取限制作业优先机台和不可作业机台。
+        Set<String> limitSpecifyMachineCodes = LhSpecifyMachineUtil.resolveLimitSpecifyMachineCodes(
+                context, sku.getMaterialCode());
+        Set<String> notAllowedMachineCodes = LhSpecifyMachineUtil.resolveNotAllowedMachineCodes(
+                context, sku.getMaterialCode());
 
         // 2. 获取SKU的模具号列表
         List<String> skuMouldCodes = getSkuMouldCodes(context, sku.getMaterialCode());
@@ -68,9 +69,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         MachineFilterTrace trace = new MachineFilterTrace(context.getMachineScheduleMap().size());
 
         for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
-            if (!canProduceSku(allowedMachineCodes, machine)) {
-                trace.allowedMachineFilteredCount++;
-                trace.recordFilteredMachine(machine, "定点机台限制");
+            if (isNotAllowedMachine(notAllowedMachineCodes, machine)) {
+                trace.notAllowedMachineFilteredCount++;
+                trace.recordFilteredMachine(machine, "定点机台不可作业");
                 continue;
             }
             MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
@@ -99,10 +100,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         traceMachineCandidates(context, sku, candidates, trace);
 
         if (CollectionUtils.isEmpty(candidates)) {
-            log.warn("SKU候选机台为空, materialCode: {}, 规格: {}, 寸口: {}, 机台总数: {}, 定点过滤: {}, 禁用过滤: {}, 超时停机过滤: {}, 寸口过滤: {}, 模具过滤: {}",
+            log.warn("SKU候选机台为空, materialCode: {}, 规格: {}, 寸口: {}, 机台总数: {}, 不可作业过滤: {}, 禁用过滤: {}, 超时停机过滤: {}, 寸口过滤: {}, 模具过滤: {}, 限制作业优先机台: {}",
                     sku.getMaterialCode(), sku.getSpecCode(), sku.getProSize(), trace.totalMachineCount,
-                    trace.allowedMachineFilteredCount, trace.disabledCount, trace.stopTimeoutCount,
-                    trace.inchMismatchCount, trace.mouldConflictCount);
+                    trace.notAllowedMachineFilteredCount, trace.disabledCount, trace.stopTimeoutCount,
+                    trace.inchMismatchCount, trace.mouldConflictCount, limitSpecifyMachineCodes);
         }
         log.debug("SKU: {} 匹配到 {} 台候选机台", sku.getMaterialCode(), candidates.size());
         return candidates;
@@ -127,25 +128,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
         return null;
-    }
-
-    /**
-     * 从硫化定点机台Map中获取该SKU可用的机台编号集合
-     * <p>若specifyMachineMap中无该规格记录，则不限制机台（返回空集合表示不限制）</p>
-     */
-    private Set<String> getAllowedMachineCodes(LhScheduleContext context, SkuScheduleDTO sku) {
-        Set<String> allowed = new HashSet<>();
-        List<LhSpecifyMachine> specifyList = context.getSpecifyMachineMap().get(sku.getSpecCode());
-        if (specifyList == null || specifyList.isEmpty()) {
-            return allowed;
-        }
-        for (LhSpecifyMachine specify : specifyList) {
-            // 排除"不可作业"的机台
-            if (!JOB_TYPE_FORBIDDEN.equals(specify.getJobType())) {
-                allowed.add(specify.getMachineCode());
-            }
-        }
-        return allowed;
     }
 
     /**
@@ -177,14 +159,16 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 判断机台是否可生产当前SKU。
+     * 判断机台是否为当前SKU的不可作业机台。
      *
-     * @param allowedMachineCodes 定点机台白名单
+     * @param notAllowedMachineCodes 不可作业机台编码集合
      * @param machine 候选机台
-     * @return true-可生产，false-不可生产
+     * @return true-不可作业，false-允许继续校验
      */
-    private boolean canProduceSku(Set<String> allowedMachineCodes, MachineScheduleDTO machine) {
-        return CollectionUtils.isEmpty(allowedMachineCodes) || allowedMachineCodes.contains(machine.getMachineCode());
+    private boolean isNotAllowedMachine(Set<String> notAllowedMachineCodes, MachineScheduleDTO machine) {
+        return !CollectionUtils.isEmpty(notAllowedMachineCodes)
+                && machine != null
+                && notAllowedMachineCodes.contains(machine.getMachineCode());
     }
 
     /**
@@ -386,7 +370,12 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      */
     private Comparator<MachineScheduleDTO> buildMachineComparator(LhScheduleContext context, SkuScheduleDTO sku) {
         return (left, right) -> {
-            int compareResult = compareEndingTime(context, left, right);
+            int compareResult = compareLimitSpecifyPriority(context, sku, left, right);
+            if (compareResult != 0) {
+                return compareResult;
+            }
+
+            compareResult = compareEndingTime(context, left, right);
             if (compareResult != 0) {
                 return compareResult;
             }
@@ -422,6 +411,37 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
             return Comparator.nullsLast(String::compareTo).compare(left.getMachineCode(), right.getMachineCode());
         };
+    }
+
+    /**
+     * 比较限制作业定点机台优先级。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param left 左机台
+     * @param right 右机台
+     * @return 比较结果
+     */
+    private int compareLimitSpecifyPriority(LhScheduleContext context, SkuScheduleDTO sku,
+                                            MachineScheduleDTO left, MachineScheduleDTO right) {
+        return Integer.compare(resolveLimitSpecifyScore(context, sku, left),
+                resolveLimitSpecifyScore(context, sku, right));
+    }
+
+    /**
+     * 解析限制作业定点机台得分。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @return 0-定点机台，1-普通机台
+     */
+    private int resolveLimitSpecifyScore(LhScheduleContext context, SkuScheduleDTO sku, MachineScheduleDTO machine) {
+        if (sku == null || machine == null) {
+            return 1;
+        }
+        return LhSpecifyMachineUtil.isLimitSpecifyMachine(context, machine.getMachineCode(), sku.getMaterialCode())
+                ? 0 : 1;
     }
 
     /**
@@ -673,7 +693,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                         + ", 寸口=" + PriorityTraceLogHelper.safeText(sku.getProSize()));
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 "候选过滤概况: 机台总数=" + trace.totalMachineCount
-                        + ", 定点限制过滤=" + trace.allowedMachineFilteredCount
+                        + ", 不可作业过滤=" + trace.notAllowedMachineFilteredCount
                         + ", 机台禁用过滤=" + trace.disabledCount
                         + ", 超时停机过滤=" + trace.stopTimeoutCount
                         + ", 寸口不符过滤=" + trace.inchMismatchCount
@@ -692,6 +712,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                             + ". 机台=" + PriorityTraceLogHelper.safeText(machine.getMachineCode())
                             + ", 名称=" + PriorityTraceLogHelper.safeText(machine.getMachineName())
                             + ", 收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime())
+                            + ", 定点机台=" + PriorityTraceLogHelper.yesNo(resolveLimitSpecifyScore(context, sku, machine) == 0)
                             + ", 同规格=" + PriorityTraceLogHelper.yesNo(resolveSpecMatchScore(sku, machine) == 0)
                             + ", 同英寸=" + PriorityTraceLogHelper.yesNo(resolveProSizeMatchScore(sku, machine) == 0)
                             + ", 英寸差=" + resolveInchDistance(sku, machine)
@@ -721,8 +742,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private static class MachineFilterTrace {
         /** 机台总数 */
         private final int totalMachineCount;
-        /** 定点限制过滤数 */
-        private int allowedMachineFilteredCount;
+        /** 不可作业过滤数 */
+        private int notAllowedMachineFilteredCount;
         /** 禁用过滤数 */
         private int disabledCount;
         /** 超时停机过滤数 */

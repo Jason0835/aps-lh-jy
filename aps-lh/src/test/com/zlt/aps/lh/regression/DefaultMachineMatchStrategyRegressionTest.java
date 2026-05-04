@@ -4,6 +4,8 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
+import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.enums.JobTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
@@ -28,6 +30,70 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 机台匹配回归：SKU存在多条模具关系时，不应把关系条数误当成待选前的用模数。
  */
 class DefaultMachineMatchStrategyRegressionTest {
+
+    @Test
+    void matchMachines_shouldUseSpecifySpecCodeAsMaterialCodeForLimitPriority() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 30),
+                "SPEC-X", "22.5", "MAT-SPECIFY");
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getMachineScheduleMap().put(specifyMachine.getMachineCode(), specifyMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-SPECIFY", JobTypeEnum.RESTRICTED.getCode())));
+
+        SkuScheduleDTO sku = sku("MAT-001", "SPEC-A", "22.5");
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(2, candidates.size(), "定点机台只是优先，不应过滤普通候选机台");
+        assertEquals("M-SPECIFY", candidates.get(0).getMachineCode(),
+                "T_LH_SPECIFY_MACHINE.SPEC_CODE 应按物料编码匹配 SKU.materialCode");
+    }
+
+    @Test
+    void matchMachines_shouldFallbackToNormalMachineWhenLimitMachineUnavailable() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO disabledSpecifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-SPECIFY");
+        disabledSpecifyMachine.setStatus("0");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(disabledSpecifyMachine.getMachineCode(), disabledSpecifyMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-SPECIFY", JobTypeEnum.RESTRICTED.getCode())));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "定点机台不可排时，应回到普通机台匹配逻辑");
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldExcludeNotAllowedMachineByMaterialCode() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO forbiddenMachine = machine("M-FORBIDDEN", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-FORBIDDEN");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(forbiddenMachine.getMachineCode(), forbiddenMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-FORBIDDEN", JobTypeEnum.NOT_ALLOWED.getCode())));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "不可作业机台必须按物料编码定点关系排除");
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode());
+    }
 
     @Test
     void matchMachines_usesMouldQtyInsteadOfRelationCount() {
@@ -320,6 +386,14 @@ class DefaultMachineMatchStrategyRegressionTest {
         MdmSkuMouldRel rel = new MdmSkuMouldRel();
         rel.setMouldCode(mouldCode);
         return rel;
+    }
+
+    private LhSpecifyMachine specifyMachine(String materialCode, String machineCode, String jobType) {
+        LhSpecifyMachine specifyMachine = new LhSpecifyMachine();
+        specifyMachine.setSpecCode(materialCode);
+        specifyMachine.setMachineCode(machineCode);
+        specifyMachine.setJobType(jobType);
+        return specifyMachine;
     }
 
     private LhScheduleContext buildContext() {

@@ -4,10 +4,13 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.enums.JobTypeEnum;
 import com.zlt.aps.lh.engine.strategy.IInsertOrderStrategy;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -88,15 +91,15 @@ public class DefaultInsertOrderStrategy implements IInsertOrderStrategy {
      */
     private String matchInsertMachine(LhScheduleContext context, SkuScheduleDTO insertOrder) {
         Map<String, List<LhSpecifyMachine>> specifyMap = context.getSpecifyMachineMap();
-        if (specifyMap == null || insertOrder.getSpecCode() == null) {
+        if (CollectionUtils.isEmpty(specifyMap) || StringUtils.isEmpty(insertOrder.getMaterialCode())) {
             return null;
         }
-        List<LhSpecifyMachine> specifyList = specifyMap.get(insertOrder.getSpecCode());
-        if (specifyList == null) {
+        List<LhSpecifyMachine> specifyList = specifyMap.get(insertOrder.getMaterialCode());
+        if (CollectionUtils.isEmpty(specifyList)) {
             return null;
         }
         for (LhSpecifyMachine specify : specifyList) {
-            if ("1".equals(specify.getJobType())) {
+            if (!StringUtils.equals(JobTypeEnum.RESTRICTED.getCode(), specify.getJobType())) {
                 continue;
             }
             MachineScheduleDTO machine = context.getMachineScheduleMap().get(specify.getMachineCode());

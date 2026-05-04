@@ -107,7 +107,7 @@ public class LhScheduleContext {
     private Map<String, Integer> embryoDescMaterialCountMap = new HashMap<>();
     /** MES硫化在机信息Map, key=machineCode */
     private Map<String, LhMachineOnlineInfo> machineOnlineInfoMap = new HashMap<>();
-    /** 硫化定点机台Map, key=specCode */
+    /** 硫化定点机台Map, key=materialCode（表字段SPEC_CODE实际维护物料编码） */
     private Map<String, List<LhSpecifyMachine>> specifyMachineMap = new HashMap<>();
     /** 硫化机胶囊已使用次数Map, key=machineCode */
     private Map<String, LhRepairCapsule> capsuleUsageMap = new HashMap<>();
@@ -149,6 +149,10 @@ public class LhScheduleContext {
     private List<LhShiftConfigVO> scheduleWindowShifts = new ArrayList<>();
     /** 机台已分配SKU Map, key=machineCode, value=已分配的排程结果 */
     private Map<String, List<LhScheduleResult>> machineAssignmentMap = new LinkedHashMap<>();
+    /** 定点机台挤量预留切换开始时间, key=machineCode */
+    private Map<String, Date> specifyMachineReservedSwitchStartTimeMap = new LinkedHashMap<>();
+    /** 定点机台挤量预留物料编码, key=machineCode */
+    private Map<String, String> specifyMachineReservedMaterialMap = new LinkedHashMap<>();
     /** 每日换模计数, key=dateString, value=[早班换模数, 中班换模数] */
     private Map<String, int[]> dailyMouldChangeCountMap = new LinkedHashMap<>();
     /** 每日首检计数, key=dateString, value=[早班首检数, 中班首检数] */

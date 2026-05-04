@@ -2,13 +2,17 @@ package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.enums.JobTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.engine.strategy.ITrialProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 
 import java.util.Date;
 import java.util.List;
@@ -60,17 +64,17 @@ public class DefaultTrialProductionStrategy implements ITrialProductionStrategy 
     @Override
     public String matchTrialMachine(LhScheduleContext context, SkuScheduleDTO trialSku) {
         // 试制量试优先匹配定点机台中的第一台可用机台
-        if (trialSku.getSpecCode() == null) {
+        if (StringUtils.isEmpty(trialSku.getMaterialCode())) {
             return null;
         }
-        java.util.List<com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine> specifyList =
-                context.getSpecifyMachineMap().get(trialSku.getSpecCode());
-        if (specifyList == null || specifyList.isEmpty()) {
+        List<LhSpecifyMachine> specifyList =
+                context.getSpecifyMachineMap().get(trialSku.getMaterialCode());
+        if (CollectionUtils.isEmpty(specifyList)) {
             return null;
         }
         // 优先取"限制作业"(0)的机台
-        for (com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine specify : specifyList) {
-            if (!"1".equals(specify.getJobType())) {
+        for (LhSpecifyMachine specify : specifyList) {
+            if (StringUtils.equals(JobTypeEnum.RESTRICTED.getCode(), specify.getJobType())) {
                 com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO machine =
                         context.getMachineScheduleMap().get(specify.getMachineCode());
                 if (machine != null && MachineStatusUtil.isEnabled(machine.getStatus())) {

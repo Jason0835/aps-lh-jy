@@ -467,8 +467,13 @@ public final class LhScheduleTimeUtil {
         Calendar cal = Calendar.getInstance();
         cal.setTime(time);
         int hour = cal.get(Calendar.HOUR_OF_DAY);
-        // 20点之后或者6点之前属于禁止换模时段
-        return hour >= noChangeStart || hour < morningHour;
+        int minute = cal.get(Calendar.MINUTE);
+        int second = cal.get(Calendar.SECOND);
+        int millisecond = cal.get(Calendar.MILLISECOND);
+        // 禁止的是20:00之后到次日06:00之前，两个整点本身允许开始换模。
+        boolean afterNoChangeStart = hour > noChangeStart
+                || (hour == noChangeStart && (minute > 0 || second > 0 || millisecond > 0));
+        return afterNoChangeStart || hour < morningHour;
     }
 
     /**

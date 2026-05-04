@@ -211,6 +211,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(context, candidateMachine, endingTime);
                 Date machineReadyTime = capacityCalculate.calculateStartTime(context,
                         machineCode, endingTime);
+                machineReadyTime = resolveSpecifyReservedReadyTime(context, sku, machineCode, machineReadyTime);
 
                 // 4. 分配换模窗口；模具清洗即便重叠，也不再顺延换模起点。
                 Date mouldChangeStartTime = null;
@@ -310,6 +311,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context.getScheduleResultList().add(result);
                 updateMachineState(context, candidateMachine, sku, result);
                 registerMachineAssignment(context, machineCode, result);
+                clearSpecifyReservation(context, machineCode, sku.getMaterialCode());
                 scheduledCount++;
                 finalMachine = candidateMachine;
                 finalProductionStartTime = firstProductionStartTime;
@@ -948,6 +950,53 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         return maintenanceScheduleService != null
                 ? maintenanceScheduleService
                 : new LhMaintenanceScheduleService();
+    }
+
+    /**
+     * 解析定点机台挤量后预留的机台就绪时间。
+     *
+     * @param context 排程上下文
+     * @param sku 新增SKU
+     * @param machineCode 机台编码
+     * @param machineReadyTime 原机台就绪时间
+     * @return 生效后的机台就绪时间
+     */
+    private Date resolveSpecifyReservedReadyTime(LhScheduleContext context,
+                                                 SkuScheduleDTO sku,
+                                                 String machineCode,
+                                                 Date machineReadyTime) {
+        if (context == null || sku == null || StringUtils.isEmpty(machineCode)) {
+            return machineReadyTime;
+        }
+        String reservedMaterialCode = context.getSpecifyMachineReservedMaterialMap().get(machineCode);
+        Date reservedSwitchStartTime = context.getSpecifyMachineReservedSwitchStartTimeMap().get(machineCode);
+        if (!StringUtils.equals(reservedMaterialCode, sku.getMaterialCode()) || reservedSwitchStartTime == null) {
+            return machineReadyTime;
+        }
+        if (machineReadyTime == null || reservedSwitchStartTime.after(machineReadyTime)) {
+            log.info("新增排产使用定点机台挤量预留时间, machineCode: {}, materialCode: {}, readyTime: {}",
+                    machineCode, sku.getMaterialCode(), LhScheduleTimeUtil.formatDateTime(reservedSwitchStartTime));
+            return reservedSwitchStartTime;
+        }
+        return machineReadyTime;
+    }
+
+    /**
+     * 清理定点机台挤量预留信息。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param materialCode 物料编码
+     */
+    private void clearSpecifyReservation(LhScheduleContext context, String machineCode, String materialCode) {
+        if (context == null || StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        String reservedMaterialCode = context.getSpecifyMachineReservedMaterialMap().get(machineCode);
+        if (StringUtils.isEmpty(materialCode) || StringUtils.equals(materialCode, reservedMaterialCode)) {
+            context.getSpecifyMachineReservedMaterialMap().remove(machineCode);
+            context.getSpecifyMachineReservedSwitchStartTimeMap().remove(machineCode);
+        }
     }
 
     private void updateMachineState(LhScheduleContext context, MachineScheduleDTO machine, SkuScheduleDTO sku, LhScheduleResult result) {

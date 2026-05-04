@@ -9,6 +9,7 @@ import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -43,8 +44,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
         Map<String, StructurePriorityMeta> structurePriorityMap = buildStructurePriorityMap(context);
         Comparator<SkuScheduleDTO> comparator = buildSkuComparator(context, structurePriorityMap);
+        Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(context, comparator);
         sortSkuList(context.getContinuousSkuList(), comparator);
-        sortSkuList(context.getNewSpecSkuList(), comparator);
+        sortSkuList(context.getNewSpecSkuList(), newSpecComparator);
 
         // 同时对每个结构下的SKU列表排序，保证结构内顺序与主排序一致。
         for (Map.Entry<String, List<SkuScheduleDTO>> entry : context.getStructureSkuMap().entrySet()) {
@@ -52,7 +54,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         }
 
         // 按统一优先级回写顺序号，供后续结果对象复用。
-        List<SkuScheduleDTO> orderedSkuList = buildOrderedSkuList(context, comparator);
+        List<SkuScheduleDTO> orderedSkuList = buildOrderedSkuList(context, newSpecComparator);
         int order = 1;
         for (SkuScheduleDTO sku : orderedSkuList) {
             sku.setScheduleOrder(order++);
@@ -98,6 +100,21 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getMidPriorityPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getConventionProductionPendingQty())
                 .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
+    }
+
+    /**
+     * 构建新增SKU比较器，定点物料优先进入新增排产。
+     *
+     * @param context 排程上下文
+     * @param baseComparator 原有SKU比较器
+     * @return 新增SKU比较器
+     */
+    private Comparator<SkuScheduleDTO> buildNewSpecComparator(LhScheduleContext context,
+                                                              Comparator<SkuScheduleDTO> baseComparator) {
+        return Comparator
+                .comparingInt((SkuScheduleDTO sku) -> LhSpecifyMachineUtil.hasLimitSpecifyMachine(
+                        context, sku.getMaterialCode()) ? 0 : 1)
+                .thenComparing(baseComparator);
     }
 
     /**

@@ -953,7 +953,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载硫化定点机台，按规格代码建立Map
+     * 加载硫化定点机台，按物料编码建立Map。
+     * <p>T_LH_SPECIFY_MACHINE.SPEC_CODE 实际维护物料编码。</p>
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
@@ -964,16 +965,16 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .eq(LhSpecifyMachine::getFactoryCode, factoryCode)
                         .eq(LhSpecifyMachine::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         Map<String, List<LhSpecifyMachine>> specifyMachineMap = new HashMap<>(32);
-        if (specifyMachineList != null) {
+        if (!CollectionUtils.isEmpty(specifyMachineList)) {
             for (LhSpecifyMachine specifyMachine : specifyMachineList) {
-                if (specifyMachine.getSpecCode() != null) {
+                if (StringUtils.isNotEmpty(specifyMachine.getSpecCode())) {
                     specifyMachineMap.computeIfAbsent(specifyMachine.getSpecCode(),
                             k -> new ArrayList<>()).add(specifyMachine);
                 }
             }
         }
         context.setSpecifyMachineMap(specifyMachineMap);
-        log.debug("硫化定点机台加载完成, 规格数量: {}", specifyMachineMap.size());
+        log.debug("硫化定点机台加载完成, 物料数量: {}", specifyMachineMap.size());
     }
 
     /**
