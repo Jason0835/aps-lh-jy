@@ -17,6 +17,7 @@ import com.zlt.aps.lh.engine.strategy.impl.DefaultFirstInspectionBalanceStrategy
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.impl.TypeBlockProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
@@ -71,6 +72,8 @@ class ContinuousProductionTypeBlockRegressionTest {
 
     @InjectMocks
     private ContinuousProductionStrategy strategy;
+    @InjectMocks
+    private TypeBlockProductionStrategy typeBlockProductionStrategy;
 
     @Test
     void scheduleTypeBlockChange_shouldSkipSameStructureDirectContinuousAndUsePriorityOneCandidate() {
@@ -93,13 +96,13 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(2, context.getScheduleResultList().size());
         LhScheduleResult continuousResult = context.getScheduleResultList().get(0);
         LhScheduleResult followUpResult = context.getScheduleResultList().get(1);
         assertEquals("MAT-P1", followUpResult.getMaterialCode());
-        assertEquals("02", followUpResult.getScheduleType());  // 换活字块现在显示为新增类型
+        assertEquals("03", followUpResult.getScheduleType());
         assertEquals("0", continuousResult.getIsTypeBlock());
         assertEquals("1", followUpResult.getIsEnd());
         assertEquals("1", followUpResult.getIsChangeMould());
@@ -137,7 +140,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(2, context.getScheduleResultList().size());
         assertEquals("MAT-SPECIFY", context.getScheduleResultList().get(1).getMaterialCode(),
@@ -170,7 +173,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         assertNull(ShiftFieldUtil.getShiftStartTime(continuousResult, 8),
                 "触发挤量后，当前在机物料不应占用最后业务日中班");
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(2, context.getScheduleResultList().size());
         assertEquals("MAT-SPECIFY", context.getScheduleResultList().get(1).getMaterialCode(),
@@ -228,7 +231,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(1, context.getScheduleResultList().size(),
                 "机台存在需走新增换模链路的定点物料时，S4.4 不应先让普通换活字块物料抢机");
@@ -254,7 +257,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult followUpResult = context.getScheduleResultList().get(1);
         MachineScheduleDTO machine = context.getMachineScheduleMap().get("M1");
@@ -285,7 +288,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult continuousResult = context.getScheduleResultList().get(0);
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
@@ -325,7 +328,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         int firstPlannedShift = resolveFirstPlannedShiftIndex(typeBlockResult);
@@ -348,7 +351,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         int firstPlannedShift = resolveFirstPlannedShiftIndex(typeBlockResult);
@@ -387,7 +390,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         cleaningWindowList.add(cleaningWindow);
         machine.setCleaningWindowList(cleaningWindowList);
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         int firstPlannedShift = resolveFirstPlannedShiftIndex(typeBlockResult);
@@ -413,7 +416,7 @@ class ContinuousProductionTypeBlockRegressionTest {
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
         strategy.scheduleContinuousEnding(baselineContext);
-        strategy.scheduleTypeBlockChange(baselineContext);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(baselineContext);
         LhScheduleResult baselineTypeBlockResult = baselineContext.getScheduleResultList().get(1);
 
         LhScheduleContext context = newContext();
@@ -443,7 +446,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         List<MachineCleaningWindowDTO> cleaningWindowList = new ArrayList<>();
         cleaningWindowList.add(cleaningWindow);
         machine.setCleaningWindowList(cleaningWindowList);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         assertEquals(LhScheduleTimeUtil.addHours(continuousResult.getSpecEndTime(),
@@ -474,7 +477,7 @@ class ContinuousProductionTypeBlockRegressionTest {
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
         strategy.scheduleContinuousEnding(baselineContext);
-        strategy.scheduleTypeBlockChange(baselineContext);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(baselineContext);
         LhScheduleResult baselineTypeBlockResult = baselineContext.getScheduleResultList().get(1);
 
         LhScheduleContext context = newContext();
@@ -501,7 +504,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         List<MachineCleaningWindowDTO> cleaningWindowList = new ArrayList<>();
         cleaningWindowList.add(cleaningWindow);
         machine.setCleaningWindowList(cleaningWindowList);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         assertEquals(LhScheduleTimeUtil.addHours(continuousResult.getSpecEndTime(), 8),
@@ -549,7 +552,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         planShut.setEndDate(LhScheduleTimeUtil.addHours(continuousResult.getSpecEndTime(), 2));
         context.getDevicePlanShutList().add(planShut);
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(2, context.getScheduleResultList().size(), "喷砂后又遇到停机顺延时，换活字块结果仍应正常生成");
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
@@ -583,7 +586,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         assertEquals("MAT-T1", typeBlockResult.getMaterialCode());
@@ -609,7 +612,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(1, context.getScheduleResultList().size());
         assertEquals("MAT-C1", context.getScheduleResultList().get(0).getMaterialCode());
@@ -637,7 +640,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(1, context.getScheduleResultList().size());
         assertEquals("MAT-C1", context.getScheduleResultList().get(0).getMaterialCode());
@@ -658,7 +661,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(1, context.getScheduleResultList().size());
         assertEquals("MAT-C1", context.getScheduleResultList().get(0).getMaterialCode());
@@ -677,7 +680,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-C1", "MOULD-1");
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(1, context.getScheduleResultList().size());
         assertEquals("MAT-T1", context.getScheduleResultList().get(0).getMaterialCode());
@@ -697,7 +700,7 @@ class ContinuousProductionTypeBlockRegressionTest {
                 buildPreviousScheduleResult("M1", "MAT-C1", "1",
                         dateTime(2026, 4, 17, 8, 0, 0), dateTime(2026, 4, 17, 8, 5, 0)));
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(1, context.getScheduleResultList().size());
         assertEquals("MAT-T1", context.getScheduleResultList().get(0).getMaterialCode());
@@ -717,7 +720,7 @@ class ContinuousProductionTypeBlockRegressionTest {
                 buildPreviousScheduleResult("M1", "MAT-C1", "0",
                         dateTime(2026, 4, 17, 9, 0, 0), dateTime(2026, 4, 17, 9, 5, 0)));
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(0, context.getScheduleResultList().size());
         assertEquals(1, context.getNewSpecSkuList().size());
@@ -745,7 +748,7 @@ class ContinuousProductionTypeBlockRegressionTest {
                 buildPreviousScheduleResult("M1", "MAT-C1", "0",
                         dateTime(2026, 4, 17, 9, 0, 0), dateTime(2026, 4, 17, 9, 30, 0)));
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(0, context.getScheduleResultList().size());
         assertEquals(1, context.getNewSpecSkuList().size());
@@ -776,7 +779,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(2, context.getScheduleResultList().size());
         assertEquals(Arrays.asList("MAT-C1", "MAT-T1"),
@@ -809,7 +812,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         List<LhScheduleResult> results = context.getScheduleResultList();
         assertEquals(Arrays.asList("MAT-C1", "MAT-C2", "MAT-T1", "MAT-T2"),
@@ -846,7 +849,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         assertEquals(dateTime(2026, 4, 18, 19, 0, 0), continuousResult.getSpecEndTime(),
                 "收尾时间应按真实完工时刻回写，不能放大到班次结束");
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         assertEquals(dateTime(2026, 4, 19, 3, 0, 0), resolveFirstStartTime(typeBlockResult),
                 "20:00前收尾应允许连续切换，夜班继续生产");
@@ -872,7 +875,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         assertEquals(dateTime(2026, 4, 18, 20, 0, 0), continuousResult.getSpecEndTime(),
                 "收尾时间应按真实完工时刻回写，不能放大到班次结束");
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
         assertEquals(dateTime(2026, 4, 19, 4, 0, 0), resolveFirstStartTime(typeBlockResult),
                 "20:00 整点允许发起换活字块，生产可在换活字块完成后开始");
@@ -899,7 +902,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
         when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertEquals(1, context.getScheduleResultList().size());
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(0);
@@ -941,7 +944,7 @@ class ContinuousProductionTypeBlockRegressionTest {
             return "3302002174".equals(sku.getMaterialCode());
         });
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertTrue(context.getScheduleResultList().size() >= 2);
         List<String> scheduledMaterials = new ArrayList<>(context.getScheduleResultList().size());
@@ -982,7 +985,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         List<String> scheduledMaterials = new ArrayList<>(context.getScheduleResultList().size());
         for (LhScheduleResult result : context.getScheduleResultList()) {
@@ -1022,7 +1025,7 @@ class ContinuousProductionTypeBlockRegressionTest {
             return "3302002174".equals(sku.getMaterialCode());
         });
 
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         List<String> scheduledMaterials = new ArrayList<>(context.getScheduleResultList().size());
         for (LhScheduleResult result : context.getScheduleResultList()) {
@@ -1058,7 +1061,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         });
 
         strategy.scheduleContinuousEnding(context);
-        strategy.scheduleTypeBlockChange(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
         assertTrue(context.getScheduleLogList().size() >= 4);
         StringBuilder allLogText = new StringBuilder();

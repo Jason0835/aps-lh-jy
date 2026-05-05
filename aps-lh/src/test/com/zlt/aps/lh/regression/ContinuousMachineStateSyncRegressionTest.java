@@ -69,7 +69,7 @@ class ContinuousMachineStateSyncRegressionTest {
 
         Date typeBlockEndTime = dateTime(2026, 4, 23, 18, 48);
         context.getScheduleResultList().add(buildResult(
-                "M1", "MAT-TB", "02", "1", 120, typeBlockEndTime));
+                "M1", "MAT-TB", "03", "1", 120, typeBlockEndTime));
 
         continuousProductionStrategy.scheduleReduceMould(context);
 
@@ -84,7 +84,7 @@ class ContinuousMachineStateSyncRegressionTest {
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
         Date typeBlockEndTime = dateTime(2026, 4, 23, 6, 0);
         context.getScheduleResultList().add(buildResult(
-                "M1", "MAT-TB", "02", "1", 120, typeBlockEndTime));
+                "M1", "MAT-TB", "03", "1", 120, typeBlockEndTime));
         continuousProductionStrategy.scheduleReduceMould(context);
 
         SkuScheduleDTO newSku = buildNewSku("MAT-NEW", "SPEC-NEW", "17");

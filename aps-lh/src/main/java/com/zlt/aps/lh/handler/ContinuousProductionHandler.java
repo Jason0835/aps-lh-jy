@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -24,6 +25,8 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
 
     @Resource
     private ScheduleStrategyFactory strategyFactory;
+    @Resource
+    private ITypeBlockProductionStrategy typeBlockProductionStrategy;
 
     @Override
     protected void doHandle(LhScheduleContext context) {
@@ -44,8 +47,8 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
         log.info("续作收尾排产完成, 排程结果数: {}, 待新增SKU: {}",
                 context.getScheduleResultList().size(), context.getNewSpecSkuList().size());
 
-        // S4.4.2 收尾后衔接排产（同产品结构直续优先，其次换活字块）
-        strategy.scheduleTypeBlockChange(context);
+        // S4.4.2 收尾后换活字块衔接排产
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
         log.info("换活字块衔接排产完成, 排程结果数: {}, 待新增SKU: {}",
                 context.getScheduleResultList().size(), context.getNewSpecSkuList().size());
 

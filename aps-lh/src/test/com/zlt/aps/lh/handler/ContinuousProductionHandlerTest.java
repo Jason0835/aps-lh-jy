@@ -4,6 +4,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -29,6 +30,8 @@ class ContinuousProductionHandlerTest {
 
     @Mock
     private ISkuPriorityStrategy skuPriorityStrategy;
+    @Mock
+    private ITypeBlockProductionStrategy typeBlockProductionStrategy;
 
     @InjectMocks
     private ContinuousProductionHandler handler;
@@ -40,10 +43,10 @@ class ContinuousProductionHandlerTest {
 
         handler.handle(new LhScheduleContext());
 
-        InOrder inOrder = inOrder(skuPriorityStrategy, strategy);
+        InOrder inOrder = inOrder(skuPriorityStrategy, strategy, typeBlockProductionStrategy);
         inOrder.verify(skuPriorityStrategy).sortByPriority(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleContinuousEnding(any(LhScheduleContext.class));
-        inOrder.verify(strategy).scheduleTypeBlockChange(any(LhScheduleContext.class));
+        inOrder.verify(typeBlockProductionStrategy).scheduleTypeBlockChange(any(LhScheduleContext.class));
         inOrder.verify(strategy).allocateShiftPlanQty(any(LhScheduleContext.class));
         inOrder.verify(strategy).adjustEmbryoStock(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleReduceMould(any(LhScheduleContext.class));

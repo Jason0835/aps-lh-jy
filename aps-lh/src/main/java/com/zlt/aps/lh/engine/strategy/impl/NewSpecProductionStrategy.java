@@ -87,11 +87,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     @Override
-    public void scheduleTypeBlockChange(LhScheduleContext context) {
-        // 新增策略不处理活字块，空实现
-    }
-
-    @Override
     public void scheduleContinuousEnding(LhScheduleContext context) {
         // 新增策略不处理续作收尾，空实现
     }
