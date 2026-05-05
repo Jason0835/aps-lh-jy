@@ -10,16 +10,19 @@ import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.impl.TypeBlockProductionStrategy;
 import com.zlt.aps.lh.handler.ContinuousProductionHandler;
 import com.zlt.aps.lh.handler.ResultValidationHandler;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Arrays;
 import java.util.Calendar;
@@ -50,6 +53,9 @@ class ContinuousFollowUpResultValidationRegressionTest {
     @InjectMocks
     private ContinuousProductionStrategy continuousProductionStrategy;
 
+    @InjectMocks
+    private TypeBlockProductionStrategy typeBlockProductionStrategy;
+
     @Mock
     private ScheduleStrategyFactory strategyFactory;
 
@@ -67,6 +73,12 @@ class ContinuousFollowUpResultValidationRegressionTest {
 
     @InjectMocks
     private ResultValidationHandler resultValidationHandler;
+
+    @BeforeEach
+    void setUp() {
+        ReflectionTestUtils.setField(continuousProductionHandler,
+                "typeBlockProductionStrategy", typeBlockProductionStrategy);
+    }
 
     @Test
     void handle_shouldPassWhenFollowUpResultIsNonEnding() {

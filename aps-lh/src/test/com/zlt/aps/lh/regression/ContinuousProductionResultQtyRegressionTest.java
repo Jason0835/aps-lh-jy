@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.regression;
 
+import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
@@ -15,6 +16,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -150,12 +152,100 @@ class ContinuousProductionResultQtyRegressionTest {
                 machine,
                 sku,
                 startTime,
+                null,
                 context.getScheduleWindowShifts(),
                 1,
                 false);
 
         assertEquals(112, result.getDailyPlanQty().intValue(), "续作应按机台实际开产后的剩余窗口产能收敛目标量");
         assertEquals(128, sku.getTargetScheduleQty().intValue(), "机台局部收敛值不应覆盖物料级全局目标量");
+    }
+
+    @Test
+    void buildScheduleResult_shouldApplyDryIceTimeRatioDuringInitialContinuousDistribution() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1110");
+        machine.setMachineName("FC-K1110");
+        machine.setMaxMoldNum(2);
+        machine.setCleaningWindowList(buildDryIceCleaningWindowList());
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.getMachineScheduleMap().put("K1110", machine);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001884");
+        sku.setMaterialDesc("MAT-K1110");
+        sku.setStructureName("S5");
+        sku.setSpecCode("SPEC-K1110");
+        sku.setEmbryoCode("EMB-K1110");
+        sku.setContinuousMachineCode("K1110");
+        sku.setMonthPlanQty(200);
+        sku.setWindowPlanQty(22);
+        sku.setPendingQty(22);
+        sku.setTargetScheduleQty(22);
+        sku.setShiftCapacity(22);
+        sku.setLhTimeSeconds(2160);
+        sku.setScheduleType("01");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD20260411015");
+
+        Date startTime = context.getScheduleWindowShifts().get(1).getShiftStartDateTime();
+        LhScheduleResult result = ReflectionTestUtils.invokeMethod(
+                strategy,
+                "buildScheduleResult",
+                context,
+                machine,
+                sku,
+                startTime,
+                null,
+                context.getScheduleWindowShifts(),
+                2,
+                true);
+
+        assertEquals(22, result.getDailyPlanQty().intValue(), "续作目标总量不变时，剩余量应继续顺延到后续班次");
+        assertEquals(12, result.getClass2PlanQty().intValue(), "续作首次分班命中干冰 3 小时时，应按剩余 5/8 时间折算到 12");
+        assertEquals(10, result.getClass3PlanQty().intValue(), "首班被压缩后的剩余计划量应顺延到下一班");
+    }
+
+    @Test
+    void buildScheduleResult_shouldWriteSpecialMaterialFlagByEmbryoCode() {
+        LhScheduleContext context = newContext();
+        context.getSpecialMaterialEmbryoCodeSet().add("EMB-SPECIAL");
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1201");
+        machine.setMachineName("FC-K1201");
+        machine.setMaxMoldNum(1);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-SPECIAL");
+        sku.setMaterialDesc("MAT-SPECIAL-DESC");
+        sku.setStructureName("S-SPECIAL");
+        sku.setSpecCode("SPEC-SPECIAL");
+        sku.setEmbryoCode("EMB-SPECIAL");
+        sku.setContinuousMachineCode("K1201");
+        sku.setMonthPlanQty(30);
+        sku.setWindowPlanQty(8);
+        sku.setPendingQty(8);
+        sku.setTargetScheduleQty(8);
+        sku.setShiftCapacity(8);
+        sku.setLhTimeSeconds(3600);
+        sku.setScheduleType("01");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD20260411016");
+
+        LhScheduleResult result = ReflectionTestUtils.invokeMethod(
+                strategy,
+                "buildScheduleResult",
+                context,
+                machine,
+                sku,
+                context.getScheduleWindowShifts().get(0).getShiftStartDateTime(),
+                null,
+                context.getScheduleWindowShifts(),
+                1,
+                false);
+
+        assertEquals("1", result.getHasSpecialMaterial());
     }
 
     @Test
@@ -198,6 +288,7 @@ class ContinuousProductionResultQtyRegressionTest {
                 machine1,
                 sku,
                 secondShiftStart,
+                null,
                 context.getScheduleWindowShifts(),
                 1,
                 false);
@@ -237,12 +328,36 @@ class ContinuousProductionResultQtyRegressionTest {
         return context;
     }
 
+    private List<MachineCleaningWindowDTO> buildDryIceCleaningWindowList() {
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanType("01");
+        cleaningWindow.setLeftRightMould("LR");
+        cleaningWindow.setCleanStartTime(dateTime(2026, 4, 11, 15, 0, 0));
+        cleaningWindow.setCleanEndTime(dateTime(2026, 4, 11, 18, 0, 0));
+        cleaningWindow.setReadyTime(dateTime(2026, 4, 11, 18, 0, 0));
+        List<MachineCleaningWindowDTO> cleaningWindowList = new ArrayList<>();
+        cleaningWindowList.add(cleaningWindow);
+        return cleaningWindowList;
+    }
+
     private static Date date(int year, int month, int day) {
         Calendar calendar = Calendar.getInstance();
         calendar.clear();
         calendar.set(Calendar.YEAR, year);
         calendar.set(Calendar.MONTH, month - 1);
         calendar.set(Calendar.DAY_OF_MONTH, day);
+        return calendar.getTime();
+    }
+
+    private static Date dateTime(int year, int month, int day, int hour, int minute, int second) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.clear();
+        calendar.set(Calendar.YEAR, year);
+        calendar.set(Calendar.MONTH, month - 1);
+        calendar.set(Calendar.DAY_OF_MONTH, day);
+        calendar.set(Calendar.HOUR_OF_DAY, hour);
+        calendar.set(Calendar.MINUTE, minute);
+        calendar.set(Calendar.SECOND, second);
         return calendar.getTime();
     }
 }

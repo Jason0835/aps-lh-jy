@@ -4,13 +4,16 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
+import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
@@ -39,17 +42,17 @@ public class TargetScheduleQtyResolver {
         if (Objects.isNull(sku)) {
             return 0;
         }
-        int surplusQty = Math.max(0, sku.getSurplusQty());
-        if (surplusQty <= 0) {
+        int pendingQty = Math.max(0, sku.getPendingQty());
+        if (pendingQty <= 0) {
             return 0;
         }
         int upperLimitQty;
         if (isFullCapacityMode(context)) {
             upperLimitQty = resolveTheoreticalWindowCapacity(context, sku);
         } else {
-            upperLimitQty = Math.max(0, sku.getPendingQty());
+            upperLimitQty = pendingQty;
         }
-        return Math.max(0, Math.min(surplusQty, upperLimitQty));
+        return Math.max(0, Math.min(pendingQty, upperLimitQty));
     }
 
     /**
@@ -65,6 +68,7 @@ public class TargetScheduleQtyResolver {
     public int refineTargetQtyByMachineCapacity(LhScheduleContext context,
                                                 SkuScheduleDTO sku,
                                                 MachineScheduleDTO machine,
+                                                Date switchStartTime,
                                                 Date productionStartTime,
                                                 List<LhShiftConfigVO> shifts) {
         if (Objects.isNull(sku)) {
@@ -74,7 +78,7 @@ public class TargetScheduleQtyResolver {
         if (currentTargetQty <= 0 || !isFullCapacityMode(context)) {
             return Math.max(currentTargetQty, 0);
         }
-        int actualCapacityQty = resolveActualWindowCapacity(context, sku, machine, productionStartTime, shifts);
+        int actualCapacityQty = resolveActualWindowCapacity(context, sku, machine, switchStartTime, productionStartTime, shifts);
         if (actualCapacityQty <= 0) {
             return 0;
         }
@@ -110,7 +114,24 @@ public class TargetScheduleQtyResolver {
         if (CollectionUtils.isEmpty(shifts)) {
             return Math.max(0, sku.getPendingQty());
         }
-        return Math.max(0, sku.getShiftCapacity() * shifts.size());
+        int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(sku.getMouldQty());
+        int totalCapacity = 0;
+        for (LhShiftConfigVO shift : shifts) {
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(
+                    context, shift, shift.getShiftStartDateTime());
+            if (Objects.isNull(control) || !control.isCanSchedule()) {
+                continue;
+            }
+            long availableSeconds = (control.getEffectiveEndTime().getTime() - control.getEffectiveStartTime().getTime()) / 1000L;
+            int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacity(
+                    sku.getShiftCapacity(),
+                    sku.getLhTimeSeconds(),
+                    mouldQty,
+                    ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
+                    availableSeconds);
+            totalCapacity += ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+        }
+        return Math.max(0, totalCapacity);
     }
 
     /**
@@ -126,6 +147,7 @@ public class TargetScheduleQtyResolver {
     private int resolveActualWindowCapacity(LhScheduleContext context,
                                             SkuScheduleDTO sku,
                                             MachineScheduleDTO machine,
+                                            Date switchStartTime,
                                             Date productionStartTime,
                                             List<LhShiftConfigVO> shifts) {
         if (Objects.isNull(context)
@@ -141,14 +163,25 @@ public class TargetScheduleQtyResolver {
             return 0;
         }
         int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-        List<MachineCleaningWindowDTO> cleaningWindowList = CollectionUtils.isEmpty(machine.getCleaningWindowList())
-                ? new ArrayList<>() : machine.getCleaningWindowList();
+        Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                context,
+                machine.getMachineCode(),
+                productionStartTime,
+                shifts,
+                shiftCapacity,
+                lhTimeSeconds,
+                mouldQty);
+        if (firstProductionStartTime == null) {
+            return 0;
+        }
+        List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
+                machine, switchStartTime, firstProductionStartTime);
         int dryIceLossQty = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
 
-        Date cursorStartTime = productionStartTime;
+        Date cursorStartTime = firstProductionStartTime;
         int totalQty = 0;
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
@@ -159,30 +192,50 @@ public class TargetScheduleQtyResolver {
                     continue;
                 }
             }
-            Date effectiveStartTime = cursorStartTime.after(shift.getShiftStartDateTime())
-                    ? cursorStartTime : shift.getShiftStartDateTime();
-            if (!effectiveStartTime.before(shift.getShiftEndDateTime())) {
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, cursorStartTime);
+            if (Objects.isNull(control) || !control.isCanSchedule()) {
                 continue;
             }
+            Date effectiveStartTime = control.getEffectiveStartTime();
+            Date effectiveEndTime = control.getEffectiveEndTime();
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
                     machine.getMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     shiftCapacity,
                     lhTimeSeconds,
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
                     dryIceDurationHours);
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;
             }
             totalQty += shiftMaxQty;
-            cursorStartTime = shift.getShiftEndDateTime();
+            cursorStartTime = effectiveEndTime;
         }
         return Math.max(totalQty, 0);
+    }
+
+    /**
+     * 解析用于排产估算的清洗窗口。
+     *
+     * @param machine 机台
+     * @param switchStartTime 切换开始时间
+     * @param firstProductionStartTime 首个可排产开始时间
+     * @return 有效清洗窗口列表
+     */
+    private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(MachineScheduleDTO machine,
+                                                                              Date switchStartTime,
+                                                                              Date firstProductionStartTime) {
+        if (Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getCleaningWindowList())) {
+            return new ArrayList<>(0);
+        }
+        return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(
+                machine.getCleaningWindowList(), switchStartTime, firstProductionStartTime));
     }
 
     /**

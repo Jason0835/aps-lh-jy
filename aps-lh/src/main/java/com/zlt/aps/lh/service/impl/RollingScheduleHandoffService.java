@@ -73,6 +73,10 @@ public class RollingScheduleHandoffService {
             interrupt(context, "滚动排程衔接失败：当前排程窗口未找到可继承班次");
             return;
         }
+        log.info("滚动排程衔接窗口, 继承起点: {}, 追加起点: {}, 继承班次: {}",
+                LhScheduleTimeUtil.formatDateTime(inheritStartTime),
+                LhScheduleTimeUtil.formatDateTime(appendStartTime),
+                formatInheritedShifts(currentInheritedShifts));
 
         // Step4: 逐条继承前批排程结果，校验物料/版本一致性，重映射班次索引
         Map<String, FactoryMonthPlanProductionFinalResult> currentMaterialPlanMap = buildCurrentMaterialPlanMap(context);
@@ -100,9 +104,9 @@ public class RollingScheduleHandoffService {
         // Step6: 回写机台继承终态，空闲机台推进到追加起点
         syncMachineState(context, inheritedResults, appendStartTime);
         context.setRollingScheduleHandoff(true);
-        log.info("滚动排程衔接完成, 继承结果: {}, 继承换模计划: {}, 追加起点: {}",
+        log.info("滚动排程衔接完成, 继承结果: {}, 继承换模计划: {}, 追加起点: {}, 继承计划量汇总: {}",
                 inheritedResults.size(), context.getMouldChangePlanList().size(),
-                LhScheduleTimeUtil.formatDateTime(appendStartTime));
+                LhScheduleTimeUtil.formatDateTime(appendStartTime), context.getInheritedPlanQtyMap());
     }
 
     /**
@@ -132,6 +136,7 @@ public class RollingScheduleHandoffService {
 
         int totalQty = 0;
         Date latestEndTime = null;
+        List<String> shiftMappings = new ArrayList<>();
         for (int sourceShiftIndex = 1; sourceShiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; sourceShiftIndex++) {
             Integer planQty = ShiftFieldUtil.getShiftPlanQty(previousResult, sourceShiftIndex);
             if (Objects.isNull(planQty) || planQty <= 0) {
@@ -165,6 +170,10 @@ public class RollingScheduleHandoffService {
             ShiftFieldUtil.copyShiftPlanFields(previousResult, sourceShiftIndex, inheritedResult, targetShiftIndex);
             totalQty += planQty;
             latestEndTime = endTime;
+            shiftMappings.add(sourceShiftIndex + "->" + targetShiftIndex
+                    + "(qty=" + planQty
+                    + ", start=" + LhScheduleTimeUtil.formatDateTime(startTime)
+                    + ", end=" + LhScheduleTimeUtil.formatDateTime(endTime) + ")");
         }
         if (totalQty <= 0) {
             return null;
@@ -194,6 +203,9 @@ public class RollingScheduleHandoffService {
         inheritedResult.setUpdateTime(null);
         inheritedResult.setMouldChangeStartTime(null);
         inheritedResult.setRollingInherited(true);
+        log.info("滚动衔接结果明细, 机台: {}, 物料: {}, 班次映射: {}, 继承量: {}, 继承后结束: {}",
+                inheritedResult.getLhMachineCode(), inheritedResult.getMaterialCode(),
+                shiftMappings, totalQty, LhScheduleTimeUtil.formatDateTime(latestEndTime));
         return inheritedResult;
     }
 
@@ -395,6 +407,24 @@ public class RollingScheduleHandoffService {
             shifts.add(shift);
         }
         return shifts;
+    }
+
+    /**
+     * 格式化当前窗口可继承班次，便于日志定位继承边界。
+     *
+     * @param currentInheritedShifts 当前窗口可继承班次
+     * @return 班次摘要
+     */
+    private String formatInheritedShifts(List<LhShiftConfigVO> currentInheritedShifts) {
+        if (CollectionUtils.isEmpty(currentInheritedShifts)) {
+            return "[]";
+        }
+        return currentInheritedShifts.stream()
+                .map(shift -> shift.getShiftIndex() + "("
+                        + LhScheduleTimeUtil.formatDateTime(shift.getShiftStartDateTime())
+                        + "~"
+                        + LhScheduleTimeUtil.formatDateTime(shift.getShiftEndDateTime()) + ")")
+                .collect(Collectors.joining(", ", "[", "]"));
     }
 
     /**

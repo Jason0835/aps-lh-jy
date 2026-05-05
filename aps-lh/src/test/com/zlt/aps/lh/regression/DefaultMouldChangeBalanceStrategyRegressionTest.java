@@ -68,6 +68,30 @@ class DefaultMouldChangeBalanceStrategyRegressionTest {
     }
 
     @Test
+    void allocateMouldChange_shouldAllowBoundaryAtSixAndTwenty() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+
+        Date sixAllocated = strategy.allocateMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 6, 0, 0));
+        Date twentyAllocated = strategy.allocateMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 20, 0, 0));
+        Date twentyOneAllocated = strategy.allocateMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 20, 1, 0));
+        Date earlyMorningAllocated = strategy.allocateMouldChange(
+                context, "K2024", dateTime(2026, 4, 24, 5, 59, 0));
+
+        assertEquals(dateTime(2026, 4, 23, 6, 0, 0), sixAllocated,
+                "06:00 整点允许开始换模");
+        assertEquals(dateTime(2026, 4, 23, 20, 0, 0), twentyAllocated,
+                "20:00 整点允许开始换模");
+        assertEquals(dateTime(2026, 4, 24, 6, 0, 0), twentyOneAllocated,
+                "20:00 后禁止开始换模，应顺延到次日早班");
+        assertEquals(dateTime(2026, 4, 24, 6, 0, 0), earlyMorningAllocated,
+                "06:00 前禁止开始换模，应顺延到当日早班");
+    }
+
+    @Test
     void rollbackMouldChange_shouldRestoreMorningQuotaAfterAllocate() {
         DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
         LhScheduleContext context = new LhScheduleContext();

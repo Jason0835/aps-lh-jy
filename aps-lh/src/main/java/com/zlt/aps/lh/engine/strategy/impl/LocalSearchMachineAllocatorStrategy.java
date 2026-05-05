@@ -7,6 +7,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -15,7 +16,9 @@ import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
+import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -41,6 +44,8 @@ public class LocalSearchMachineAllocatorStrategy {
     private static final long MILLIS_PER_MINUTE = 60_000L;
     /** 不可行分支的惩罚分 */
     private static final long INFEASIBLE_PENALTY = 1_000_000L;
+    /** 喷砂顺延场景的最小重试次数 */
+    private static final int MIN_SWITCH_DELAY_RETRY_COUNT = 2;
 
     /**
      * 选择当前 SKU 的首选机台。
@@ -65,8 +70,17 @@ public class LocalSearchMachineAllocatorStrategy {
                                                 ICapacityCalculateStrategy capacityCalculate) {
         // 基础输入不完整时直接放弃局部搜索，交给外层常规选机逻辑兜底
         if (CollectionUtils.isEmpty(windowSkuList) || CollectionUtils.isEmpty(currentCandidates) || CollectionUtils.isEmpty(shifts)) {
+            log.debug("局部搜索输入不足，跳过评估, SKU窗口: {}, 候选机台: {}, 班次: {}",
+                    CollectionUtils.isEmpty(windowSkuList) ? 0 : windowSkuList.size(),
+                    CollectionUtils.isEmpty(currentCandidates) ? 0 : currentCandidates.size(),
+                    CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
             return null;
         }
+        SkuScheduleDTO currentSku = windowSkuList.get(0);
+        log.info("局部搜索选机开始, 当前SKU: {}, 窗口SKU数: {}, 候选机台数: {}, 搜索深度: {}, 时间预算: {}ms",
+                currentSku.getMaterialCode(), windowSkuList.size(), currentCandidates.size(),
+                context.getScheduleConfig().getLocalSearchDepth(),
+                context.getScheduleConfig().getLocalSearchTimeBudgetMs());
         // 设置搜索时间预算，避免局部搜索阻塞主排程流程
         long deadlineMs = System.currentTimeMillis() + context.getScheduleConfig().getLocalSearchTimeBudgetMs();
         int[] bestFeasibleCountHolder = new int[]{-1};
@@ -82,15 +96,21 @@ public class LocalSearchMachineAllocatorStrategy {
 
         // DFS 只记录首台机台编码，这里回填对应机台对象给上层使用
         if (StringUtils.isEmpty(bestFirstMachineCodeHolder[0])) {
+            log.warn("局部搜索未找到可行首选机台, 当前SKU: {}, 窗口SKU数: {}, 候选机台数: {}, 最优可行数: {}, 最优评分: {}",
+                    currentSku.getMaterialCode(), windowSkuList.size(), currentCandidates.size(),
+                    bestFeasibleCountHolder[0], bestPenaltyHolder[0]);
             return null;
         }
         for (MachineScheduleDTO machine : currentCandidates) {
             if (machine != null && bestFirstMachineCodeHolder[0].equals(machine.getMachineCode())) {
-                log.debug("局部搜索选机完成, 首选机台: {}, 可行数: {}, 评分: {}",
-                        bestFirstMachineCodeHolder[0], bestFeasibleCountHolder[0], bestPenaltyHolder[0]);
+                log.info("局部搜索选机完成, 当前SKU: {}, 首选机台: {}, 可行数: {}, 评分: {}",
+                        currentSku.getMaterialCode(), bestFirstMachineCodeHolder[0],
+                        bestFeasibleCountHolder[0], bestPenaltyHolder[0]);
                 return machine;
             }
         }
+        log.warn("局部搜索首选机台未回填到当前候选列表, 当前SKU: {}, 首选机台: {}, 候选机台数: {}",
+                currentSku.getMaterialCode(), bestFirstMachineCodeHolder[0], currentCandidates.size());
         return null;
     }
 
@@ -287,22 +307,56 @@ public class LocalSearchMachineAllocatorStrategy {
         // 按“机台准备 -> 换模 -> 首检 -> 产能估算”的顺序串行预占资源
         Date machineEndTime = resolveMachineEndTime(context, machine, shifts, virtualMachineEndTimeMap);
         Date machineReadyTime = capacityCalculate.calculateStartTime(context, machineCode, machineEndTime);
-        Date mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(context, machineCode, machineReadyTime);
-        if (mouldChangeStartTime == null) {
-            return null;
-        }
-        Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(
-                mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
-        Date inspectionTime = inspectionBalance.allocateInspection(context, machineCode, mouldChangeCompleteTime);
-        if (inspectionTime == null) {
-            // 首检失败需要回滚换模，避免污染全局资源状态
+        Date mouldChangeStartTime = null;
+        Date mouldChangeCompleteTime = null;
+        Date inspectionTime = null;
+        Date candidateSwitchStartTime = machineReadyTime;
+        int maxDelayRetryCount = resolveMaxSwitchDelayRetryCount(machine);
+        for (int retry = 0; retry < maxDelayRetryCount; retry++) {
+            mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(context, machineCode, candidateSwitchStartTime);
+            if (mouldChangeStartTime == null) {
+                return null;
+            }
+            mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(
+                    mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+            inspectionTime = inspectionBalance.allocateInspection(context, machineCode, mouldChangeCompleteTime);
+            if (inspectionTime == null) {
+                // 首检失败需要回滚换模，避免污染全局资源状态
+                mouldChangeBalance.rollbackMouldChange(context, mouldChangeStartTime);
+                return null;
+            }
+            Date delayedSwitchStartTime = resolveDelayedSwitchStartTime(machine, mouldChangeStartTime, inspectionTime);
+            if (!delayedSwitchStartTime.after(mouldChangeStartTime)) {
+                break;
+            }
+            inspectionBalance.rollbackInspection(context, inspectionTime);
             mouldChangeBalance.rollbackMouldChange(context, mouldChangeStartTime);
+            mouldChangeStartTime = null;
+            mouldChangeCompleteTime = null;
+            inspectionTime = null;
+            candidateSwitchStartTime = delayedSwitchStartTime;
+        }
+        if (mouldChangeStartTime == null || inspectionTime == null) {
             return null;
         }
         // 业务口径：换模总时长已包含首检时长，局部搜索与主流程保持一致，不再额外 +FIRST_INSPECTION_HOURS
         Date productionStartTime = inspectionTime;
+        int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+        Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                context,
+                machineCode,
+                productionStartTime,
+                shifts,
+                sku.getShiftCapacity(),
+                sku.getLhTimeSeconds(),
+                machineMouldQty);
+        if (firstProductionStartTime == null) {
+            inspectionBalance.rollbackInspection(context, inspectionTime);
+            mouldChangeBalance.rollbackMouldChange(context, mouldChangeStartTime);
+            return null;
+        }
         LocalSearchCapacityEstimate capacityEstimate = estimateCapacity(
-                context, sku, machine, productionStartTime, shifts);
+                context, sku, machine, mouldChangeStartTime, firstProductionStartTime, shifts);
         if (capacityEstimate.getTotalQty() <= 0 || capacityEstimate.getSpecEndTime() == null) {
             // 产能不可行时回滚已占用的首检/换模窗口
             inspectionBalance.rollbackInspection(context, inspectionTime);
@@ -347,6 +401,7 @@ public class LocalSearchMachineAllocatorStrategy {
     private LocalSearchCapacityEstimate estimateCapacity(LhScheduleContext context,
                                                          SkuScheduleDTO sku,
                                                          MachineScheduleDTO machine,
+                                                         Date mouldChangeStartTime,
                                                          Date productionStartTime,
                                                          List<LhShiftConfigVO> shifts) {
         if (sku == null || machine == null || productionStartTime == null || CollectionUtils.isEmpty(shifts)) {
@@ -359,8 +414,8 @@ public class LocalSearchMachineAllocatorStrategy {
         if (lhTimeSeconds <= 0 || remainingQty <= 0) {
             return LocalSearchCapacityEstimate.empty();
         }
-        List<MachineCleaningWindowDTO> cleaningWindowList = CollectionUtils.isEmpty(machine.getCleaningWindowList())
-                ? new ArrayList<>() : machine.getCleaningWindowList();
+        List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
+                machine, mouldChangeStartTime, productionStartTime);
         int dryIceLossQty = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
@@ -382,11 +437,12 @@ public class LocalSearchMachineAllocatorStrategy {
                     continue;
                 }
             }
-            Date effectiveStartTime = cursorStartTime.after(shift.getShiftStartDateTime())
-                    ? cursorStartTime : shift.getShiftStartDateTime();
-            if (!effectiveStartTime.before(shift.getShiftEndDateTime())) {
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, cursorStartTime);
+            if (control == null || !control.isCanSchedule()) {
                 continue;
             }
+            Date effectiveStartTime = control.getEffectiveStartTime();
+            Date effectiveEndTime = control.getEffectiveEndTime();
 
             // 统一按班产主口径或回退公式估算残班/整班计划量。
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
@@ -394,18 +450,20 @@ public class LocalSearchMachineAllocatorStrategy {
                     cleaningWindowList,
                     machine.getMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     shiftCapacity,
                     lhTimeSeconds,
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
                     dryIceDurationHours);
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;
             }
 
-            int allocationQty = Math.min(remainingQty, shiftMaxQty);
+            int allocationQty = ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(
+                    Math.min(remainingQty, shiftMaxQty), shiftMaxQty, mouldQty);
             if (allocationQty <= 0) {
                 continue;
             }
@@ -416,11 +474,11 @@ public class LocalSearchMachineAllocatorStrategy {
                     cleaningWindowList,
                     machine.getMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     allocationQty,
                     shiftMaxQty);
             // 当前班次结束后再推进到下一班次，避免跨班次重叠计算
-            cursorStartTime = shift.getShiftEndDateTime();
+            cursorStartTime = effectiveEndTime;
         }
 
         if (totalQty <= 0 || specEndTime == null) {
@@ -428,6 +486,55 @@ public class LocalSearchMachineAllocatorStrategy {
         }
         long penaltyScore = productionStartTime.getTime() / MILLIS_PER_MINUTE + (long) remainingQty * INFEASIBLE_PENALTY;
         return new LocalSearchCapacityEstimate(totalQty, specEndTime, penaltyScore);
+    }
+
+    /**
+     * 解析局部搜索估产时需要生效的清洗窗口。
+     *
+     * @param machine 候选机台
+     * @param switchStartTime 换模开始时间
+     * @param firstProductionStartTime 首个可排产开始时间
+     * @return 有效清洗窗口列表
+     */
+    private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(MachineScheduleDTO machine,
+                                                                              Date switchStartTime,
+                                                                              Date firstProductionStartTime) {
+        if (machine == null || CollectionUtils.isEmpty(machine.getCleaningWindowList())) {
+            return new ArrayList<>(0);
+        }
+        return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(
+                machine.getCleaningWindowList(), switchStartTime, firstProductionStartTime));
+    }
+
+    /**
+     * 解析喷砂清洗导致的切换顺延起点。
+     *
+     * @param machine 候选机台
+     * @param switchStartTime 候选切换开始时间
+     * @param productionStartTime 候选开产时间
+     * @return 顺延后的切换开始时间
+     */
+    private Date resolveDelayedSwitchStartTime(MachineScheduleDTO machine,
+                                               Date switchStartTime,
+                                               Date productionStartTime) {
+        if (machine == null) {
+            return switchStartTime;
+        }
+        return MachineCleaningOverlapUtil.resolveDelayedSwitchStartBySandBlast(
+                machine.getCleaningWindowList(), switchStartTime, productionStartTime);
+    }
+
+    /**
+     * 计算喷砂重叠场景下的最大顺延重试次数。
+     *
+     * @param machine 候选机台
+     * @return 重试次数
+     */
+    private int resolveMaxSwitchDelayRetryCount(MachineScheduleDTO machine) {
+        if (machine == null || CollectionUtils.isEmpty(machine.getCleaningWindowList())) {
+            return MIN_SWITCH_DELAY_RETRY_COUNT;
+        }
+        return Math.max(machine.getCleaningWindowList().size() + 1, MIN_SWITCH_DELAY_RETRY_COUNT);
     }
 
     /**

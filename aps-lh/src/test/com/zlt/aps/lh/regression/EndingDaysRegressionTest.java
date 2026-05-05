@@ -62,18 +62,19 @@ class EndingDaysRegressionTest {
     }
 
     @Test
-    void isEnding_fullCapacityMode_shouldUseSurplusQtyWhenSwitchEnabled() {
+    void isEnding_fullCapacityMode_shouldUseMaxDemandQtyWhenSwitchEnabled() {
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(new java.util.Date());
         context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
                 LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, "1")));
         SkuScheduleDTO dto = new SkuScheduleDTO();
         dto.setTargetScheduleQty(160);
-        dto.setSurplusQty(120);
+        dto.setSurplusQty(80);
+        dto.setEmbryoStock(120);
         dto.setShiftCapacity(20);
         dto.setDailyCapacity(62);
 
-        assertTrue(strategy.isEnding(context, dto), "满排模式启用开关后，应按余量与窗口产能比较命中规则2");
+        assertTrue(strategy.isEnding(context, dto), "满排模式启用开关后，应按max(余量,库存)与窗口产能比较命中规则2");
     }
 
     @Test

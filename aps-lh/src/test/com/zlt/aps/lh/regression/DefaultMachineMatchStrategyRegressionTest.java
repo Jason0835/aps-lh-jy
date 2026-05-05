@@ -4,9 +4,13 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
+import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.enums.JobTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Test;
@@ -26,6 +30,113 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 机台匹配回归：SKU存在多条模具关系时，不应把关系条数误当成待选前的用模数。
  */
 class DefaultMachineMatchStrategyRegressionTest {
+
+    @Test
+    void matchMachines_shouldUseSpecifySpecCodeAsMaterialCodeForLimitPriority() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSpecifyMachineRule(context);
+
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 30),
+                "SPEC-X", "22.5", "MAT-SPECIFY");
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getMachineScheduleMap().put(specifyMachine.getMachineCode(), specifyMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-SPECIFY", JobTypeEnum.RESTRICTED.getCode())));
+
+        SkuScheduleDTO sku = sku("MAT-001", "SPEC-A", "22.5");
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(2, candidates.size(), "定点机台只是优先，不应过滤普通候选机台");
+        assertEquals("M-SPECIFY", candidates.get(0).getMachineCode(),
+                "T_LH_SPECIFY_MACHINE.SPEC_CODE 应按物料编码匹配 SKU.materialCode");
+    }
+
+    @Test
+    void matchMachines_shouldFallbackToNormalMachineWhenLimitMachineUnavailable() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSpecifyMachineRule(context);
+
+        MachineScheduleDTO disabledSpecifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-SPECIFY");
+        disabledSpecifyMachine.setStatus("0");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(disabledSpecifyMachine.getMachineCode(), disabledSpecifyMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-SPECIFY", JobTypeEnum.RESTRICTED.getCode())));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "定点机台不可排时，应回到普通机台匹配逻辑");
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldExcludeNotAllowedMachineByMaterialCode() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSpecifyMachineRule(context);
+
+        MachineScheduleDTO forbiddenMachine = machine("M-FORBIDDEN", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-FORBIDDEN");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(forbiddenMachine.getMachineCode(), forbiddenMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-FORBIDDEN", JobTypeEnum.NOT_ALLOWED.getCode())));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "不可作业机台必须按物料编码定点关系排除");
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldIgnoreLimitSpecifyPriorityWhenRuleDisabled() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 30),
+                "SPEC-X", "22.5", "MAT-SPECIFY");
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getMachineScheduleMap().put(specifyMachine.getMachineCode(), specifyMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-SPECIFY", JobTypeEnum.RESTRICTED.getCode())));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size(), "关闭开关后定点机台不应提升优先级");
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldIgnoreNotAllowedMachineWhenRuleDisabled() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO forbiddenMachine = machine("M-FORBIDDEN", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-FORBIDDEN");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(forbiddenMachine.getMachineCode(), forbiddenMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
+                specifyMachine("MAT-001", "M-FORBIDDEN", JobTypeEnum.NOT_ALLOWED.getCode())));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size(), "关闭开关后不可作业配置不应过滤候选机台");
+        assertEquals("M-FORBIDDEN", candidates.get(0).getMachineCode());
+    }
 
     @Test
     void matchMachines_usesMouldQtyInsteadOfRelationCount() {
@@ -227,10 +338,105 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertTrue(processLog.getLogDetail().contains("TOP5"));
     }
 
+    @Test
+    void matchMachines_shouldExcludeMachineWhenPlanStopExceedsTimeoutHours() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, "24")));
+
+        MachineScheduleDTO timeoutMachine = machine("M-STOP", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 21, 9, 0),
+                "SPEC-A", "22.5", "MAT-B");
+        context.getMachineScheduleMap().put(timeoutMachine.getMachineCode(), timeoutMachine);
+        context.getMachineScheduleMap().put(availableMachine.getMachineCode(), availableMachine);
+        context.getDevicePlanShutList().add(devicePlanShut("M-STOP",
+                dateTime(2026, 4, 21, 8, 0), dateTime(2026, 4, 22, 10, 0)));
+
+        SkuScheduleDTO sku = sku("MAT-1", "SPEC-A", "22.5");
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(1, candidates.size(), "停机超过阈值的机台应被排除，新增规格继续选择其他可用机台");
+        assertEquals("M-OK", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldKeepRecoveredMachineWhenLongStopEndedBeforeReferenceTime() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, "24")));
+
+        MachineScheduleDTO recoveredMachine = machine("M-RECOVERED", dateTime(2026, 4, 22, 12, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 22, 13, 0),
+                "SPEC-A", "22.5", "MAT-B");
+        context.getMachineScheduleMap().put(recoveredMachine.getMachineCode(), recoveredMachine);
+        context.getMachineScheduleMap().put(availableMachine.getMachineCode(), availableMachine);
+        context.getDevicePlanShutList().add(devicePlanShut("M-RECOVERED",
+                dateTime(2026, 4, 21, 8, 0), dateTime(2026, 4, 22, 10, 0)));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size(), "长停机已在待排前恢复时，不应继续排除该机台");
+        assertTrue(candidates.stream().anyMatch(machine -> "M-RECOVERED".equals(machine.getMachineCode())));
+    }
+
+    @Test
+    void matchMachines_shouldKeepStopMachineWhenNoAlternativeExists() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, "24")));
+
+        MachineScheduleDTO onlyMachine = machine("M-ONLY", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        context.getMachineScheduleMap().put(onlyMachine.getMachineCode(), onlyMachine);
+        context.getDevicePlanShutList().add(devicePlanShut("M-ONLY",
+                dateTime(2026, 4, 21, 7, 0), dateTime(2026, 4, 22, 10, 0)));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "没有其他可用机台时，不应把唯一候选机台直接排除");
+        assertEquals("M-ONLY", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldExcludeMachineWhenFutureLongStopOverlapsScheduleWindow() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, "24")));
+
+        MachineScheduleDTO futureStopMachine = machine("M-FUTURE-STOP", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 21, 8, 30),
+                "SPEC-A", "22.5", "MAT-B");
+        context.getMachineScheduleMap().put(futureStopMachine.getMachineCode(), futureStopMachine);
+        context.getMachineScheduleMap().put(availableMachine.getMachineCode(), availableMachine);
+        context.getDevicePlanShutList().add(devicePlanShut("M-FUTURE-STOP",
+                dateTime(2026, 4, 21, 9, 0), dateTime(2026, 4, 22, 12, 0)));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "后续长停机与排程窗口重叠时，应切换到其他可用机台");
+        assertEquals("M-OK", candidates.get(0).getMachineCode());
+    }
+
     private MdmSkuMouldRel mouldRel(String mouldCode) {
         MdmSkuMouldRel rel = new MdmSkuMouldRel();
         rel.setMouldCode(mouldCode);
         return rel;
+    }
+
+    private LhSpecifyMachine specifyMachine(String materialCode, String machineCode, String jobType) {
+        LhSpecifyMachine specifyMachine = new LhSpecifyMachine();
+        specifyMachine.setSpecCode(materialCode);
+        specifyMachine.setMachineCode(machineCode);
+        specifyMachine.setJobType(jobType);
+        return specifyMachine;
     }
 
     private LhScheduleContext buildContext() {
@@ -238,6 +444,10 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
         context.setMachineAssignmentMap(new LinkedHashMap<String, List<com.zlt.aps.lh.api.domain.entity.LhScheduleResult>>());
         context.setMaterialInfoMap(new HashMap<String, MdmMaterialInfo>());
+        context.setDevicePlanShutList(new java.util.ArrayList<MdmDevicePlanShut>());
+        context.setScheduleDate(dateTime(2026, 4, 21, 7, 0));
+        context.setScheduleTargetDate(dateTime(2026, 4, 21, 7, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
         return context;
     }
 
@@ -248,6 +458,12 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
                 LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1")));
         return context;
+    }
+
+    private void enableSpecifyMachineRule(LhScheduleContext context) {
+        Map<String, String> paramMap = new HashMap<>(1);
+        paramMap.put(LhScheduleParamConstant.ENABLE_SPECIFY_MACHINE_RULE, "1");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
     }
 
     private MachineScheduleDTO machine(String machineCode, Date estimatedEndTime, String previousSpecCode,
@@ -277,6 +493,14 @@ class DefaultMachineMatchStrategyRegressionTest {
         materialInfo.setMaterialCode(materialCode);
         materialInfo.setEmbryoDesc(embryoDesc);
         context.getMaterialInfoMap().put(materialCode, materialInfo);
+    }
+
+    private MdmDevicePlanShut devicePlanShut(String machineCode, Date beginDate, Date endDate) {
+        MdmDevicePlanShut devicePlanShut = new MdmDevicePlanShut();
+        devicePlanShut.setMachineCode(machineCode);
+        devicePlanShut.setBeginDate(beginDate);
+        devicePlanShut.setEndDate(endDate);
+        return devicePlanShut;
     }
 
     private Date dateTime(int year, int month, int day, int hour, int minute) {

@@ -16,7 +16,8 @@ import lombok.Getter;
 public enum ScheduleTypeEnum {
 
     CONTINUOUS("01", "续作"),
-    NEW_SPEC("02", "新增");
+    NEW_SPEC("02", "新增"),
+    TYPE_BLOCK("03", "换活字块");
 
     /** 类型编码 */
     private final String code;

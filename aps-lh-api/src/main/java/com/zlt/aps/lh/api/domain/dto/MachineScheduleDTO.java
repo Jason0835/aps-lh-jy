@@ -84,6 +84,8 @@ public class MachineScheduleDTO {
     private boolean hasMaintenancePlan;
     /** 保养计划时间 */
     private Date maintenancePlanTime;
+    /** 保养时间窗口明细 */
+    private List<MachineMaintenanceWindowDTO> maintenanceWindowList = new ArrayList<>();
     /** 是否有维修计划 */
     private boolean hasRepairPlan;
     /** 维修计划时间 */

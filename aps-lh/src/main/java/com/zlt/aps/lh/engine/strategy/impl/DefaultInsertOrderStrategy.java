@@ -5,13 +5,15 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.engine.strategy.IInsertOrderStrategy;
+import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 /**
  * 默认插单处理策略
@@ -87,18 +89,15 @@ public class DefaultInsertOrderStrategy implements IInsertOrderStrategy {
      * 为插单匹配可用机台（优先使用指定机台列表中的第一台启用机台）
      */
     private String matchInsertMachine(LhScheduleContext context, SkuScheduleDTO insertOrder) {
-        Map<String, List<LhSpecifyMachine>> specifyMap = context.getSpecifyMachineMap();
-        if (specifyMap == null || insertOrder.getSpecCode() == null) {
+        if (StringUtils.isEmpty(insertOrder.getMaterialCode())) {
             return null;
         }
-        List<LhSpecifyMachine> specifyList = specifyMap.get(insertOrder.getSpecCode());
-        if (specifyList == null) {
+        List<LhSpecifyMachine> specifyList = LhSpecifyMachineUtil.listLimitSpecifyMachinesByMaterialCode(
+                context, insertOrder.getMaterialCode());
+        if (CollectionUtils.isEmpty(specifyList)) {
             return null;
         }
         for (LhSpecifyMachine specify : specifyList) {
-            if ("1".equals(specify.getJobType())) {
-                continue;
-            }
             MachineScheduleDTO machine = context.getMachineScheduleMap().get(specify.getMachineCode());
             if (machine != null && MachineStatusUtil.isEnabled(machine.getStatus())) {
                 return specify.getMachineCode();

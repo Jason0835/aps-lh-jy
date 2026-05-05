@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -142,10 +143,10 @@ class NewSpecTimelineRegressionTest {
         assertEquals("LR", result.getLeftRightMould());
         assertEquals(2, result.getMouldQty());
         assertEquals(16, result.getSingleMouldShiftQty());
-        assertEquals(17, result.getDailyPlanQty());
+        assertEquals(16, result.getDailyPlanQty());
         assertEquals(50, result.getTotalDailyPlanQty());
         assertEquals(16, result.getClass1PlanQty());
-        assertEquals(1, result.getClass2PlanQty());
+        assertNull(result.getClass2PlanQty(), "双模残班剩余不足 2 条时，不应再落成奇数班次");
         assertEquals(dateTime(2026, 4, 11, 6, 0), result.getClass1StartTime());
     }
 

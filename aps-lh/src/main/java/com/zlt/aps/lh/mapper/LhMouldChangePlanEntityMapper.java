@@ -13,7 +13,7 @@ import java.util.List;
  * @author APS
  */
 @Mapper
-public interface LhMouldChangePlanMapper extends BaseMapper<LhMouldChangePlan> {
+public interface LhMouldChangePlanEntityMapper extends BaseMapper<LhMouldChangePlan> {
 
     /**
      * 批量插入模具交替计划

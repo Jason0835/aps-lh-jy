@@ -2,12 +2,12 @@
 <!DOCTYPE mapper
         PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="com.zlt.aps.lh.mapper.LhMouldChangePlanMapper">
+<mapper namespace="com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper">
 
     <insert id="insertBatch">
         INSERT INTO T_LH_MOULD_CHANGE_PLAN (
             FACTORY_CODE, LH_RESULT_BATCH_NO, ORDER_NO, PLAN_DATE, PLAN_ORDER,
-            SCHEDULE_DATE, LEFT_RIGHT_MOULD, LH_MACHINE_CODE, LH_MACHINE_NAME,
+            CLASS_INDEX, SCHEDULE_DATE, LEFT_RIGHT_MOULD, LH_MACHINE_CODE, LH_MACHINE_NAME,
             BEFORE_MATERIAL_CODE, BEFORE_MATERIAL_DESC, CHANGE_MOULD_TYPE,
             AFTER_MATERIAL_CODE, AFTER_MATERIAL_DESC, CHANGE_TIME, MOULD_CODE,
             IS_RELEASE, MOULD_STATUS,
@@ -16,7 +16,7 @@
         <foreach collection="list" item="item" separator=",">
             (
                 #{item.factoryCode}, #{item.lhResultBatchNo}, #{item.orderNo}, #{item.planDate}, #{item.planOrder},
-                #{item.scheduleDate}, #{item.leftRightMould}, #{item.lhMachineCode}, #{item.lhMachineName},
+                #{item.classIndex}, #{item.scheduleDate}, #{item.leftRightMould}, #{item.lhMachineCode}, #{item.lhMachineName},
                 #{item.beforeMaterialCode}, #{item.beforeMaterialDesc}, #{item.changeMouldType},
                 #{item.afterMaterialCode}, #{item.afterMaterialDesc}, #{item.changeTime}, #{item.mouldCode},
                 #{item.isRelease}, #{item.mouldStatus},

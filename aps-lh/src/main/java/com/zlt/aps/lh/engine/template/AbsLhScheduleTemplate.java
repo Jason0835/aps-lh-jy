@@ -42,6 +42,7 @@ public abstract class AbsLhScheduleTemplate {
             context.setCurrentStep(ScheduleStepEnum.S4_1_PRE_VALIDATION.getCode());
             log.info(">>> 步骤 S4.1: {}", ScheduleStepEnum.S4_1_PRE_VALIDATION.getDescription());
             doPreValidation(context);
+            logStepSnapshot(context, ScheduleStepEnum.S4_1_PRE_VALIDATION);
             if (context.isInterrupted()) {
                 return buildInterruptResponse(context);
             }
@@ -50,6 +51,7 @@ public abstract class AbsLhScheduleTemplate {
             context.setCurrentStep(ScheduleStepEnum.S4_2_DATA_INIT.getCode());
             log.info(">>> 步骤 S4.2: {}", ScheduleStepEnum.S4_2_DATA_INIT.getDescription());
             doDataInitialization(context);
+            logStepSnapshot(context, ScheduleStepEnum.S4_2_DATA_INIT);
             if (context.isInterrupted()) {
                 return buildInterruptResponse(context);
             }
@@ -58,6 +60,7 @@ public abstract class AbsLhScheduleTemplate {
             context.setCurrentStep(ScheduleStepEnum.S4_3_ADJUST_AND_GATHER.getCode());
             log.info(">>> 步骤 S4.3: {}", ScheduleStepEnum.S4_3_ADJUST_AND_GATHER.getDescription());
             doAdjustAndGather(context);
+            logStepSnapshot(context, ScheduleStepEnum.S4_3_ADJUST_AND_GATHER);
             if (context.isInterrupted()) {
                 return buildInterruptResponse(context);
             }
@@ -66,6 +69,7 @@ public abstract class AbsLhScheduleTemplate {
             context.setCurrentStep(ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION.getCode());
             log.info(">>> 步骤 S4.4: {}", ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION.getDescription());
             doContinuousProduction(context);
+            logStepSnapshot(context, ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION);
             if (context.isInterrupted()) {
                 return buildInterruptResponse(context);
             }
@@ -74,6 +78,7 @@ public abstract class AbsLhScheduleTemplate {
             context.setCurrentStep(ScheduleStepEnum.S4_5_NEW_PRODUCTION.getCode());
             log.info(">>> 步骤 S4.5: {}", ScheduleStepEnum.S4_5_NEW_PRODUCTION.getDescription());
             doNewSpecProduction(context);
+            logStepSnapshot(context, ScheduleStepEnum.S4_5_NEW_PRODUCTION);
             if (context.isInterrupted()) {
                 return buildInterruptResponse(context);
             }
@@ -82,6 +87,7 @@ public abstract class AbsLhScheduleTemplate {
             context.setCurrentStep(ScheduleStepEnum.S4_6_RESULT_VALIDATION.getCode());
             log.info(">>> 步骤 S4.6: {}", ScheduleStepEnum.S4_6_RESULT_VALIDATION.getDescription());
             doResultValidationAndSave(context);
+            logStepSnapshot(context, ScheduleStepEnum.S4_6_RESULT_VALIDATION);
 
             return buildSuccessResponse(context);
         } catch (ScheduleException e) {
@@ -96,7 +102,12 @@ public abstract class AbsLhScheduleTemplate {
             return LhScheduleResponseDTO.fail(context.getBatchNo(), "排程执行异常: " + e.getMessage());
         } finally {
             long elapsed = System.currentTimeMillis() - startTime;
-            log.info("========== 硫化排程结束, 耗时: {}ms ==========", elapsed);
+            log.info("========== 硫化排程结束, 批次号:{}, 排程结果:{}, 未排:{}, 模具计划:{}, 耗时:{}ms ==========",
+                    context.getBatchNo(),
+                    context.getScheduleResultList().size(),
+                    context.getUnscheduledResultList().size(),
+                    context.getMouldChangePlanList().size(),
+                    elapsed);
         }
     }
 
@@ -147,5 +158,21 @@ public abstract class AbsLhScheduleTemplate {
         response.setUnscheduledCount(context.getUnscheduledResultList().size());
         response.setMouldChangePlanCount(context.getMouldChangePlanList().size());
         return response;
+    }
+
+    /**
+     * 输出步骤执行后的关键上下文快照。
+     *
+     * @param context 排程上下文
+     * @param stepEnum 当前步骤
+     * @return void
+     */
+    private void logStepSnapshot(LhScheduleContext context, ScheduleStepEnum stepEnum) {
+        log.info("<<< 步骤 {} 完成, 工厂: {}, 目标日: {}, 批次号: {}, 机台数: {}, 续作SKU: {}, 新增SKU: {}, 排程结果: {}, 未排: {}",
+                stepEnum.getCode(), context.getFactoryCode(),
+                LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
+                context.getBatchNo(), context.getMachineScheduleMap().size(),
+                context.getContinuousSkuList().size(), context.getNewSpecSkuList().size(),
+                context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
     }
 }

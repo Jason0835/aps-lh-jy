@@ -34,13 +34,6 @@ public interface IProductionStrategy {
     }
 
     /**
-     * 换活字块排产(同胎胚同模具的SKU切换)
-     *
-     * @param context 排程上下文
-     */
-    void scheduleTypeBlockChange(LhScheduleContext context);
-
-    /**
      * 续作收尾判定与排产
      *
      * @param context 排程上下文

@@ -66,6 +66,14 @@ public class LhMouldChangePlan extends BaseEntity implements Serializable {
     private Integer planOrder;
 
     /**
+     * 班别编码（01-夜班；02-早班；03-中班）
+     */
+    @ApiModelProperty(value = "班别编码（01-夜班；02-早班；03-中班）")
+    @Excel(name = "ui.data.column.lhMouldChangePlan.classIndex", dictType = "CLASS_NUM")
+    @TableField(value = "CLASS_INDEX")
+    private String classIndex;
+
+    /**
      * 排程日期
      */
     @Excel(name = "ui.data.column.lhMouldChangePlan.scheduleDate")

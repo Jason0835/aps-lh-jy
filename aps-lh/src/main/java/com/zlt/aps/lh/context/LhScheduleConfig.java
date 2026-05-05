@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
 import org.apache.commons.lang3.StringUtils;
 
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -89,6 +90,25 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 获取高精度小数参数值。
+     *
+     * @param paramCode 参数编码
+     * @param defaultValue 默认值
+     * @return 参数值
+     */
+    public BigDecimal getParamBigDecimalValue(String paramCode, BigDecimal defaultValue) {
+        String value = resolvedParamMap.get(paramCode);
+        if (StringUtils.isEmpty(value)) {
+            return defaultValue;
+        }
+        try {
+            return new BigDecimal(value.trim());
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    /**
      * 以下为常用业务参数的强类型快捷读取，避免调用方重复传参数编码与默认值。
      */
     public int getScheduleDays() {
@@ -103,6 +123,16 @@ public class LhScheduleConfig {
     public boolean isEndingBySurplusInFullModeEnabled() {
         return getParamIntValue(LhScheduleParamConstant.ENABLE_ENDING_BY_SURPLUS_IN_FULL_MODE,
                 LhScheduleConstant.ENABLE_ENDING_BY_SURPLUS_IN_FULL_MODE) == 1;
+    }
+
+    /**
+     * 判断是否启用强制重排。
+     *
+     * @return true-窗口内全部重排；false-滚动衔接排程
+     */
+    public boolean isForceRescheduleEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.FORCE_RESCHEDULE,
+                LhScheduleConstant.FORCE_RESCHEDULE) == LhScheduleConstant.FORCE_RESCHEDULE_ENABLED;
     }
 
     public ScheduleTargetModeEnum getScheduleTargetMode() {
@@ -188,9 +218,91 @@ public class LhScheduleConfig {
         return getParamIntValue(LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
     }
 
+    public int getDryIceWarningDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.DRY_ICE_WARNING_DAYS,
+                LhScheduleConstant.DRY_ICE_WARNING_DAYS));
+    }
+
+    public int getDryIceAdvanceDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.DRY_ICE_ADVANCE_DAYS,
+                LhScheduleConstant.DRY_ICE_ADVANCE_DAYS));
+    }
+
+    public int getDryIceDailyLimit() {
+        return Math.max(1, getParamIntValue(LhScheduleParamConstant.DRY_ICE_DAILY_LIMIT,
+                LhScheduleConstant.DRY_ICE_DAILY_LIMIT));
+    }
+
+    public int getDryIceMorningShiftLimit() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.DRY_ICE_MORNING_SHIFT_LIMIT,
+                LhScheduleConstant.DRY_ICE_MORNING_SHIFT_LIMIT));
+    }
+
+    public int getDryIceAfternoonShiftLimit() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT,
+                LhScheduleConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT));
+    }
+
+    public String getDryIceWorkStartTime() {
+        return getParamValue(LhScheduleParamConstant.DRY_ICE_WORK_START_TIME, LhScheduleConstant.DRY_ICE_WORK_START_TIME);
+    }
+
+    public String getDryIceWorkEndTime() {
+        return getParamValue(LhScheduleParamConstant.DRY_ICE_WORK_END_TIME, LhScheduleConstant.DRY_ICE_WORK_END_TIME);
+    }
+
+    public int getSandBlastDurationHours() {
+        return getParamIntValue(LhScheduleParamConstant.SAND_BLAST_DURATION_HOURS, LhScheduleConstant.SAND_BLAST_DURATION_HOURS);
+    }
+
+    public int getSandBlastWarningDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.SAND_BLAST_WARNING_DAYS,
+                LhScheduleConstant.SAND_BLAST_WARNING_DAYS));
+    }
+
+    public int getSandBlastAdvanceDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.SAND_BLAST_ADVANCE_DAYS,
+                LhScheduleConstant.SAND_BLAST_ADVANCE_DAYS));
+    }
+
     public int getSandBlastWithInspectionHours() {
         return getParamIntValue(LhScheduleParamConstant.SAND_BLAST_WITH_INSPECTION_HOURS,
                 LhScheduleConstant.SAND_BLAST_WITH_INSPECTION_HOURS);
+    }
+
+    public int getSandBlastDailyLimit() {
+        return Math.max(1, getParamIntValue(LhScheduleParamConstant.SAND_BLAST_DAILY_LIMIT,
+                LhScheduleConstant.SAND_BLAST_DAILY_LIMIT));
+    }
+
+    public boolean isSandBlastSkipSundayEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED,
+                LhScheduleConstant.SAND_BLAST_SKIP_SUNDAY_ENABLED) == 1;
+    }
+
+    public boolean isSandBlastSkipHolidayEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.SAND_BLAST_SKIP_HOLIDAY_ENABLED,
+                LhScheduleConstant.SAND_BLAST_SKIP_HOLIDAY_ENABLED) == 1;
+    }
+
+    public String getSandBlastMaintenanceDates() {
+        return getParamValue(LhScheduleParamConstant.SAND_BLAST_MAINTENANCE_DATES,
+                LhScheduleConstant.SAND_BLAST_MAINTENANCE_DATES);
+    }
+
+    public boolean isSandBlastOnMaintenanceDateAllowed() {
+        return getParamIntValue(LhScheduleParamConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE,
+                LhScheduleConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE) == 1;
+    }
+
+    public boolean isSandBlastSundayManualAllowed() {
+        return getParamIntValue(LhScheduleParamConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED,
+                LhScheduleConstant.SAND_BLAST_ALLOW_SUNDAY_MANUAL_ENABLED) == 1;
+    }
+
+    public int getSandBlastSundayMinAlternatePlanCount() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT,
+                LhScheduleConstant.SAND_BLAST_SUNDAY_MIN_ALTERNATE_PLAN_COUNT));
     }
 
     public int getMaintenanceDurationHours() {
@@ -201,6 +313,35 @@ public class LhScheduleConfig {
         return getParamIntValue(LhScheduleParamConstant.MAINTENANCE_START_HOUR, LhScheduleConstant.MAINTENANCE_START_HOUR);
     }
 
+    public int getMaintenanceWarningDays() {
+        return getParamIntValue(LhScheduleParamConstant.MAINTENANCE_WARNING_DAYS, LhScheduleConstant.MAINTENANCE_WARNING_DAYS);
+    }
+
+    public int getMaintenanceDailyLimit() {
+        return Math.max(1, getParamIntValue(LhScheduleParamConstant.MAINTENANCE_DAILY_LIMIT,
+                LhScheduleConstant.MAINTENANCE_DAILY_LIMIT));
+    }
+
+    public boolean isMaintenanceOnSundayAllowed() {
+        return getParamIntValue(LhScheduleParamConstant.ALLOW_MAINTENANCE_ON_SUNDAY,
+                LhScheduleConstant.ALLOW_MAINTENANCE_ON_SUNDAY) == 1;
+    }
+
+    public int getMaintenanceHolidayBlockDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.MAINTENANCE_HOLIDAY_BLOCK_DAYS,
+                LhScheduleConstant.MAINTENANCE_HOLIDAY_BLOCK_DAYS));
+    }
+
+    public int getMaintenanceForceCheckDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.MAINTENANCE_FORCE_CHECK_DAYS,
+                LhScheduleConstant.MAINTENANCE_FORCE_CHECK_DAYS));
+    }
+
+    public boolean isMaintenanceOnInventoryDayAllowed() {
+        return getParamIntValue(LhScheduleParamConstant.ALLOW_MAINTENANCE_ON_INVENTORY_DAY,
+                LhScheduleConstant.ALLOW_MAINTENANCE_ON_INVENTORY_DAY) == 1;
+    }
+
     public double getCapsulePreheatHours() {
         return getParamDoubleValue(LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS,
                 LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue());
@@ -208,6 +349,21 @@ public class LhScheduleConfig {
 
     public int getMachineStopTimeoutHours() {
         return getParamIntValue(LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
+    }
+
+    /**
+     * 判断是否启用硫化定点机台规则。
+     *
+     * @return true-启用；false-关闭
+     */
+    public boolean isSpecifyMachineRuleEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.ENABLE_SPECIFY_MACHINE_RULE,
+                LhScheduleConstant.ENABLE_SPECIFY_MACHINE_RULE) == 1;
+    }
+
+    public int getMouldCleaningAdvanceDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.MOULD_CLEANING_ADVANCE_DAYS,
+                LhScheduleConstant.MOULD_CLEANING_ADVANCE_DAYS));
     }
 
     public int getShutdownDayMinus3Rate() {
@@ -224,6 +380,29 @@ public class LhScheduleConfig {
 
     public int getStartupFirstDayRate() {
         return getParamIntValue(LhScheduleParamConstant.STARTUP_FIRST_DAY_RATE, LhScheduleConstant.STARTUP_FIRST_DAY_RATE);
+    }
+
+    public boolean isOpenStopProductionControlEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.ENABLE_OPEN_STOP_PRODUCTION_CONTROL,
+                LhScheduleConstant.ENABLE_OPEN_STOP_PRODUCTION_CONTROL) == 1;
+    }
+
+    public String getCuringOpenMoldTime() {
+        return getParamValue(LhScheduleParamConstant.CURING_OPEN_MOLD_TIME, LhScheduleConstant.CURING_OPEN_MOLD_TIME);
+    }
+
+    public String getCuringStopPotTime() {
+        return getParamValue(LhScheduleParamConstant.CURING_STOP_POT_TIME, LhScheduleConstant.CURING_STOP_POT_TIME);
+    }
+
+    public BigDecimal getOpenProductionShortageThresholdRate() {
+        return getParamBigDecimalValue(LhScheduleParamConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE,
+                LhScheduleConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE);
+    }
+
+    public String getOpenProductionWinterTireKeywords() {
+        return getParamValue(LhScheduleParamConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS,
+                LhScheduleConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS);
     }
 
     public int getTrialDailyLimit() {

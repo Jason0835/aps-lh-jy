@@ -4,11 +4,15 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
+import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -22,6 +26,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 默认SKU排产优先级策略实现
@@ -33,6 +38,11 @@ import java.util.Map;
 @Component
 public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
+    /** 特殊材料标识 */
+    private static final String SPECIAL_MATERIAL_YES_FLAG = "1";
+    /** 雪地胎关键词分隔正则 */
+    private static final String WINTER_TIRE_KEYWORD_SEPARATOR_REGEX = "[,，]";
+
     @Resource
     private IEndingJudgmentStrategy endingJudgmentStrategy;
 
@@ -43,8 +53,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
         Map<String, StructurePriorityMeta> structurePriorityMap = buildStructurePriorityMap(context);
         Comparator<SkuScheduleDTO> comparator = buildSkuComparator(context, structurePriorityMap);
+        Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(context, comparator);
         sortSkuList(context.getContinuousSkuList(), comparator);
-        sortSkuList(context.getNewSpecSkuList(), comparator);
+        sortSkuList(context.getNewSpecSkuList(), newSpecComparator);
 
         // 同时对每个结构下的SKU列表排序，保证结构内顺序与主排序一致。
         for (Map.Entry<String, List<SkuScheduleDTO>> entry : context.getStructureSkuMap().entrySet()) {
@@ -52,12 +63,13 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         }
 
         // 按统一优先级回写顺序号，供后续结果对象复用。
-        List<SkuScheduleDTO> orderedSkuList = buildOrderedSkuList(context, comparator);
+        List<SkuScheduleDTO> orderedSkuList = buildOrderedSkuList(context, newSpecComparator);
         int order = 1;
         for (SkuScheduleDTO sku : orderedSkuList) {
             sku.setScheduleOrder(order++);
         }
 
+        traceOpenProductionLateScore(context, orderedSkuList);
         traceSortedSkuList(context, structurePriorityMap);
         log.debug("SKU优先级排序完成, 排序后第一位: {}",
                 CollectionUtils.isEmpty(orderedSkuList) ? "空" : orderedSkuList.get(0).getMaterialCode());
@@ -97,7 +109,24 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getCycleProductionPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getMidPriorityPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getConventionProductionPendingQty())
+                // 顺序5：开产模式下雪地胎、不同英寸、特殊材料仅在同等条件下靠后。
+                .thenComparingInt((SkuScheduleDTO s) -> resolveOpenProductionLateScore(context, s))
                 .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
+    }
+
+    /**
+     * 构建新增SKU比较器，定点物料优先进入新增排产。
+     *
+     * @param context 排程上下文
+     * @param baseComparator 原有SKU比较器
+     * @return 新增SKU比较器
+     */
+    private Comparator<SkuScheduleDTO> buildNewSpecComparator(LhScheduleContext context,
+                                                              Comparator<SkuScheduleDTO> baseComparator) {
+        return Comparator
+                .comparingInt((SkuScheduleDTO sku) -> LhSpecifyMachineUtil.hasLimitSpecifyMachine(
+                        context, sku.getMaterialCode()) ? 0 : 1)
+                .thenComparing(baseComparator);
     }
 
     /**
@@ -164,6 +193,111 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
+     * 解析开产模式 SKU 靠后分。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 靠后分
+     */
+    private int resolveOpenProductionLateScore(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || !context.isOpenProductionMode()) {
+            return 0;
+        }
+        int score = 0;
+        if (isWinterTire(context, sku)) {
+            score += LhScheduleConstant.OPEN_PRODUCTION_WINTER_TIRE_PENALTY;
+        }
+        if (isDifferentInch(context, sku)) {
+            score += LhScheduleConstant.OPEN_PRODUCTION_DIFFERENT_INCH_PENALTY;
+        }
+        if (isSpecialMaterial(context, sku)) {
+            score += LhScheduleConstant.OPEN_PRODUCTION_SPECIAL_MATERIAL_PENALTY;
+        }
+        return score;
+    }
+
+    /**
+     * 判断是否为雪地胎。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-雪地胎，false-非雪地胎
+     */
+    private boolean isWinterTire(LhScheduleContext context, SkuScheduleDTO sku) {
+        String keywords = Objects.nonNull(context.getScheduleConfig())
+                ? context.getScheduleConfig().getOpenProductionWinterTireKeywords()
+                : context.getParamValue(LhScheduleParamConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS,
+                LhScheduleConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS);
+        if (StringUtils.isEmpty(keywords)) {
+            return false;
+        }
+        String[] keywordArray = keywords.split(WINTER_TIRE_KEYWORD_SEPARATOR_REGEX);
+        for (String keyword : keywordArray) {
+            if (StringUtils.isEmpty(keyword)) {
+                continue;
+            }
+            String trimmedKeyword = keyword.trim();
+            if (StringUtils.containsIgnoreCase(sku.getMaterialDesc(), trimmedKeyword)
+                    || StringUtils.containsIgnoreCase(sku.getSpecDesc(), trimmedKeyword)
+                    || StringUtils.containsIgnoreCase(sku.getPattern(), trimmedKeyword)
+                    || StringUtils.containsIgnoreCase(sku.getMainPattern(), trimmedKeyword)
+                    || StringUtils.containsIgnoreCase(sku.getBrand(), trimmedKeyword)
+                    || StringUtils.containsIgnoreCase(sku.getMainMaterialDesc(), trimmedKeyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断 SKU 是否与当前在机或续作英寸不同。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-不同英寸，false-相同或无比较基准
+     */
+    private boolean isDifferentInch(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (StringUtils.isEmpty(sku.getProSize())) {
+            return false;
+        }
+        boolean hasReference = false;
+        if (!CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
+            for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+                if (Objects.isNull(machine) || StringUtils.isEmpty(machine.getPreviousProSize())) {
+                    continue;
+                }
+                hasReference = true;
+                if (StringUtils.equals(sku.getProSize(), machine.getPreviousProSize())) {
+                    return false;
+                }
+            }
+        }
+        if (!CollectionUtils.isEmpty(context.getContinuousSkuList())) {
+            for (SkuScheduleDTO continuousSku : context.getContinuousSkuList()) {
+                if (Objects.isNull(continuousSku) || StringUtils.isEmpty(continuousSku.getProSize())) {
+                    continue;
+                }
+                hasReference = true;
+                if (StringUtils.equals(sku.getProSize(), continuousSku.getProSize())) {
+                    return false;
+                }
+            }
+        }
+        return hasReference;
+    }
+
+    /**
+     * 判断是否为特殊材料。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-特殊材料，false-非特殊材料
+     */
+    private boolean isSpecialMaterial(LhScheduleContext context, SkuScheduleDTO sku) {
+        return StringUtils.equals(SPECIAL_MATERIAL_YES_FLAG, LhSpecialMaterialUtil.resolveHasSpecialMaterial(context, sku));
+    }
+
+    /**
      * 排序列表，为空时直接跳过。
      */
     private void sortSkuList(List<SkuScheduleDTO> skuList, Comparator<SkuScheduleDTO> comparator) {
@@ -183,6 +317,36 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         orderedSkus.addAll(context.getNewSpecSkuList());
         orderedSkus.sort(comparator);
         return orderedSkus;
+    }
+
+    /**
+     * 输出开产模式 SKU 靠后排序原因。
+     *
+     * @param context 排程上下文
+     * @param orderedSkuList 排序后 SKU 列表
+     * @return void
+     */
+    private void traceOpenProductionLateScore(LhScheduleContext context, List<SkuScheduleDTO> orderedSkuList) {
+        if (Objects.isNull(context) || !context.isOpenProductionMode()
+                || context.isPriorityTraceMuted() || CollectionUtils.isEmpty(orderedSkuList)) {
+            return;
+        }
+        StringBuilder detailBuilder = new StringBuilder(256);
+        for (SkuScheduleDTO sku : orderedSkuList) {
+            int score = resolveOpenProductionLateScore(context, sku);
+            if (score <= 0) {
+                continue;
+            }
+            detailBuilder.append("materialCode=").append(sku.getMaterialCode())
+                    .append(", score=").append(score)
+                    .append(", winterTire=").append(isWinterTire(context, sku))
+                    .append(", differentInch=").append(isDifferentInch(context, sku))
+                    .append(", specialMaterial=").append(isSpecialMaterial(context, sku))
+                    .append('\n');
+        }
+        if (detailBuilder.length() > 0) {
+            log.info("开产SKU靠后排序原因\n{}", detailBuilder.toString().trim());
+        }
     }
 
     /**

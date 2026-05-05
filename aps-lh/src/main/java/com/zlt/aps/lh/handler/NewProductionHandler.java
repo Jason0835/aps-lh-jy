@@ -10,6 +10,7 @@ import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -30,6 +31,10 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
 
     @Override
     protected void doHandle(LhScheduleContext context) {
+        log.info("新增规格排产处理开始, 工厂: {}, 目标日: {}, 待排新增SKU: {}, 当前结果数: {}, 未排产数: {}",
+                context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
+                context.getNewSpecSkuList().size(), context.getScheduleResultList().size(),
+                context.getUnscheduledResultList().size());
         // S4.5.1 获取排产策略
         IProductionStrategy strategy = strategyFactory.getProductionStrategy(
                 ScheduleTypeEnum.NEW_SPEC.getCode());
@@ -37,6 +42,7 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
         // S4.5.2 SKU优先级排序
         ISkuPriorityStrategy priorityStrategy = strategyFactory.getSkuPriorityStrategy();
         priorityStrategy.sortByPriority(context);
+        log.debug("新增规格SKU优先级排序完成, 待排新增SKU: {}", context.getNewSpecSkuList().size());
 
         // S4.5.3 遍历新增SKU, 匹配机台
         IMachineMatchStrategy machineMatchStrategy = strategyFactory.getMachineMatchStrategy();
@@ -63,9 +69,17 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
          */
         strategy.scheduleNewSpecs(context, machineMatchStrategy,
                 mouldChangeStrategy, inspectionStrategy, capacityStrategy);
+        log.info("新增规格选机排产完成, 排程结果数: {}, 剩余新增SKU: {}, 未排产数: {}",
+                context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
+                context.getUnscheduledResultList().size());
         strategy.allocateShiftPlanQty(context);
         strategy.adjustEmbryoStock(context);
+        log.info("新增规格胎胚库存调整完成, 排程结果数: {}, 剩余新增SKU: {}, 未排产数: {}",
+                context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
+                context.getUnscheduledResultList().size());
         strategy.scheduleReduceMould(context);
+        log.info("新增规格排产处理完成, 排程结果数: {}, 未排产数: {}",
+                context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
     }
 
     @Override

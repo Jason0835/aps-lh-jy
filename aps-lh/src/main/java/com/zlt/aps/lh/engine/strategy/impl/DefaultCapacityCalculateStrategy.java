@@ -5,7 +5,6 @@ package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
-import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
@@ -13,14 +12,13 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-import org.springframework.util.CollectionUtils;
 
 import java.util.Date;
 
 /**
  * 默认产能计算策略实现
  * <p>基于硫化时间和模数计算班产、日产、首班产量和开产时间，
- * 并综合考虑保养、维修、清洗等计划停机情况</p>
+ * 并综合考虑保养、维修等计划停机情况</p>
  *
  * @author APS
  */
@@ -47,21 +45,18 @@ public class DefaultCapacityCalculateStrategy implements ICapacityCalculateStrat
         // 语义调整为“机台准备就绪时间”，仅表达机台从何时开始可以继续安排换模/首检/生产
         Date baseReadyTime = endingTime;
 
-        // 判断机台是否有保养/维修计划，若有则取最晚时间
+        // 判断机台是否有保养/维修计划，若有则取最晚时间。
+        // 清洗与换模/换活字块的重叠判定已下沉到后续切换链路，不在这里提前固化 readyTime。
         Date maintenanceStartTime = calculateMaintenanceStartTime(context, machineCode);
         Date repairStartTime = calculateRepairStartTime(context, machineCode);
-        Date cleaningStartTime = calculateCleaningReadyTime(context, machineCode, baseReadyTime);
 
-        // 取四者最大值：基础可用时间、保养后可用时间、维修后可用时间、清洗后可用时间
+        // 取三者最大值：基础可用时间、保养后可用时间、维修后可用时间
         Date maxStartTime = baseReadyTime;
         if (maintenanceStartTime != null && maintenanceStartTime.after(maxStartTime)) {
             maxStartTime = maintenanceStartTime;
         }
         if (repairStartTime != null && repairStartTime.after(maxStartTime)) {
             maxStartTime = repairStartTime;
-        }
-        if (cleaningStartTime != null && cleaningStartTime.after(maxStartTime)) {
-            maxStartTime = cleaningStartTime;
         }
 
         log.debug("计算机台准备就绪时间, 机台: {}, 收尾时间: {}, 就绪时间: {}",
@@ -173,61 +168,5 @@ public class DefaultCapacityCalculateStrategy implements ICapacityCalculateStrat
 
         // 语义为机台维修完成后的就绪时间
         return repairEnd;
-    }
-
-    /**
-     * 计算设备清洗后的机台可用时间。
-     *
-     * @param context     排程上下文
-     * @param machineCode 机台编号
-     * @return 清洗后的可用时间
-     */
-    private Date calculateCleaningReadyTime(LhScheduleContext context, String machineCode, Date baseReadyTime) {
-        MachineScheduleDTO machineDTO = context.getMachineScheduleMap().get(machineCode);
-        if (machineDTO == null || CollectionUtils.isEmpty(machineDTO.getCleaningWindowList())) {
-            return null;
-        }
-
-        // 仅约束“当前开产时点已命中”的清洗窗口，避免被未来清洗计划过度后移。
-        Date constrainedReadyTime = null;
-        for (MachineCleaningWindowDTO cleaningWindow : machineDTO.getCleaningWindowList()) {
-            if (cleaningWindow == null
-                    || cleaningWindow.getCleanStartTime() == null
-                    || cleaningWindow.getReadyTime() == null) {
-                continue;
-            }
-            if (baseReadyTime != null && cleaningWindow.getCleanStartTime().after(baseReadyTime)) {
-                continue;
-            }
-            if (baseReadyTime != null && !cleaningWindow.getReadyTime().after(baseReadyTime)) {
-                continue;
-            }
-            if (constrainedReadyTime == null || cleaningWindow.getReadyTime().after(constrainedReadyTime)) {
-                constrainedReadyTime = cleaningWindow.getReadyTime();
-            }
-        }
-        if (constrainedReadyTime == null) {
-            return null;
-        }
-
-        // 若命中窗口后又遇到“开始时间早于当前就绪时刻”的后续清洗，继续顺延到连续清洗链末端。
-        boolean expanded = true;
-        while (expanded) {
-            expanded = false;
-            for (MachineCleaningWindowDTO cleaningWindow : machineDTO.getCleaningWindowList()) {
-                if (cleaningWindow == null
-                        || cleaningWindow.getCleanStartTime() == null
-                        || cleaningWindow.getReadyTime() == null) {
-                    continue;
-                }
-                if (cleaningWindow.getCleanStartTime().after(constrainedReadyTime)
-                        || !cleaningWindow.getReadyTime().after(constrainedReadyTime)) {
-                    continue;
-                }
-                constrainedReadyTime = cleaningWindow.getReadyTime();
-                expanded = true;
-            }
-        }
-        return constrainedReadyTime;
     }
 }

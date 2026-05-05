@@ -1,8 +1,10 @@
 package com.zlt.aps.lh.handler;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
@@ -24,6 +26,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -47,9 +51,18 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /** 无窗口计划量但存在余量/正向结转目标量提示 */
     private static final String TARGET_QTY_ONLY_WARN_TEMPLATE =
             "物料：%s 当前排程窗口没有计划量，但存在月计划余量/正向结转目标量[%d]，继续排产";
+    /** 开产管控缺口未排提示 */
+    private static final String OPEN_PRODUCTION_SHORTAGE_REASON_TEMPLATE =
+            "物料：%s 开产管控导致排产目标量低于待排量，待排量[%d]，目标量[%d]，缺口[%d]，缺口比例[%s]，阈值[%s]";
     /** 满排模式下无窗口计划量仍继续排产提示 */
     private static final String FULL_CAPACITY_WARN_TEMPLATE =
             "物料：%s 当前排程窗口没有计划量，但按产能满排模式生成排产目标量[%d]，继续排产";
+    /** 自动排程数据来源 */
+    private static final String DATA_SOURCE_AUTO = "0";
+    /** 正常删除标识 */
+    private static final int DELETE_FLAG_NORMAL = 0;
+    /** 比例展示小数位 */
+    private static final int RATE_DISPLAY_SCALE = 4;
     /** 月计划最小自然日 */
     private static final int MIN_DAY_OF_MONTH = 1;
     /** 月计划最大自然日 */
@@ -62,6 +75,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
     @Override
     protected void doHandle(LhScheduleContext context) {
+        log.info("排程调整与SKU归集开始, 工厂: {}, 目标日: {}, T日: {}, 月计划记录数: {}, 前批次结果数: {}",
+                context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
+                LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                context.getMonthPlanList().size(), context.getPreviousScheduleResultList().size());
         // S4.3.1 前日排程欠/超产量调整
         adjustPreviousSchedule(context);
 
@@ -91,6 +108,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private void adjustPreviousSchedule(LhScheduleContext context) {
         List<LhScheduleResult> previousScheduleList = context.getPreviousScheduleResultList();
         if (previousScheduleList == null || previousScheduleList.isEmpty()) {
+            log.warn("前日排程结果为空，跳过欠产/超产传导, 工厂: {}, T日: {}",
+                    context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()));
             return;
         }
         Date previousScheduleDate = resolvePreviousScheduleDate(context);
@@ -145,6 +164,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
             // 产品结构为空，跳过
             if (StringUtils.isEmpty(plan.getStructureName())) {
+                log.warn("月计划产品结构为空，跳过SKU归集, materialCode: {}, 计划量: {}, 月计划版本: {}",
+                        plan.getMaterialCode(), plan.getTotalQty(), plan.getMonthPlanVersion());
                 continue;
             }
 
@@ -198,28 +219,46 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * @return 已完成量
      */
     private int calculateFinishedQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
-        // 优先使用基础数据阶段按物料汇总好的月累计完成量（截至目标排产日期）。
+        // 严格使用基础数据阶段按物料汇总好的月累计完成量（截至窗口T-1，含当天）。
         String materialCode = plan.getMaterialCode();
         if (StringUtils.isNotEmpty(materialCode)) {
             Integer monthFinishedQty = context.getMaterialMonthFinishedQtyMap().get(materialCode);
-            if (monthFinishedQty != null) {
+            if (Objects.nonNull(monthFinishedQty)) {
                 return Math.max(monthFinishedQty, 0);
             }
-            Integer dayFinishedQty = context.getMaterialDayFinishedQtyMap().get(
-                    buildMaterialDayKey(materialCode, resolvePreviousScheduleDate(context)));
-            if (Objects.nonNull(dayFinishedQty)) {
-                return Math.max(dayFinishedQty, 0);
-            }
-        }
+            if (canFallbackToPreviousFinishedQty(context)) {
+                Integer dayFinishedQty = context.getMaterialDayFinishedQtyMap().get(
+                        buildMaterialDayKey(materialCode, resolvePreviousScheduleDate(context)));
+                if (Objects.nonNull(dayFinishedQty)) {
+                    return Math.max(dayFinishedQty, 0);
+                }
 
-        // 兜底：从前日排程结果按班次完成量字段汇总。
-        int finishedQty = 0;
-        for (LhScheduleResult result : context.getPreviousScheduleResultList()) {
-            if (StringUtils.isNotEmpty(materialCode) && materialCode.equals(result.getMaterialCode())) {
-                finishedQty += resolveShiftFinishedQty(result, context);
+                int finishedQty = 0;
+                for (LhScheduleResult result : context.getPreviousScheduleResultList()) {
+                    if (materialCode.equals(result.getMaterialCode())) {
+                        finishedQty += resolveShiftFinishedQty(result, context);
+                    }
+                }
+                return finishedQty;
             }
         }
-        return finishedQty;
+        return 0;
+    }
+
+    /**
+     * 仅当前一日基线与窗口T-1一致时，才允许回退使用前一日完成量/前一日排程结果。
+     *
+     * @param context 排程上下文
+     * @return true-允许回退
+     */
+    private boolean canFallbackToPreviousFinishedQty(LhScheduleContext context) {
+        if (Objects.isNull(context.getScheduleDate())) {
+            return false;
+        }
+        Date previousScheduleDate = resolvePreviousScheduleDate(context);
+        Date windowPreviousDate = LhScheduleTimeUtil.clearTime(LhScheduleTimeUtil.addDays(context.getScheduleDate(), -1));
+        return Objects.nonNull(previousScheduleDate)
+                && previousScheduleDate.equals(windowPreviousDate);
     }
 
     /**
@@ -255,8 +294,13 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int inheritedPlanQty = Math.max(0, context.getInheritedPlanQtyMap().getOrDefault(plan.getMaterialCode(), 0));
         dto.setWindowPlanQty(windowPlanQty);
         dto.setSurplusQty(surplus.getSurplusQty());
-        // 待排量 = (窗口计划量 - 已继承量) + 欠产传导量
-        dto.setPendingQty(Math.max(0, windowPlanQty - inheritedPlanQty) + carryForwardQty);
+        dto.setEmbryoStock(context.getEmbryoRealtimeStockMap().getOrDefault(plan.getEmbryoCode(), -1));
+        // 待排量以“余量/库存取大”为基线，再叠加滚动继承扣减与欠产传导，避免重复排产。
+        int basePendingQty = Math.max(surplus.getSurplusQty(), Math.max(0, dto.getEmbryoStock()));
+        if (context.isStopProductionMode()) {
+            basePendingQty = resolveStopProductionDemandQty(context, plan, dto.getEmbryoStock());
+        }
+        dto.setPendingQty(Math.max(0, basePendingQty - inheritedPlanQty) + carryForwardQty);
         dto.setDailyPlanQty(plan.getDayVulcanizationQty() != null ? plan.getDayVulcanizationQty() : 0);
 
         // 产能信息（从SKU日硫化产能Map获取）
@@ -268,12 +312,24 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             dto.setShiftCapacity(capacity.getClassCapacity() != null ? capacity.getClassCapacity() : 0);
         } else {
             // 无产能数据时使用默认值
+            log.warn("SKU硫化产能缺失，使用默认硫化时间继续计算, materialCode: {}, specCode: {}, structureName: {}",
+                    plan.getMaterialCode(), plan.getSpecifications(), plan.getStructureName());
             dto.setLhTimeSeconds(3600);
         }
 
         // 填充日硫化产能
         fillDailyCapacity(dto, capacity);
         dto.setTargetScheduleQty(getTargetScheduleQtyResolver().resolveInitialTargetQty(context, dto));
+        appendOpenProductionShortageIfNecessary(context, dto);
+        log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 已完成: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
+                dto.getMaterialCode(), dto.getStructureName(), dto.getMonthPlanQty(), dto.getWindowPlanQty(),
+                dto.getFinishedQty(), dto.getSurplusQty(), dto.getPendingQty(), dto.getTargetScheduleQty(),
+                dto.getShiftCapacity());
+        if (context.isRollingScheduleHandoff() || inheritedPlanQty > 0) {
+            log.info("滚动待排量拆解, 物料: {}, 窗口计划量: {}, 已继承量: {}, 欠产传导量: {}, 待排量: {}, 余量: {}, 目标量: {}",
+                    dto.getMaterialCode(), windowPlanQty, inheritedPlanQty, carryForwardQty,
+                    dto.getPendingQty(), dto.getSurplusQty(), dto.getTargetScheduleQty());
+        }
 
         // 优先级信息
         dto.setSupplyChainPriority(plan.getProductionType());
@@ -303,6 +359,98 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
+     * 解析停产收尾需求量。
+     *
+     * @param context 排程上下文
+     * @param plan 月计划
+     * @param embryoStock 胎胚库存
+     * @return 停产收尾需求量
+     */
+    private int resolveStopProductionDemandQty(LhScheduleContext context,
+                                               FactoryMonthPlanProductionFinalResult plan,
+                                               int embryoStock) {
+        int stopDayPlanQty = resolveStopDayPlanQty(context, plan);
+        int lossIncludedStopDayPlanQty = resolveLossIncludedStopDayPlanQty(plan, stopDayPlanQty);
+        int demandQty = Math.max(lossIncludedStopDayPlanQty, Math.max(0, embryoStock));
+        log.info("停产收尾需求量计算完成, materialCode={}, stopDayPlanQty={}, lossIncludedStopDayPlanQty={}, embryoStock={}, demandQty={}",
+                plan.getMaterialCode(), stopDayPlanQty, lossIncludedStopDayPlanQty, embryoStock, demandQty);
+        return demandQty;
+    }
+
+    /**
+     * 解析停产日月计划量。
+     *
+     * @param context 排程上下文
+     * @param plan 月计划
+     * @return 停产日计划量
+     */
+    private int resolveStopDayPlanQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
+        if (Objects.isNull(context.getCuringStopPotTime())) {
+            return 0;
+        }
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(context.getCuringStopPotTime());
+        return MonthPlanDayQtyUtil.resolveDayQty(plan, calendar.get(Calendar.DAY_OF_MONTH));
+    }
+
+    /**
+     * 按月计划含损耗需求折算停产日计划量。
+     *
+     * @param plan 月计划
+     * @param stopDayPlanQty 停产日计划量
+     * @return 含损耗停产日计划量
+     */
+    private int resolveLossIncludedStopDayPlanQty(FactoryMonthPlanProductionFinalResult plan, int stopDayPlanQty) {
+        if (stopDayPlanQty <= 0
+                || Objects.isNull(plan.getFactProdReqQty())
+                || Objects.isNull(plan.getTotalQty())
+                || plan.getTotalQty() <= 0
+                || plan.getFactProdReqQty() <= plan.getTotalQty()) {
+            return Math.max(stopDayPlanQty, 0);
+        }
+        return BigDecimal.valueOf(stopDayPlanQty)
+                .multiply(BigDecimal.valueOf(plan.getFactProdReqQty()))
+                .divide(BigDecimal.valueOf(plan.getTotalQty()), 0, RoundingMode.UP)
+                .intValue();
+    }
+
+    /**
+     * 达到开产欠产阈值时写入现有未排结果链路。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return void
+     */
+    private void appendOpenProductionShortageIfNecessary(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (!context.isOpenProductionMode() || Objects.isNull(sku)) {
+            return;
+        }
+        int pendingQty = Math.max(0, sku.getPendingQty());
+        int targetQty = Math.max(0, sku.resolveTargetScheduleQty());
+        int shortageQty = pendingQty - targetQty;
+        if (pendingQty <= 0 || shortageQty <= 0) {
+            return;
+        }
+        BigDecimal shortageRate = BigDecimal.valueOf(shortageQty)
+                .divide(BigDecimal.valueOf(pendingQty), RATE_DISPLAY_SCALE, RoundingMode.HALF_UP);
+        BigDecimal thresholdRate = Objects.nonNull(context.getOpenProductionShortageThresholdRate())
+                ? context.getOpenProductionShortageThresholdRate() : LhScheduleConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE;
+        if (shortageRate.compareTo(thresholdRate) < 0) {
+            return;
+        }
+        String reason = String.format(OPEN_PRODUCTION_SHORTAGE_REASON_TEMPLATE,
+                sku.getMaterialCode(), pendingQty, targetQty, shortageQty,
+                shortageRate.stripTrailingZeros().toPlainString(),
+                thresholdRate.stripTrailingZeros().toPlainString());
+        log.warn(reason);
+
+        LhUnscheduledResult unscheduled = buildBaseUnscheduledResult(context, sku);
+        unscheduled.setUnscheduledQty(shortageQty);
+        unscheduled.setUnscheduledReason(reason);
+        context.getUnscheduledResultList().add(unscheduled);
+    }
+
+    /**
      * 追加“无计划量不排产”的未排结果。
      *
      * @param context 排程上下文
@@ -312,6 +460,20 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         String reason = String.format(NO_PLAN_QTY_REASON_TEMPLATE, sku.getMaterialCode());
         log.warn(reason);
 
+        LhUnscheduledResult unscheduled = buildBaseUnscheduledResult(context, sku);
+        unscheduled.setUnscheduledQty(0);
+        unscheduled.setUnscheduledReason(reason);
+        context.getUnscheduledResultList().add(unscheduled);
+    }
+
+    /**
+     * 构建未排结果公共字段。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return 未排结果
+     */
+    private LhUnscheduledResult buildBaseUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku) {
         LhUnscheduledResult unscheduled = new LhUnscheduledResult();
         unscheduled.setFactoryCode(context.getFactoryCode());
         unscheduled.setBatchNo(context.getBatchNo());
@@ -324,12 +486,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
         unscheduled.setSpecCode(sku.getSpecCode());
         unscheduled.setEmbryoCode(sku.getEmbryoCode());
-        unscheduled.setUnscheduledQty(0);
-        unscheduled.setUnscheduledReason(reason);
         unscheduled.setMouldQty(sku.getMouldQty());
-        unscheduled.setDataSource("0");
-        unscheduled.setIsDelete(0);
-        context.getUnscheduledResultList().add(unscheduled);
+        unscheduled.setDataSource(DATA_SOURCE_AUTO);
+        unscheduled.setIsDelete(DELETE_FLAG_NORMAL);
+        return unscheduled;
     }
 
     private int resolveShiftFinishedQty(LhScheduleResult result, LhScheduleContext context) {
@@ -411,20 +571,32 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 解析前日排程日期（目标排程日-1）。
+     * 解析前日排程日期。
      *
      * @param context 排程上下文
      * @return 前日日期
      */
     private Date resolvePreviousScheduleDate(LhScheduleContext context) {
-        // 滚动衔接时前日排程日期以scheduleDate(实际排程日)为准，而非scheduleTargetDate(目标日)
-        if (context.isRollingScheduleHandoff() && Objects.nonNull(context.getScheduleDate())) {
+        // 滚动衔接或强制重排时，前日基线以窗口起点T日前一日为准。
+        if (isPreviousBaselineFromScheduleDate(context) && Objects.nonNull(context.getScheduleDate())) {
             return LhScheduleTimeUtil.clearTime(LhScheduleTimeUtil.addDays(context.getScheduleDate(), -1));
         }
         if (Objects.nonNull(context.getScheduleTargetDate())) {
             return LhScheduleTimeUtil.clearTime(LhScheduleTimeUtil.addDays(context.getScheduleTargetDate(), -1));
         }
         return LhScheduleTimeUtil.clearTime(context.getScheduleDate());
+    }
+
+    /**
+     * 判断前日传导基线是否应以窗口起点T日计算。
+     *
+     * @param context 排程上下文
+     * @return true-使用T日前一日
+     */
+    private boolean isPreviousBaselineFromScheduleDate(LhScheduleContext context) {
+        return context.isRollingScheduleHandoff()
+                || context.getParamIntValue(LhScheduleParamConstant.FORCE_RESCHEDULE,
+                        LhScheduleConstant.FORCE_RESCHEDULE) == LhScheduleConstant.FORCE_RESCHEDULE_ENABLED;
     }
 
     /**
@@ -535,14 +707,23 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         List<SkuScheduleDTO> newSpecSkuList = new ArrayList<>();
         Map<String, List<SkuScheduleDTO>> skuByMaterialMap = buildSkuByMaterialMap(context);
 
-        // 保持MES最近快照顺序消费，同时过滤掉本轮不可排机台，避免停用机抢占续作资格。
-        Map<String, ?> schedulableMachineMap = context.getMachineScheduleMap();
+        // 保持MES最近快照顺序消费，同时优先承接滚动衔接后的机台当前物料。
+        Map<String, MachineScheduleDTO> schedulableMachineMap = context.getMachineScheduleMap();
         for (Map.Entry<String, LhMachineOnlineInfo> entry : context.getMachineOnlineInfoMap().entrySet()) {
             if (CollectionUtils.isEmpty(schedulableMachineMap)
                     || !schedulableMachineMap.containsKey(entry.getKey())) {
                 continue;
             }
-            assignContinuousSku(entry.getKey(), entry.getValue(), skuByMaterialMap, continuousSkuList);
+            String materialCode = resolveContinuousMaterialCode(
+                    context, entry.getKey(), schedulableMachineMap.get(entry.getKey()), entry.getValue());
+            assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap, continuousSkuList);
+        }
+
+        if (context.isRollingScheduleHandoff() && !CollectionUtils.isEmpty(schedulableMachineMap)) {
+            for (Map.Entry<String, MachineScheduleDTO> entry : schedulableMachineMap.entrySet()) {
+                String materialCode = resolveRollingContinuousMaterialCode(context, entry.getKey(), entry.getValue());
+                assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap, continuousSkuList);
+            }
         }
 
         for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
@@ -591,15 +772,14 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * @param skuByMaterialMap 物料编码 -> 待匹配SKU列表
      * @param continuousSkuList 续作SKU列表
      */
-    private void assignContinuousSku(String machineCode, LhMachineOnlineInfo onlineInfo,
+    private void assignContinuousSku(String machineCode,
+                                     String materialCode,
                                      Map<String, List<SkuScheduleDTO>> skuByMaterialMap,
                                      List<SkuScheduleDTO> continuousSkuList) {
-        if (onlineInfo == null
-                || StringUtils.isEmpty(machineCode)
-                || StringUtils.isEmpty(onlineInfo.getMaterialCode())) {
+        if (StringUtils.isEmpty(machineCode) || StringUtils.isEmpty(materialCode)) {
             return;
         }
-        List<SkuScheduleDTO> matchedSkuList = skuByMaterialMap.get(onlineInfo.getMaterialCode());
+        List<SkuScheduleDTO> matchedSkuList = skuByMaterialMap.get(materialCode);
         if (CollectionUtils.isEmpty(matchedSkuList)) {
             return;
         }
@@ -608,6 +788,70 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         matchedSku.setScheduleType(ScheduleTypeEnum.CONTINUOUS.getCode());
         matchedSku.setContinuousMachineCode(machineCode);
         continuousSkuList.add(matchedSku);
+    }
+
+    /**
+     * 解析机台本轮续作应承接的物料编码。
+     * <p>滚动衔接已继承且未收尾时，以继承后的机台当前物料为准；否则沿用 MES 在机物料。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param machine 机台状态
+     * @param onlineInfo MES 在机快照
+     * @return 续作物料编码
+     */
+    private String resolveContinuousMaterialCode(LhScheduleContext context,
+                                                 String machineCode,
+                                                 MachineScheduleDTO machine,
+                                                 LhMachineOnlineInfo onlineInfo) {
+        String rollingMaterialCode = resolveRollingContinuousMaterialCode(context, machineCode, machine);
+        if (StringUtils.isNotEmpty(rollingMaterialCode)) {
+            return rollingMaterialCode;
+        }
+        return onlineInfo != null ? onlineInfo.getMaterialCode() : null;
+    }
+
+    /**
+     * 解析滚动衔接后机台应继续承接的当前物料。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param machine 机台状态
+     * @return 未收尾的继承当前物料；不存在时返回 null
+     */
+    private String resolveRollingContinuousMaterialCode(LhScheduleContext context,
+                                                        String machineCode,
+                                                        MachineScheduleDTO machine) {
+        if (context == null
+                || !context.isRollingScheduleHandoff()
+                || machine == null
+                || StringUtils.isEmpty(machineCode)
+                || StringUtils.isEmpty(machine.getCurrentMaterialCode())
+                || CollectionUtils.isEmpty(context.getRollingInheritedScheduleResultList())) {
+            return null;
+        }
+        LhScheduleResult latestInheritedResult = null;
+        for (LhScheduleResult inheritedResult : context.getRollingInheritedScheduleResultList()) {
+            if (inheritedResult == null
+                    || !StringUtils.equals(machineCode, inheritedResult.getLhMachineCode())
+                    || !StringUtils.equals(machine.getCurrentMaterialCode(), inheritedResult.getMaterialCode())) {
+                continue;
+            }
+            if (latestInheritedResult == null) {
+                latestInheritedResult = inheritedResult;
+                continue;
+            }
+            Date latestSpecEndTime = latestInheritedResult.getSpecEndTime();
+            Date currentSpecEndTime = inheritedResult.getSpecEndTime();
+            if (latestSpecEndTime == null
+                    || (currentSpecEndTime != null && currentSpecEndTime.after(latestSpecEndTime))) {
+                latestInheritedResult = inheritedResult;
+            }
+        }
+        if (latestInheritedResult == null || StringUtils.equals("1", latestInheritedResult.getIsEnd())) {
+            return null;
+        }
+        return machine.getCurrentMaterialCode();
     }
 
     /**

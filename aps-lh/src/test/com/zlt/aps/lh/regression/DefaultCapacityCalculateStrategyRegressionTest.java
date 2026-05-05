@@ -14,6 +14,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -56,7 +57,7 @@ class DefaultCapacityCalculateStrategyRegressionTest {
     }
 
     @Test
-    void calculateStartTime_shouldRespectCleaningReadyTime() {
+    void calculateStartTime_shouldNotPreConsumeDryIceCleaningReadyTime() {
         String machineCode = "K1514";
         LhScheduleContext context = new LhScheduleContext();
 
@@ -79,12 +80,12 @@ class DefaultCapacityCalculateStrategyRegressionTest {
         Date ending = dateTime(2026, 4, 21, 9, 0, 0);
         Date startTime = strategy.calculateStartTime(context, machineCode, ending);
 
-        assertTrue(!startTime.before(dateTime(2026, 4, 21, 11, 22, 22)),
-                "干冰清洗后的可开产时间应至少晚于清洗完成时间");
+        assertEquals(ending, startTime,
+                "机台准备就绪时间不应再提前固化干冰清洗readyTime");
     }
 
     @Test
-    void calculateStartTime_shouldUseSandBlastInspectionReadyTime() {
+    void calculateStartTime_shouldNotPreConsumeSandBlastReadyTime() {
         String machineCode = "K1514";
         LhScheduleContext context = new LhScheduleContext();
 
@@ -107,12 +108,12 @@ class DefaultCapacityCalculateStrategyRegressionTest {
         Date ending = dateTime(2026, 4, 21, 9, 0, 0);
         Date startTime = strategy.calculateStartTime(context, machineCode, ending);
 
-        assertTrue(!startTime.before(dateTime(2026, 4, 21, 20, 22, 22)),
-                "喷砂清洗后的可开产时间应按喷砂含首检就绪时间计算");
+        assertEquals(ending, startTime,
+                "机台准备就绪时间不应再提前固化喷砂清洗readyTime");
     }
 
     @Test
-    void calculateStartTime_shouldNotBeBlockedByLaterCleaningWindow() {
+    void calculateStartTime_shouldIgnoreCleaningWindowsInReadyTimeStage() {
         String machineCode = "K1514";
         LhScheduleContext context = new LhScheduleContext();
 
@@ -141,10 +142,8 @@ class DefaultCapacityCalculateStrategyRegressionTest {
         Date ending = dateTime(2026, 4, 21, 9, 0, 0);
         Date startTime = strategy.calculateStartTime(context, machineCode, ending);
 
-        assertTrue(!startTime.before(dateTime(2026, 4, 21, 11, 0, 0)),
-                "命中当前清洗窗口时，应至少顺延到当前窗口 readyTime");
-        assertTrue(startTime.before(dateTime(2026, 4, 21, 14, 0, 0)),
-                "未来清洗窗口不应提前阻塞当前规格开产时间");
+        assertEquals(ending, startTime,
+                "清洗与换模/换活字块的重叠判定应下沉到后续切换链路，不在readyTime阶段处理");
     }
 
     private static Date date(int y, int month, int day) {

@@ -66,7 +66,7 @@ public class SkuScheduleDTO {
     // ========== 状态标记 ==========
     /** SKU标记: 01-常规, 02-收尾 */
     private String skuTag;
-    /** 排程类型: 01-续作, 02-新增 */
+    /** 排程类型: 01-续作, 02-新增, 03-换活字块 */
     private String scheduleType;
     /** 是否试制量试 */
     private boolean trial;

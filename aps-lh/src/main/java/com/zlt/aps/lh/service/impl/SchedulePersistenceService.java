@@ -10,7 +10,7 @@ import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
-import com.zlt.aps.lh.mapper.LhMouldChangePlanMapper;
+import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
 import com.zlt.aps.lh.mapper.LhScheduleProcessLogMapper;
 import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
 import com.zlt.aps.lh.mapper.LhUnscheduledResultMapper;
@@ -49,7 +49,7 @@ public class SchedulePersistenceService {
     private LhUnscheduledResultMapper unscheduledResultMapper;
 
     @Resource
-    private LhMouldChangePlanMapper mouldChangePlanMapper;
+    private LhMouldChangePlanEntityMapper mouldChangePlanMapper;
 
     @Resource
     private LhScheduleProcessLogMapper processLogMapper;

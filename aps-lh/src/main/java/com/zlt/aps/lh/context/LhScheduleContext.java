@@ -1,17 +1,18 @@
 package com.zlt.aps.lh.context;
 
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
+import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
-import com.zlt.aps.mp.api.domain.entity.MdmDevMaintenancePlan;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
@@ -27,6 +28,7 @@ import lombok.Data;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
+import java.math.BigDecimal;
 import java.util.*;
 import java.util.Objects;
 
@@ -63,6 +65,22 @@ public class LhScheduleContext {
     private String operator;
     /** 本次排程配置快照 */
     private LhScheduleConfig scheduleConfig;
+    /** 硫化开模时间 */
+    private Date curingOpenMoldTime;
+    /** 硫化停锅时间 */
+    private Date curingStopPotTime;
+    /** 开产班次 */
+    private ShiftProductionControlDTO openProductionShift;
+    /** 停产班次 */
+    private ShiftProductionControlDTO stopProductionShift;
+    /** 是否启用开停产管控 */
+    private boolean enableOpenStopProductionControl;
+    /** 是否处于开产模式 */
+    private boolean openProductionMode;
+    /** 是否处于停产模式 */
+    private boolean stopProductionMode;
+    /** 开产欠产阈值比例 */
+    private BigDecimal openProductionShortageThresholdRate;
 
     // ========== 硫化参数(从LhParams加载) ==========
 
@@ -91,6 +109,8 @@ public class LhScheduleContext {
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
     /** 月底计划余量Map, key=materialCode */
     private Map<String, MdmMonthSurplus> monthSurplusMap = new HashMap<>();
+    /** 胎胚实时库存Map, key=embryoCode */
+    private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
     /** 日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd) */
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
     /** 月累计完成量Map（截至目标排产日期含当天）, key=materialCode */
@@ -105,12 +125,14 @@ public class LhScheduleContext {
     private Map<String, Integer> embryoDescMaterialCountMap = new HashMap<>();
     /** MES硫化在机信息Map, key=machineCode */
     private Map<String, LhMachineOnlineInfo> machineOnlineInfoMap = new HashMap<>();
-    /** 硫化定点机台Map, key=specCode */
+    /** 硫化定点机台Map, key=materialCode（表字段SPEC_CODE实际维护物料编码） */
     private Map<String, List<LhSpecifyMachine>> specifyMachineMap = new HashMap<>();
     /** 硫化机胶囊已使用次数Map, key=machineCode */
     private Map<String, LhRepairCapsule> capsuleUsageMap = new HashMap<>();
-    /** 设备保养计划Map, key=devCode */
-    private Map<String, MdmDevMaintenancePlan> maintenancePlanMap = new HashMap<>();
+    /** 硫化精度保养计划Map, key=machineCode */
+    private Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>();
+    /** 特殊材料胎胚编码集合 */
+    private Set<String> specialMaterialEmbryoCodeSet = new HashSet<>();
 
     // ========== 中间计算结果(S4.3) ==========
 
@@ -145,12 +167,20 @@ public class LhScheduleContext {
     private Map<Integer, ShiftRuntimeState> shiftRuntimeStateMap = new LinkedHashMap<>(8);
     /** 本次排程解析后的班次窗口 */
     private List<LhShiftConfigVO> scheduleWindowShifts = new ArrayList<>();
+    /** 班次排产管控，key=班次索引 */
+    private Map<Integer, ShiftProductionControlDTO> shiftProductionControlMap = new LinkedHashMap<>(8);
     /** 机台已分配SKU Map, key=machineCode, value=已分配的排程结果 */
     private Map<String, List<LhScheduleResult>> machineAssignmentMap = new LinkedHashMap<>();
+    /** 定点机台挤量预留切换开始时间, key=machineCode */
+    private Map<String, Date> specifyMachineReservedSwitchStartTimeMap = new LinkedHashMap<>();
+    /** 定点机台挤量预留物料编码, key=machineCode */
+    private Map<String, String> specifyMachineReservedMaterialMap = new LinkedHashMap<>();
     /** 每日换模计数, key=dateString, value=[早班换模数, 中班换模数] */
     private Map<String, int[]> dailyMouldChangeCountMap = new LinkedHashMap<>();
     /** 每日首检计数, key=dateString, value=[早班首检数, 中班首检数] */
     private Map<String, int[]> dailyFirstInspectionCountMap = new LinkedHashMap<>();
+    /** 每日精度保养计数, key=dateString, value=已安排保养机台数 */
+    private Map<String, Integer> dailyMaintenanceCountMap = new LinkedHashMap<>();
 
     // ========== 排程输出结果 ==========
 

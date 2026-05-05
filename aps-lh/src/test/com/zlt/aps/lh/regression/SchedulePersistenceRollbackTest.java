@@ -2,7 +2,7 @@ package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
-import com.zlt.aps.lh.mapper.LhMouldChangePlanMapper;
+import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
 import com.zlt.aps.lh.mapper.LhScheduleProcessLogMapper;
 import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
 import com.zlt.aps.lh.mapper.LhUnscheduledResultMapper;
@@ -37,7 +37,7 @@ class SchedulePersistenceRollbackTest {
     private LhUnscheduledResultMapper unscheduledResultMapper;
 
     @Mock
-    private LhMouldChangePlanMapper mouldChangePlanMapper;
+    private LhMouldChangePlanEntityMapper mouldChangePlanMapper;
 
     @Mock
     private LhScheduleProcessLogMapper processLogMapper;

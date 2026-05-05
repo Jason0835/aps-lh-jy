@@ -159,7 +159,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
      * 排程日期
      */
     @Excel(name = "ui.data.column.lhScheduleResult.scheduleDate")
-    @JsonFormat(pattern = "yyyy-MM-dd", timezone = "GMT+8")
+    @JsonFormat(pattern = "yyyy-MM-dd")
     @ApiModelProperty(value = "排程日期", name = "scheduleDate")
     @TableField(value = "SCHEDULE_DATE")
     private Date scheduleDate;
@@ -685,6 +685,14 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String mouldCode;
 
     /**
+     * 是否含特殊材料
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.hasSpecialMaterial", dictType = "biz_yes_no")
+    @ApiModelProperty(value = "是否含特殊材料", name = "hasSpecialMaterial")
+    @TableField(value = "HAS_SPECIAL_MATERIAL")
+    private String hasSpecialMaterial;
+
+    /**
      * 是否拆分
      */
     @Excel(name = "ui.data.column.lhScheduleResult.isSplit")
@@ -701,10 +709,10 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String scheduleOrder;
 
     /**
-     * 排程类型 01-续作 02-新增
+     * 排程类型 01-续作 02-新增 03-换活字块
      */
     @Excel(name = "ui.data.column.lhScheduleResult.scheduleType")
-    @ApiModelProperty(value = "排程类型 01-续作 02-新增", name = "scheduleType")
+    @ApiModelProperty(value = "排程类型 01-续作 02-新增 03-换活字块", name = "scheduleType")
     @TableField(value = "SCHEDULE_TYPE")
     private String scheduleType;
 
@@ -743,9 +751,11 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Integer isDelete;
 
     /**
-     * 真实换模开始时间，仅用于本次排程运行期生成换模计划，不落库。
+     * 真实换模开始时间，用于本次排程运行期生成换模计划
      */
-    @TableField(exist = false)
+    @Excel(name = "ui.data.column.lhScheduleResult.mouldChangeStartTime")
+    @ApiModelProperty(value = "换模开始时间", name = "mouldChangeStartTime")
+    @TableField(value = "MOULD_CHANGE_START_TIME")
     private Date mouldChangeStartTime;
 
     /**

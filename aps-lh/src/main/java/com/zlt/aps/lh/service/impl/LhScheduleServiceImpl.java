@@ -53,13 +53,23 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
 
     @Override
     public LhScheduleResponseDTO executeSchedule(LhScheduleRequestDTO request) {
-        log.info("接收排程请求, 工厂: {}, 日期: {}",
-                request.getFactoryCode(), LhScheduleTimeUtil.formatDate(request.getScheduleDate()));
+        log.info("接收排程请求, 工厂: {}, 日期: {}, 月计划版本: {}, 生产版本: {}",
+                request.getFactoryCode(), LhScheduleTimeUtil.formatDate(request.getScheduleDate()),
+                request.getMonthPlanVersion(), request.getProductionVersion());
         LhScheduleContext context = buildContext(request);
         String lockToken = null;
         try {
+            log.info("准备获取排程执行锁, 工厂: {}, 目标日: {}, T日: {}, 排程天数: {}",
+                    context.getFactoryCode(),
+                    LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
+                    LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                    context.getScheduleConfig().getScheduleDays());
             lockToken = scheduleExecutionGuard.acquire(context.getFactoryCode(), context.getScheduleTargetDate());
-            return scheduleExecutor.execute(context);
+            LhScheduleResponseDTO response = scheduleExecutor.execute(context);
+            log.info("排程服务执行完成, 工厂: {}, 批次号: {}, 成功: {}, 排程结果数: {}, 未排产数: {}, 模具计划数: {}",
+                    context.getFactoryCode(), response.getBatchNo(), response.isSuccess(),
+                    response.getScheduleResultCount(), response.getUnscheduledCount(), response.getMouldChangePlanCount());
+            return response;
         } catch (ScheduleException e) {
             log.warn("排程请求被拒绝, 工厂: {}, 日期: {}, 原因: {}",
                     context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()), e.getMessage());
@@ -70,6 +80,9 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
             return LhScheduleResponseDTO.fail(context.getBatchNo(), "排程执行异常: " + e.getMessage());
         } finally {
             scheduleExecutionGuard.release(context.getFactoryCode(), context.getScheduleTargetDate(), lockToken);
+            log.debug("排程执行锁释放完成, 工厂: {}, 目标日: {}, 锁令牌是否存在: {}",
+                    context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
+                    StringUtils.isNotEmpty(lockToken));
         }
     }
 
@@ -82,6 +95,7 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
                     .eq(LhScheduleResult::getBatchNo, batchNo)
                     .eq(LhScheduleResult::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
             if (results == null || results.isEmpty()) {
+                log.warn("发布排程结果失败, 未查询到有效排程结果, 批次号: {}", batchNo);
                 return LhScheduleResponseDTO.fail(batchNo, "批次号[" + batchNo + "]对应的排程结果不存在");
             }
 
@@ -134,6 +148,13 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
         int offsetDays = Math.max(0, scheduleDays - 1);
         // 引擎使用 T 日 = 目标日 − (连续排程日历跨度 − 1)
         context.setScheduleDate(LhScheduleTimeUtil.addDays(target, -offsetDays));
+        log.info("排程上下文构建完成, 工厂: {}, 工厂名称: {}, 目标日: {}, T日: {}, 排程天数: {}, 强制重排: {}, 局部搜索: {}, 定点机台规则: {}",
+                context.getFactoryCode(), context.getFactoryDisplayName(),
+                LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
+                LhScheduleTimeUtil.formatDate(context.getScheduleDate()), scheduleDays,
+                context.getScheduleConfig().isForceRescheduleEnabled(),
+                context.getScheduleConfig().isLocalSearchEnabled(),
+                context.getScheduleConfig().isSpecifyMachineRuleEnabled());
         return context;
     }
 }

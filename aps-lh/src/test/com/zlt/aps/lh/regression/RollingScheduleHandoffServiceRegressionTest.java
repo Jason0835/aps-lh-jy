@@ -1,5 +1,8 @@
 package com.zlt.aps.lh.regression;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
@@ -12,12 +15,14 @@ import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -194,6 +199,48 @@ class RollingScheduleHandoffServiceRegressionTest {
 
         assertTrue(context.isInterrupted());
         assertTrue(context.getInterruptReason().contains("跨越继承窗口边界"));
+    }
+
+    @Test
+    void apply_shouldLogInheritedWindowShiftMappingsAndSummary() {
+        LhScheduleContext context = newRollingContext();
+        context.setMonthPlanList(Collections.singletonList(buildPlan("MAT-A")));
+        context.setPreviousScheduleResultList(Collections.singletonList(buildPreviousResult()));
+
+        ListAppender<ILoggingEvent> appender = attachAppender();
+        try {
+            service.apply(context);
+        } finally {
+            detachAppender(appender);
+        }
+
+        List<String> messages = appender.list.stream()
+                .map(ILoggingEvent::getFormattedMessage)
+                .collect(Collectors.toList());
+        assertTrue(messages.stream().anyMatch(message -> message.contains("滚动排程衔接窗口")
+                        && message.contains("继承起点")
+                        && message.contains("追加起点")),
+                "应输出继承窗口日志，便于确认滚动衔接边界");
+        assertTrue(messages.stream().anyMatch(message -> message.contains("滚动衔接结果明细")
+                        && message.contains("班次映射")
+                        && message.contains("MAT-A")),
+                "应输出继承结果班次映射日志，便于核对班次承接关系");
+        assertTrue(messages.stream().anyMatch(message -> message.contains("滚动排程衔接完成")
+                        && message.contains("继承计划量汇总")),
+                "应输出继承计划量汇总日志，便于核对 inheritedPlanQtyMap");
+    }
+
+    private ListAppender<ILoggingEvent> attachAppender() {
+        Logger logger = (Logger) LoggerFactory.getLogger(RollingScheduleHandoffService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        return appender;
+    }
+
+    private void detachAppender(ListAppender<ILoggingEvent> appender) {
+        Logger logger = (Logger) LoggerFactory.getLogger(RollingScheduleHandoffService.class);
+        logger.detachAppender(appender);
     }
 
     private LhScheduleContext newRollingContext() {

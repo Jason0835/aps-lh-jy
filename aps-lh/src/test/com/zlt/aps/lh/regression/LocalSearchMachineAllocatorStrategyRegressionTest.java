@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -246,6 +247,7 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
                 context,
                 sku,
                 machine,
+                null,
                 context.getScheduleWindowShifts().get(0).getShiftStartDateTime(),
                 context.getScheduleWindowShifts());
 
@@ -278,6 +280,7 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
                 context,
                 sku,
                 machine,
+                null,
                 context.getScheduleWindowShifts().get(1).getShiftStartDateTime(),
                 context.getScheduleWindowShifts());
 
@@ -311,6 +314,7 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
                 context,
                 sku,
                 machine,
+                null,
                 productionStartTime,
                 context.getScheduleWindowShifts());
 
@@ -319,6 +323,139 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
         assertEquals(112, totalQty.intValue(), "候选机台估产总量应受实际剩余班次上限约束");
         assertTrue(penaltyScore.longValue() >= 88L * 1_000_000L,
                 "目标量超出机台能力时应保留未满足量罚分，不能在估产前被预先截断");
+    }
+
+    @Test
+    void estimateCapacity_shouldIgnoreSandBlastLossWhenCleaningOverlapsMouldChange() {
+        LocalSearchMachineAllocatorStrategy strategy = new LocalSearchMachineAllocatorStrategy();
+        LhScheduleContext context = newContext();
+        context.setScheduleDate(date(2026, 4, 22));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2025");
+        machine.setMachineName("K2025");
+        machine.setMaxMoldNum(1);
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanType("02");
+        cleaningWindow.setCleanStartTime(dateTime(2026, 4, 22, 6, 0));
+        cleaningWindow.setCleanEndTime(dateTime(2026, 4, 22, 18, 0));
+        cleaningWindow.setReadyTime(dateTime(2026, 4, 22, 16, 0));
+        machine.setCleaningWindowList(Collections.singletonList(cleaningWindow));
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-CLEAN");
+        sku.setPendingQty(8);
+        sku.setWindowPlanQty(8);
+        sku.setTargetScheduleQty(8);
+        sku.setShiftCapacity(8);
+        sku.setLhTimeSeconds(3600);
+
+        Object estimate = ReflectionTestUtils.invokeMethod(
+                strategy,
+                "estimateCapacity",
+                context,
+                sku,
+                machine,
+                dateTime(2026, 4, 22, 6, 0),
+                dateTime(2026, 4, 22, 14, 0),
+                context.getScheduleWindowShifts());
+
+        Integer totalQty = ReflectionTestUtils.invokeMethod(estimate, "getTotalQty");
+        assertEquals(8, totalQty.intValue(), "局部搜索估产在重叠场景下不应再扣减喷砂清洗损失量");
+    }
+
+    @Test
+    void reserveAssignment_shouldDelaySandBlastOverlapUntilCleaningEndTime() {
+        LocalSearchMachineAllocatorStrategy strategy = new LocalSearchMachineAllocatorStrategy();
+        LhScheduleContext context = newContext();
+        context.setScheduleDate(date(2026, 4, 22));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2025");
+        machine.setMachineName("K2025");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(dateTime(2026, 4, 22, 6, 0));
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanType("02");
+        cleaningWindow.setCleanStartTime(dateTime(2026, 4, 22, 6, 0));
+        cleaningWindow.setCleanEndTime(dateTime(2026, 4, 22, 18, 0));
+        cleaningWindow.setReadyTime(dateTime(2026, 4, 22, 16, 0));
+        machine.setCleaningWindowList(Collections.singletonList(cleaningWindow));
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-CLEAN");
+        sku.setPendingQty(8);
+        sku.setWindowPlanQty(8);
+        sku.setTargetScheduleQty(8);
+        sku.setShiftCapacity(8);
+        sku.setLhTimeSeconds(3600);
+
+        IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                return endingTime;
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                return 99;
+            }
+        };
+
+        IFirstInspectionBalanceStrategy inspectionBalanceStrategy = (ctx, machineCode, mouldChangeTime) -> mouldChangeTime;
+
+        ICapacityCalculateStrategy capacityCalculateStrategy = new ICapacityCalculateStrategy() {
+            @Override
+            public int calculateShiftCapacity(LhScheduleContext ctx, int lhTimeSeconds, int mouldQty) {
+                return 0;
+            }
+
+            @Override
+            public Date calculateStartTime(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                return endingTime;
+            }
+
+            @Override
+            public int calculateFirstShiftQty(Date startTime, Date shiftEndTime, int lhTimeSeconds, int mouldQty) {
+                return 0;
+            }
+
+            @Override
+            public int calculateDailyCapacity(int lhTimeSeconds, int mouldQty) {
+                return 0;
+            }
+        };
+
+        Object token = ReflectionTestUtils.invokeMethod(
+                strategy,
+                "reserveAssignment",
+                context,
+                sku,
+                machine,
+                mouldChangeBalanceStrategy,
+                inspectionBalanceStrategy,
+                capacityCalculateStrategy,
+                context.getScheduleWindowShifts(),
+                new HashMap<String, Date>(),
+                0);
+
+        assertNotNull(token, "局部搜索在喷砂顺延后仍应保留该机台作为可行候选");
+        Date mouldChangeStartTime = ReflectionTestUtils.invokeMethod(token, "getMouldChangeStartTime");
+        Date inspectionTime = ReflectionTestUtils.invokeMethod(token, "getInspectionTime");
+        Date specEndTime = ReflectionTestUtils.invokeMethod(token, "getSpecEndTime");
+        assertEquals(dateTime(2026, 4, 22, 18, 0), mouldChangeStartTime,
+                "局部搜索预占换模窗口时，应顺延到喷砂完整12小时结束后再开始换模");
+        assertEquals(dateTime(2026, 4, 23, 2, 0), inspectionTime,
+                "顺延后的首检结束时间应与正式排产口径一致");
+        assertEquals(dateTime(2026, 4, 23, 10, 0), specEndTime,
+                "局部搜索估产的完工时间应基于顺延后的夜班和早班实际产出重新计算");
     }
 
     private LhScheduleContext newContext() {

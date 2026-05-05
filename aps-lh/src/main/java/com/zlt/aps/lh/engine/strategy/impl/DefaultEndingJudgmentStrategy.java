@@ -144,6 +144,17 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
         if (!endingBySurplusInFullModeEnabled) {
             return 0;
         }
-        return Math.max(sku.getSurplusQty(), 0);
+        return resolveMaxDemandQty(sku.getSurplusQty(), sku.getEmbryoStock());
+    }
+
+    /**
+     * 计算收尾比较量。
+     *
+     * @param surplusQty 月计划余量
+     * @param embryoStock 胎胚库存
+     * @return max(余量, 库存)
+     */
+    private int resolveMaxDemandQty(int surplusQty, int embryoStock) {
+        return Math.max(Math.max(surplusQty, 0), Math.max(embryoStock, 0));
     }
 }

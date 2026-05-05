@@ -3,21 +3,25 @@ package com.zlt.aps.lh.regression;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.zlt.aps.cx.api.domain.entity.CxStock;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhMachineInfoMapper;
 import com.zlt.aps.lh.mapper.LhMouldCleanPlanMapper;
-import com.zlt.aps.lh.mapper.LhMouldChangePlanMapper;
+import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
 import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
 import com.zlt.aps.lh.mapper.LhSpecifyMachineMapper;
-import com.zlt.aps.lh.mapper.MdmDevMaintenancePlanMapper;
+import com.zlt.aps.lh.mapper.CxStockMapper;
+import com.zlt.aps.lh.mapper.LhPrecisionPlanMapper;
 import com.zlt.aps.lh.mapper.MdmDevicePlanShutMapper;
 import com.zlt.aps.lh.mapper.MdmCapsuleChuckMapper;
 import com.zlt.aps.lh.mapper.LhMachineOnlineInfoMapper;
@@ -27,10 +31,15 @@ import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
+import com.zlt.aps.lh.mapper.MdmMaterialConsumeDetailMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
+import com.zlt.aps.lh.mapper.RawSpecialMaterialRecordMapper;
 import com.zlt.aps.lh.service.impl.LhBaseDataServiceImpl;
+import com.zlt.aps.mp.api.domain.entity.MdmMaterialConsumeDetail;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
+import com.zlt.aps.mp.api.domain.entity.RawSpecialMaterialRecord;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.Test;
@@ -49,6 +58,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -75,6 +85,10 @@ class ScheduleDataWindowRegressionTest {
     @Mock
     private MdmDevicePlanShutMapper devicePlanShutMapper;
     @Mock
+    private MdmMaterialConsumeDetailMapper mdmMaterialConsumeDetailMapper;
+    @Mock
+    private RawSpecialMaterialRecordMapper rawSpecialMaterialRecordMapper;
+    @Mock
     private MdmSkuMouldRelMapper skuMouldRelMapper;
     @Mock
     private MdmModelInfoMapper mdmModelInfoMapper;
@@ -83,7 +97,7 @@ class ScheduleDataWindowRegressionTest {
     @Mock
     private LhMouldCleanPlanMapper lhMouldCleanPlanMapper;
     @Mock
-    private LhMouldChangePlanMapper lhMouldChangePlanMapper;
+    private LhMouldChangePlanEntityMapper lhMouldChangePlanMapper;
     @Mock
     private MdmMonthSurplusMapper monthSurplusMapper;
     @Mock
@@ -99,9 +113,11 @@ class ScheduleDataWindowRegressionTest {
     @Mock
     private LhRepairCapsuleMapper lhRepairCapsuleMapper;
     @Mock
-    private MdmDevMaintenancePlanMapper devMaintenancePlanMapper;
+    private LhPrecisionPlanMapper lhPrecisionPlanMapper;
     @Mock
     private LhScheduleResultMapper lhScheduleResultMapper;
+    @Mock
+    private CxStockMapper cxStockMapper;
 
     @InjectMocks
     private LhBaseDataServiceImpl lhBaseDataService;
@@ -150,6 +166,48 @@ class ScheduleDataWindowRegressionTest {
         verify(devicePlanShutMapper).selectList(any());
         verify(lhMouldCleanPlanMapper).selectList(any());
         verify(lhScheduleResultMapper).selectList(any());
+    }
+
+    @Test
+    void loadAllBaseData_forceRescheduleShouldLoadPreviousDataFromTMinusOne() {
+        String factoryCode = "FC01";
+        Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 26));
+        Date scheduleDate = LhScheduleTimeUtil.clearTime(date(2026, 4, 24));
+
+        prepareRequiredBaseMocks();
+        when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode(factoryCode);
+        context.setScheduleTargetDate(target);
+        context.setScheduleDate(scheduleDate);
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "1");
+
+        lhBaseDataService.loadAllBaseData(context);
+
+        assertQueryContainsExpectedDate(captureScheduleResultWrapper(),
+                stripTime(date(2026, 4, 23)), stripTime(date(2026, 4, 25)));
+        assertQueryContainsExpectedDate(captureMouldChangePlanWrapper(),
+                stripTime(date(2026, 4, 23)), stripTime(date(2026, 4, 25)));
+    }
+
+    @Test
+    void loadAllBaseData_forceRescheduleShouldLoadDayFinishQtyFromTMinusOne() {
+        Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 26));
+        Date scheduleDate = LhScheduleTimeUtil.clearTime(date(2026, 4, 24));
+        prepareRequiredBaseMocks();
+        when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setScheduleTargetDate(target);
+        context.setScheduleDate(scheduleDate);
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "1");
+
+        lhBaseDataService.loadAllBaseData(context);
+
+        List<LambdaQueryWrapper<LhDayFinishQty>> wrappers = captureDayFinishQtyWrappers();
+        assertQueryContainsDateRange(wrappers.get(0), stripTime(date(2026, 4, 23)), stripTime(date(2026, 4, 24)));
     }
 
     @Test
@@ -253,6 +311,7 @@ class ScheduleDataWindowRegressionTest {
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "0");
 
         lhBaseDataService.loadAllBaseData(context);
 
@@ -266,6 +325,85 @@ class ScheduleDataWindowRegressionTest {
         assertQueryContainsDateRange(wrappers.get(1), stripTime(date(2026, 4, 1)), stripTime(date(2026, 4, 18)));
         assertQueryCompatibleWithNullDeleteFlag(wrappers.get(0));
         assertQueryCompatibleWithNullDeleteFlag(wrappers.get(1));
+    }
+
+    @Test
+    void loadAllBaseData_shouldLoadEmbryoRealtimeStockByScheduleDateAndAggregateByEmbryoCode() {
+        Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 17));
+        Date scheduleDate = LhScheduleTimeUtil.addDays(target, -2);
+        prepareRequiredBaseMocks();
+        when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+
+        FactoryMonthPlanProductionFinalResult planA = new FactoryMonthPlanProductionFinalResult();
+        planA.setMaterialCode("MAT-A");
+        planA.setEmbryoCode("EMB-A");
+        FactoryMonthPlanProductionFinalResult planB = new FactoryMonthPlanProductionFinalResult();
+        planB.setMaterialCode("MAT-B");
+        planB.setEmbryoCode("EMB-B");
+        when(monthPlanMapper.selectList(any())).thenReturn(Arrays.asList(planA, planB));
+
+        CxStock stockA1 = new CxStock();
+        stockA1.setEmbryoCode("EMB-A");
+        stockA1.setStockNum(40);
+        CxStock stockA2 = new CxStock();
+        stockA2.setEmbryoCode("EMB-A");
+        stockA2.setStockNum(12);
+        CxStock stockB = new CxStock();
+        stockB.setEmbryoCode("EMB-B");
+        stockB.setStockNum(9);
+        when(cxStockMapper.selectList(any())).thenReturn(Arrays.asList(stockA1, stockA2, stockB));
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setScheduleTargetDate(target);
+        context.setScheduleDate(scheduleDate);
+
+        lhBaseDataService.loadAllBaseData(context);
+
+        assertEquals(52, context.getEmbryoRealtimeStockMap().get("EMB-A").intValue());
+        assertEquals(9, context.getEmbryoRealtimeStockMap().get("EMB-B").intValue());
+        LambdaQueryWrapper<CxStock> wrapper = captureCxStockWrapper();
+        assertQueryContainsExpectedDate(wrapper, scheduleDate, target);
+        assertTrue(wrapper.getParamNameValuePairs().containsValue("FC01"));
+        assertParamContainsEmbryoCodes(wrapper, "EMB-A", "EMB-B");
+    }
+
+    @Test
+    void loadAllBaseData_shouldPrecomputeSpecialMaterialEmbryoCodes() {
+        Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 17));
+        Date scheduleDate = LhScheduleTimeUtil.addDays(target, -2);
+        prepareRequiredBaseMocks();
+        when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+
+        FactoryMonthPlanProductionFinalResult hitPlan = new FactoryMonthPlanProductionFinalResult();
+        hitPlan.setMaterialCode("MAT-HIT");
+        hitPlan.setEmbryoCode("EMB-HIT");
+        FactoryMonthPlanProductionFinalResult missPlan = new FactoryMonthPlanProductionFinalResult();
+        missPlan.setMaterialCode("MAT-MISS");
+        missPlan.setEmbryoCode("EMB-MISS");
+        when(monthPlanMapper.selectList(any())).thenReturn(Arrays.asList(hitPlan, missPlan));
+
+        MdmMaterialConsumeDetail hitBom = new MdmMaterialConsumeDetail();
+        hitBom.setEmbryoCode("EMB-HIT");
+        hitBom.setChildMaterialCode("RAW-SPECIAL");
+        MdmMaterialConsumeDetail missBom = new MdmMaterialConsumeDetail();
+        missBom.setEmbryoCode("EMB-MISS");
+        missBom.setChildMaterialCode("RAW-NORMAL");
+        when(mdmMaterialConsumeDetailMapper.selectList(any())).thenReturn(Arrays.asList(hitBom, missBom));
+
+        RawSpecialMaterialRecord specialMaterial = new RawSpecialMaterialRecord();
+        specialMaterial.setMaterialCode("RAW-SPECIAL");
+        when(rawSpecialMaterialRecordMapper.selectList(any())).thenReturn(Collections.singletonList(specialMaterial));
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setScheduleTargetDate(target);
+        context.setScheduleDate(scheduleDate);
+
+        lhBaseDataService.loadAllBaseData(context);
+
+        assertTrue(context.getSpecialMaterialEmbryoCodeSet().contains("EMB-HIT"));
+        assertFalse(context.getSpecialMaterialEmbryoCodeSet().contains("EMB-MISS"));
     }
 
     @Test
@@ -298,6 +436,7 @@ class ScheduleDataWindowRegressionTest {
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "0");
 
         lhBaseDataService.loadAllBaseData(context);
 
@@ -348,7 +487,7 @@ class ScheduleDataWindowRegressionTest {
         when(mdmCapsuleChuckMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(lhSpecifyMachineMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(lhRepairCapsuleMapper.selectList(any())).thenReturn(Collections.emptyList());
-        when(devMaintenancePlanMapper.selectList(any())).thenReturn(Collections.emptyList());
+        when(lhPrecisionPlanMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(lhScheduleResultMapper.selectList(any())).thenReturn(Collections.emptyList());
     }
 
@@ -366,15 +505,74 @@ class ScheduleDataWindowRegressionTest {
     }
 
     /**
+     * 抓取前日排程结果查询条件。
+     *
+     * @return 前日排程查询 wrapper
+     */
+    @SuppressWarnings("unchecked")
+    private LambdaQueryWrapper<LhScheduleResult> captureScheduleResultWrapper() {
+        initializeTableInfo(LhScheduleResult.class);
+        ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(lhScheduleResultMapper).selectList(captor.capture());
+        return (LambdaQueryWrapper<LhScheduleResult>) captor.getValue();
+    }
+
+    /**
+     * 抓取前日模具交替计划查询条件。
+     *
+     * @return 前日模具交替计划查询 wrapper
+     */
+    @SuppressWarnings("unchecked")
+    private LambdaQueryWrapper<LhMouldChangePlan> captureMouldChangePlanWrapper() {
+        initializeTableInfo(LhMouldChangePlan.class);
+        ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(lhMouldChangePlanMapper).selectList(captor.capture());
+        return (LambdaQueryWrapper<LhMouldChangePlan>) captor.getValue();
+    }
+
+    /**
+     * 抓取胎胚库存查询条件。
+     *
+     * @return 胎胚库存查询 wrapper
+     */
+    @SuppressWarnings("unchecked")
+    private LambdaQueryWrapper<CxStock> captureCxStockWrapper() {
+        initializeTableInfo(CxStock.class);
+        ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(cxStockMapper).selectList(captor.capture());
+        return (LambdaQueryWrapper<CxStock>) captor.getValue();
+    }
+
+    /**
+     * 校验胎胚编码集合参数。
+     *
+     * @param wrapper 查询条件
+     * @param embryoCodes 胎胚编码
+     */
+    private void assertParamContainsEmbryoCodes(LambdaQueryWrapper<CxStock> wrapper, String... embryoCodes) {
+        assertTrue(Arrays.stream(embryoCodes)
+                .allMatch(embryoCode -> wrapper.getParamNameValuePairs().containsValue(embryoCode)));
+    }
+
+    /**
      * 初始化实体表信息，避免测试环境下解析 wrapper SQL 时缺少 lambda cache。
      */
     private void initializeDayFinishQtyTableInfo() {
-        if (TableInfoHelper.getTableInfo(LhDayFinishQty.class) != null) {
+        initializeTableInfo(LhDayFinishQty.class);
+    }
+
+    /**
+     * 初始化实体表信息，避免测试环境下解析 wrapper SQL 时缺少 lambda cache。
+     *
+     * @param entityClass 实体类型
+     */
+    private void initializeTableInfo(Class<?> entityClass) {
+        if (TableInfoHelper.getTableInfo(entityClass) != null) {
             return;
         }
         MapperBuilderAssistant assistant = new MapperBuilderAssistant(new MybatisConfiguration(),
-                LhDayFinishQty.class.getName());
-        TableInfoHelper.initTableInfo(assistant, LhDayFinishQty.class);
+                entityClass.getName());
+        TableInfoHelper.initTableInfo(assistant, entityClass);
     }
 
     /**
@@ -391,8 +589,22 @@ class ScheduleDataWindowRegressionTest {
         assertTrue(sqlSegment.contains(">="));
         assertTrue(sqlSegment.contains("<"));
         assertFalse(sqlSegment.contains("finish_date ="));
-        assertTrue(paramMap.containsValue(rangeStart));
-        assertTrue(paramMap.containsValue(rangeEnd));
+        assertTrue(paramMapContainsDate(paramMap, rangeStart));
+        assertTrue(paramMapContainsDate(paramMap, rangeEnd));
+    }
+
+    /**
+     * 判断查询参数中是否包含指定日期。
+     *
+     * @param paramMap 查询参数
+     * @param expectedDate 预期日期
+     * @return 是否包含指定日期
+     */
+    private boolean paramMapContainsDate(Map<String, Object> paramMap, Date expectedDate) {
+        return paramMap.values().stream()
+                .filter(Date.class::isInstance)
+                .map(Date.class::cast)
+                .anyMatch(date -> date.getTime() == expectedDate.getTime());
     }
 
     /**
@@ -407,6 +619,39 @@ class ScheduleDataWindowRegressionTest {
         assertTrue(sqlSegment.contains("is null"));
         assertTrue(sqlSegment.contains("or"));
         assertTrue(paramMap.containsValue(DeleteFlagEnum.NORMAL.getCode()));
+    }
+
+    /**
+     * 校验查询命中预期日期，且不再使用目标日前一日作为强制重排基线。
+     *
+     * @param wrapper        查询条件
+     * @param expectedDate   预期日期
+     * @param unexpectedDate 非预期日期
+     */
+    private void assertQueryContainsExpectedDate(LambdaQueryWrapper<?> wrapper, Date expectedDate, Date unexpectedDate) {
+        wrapper.getSqlSegment();
+        Map<String, Object> paramMap = wrapper.getParamNameValuePairs();
+        String expectedDateText = LhScheduleTimeUtil.formatDate(expectedDate);
+        String unexpectedDateText = LhScheduleTimeUtil.formatDate(unexpectedDate);
+        String paramSummary = paramMap.values().stream()
+                .map(value -> value + "(" + value.getClass().getSimpleName() + ")")
+                .collect(Collectors.joining(","));
+        assertTrue(paramMap.values().stream().anyMatch(value -> isSameDate(value, expectedDateText)), paramSummary);
+        assertFalse(paramMap.values().stream().anyMatch(value -> isSameDate(value, unexpectedDateText)), paramSummary);
+    }
+
+    /**
+     * 判断查询参数是否为指定自然日。
+     *
+     * @param value 查询参数值
+     * @param dateText 日期文本
+     * @return true-同一天
+     */
+    private boolean isSameDate(Object value, String dateText) {
+        if (!(value instanceof Date)) {
+            return false;
+        }
+        return dateText.equals(LhScheduleTimeUtil.formatDate((Date) value));
     }
 
     private static Date date(int y, int month, int day) {

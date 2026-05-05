@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -15,10 +16,13 @@ import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
+import com.zlt.aps.lh.engine.strategy.impl.DefaultCapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
+import com.zlt.aps.lh.engine.strategy.impl.DefaultMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.LocalSearchMachineAllocatorStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import org.junit.jupiter.api.Test;
 
@@ -251,6 +255,158 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldIgnoreSandBlastDelayAndOnlyKeepMouldChangeDuration() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 22, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2025");
+        machine.setMachineName("K2025");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(dateTime(2026, 4, 22, 6, 0));
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanType("02");
+        cleaningWindow.setCleanStartTime(dateTime(2026, 4, 22, 6, 0));
+        cleaningWindow.setCleanEndTime(dateTime(2026, 4, 22, 18, 0));
+        cleaningWindow.setReadyTime(dateTime(2026, 4, 22, 16, 0));
+        machine.setCleaningWindowList(Arrays.asList(cleaningWindow));
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("MAT-CLEAN");
+        sku.setMaterialDesc("喷砂重叠测试物料");
+        sku.setPendingQty(8);
+        sku.setDailyPlanQty(8);
+        sku.setTargetScheduleQty(8);
+        sku.setShiftCapacity(8);
+        context.getNewSpecSkuList().add(sku);
+
+        ICapacityCalculateStrategy capacityCalculateStrategy = new DefaultCapacityCalculateStrategy();
+        IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new DefaultMouldChangeBalanceStrategy();
+        IFirstInspectionBalanceStrategy inspectionBalanceStrategy =
+                (ctx, machineCode, mouldChangeTime) -> mouldChangeTime;
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), mouldChangeBalanceStrategy,
+                inspectionBalanceStrategy, capacityCalculateStrategy);
+
+        assertEquals(1, context.getScheduleResultList().size(), "重叠场景应正常生成新增换模结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(dateTime(2026, 4, 22, 6, 0), result.getMouldChangeStartTime(),
+                "喷砂与换模重叠时，不应再顺延到喷砂结束后才开始换模");
+        int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
+        assertEquals(2, firstPlannedShiftIndex, "喷砂重叠但不再顺延时，首个排产班次应仍落在当日中班");
+        assertEquals(dateTime(2026, 4, 22, 14, 0), ShiftFieldUtil.getShiftStartTime(result, firstPlannedShiftIndex),
+                "新增排产应只保留换模8小时后的实际开产时刻");
+        assertEquals(8, ShiftFieldUtil.getShiftPlanQty(result, firstPlannedShiftIndex).intValue(),
+                "不再计入喷砂清洗时间后，首个完整中班应保留整班产量");
+        assertEquals("模具清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, firstPlannedShiftIndex),
+                "喷砂重叠但不再顺延时，首个排产班次仍应保留模具清洗+换模原因分析");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldIgnoreSandBlastAndStillRespectNoMouldChangeWindow() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 22, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2027");
+        machine.setMachineName("K2027");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(dateTime(2026, 4, 22, 8, 0));
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanType("02");
+        cleaningWindow.setCleanStartTime(dateTime(2026, 4, 22, 8, 0));
+        cleaningWindow.setCleanEndTime(dateTime(2026, 4, 22, 20, 0));
+        cleaningWindow.setReadyTime(dateTime(2026, 4, 22, 18, 0));
+        machine.setCleaningWindowList(Arrays.asList(cleaningWindow));
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("MAT-NO-CHANGE");
+        sku.setMaterialDesc("喷砂后禁换顺延测试物料");
+        sku.setPendingQty(8);
+        sku.setDailyPlanQty(8);
+        sku.setTargetScheduleQty(8);
+        sku.setShiftCapacity(8);
+        context.getNewSpecSkuList().add(sku);
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
+                new DefaultMouldChangeBalanceStrategy(),
+                (ctx, machineCode, mouldChangeTime) -> mouldChangeTime,
+                new DefaultCapacityCalculateStrategy());
+
+        assertEquals(1, context.getScheduleResultList().size(), "喷砂后进入禁止换模时段时，新增排产仍应正常生成结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(dateTime(2026, 4, 22, 8, 0), result.getMouldChangeStartTime(),
+                "喷砂与换模重叠时，不应先等待喷砂结束再判断禁止换模时段");
+        int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
+        assertTrue(firstPlannedShiftIndex > 0, "顺延后应仍存在首个有效排产班次");
+        assertEquals("模具清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, firstPlannedShiftIndex),
+                "喷砂重叠但不再顺延时，首个排产班次仍应保留模具清洗+换模分析");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldUseFirstPlannedShiftStartForCleaningMouldAnalysis() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 22, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2026");
+        machine.setMachineName("K2026");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(dateTime(2026, 4, 22, 13, 30));
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanType("02");
+        cleaningWindow.setCleanStartTime(dateTime(2026, 4, 22, 21, 40));
+        cleaningWindow.setCleanEndTime(dateTime(2026, 4, 22, 21, 50));
+        cleaningWindow.setReadyTime(dateTime(2026, 4, 22, 21, 50));
+        machine.setCleaningWindowList(Arrays.asList(cleaningWindow));
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("MAT-LATE");
+        sku.setMaterialDesc("晚班备注测试物料");
+        sku.setPendingQty(1);
+        sku.setDailyPlanQty(1);
+        sku.setTargetScheduleQty(1);
+        sku.setShiftCapacity(8);
+        context.getNewSpecSkuList().add(sku);
+
+        ICapacityCalculateStrategy capacityCalculateStrategy = new DefaultCapacityCalculateStrategy();
+        IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new DefaultMouldChangeBalanceStrategy();
+        IFirstInspectionBalanceStrategy inspectionBalanceStrategy =
+                (ctx, machineCode, mouldChangeTime) -> mouldChangeTime;
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), mouldChangeBalanceStrategy,
+                inspectionBalanceStrategy, capacityCalculateStrategy);
+
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
+        assertEquals(dateTime(2026, 4, 22, 22, 0), ShiftFieldUtil.getShiftStartTime(result, firstPlannedShiftIndex),
+                "当 inspection 所在班次无有效产能时，应从首个有量班次开始排产");
+        assertEquals("模具清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, firstPlannedShiftIndex),
+                "原因分析应按首个有量班次开始时刻判定重叠窗口");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldRestoreTargetQtyAfterFailedCandidateBuild() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
@@ -373,7 +529,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void adjustEmbryoStock_shouldResetIsEndWhenFinalPlanQtyLessThanSurplus() throws Exception {
+    void adjustEmbryoStock_shouldResetIsEndWhenFinalPlanQtyLessThanMaxDemand() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
 
@@ -382,18 +538,19 @@ class NewSpecProductionStrategyRegressionTest {
         result.setScheduleType("02");
         result.setMaterialCode("MAT-ENDING-CHECK");
         result.setDailyPlanQty(88);
-        result.setMouldSurplusQty(140);
+        result.setMouldSurplusQty(80);
+        result.setEmbryoStock(140);
         result.setIsEnd("1");
         context.getScheduleResultList().add(result);
 
         strategy.adjustEmbryoStock(context);
 
         assertEquals("0", context.getScheduleResultList().get(0).getIsEnd(),
-                "新增结果最终计划量小于硫化余量时，应回写为正常");
+                "新增结果最终计划量小于max(硫化余量,胎胚库存)时，应回写为正常");
     }
 
     @Test
-    void adjustEmbryoStock_shouldKeepIsEndWhenFinalPlanQtyReachSurplus() throws Exception {
+    void adjustEmbryoStock_shouldKeepIsEndWhenFinalPlanQtyReachMaxDemand() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
 
@@ -402,14 +559,15 @@ class NewSpecProductionStrategyRegressionTest {
         result.setScheduleType("02");
         result.setMaterialCode("MAT-ENDING-CHECK");
         result.setDailyPlanQty(140);
-        result.setMouldSurplusQty(140);
+        result.setMouldSurplusQty(80);
+        result.setEmbryoStock(140);
         result.setIsEnd("0");
         context.getScheduleResultList().add(result);
 
         strategy.adjustEmbryoStock(context);
 
         assertEquals("1", context.getScheduleResultList().get(0).getIsEnd(),
-                "新增结果最终计划量达到硫化余量时，应回写为收尾");
+                "新增结果最终计划量达到max(硫化余量,胎胚库存)时，应回写为收尾");
     }
 
     @Test
@@ -570,6 +728,228 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(4, context.getScheduleLogList().size(), "日志数量应受控在真实决策口径内");
     }
 
+    @Test
+    void scheduleNewSpecs_shouldKeepBaseFirstCandidateWhenLocalSearchSuggestsAnotherMachine() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Map<String, String> scheduleParamMap = new HashMap<>(8);
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_LOCAL_SEARCH, "1");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_MACHINE_THRESHOLD, "10");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_DEPTH, "3");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_TIME_BUDGET_MS, "200");
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+
+        SkuScheduleDTO firstSku = buildSku();
+        firstSku.setMaterialCode("MAT-A");
+        firstSku.setMaterialDesc("测试物料A");
+        firstSku.setPendingQty(1);
+        firstSku.setDailyPlanQty(1);
+        SkuScheduleDTO secondSku = buildSku();
+        secondSku.setMaterialCode("MAT-B");
+        secondSku.setMaterialDesc("测试物料B");
+        secondSku.setPendingQty(1);
+        secondSku.setDailyPlanQty(1);
+        SkuScheduleDTO thirdSku = buildSku();
+        thirdSku.setMaterialCode("MAT-C");
+        thirdSku.setMaterialDesc("测试物料C");
+        thirdSku.setPendingQty(1);
+        thirdSku.setDailyPlanQty(1);
+        context.getNewSpecSkuList().add(firstSku);
+        context.getNewSpecSkuList().add(secondSku);
+        context.getNewSpecSkuList().add(thirdSku);
+
+        MachineScheduleDTO firstMachine = buildMachine("K2025", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO secondMachine = buildMachine("K2026", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO thirdMachine = buildMachine("K2027", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(firstMachine.getMachineCode(), firstMachine);
+        context.getMachineScheduleMap().put(secondMachine.getMachineCode(), secondMachine);
+        context.getMachineScheduleMap().put(thirdMachine.getMachineCode(), thirdMachine);
+
+        injectLocalSearchAllocator(strategy, new LocalSearchMachineAllocatorStrategy() {
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx,
+                                                        List<SkuScheduleDTO> windowSkuList,
+                                                        List<MachineScheduleDTO> currentCandidates,
+                                                        List<LhShiftConfigVO> shifts,
+                                                        IMachineMatchStrategy machineMatch,
+                                                        IMouldChangeBalanceStrategy mouldChangeBalance,
+                                                        IFirstInspectionBalanceStrategy inspectionBalance,
+                                                        ICapacityCalculateStrategy capacityCalculate) {
+                return currentCandidates.get(1);
+            }
+        });
+
+        strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(3, context.getScheduleResultList().size());
+        assertEquals("K2025", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "局部搜索返回后序机台时，当前SKU仍应先按基础候选首位落机");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldKeepRealSkuOrderAndBaseMachineOrderWhenLocalSearchSuggestsRotatedMachines() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+
+        LhScheduleContext context = buildContext();
+        Map<String, String> scheduleParamMap = new HashMap<>(8);
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_LOCAL_SEARCH, "1");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_MACHINE_THRESHOLD, "10");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_DEPTH, "3");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_TIME_BUDGET_MS, "200");
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+
+        SkuScheduleDTO firstSku = buildRealIssueSku("3302002530", "EAR30", 7);
+        SkuScheduleDTO secondSku = buildRealIssueSku("3302001038", "BT165", 8);
+        SkuScheduleDTO thirdSku = buildRealIssueSku("3302000245", "JF568", 9);
+        context.getNewSpecSkuList().add(firstSku);
+        context.getNewSpecSkuList().add(secondSku);
+        context.getNewSpecSkuList().add(thirdSku);
+
+        MachineScheduleDTO k2025 = buildMachine("K2025", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO k2026 = buildMachine("K2026", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO k2027 = buildMachine("K2027", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(k2025.getMachineCode(), k2025);
+        context.getMachineScheduleMap().put(k2026.getMachineCode(), k2026);
+        context.getMachineScheduleMap().put(k2027.getMachineCode(), k2027);
+
+        injectLocalSearchAllocator(strategy, new LocalSearchMachineAllocatorStrategy() {
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx,
+                                                        List<SkuScheduleDTO> windowSkuList,
+                                                        List<MachineScheduleDTO> currentCandidates,
+                                                        List<LhShiftConfigVO> shifts,
+                                                        IMachineMatchStrategy machineMatch,
+                                                        IMouldChangeBalanceStrategy mouldChangeBalance,
+                                                        IFirstInspectionBalanceStrategy inspectionBalance,
+                                                        ICapacityCalculateStrategy capacityCalculate) {
+                String materialCode = windowSkuList.get(0).getMaterialCode();
+                if ("3302002530".equals(materialCode)) {
+                    return findMachine(currentCandidates, "K2026");
+                }
+                if ("3302001038".equals(materialCode)) {
+                    return findMachine(currentCandidates, "K2027");
+                }
+                if ("3302000245".equals(materialCode)) {
+                    return findMachine(currentCandidates, "K2025");
+                }
+                return null;
+            }
+        });
+
+        strategy.scheduleNewSpecs(context, new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                return Arrays.asList(k2025, k2026, k2027);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx,
+                                                        SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (!excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        }, defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(3, context.getScheduleResultList().size());
+        assertEquals("3302002530", context.getScheduleResultList().get(0).getMaterialCode());
+        assertEquals("K2025", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals("3302001038", context.getScheduleResultList().get(1).getMaterialCode());
+        assertEquals("K2025", context.getScheduleResultList().get(1).getLhMachineCode());
+        assertEquals("3302000245", context.getScheduleResultList().get(2).getMaterialCode());
+        assertEquals("K2025", context.getScheduleResultList().get(2).getLhMachineCode());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldTryNextCandidateOnlyAfterBaseFirstCandidateFails() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Map<String, String> scheduleParamMap = new HashMap<>(8);
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_LOCAL_SEARCH, "1");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_MACHINE_THRESHOLD, "10");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_DEPTH, "3");
+        scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_TIME_BUDGET_MS, "200");
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+
+        SkuScheduleDTO sku = buildSku();
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO firstMachine = buildMachine("K2025", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO secondMachine = buildMachine("K2026", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(firstMachine.getMachineCode(), firstMachine);
+        context.getMachineScheduleMap().put(secondMachine.getMachineCode(), secondMachine);
+
+        injectLocalSearchAllocator(strategy, new LocalSearchMachineAllocatorStrategy() {
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx,
+                                                        List<SkuScheduleDTO> windowSkuList,
+                                                        List<MachineScheduleDTO> currentCandidates,
+                                                        List<LhShiftConfigVO> shifts,
+                                                        IMachineMatchStrategy machineMatch,
+                                                        IMouldChangeBalanceStrategy mouldChangeBalance,
+                                                        IFirstInspectionBalanceStrategy inspectionBalance,
+                                                        ICapacityCalculateStrategy capacityCalculate) {
+                return currentCandidates.get(1);
+            }
+        });
+
+        strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), new IMouldChangeBalanceStrategy() {
+                    @Override
+                    public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                        return true;
+                    }
+
+                    @Override
+                    public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                        if ("K2025".equals(machineCode)) {
+                            return null;
+                        }
+                        return endingTime;
+                    }
+
+                    @Override
+                    public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                        return 99;
+                    }
+                },
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size());
+        assertEquals("K2026", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "只有基础首位机台真实失败后，才应顺序尝试下一台候选机台");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldWriteSpecialMaterialFlagByEmbryoCode() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.getSpecialMaterialEmbryoCodeSet().add("EMB-SPECIAL");
+        SkuScheduleDTO sku = buildSku();
+        sku.setEmbryoCode("EMB-SPECIAL");
+        sku.setTargetScheduleQty(1);
+        sku.setShiftCapacity(1);
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = buildMachine("K1301", dateTime(2026, 4, 17, 6, 0));
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals("1", context.getScheduleResultList().get(0).getHasSpecialMaterial());
+    }
+
     private LhScheduleContext buildContext() {
         LhScheduleContext context = new LhScheduleContext();
         Date scheduleDate = dateTime(2026, 4, 17, 0, 0);
@@ -596,6 +976,46 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setPendingQty(1);
         sku.setDailyPlanQty(1);
         return sku;
+    }
+
+    private MachineScheduleDTO buildMachine(String machineCode, Date estimatedEndTime) {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setMachineName(machineCode);
+        machine.setStatus("1");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(estimatedEndTime);
+        machine.setPreviousSpecCode("11R22.5");
+        machine.setPreviousProSize("22.5");
+        machine.setPreviousMaterialCode("PREV-" + machineCode);
+        return machine;
+    }
+
+    private SkuScheduleDTO buildRealIssueSku(String materialCode, String pattern, int scheduleOrder) {
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode(materialCode);
+        sku.setMaterialDesc(materialCode);
+        sku.setSpecCode("215/75R17.5");
+        sku.setSpecDesc("215/75R17.5");
+        sku.setStructureName("215/75R17.5");
+        sku.setProSize("R17.5");
+        sku.setPattern(pattern);
+        sku.setMainPattern(pattern);
+        sku.setShiftCapacity(1);
+        sku.setPendingQty(1);
+        sku.setDailyPlanQty(1);
+        sku.setTargetScheduleQty(1);
+        sku.setScheduleOrder(scheduleOrder);
+        return sku;
+    }
+
+    private MachineScheduleDTO findMachine(List<MachineScheduleDTO> candidates, String machineCode) {
+        for (MachineScheduleDTO candidate : candidates) {
+            if (machineCode.equals(candidate.getMachineCode())) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private IMachineMatchStrategy singletonMachineMatch(MachineScheduleDTO machine) {
@@ -702,6 +1122,23 @@ class NewSpecProductionStrategyRegressionTest {
         Field localSearchField = NewSpecProductionStrategy.class.getDeclaredField("localSearchMachineAllocator");
         localSearchField.setAccessible(true);
         localSearchField.set(strategy, new LocalSearchMachineAllocatorStrategy());
+    }
+
+    private void injectLocalSearchAllocator(NewSpecProductionStrategy strategy,
+                                            LocalSearchMachineAllocatorStrategy allocator) throws Exception {
+        Field localSearchField = NewSpecProductionStrategy.class.getDeclaredField("localSearchMachineAllocator");
+        localSearchField.setAccessible(true);
+        localSearchField.set(strategy, allocator);
+    }
+
+    private int resolveFirstPlannedShiftIndex(LhScheduleResult result) {
+        for (int shiftIndex = 1; shiftIndex <= 8; shiftIndex++) {
+            Integer shiftPlanQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            if (shiftPlanQty != null && shiftPlanQty > 0) {
+                return shiftIndex;
+            }
+        }
+        return -1;
     }
 
     private static Date dateTime(int year, int month, int day, int hour, int minute) {
