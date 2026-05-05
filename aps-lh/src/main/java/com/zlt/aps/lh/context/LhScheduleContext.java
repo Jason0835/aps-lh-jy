@@ -113,6 +113,8 @@ public class LhScheduleContext {
     private Map<String, LhRepairCapsule> capsuleUsageMap = new HashMap<>();
     /** 硫化精度保养计划Map, key=machineCode */
     private Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>();
+    /** 特殊材料胎胚编码集合 */
+    private Set<String> specialMaterialEmbryoCodeSet = new HashSet<>();
 
     // ========== 中间计算结果(S4.3) ==========
 

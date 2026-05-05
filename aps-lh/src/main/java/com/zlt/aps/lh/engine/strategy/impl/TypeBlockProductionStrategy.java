@@ -24,6 +24,7 @@ import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
@@ -1152,6 +1153,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setProductionVersion(sku.getProductionVersion());
         result.setIsTrial(sku.isTrial() ? YES_FLAG : NO_FLAG);
         result.setMachineOrder(machine.getMachineOrder());
+        result.setHasSpecialMaterial(LhSpecialMaterialUtil.resolveHasSpecialMaterial(context, sku));
 
         // 生成工单号。
         result.setOrderNo(generateOrderNo(context));

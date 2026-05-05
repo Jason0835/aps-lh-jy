@@ -24,6 +24,7 @@ import com.zlt.aps.lh.mapper.MdmDevicePlanShutMapper;
 import com.zlt.aps.lh.mapper.LhMachineOnlineInfoMapper;
 import com.zlt.aps.lh.mapper.LhRepairCapsuleMapper;
 import com.zlt.aps.lh.mapper.MdmCapsuleChuckMapper;
+import com.zlt.aps.lh.mapper.MdmMaterialConsumeDetailMapper;
 import com.zlt.aps.lh.mapper.MdmMaterialInfoMapper;
 import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
@@ -31,6 +32,7 @@ import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
+import com.zlt.aps.lh.mapper.RawSpecialMaterialRecordMapper;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
@@ -49,8 +51,10 @@ import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
+import com.zlt.aps.mp.api.domain.entity.MdmMaterialConsumeDetail;
 import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
+import com.zlt.aps.mp.api.domain.entity.RawSpecialMaterialRecord;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import lombok.extern.slf4j.Slf4j;
@@ -65,6 +69,7 @@ import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -104,6 +109,12 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private MdmDevicePlanShutMapper devicePlanShutMapper;
+
+    @Resource
+    private MdmMaterialConsumeDetailMapper mdmMaterialConsumeDetailMapper;
+
+    @Resource
+    private RawSpecialMaterialRecordMapper rawSpecialMaterialRecordMapper;
 
     @Resource
     private MdmSkuMouldRelMapper skuMouldRelMapper;
@@ -176,67 +187,70 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         // 2. 加载月生产计划
         loadMonthPlan(context, factoryCode, year, month);
 
-        // 3. 加载胎胚实时库存
+        // 3. 加载特殊材料胎胚集合
+        loadSpecialMaterialEmbryoCodes(context, factoryCode);
+
+        // 4. 加载胎胚实时库存
         loadEmbryoRealtimeStock(context, factoryCode, startDate);
 
-        // 4. 加载周程滚动调整结果
+        // 5. 加载周程滚动调整结果
         loadAdjustResult(context, factoryCode, year, month);
 
-        // 5. 加载工作日历
+        // 6. 加载工作日历
         loadWorkCalendar(context, factoryCode, startDate, endDate);
 
-        // 6. 加载SKU日硫化产能
+        // 7. 加载SKU日硫化产能
         loadSkuLhCapacity(context, factoryCode);
 
-        // 7. 加载设备停机计划
+        // 8. 加载设备停机计划
         loadDevicePlanShut(context, factoryCode, startDate, endDate);
 
-        // 8. 加载SKU与模具关系
+        // 9. 加载SKU与模具关系
         loadSkuMouldRel(context, factoryCode);
 
-        // 9. 加载模具台账
+        // 10. 加载模具台账
         loadModelInfo(context, factoryCode);
 
-        // 10. 加载硫化机台信息
+        // 11. 加载硫化机台信息
         loadMachineInfo(context, factoryCode);
 
-        // 11. 加载模具清洗计划
+        // 12. 加载模具清洗计划
         loadCleaningPlan(context, factoryCode, startDate, endDate);
 
-        // 12. 加载月底计划余量
+        // 13. 加载月底计划余量
         loadMonthSurplus(context, factoryCode, year, month);
 
-        // 13. 加载前日物料日完成量（用于前日欠/超产差值修正,滚动模式取目标日前一日；强制重排取T-1）
+        // 14. 加载前日物料日完成量（用于前日欠/超产差值修正,滚动模式取目标日前一日；强制重排取T-1）
         Date previousDataDate = resolvePreviousDataDate(context, targetDate);
         loadDayFinishQty(context, factoryCode, previousDataDate);
 
-        // 14. 加载月累计完成量（截至排产T-1日（包含），按目标日所在月份统计）
+        // 15. 加载月累计完成量（截至排产T-1日（包含），按目标日所在月份统计）
         loadMaterialMonthFinishedQty(context, factoryCode, LhScheduleTimeUtil.addDays(scheduleDate, -1));
 
-        // 15. 加载物料信息
+        // 16. 加载物料信息
         loadMaterialInfo(context, factoryCode);
 
-        // 15.1 加载胶囊卡盘分组
+        // 16.1 加载胶囊卡盘分组
         loadCapsuleChuck(context, factoryCode);
 
-        // 16. 加载MES硫化在机信息（从 T-1 开始，按配置天数向前追溯最近有数据日期）
+        // 17. 加载MES硫化在机信息（从 T-1 开始，按配置天数向前追溯最近有数据日期）
         int machineOnlineLookbackDays = context.getParamIntValue(
                 LhScheduleParamConstant.MACHINE_ONLINE_LOOKBACK_DAYS,
                 LhScheduleConstant.MACHINE_ONLINE_LOOKBACK_DAYS);
         loadMachineOnlineInfo(context, factoryCode, startDate, machineOnlineLookbackDays);
 
-        // 17. 加载硫化定点机台
+        // 18. 加载硫化定点机台
         loadSpecifyMachine(context, factoryCode);
 
-        // 18. 加载硫化机胶囊已使用次数
+        // 19. 加载硫化机胶囊已使用次数
         loadCapsuleUsage(context, factoryCode);
 
-        // 19. 加载设备保养计划
+        // 20. 加载设备保养计划
         loadMaintenancePlan(context, factoryCode);
 
-        // 20. 加载前日硫化排程结果
+        // 21. 加载前日硫化排程结果
         loadPreviousScheduleResults(context, factoryCode, targetDate);
-        // 21. 加载前日模具交替计划，供滚动衔接继承
+        // 22. 加载前日模具交替计划，供滚动衔接继承
         loadPreviousMouldChangePlans(context, factoryCode, targetDate);
 
         log.info("基础数据加载完成, 工厂: {}, 目标日: {}, T日: {}",
@@ -491,6 +505,73 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
         context.setEmbryoRealtimeStockMap(stockMap);
         log.debug("胎胚实时库存加载完成, 数量: {}", stockMap.size());
+    }
+
+    /**
+     * 加载含特殊材料的胎胚编码集合。
+     *
+     * @param context 排程上下文
+     * @param factoryCode 分厂编号
+     */
+    private void loadSpecialMaterialEmbryoCodes(LhScheduleContext context, String factoryCode) {
+        List<String> embryoCodeList = context.getMonthPlanList().stream()
+                .map(FactoryMonthPlanProductionFinalResult::getEmbryoCode)
+                .filter(StringUtils::isNotEmpty)
+                .distinct()
+                .collect(java.util.stream.Collectors.toList());
+        Set<String> specialMaterialEmbryoCodeSet = new HashSet<>(Math.max(16, embryoCodeList.size()));
+        if (CollectionUtils.isEmpty(embryoCodeList)) {
+            context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
+            log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
+            return;
+        }
+
+        // 先按本次月计划胎胚范围加载BOM明细，避免扫描无关胎胚。
+        List<MdmMaterialConsumeDetail> consumeDetailList = mdmMaterialConsumeDetailMapper.selectList(
+                new LambdaQueryWrapper<MdmMaterialConsumeDetail>()
+                        .eq(MdmMaterialConsumeDetail::getFactoryCode, factoryCode)
+                        .eq(MdmMaterialConsumeDetail::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
+                        .in(MdmMaterialConsumeDetail::getEmbryoCode, embryoCodeList));
+        if (CollectionUtils.isEmpty(consumeDetailList)) {
+            context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
+            log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
+            return;
+        }
+
+        Set<String> childMaterialCodeSet = consumeDetailList.stream()
+                .map(MdmMaterialConsumeDetail::getChildMaterialCode)
+                .filter(StringUtils::isNotEmpty)
+                .collect(java.util.stream.Collectors.toSet());
+        if (CollectionUtils.isEmpty(childMaterialCodeSet)) {
+            context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
+            log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
+            return;
+        }
+
+        List<RawSpecialMaterialRecord> specialMaterialList = rawSpecialMaterialRecordMapper.selectList(
+                new LambdaQueryWrapper<RawSpecialMaterialRecord>()
+                        .eq(RawSpecialMaterialRecord::getFactoryCode, factoryCode)
+                        .eq(RawSpecialMaterialRecord::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
+                        .in(RawSpecialMaterialRecord::getMaterialCode, childMaterialCodeSet));
+        Set<String> specialMaterialCodeSet = new HashSet<>(Math.max(16,
+                CollectionUtils.isEmpty(specialMaterialList) ? 0 : specialMaterialList.size()));
+        if (!CollectionUtils.isEmpty(specialMaterialList)) {
+            for (RawSpecialMaterialRecord specialMaterial : specialMaterialList) {
+                if (StringUtils.isNotEmpty(specialMaterial.getMaterialCode())) {
+                    specialMaterialCodeSet.add(specialMaterial.getMaterialCode());
+                }
+            }
+        }
+
+        // 按BOM胎胚与特殊材料编码交集，形成结果字段判定集合。
+        for (MdmMaterialConsumeDetail detail : consumeDetailList) {
+            if (StringUtils.isNotEmpty(detail.getEmbryoCode())
+                    && specialMaterialCodeSet.contains(detail.getChildMaterialCode())) {
+                specialMaterialEmbryoCodeSet.add(detail.getEmbryoCode());
+            }
+        }
+        context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
+        log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
     }
 
     /**

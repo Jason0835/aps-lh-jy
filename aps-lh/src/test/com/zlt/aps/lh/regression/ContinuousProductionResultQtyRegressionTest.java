@@ -208,6 +208,47 @@ class ContinuousProductionResultQtyRegressionTest {
     }
 
     @Test
+    void buildScheduleResult_shouldWriteSpecialMaterialFlagByEmbryoCode() {
+        LhScheduleContext context = newContext();
+        context.getSpecialMaterialEmbryoCodeSet().add("EMB-SPECIAL");
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1201");
+        machine.setMachineName("FC-K1201");
+        machine.setMaxMoldNum(1);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-SPECIAL");
+        sku.setMaterialDesc("MAT-SPECIAL-DESC");
+        sku.setStructureName("S-SPECIAL");
+        sku.setSpecCode("SPEC-SPECIAL");
+        sku.setEmbryoCode("EMB-SPECIAL");
+        sku.setContinuousMachineCode("K1201");
+        sku.setMonthPlanQty(30);
+        sku.setWindowPlanQty(8);
+        sku.setPendingQty(8);
+        sku.setTargetScheduleQty(8);
+        sku.setShiftCapacity(8);
+        sku.setLhTimeSeconds(3600);
+        sku.setScheduleType("01");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD20260411016");
+
+        LhScheduleResult result = ReflectionTestUtils.invokeMethod(
+                strategy,
+                "buildScheduleResult",
+                context,
+                machine,
+                sku,
+                context.getScheduleWindowShifts().get(0).getShiftStartDateTime(),
+                null,
+                context.getScheduleWindowShifts(),
+                1,
+                false);
+
+        assertEquals("1", result.getHasSpecialMaterial());
+    }
+
+    @Test
     void scheduleReduceMould_shouldKeepGlobalTargetWhenSingleMachineResultIsRefined() {
         LhScheduleContext context = newContext();
         MachineScheduleDTO machine1 = new MachineScheduleDTO();

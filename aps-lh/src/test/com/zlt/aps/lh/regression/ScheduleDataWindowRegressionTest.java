@@ -31,11 +31,15 @@ import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
+import com.zlt.aps.lh.mapper.MdmMaterialConsumeDetailMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
+import com.zlt.aps.lh.mapper.RawSpecialMaterialRecordMapper;
 import com.zlt.aps.lh.service.impl.LhBaseDataServiceImpl;
+import com.zlt.aps.mp.api.domain.entity.MdmMaterialConsumeDetail;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
+import com.zlt.aps.mp.api.domain.entity.RawSpecialMaterialRecord;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.Test;
@@ -80,6 +84,10 @@ class ScheduleDataWindowRegressionTest {
     private MdmSkuLhCapacityMapper skuLhCapacityMapper;
     @Mock
     private MdmDevicePlanShutMapper devicePlanShutMapper;
+    @Mock
+    private MdmMaterialConsumeDetailMapper mdmMaterialConsumeDetailMapper;
+    @Mock
+    private RawSpecialMaterialRecordMapper rawSpecialMaterialRecordMapper;
     @Mock
     private MdmSkuMouldRelMapper skuMouldRelMapper;
     @Mock
@@ -361,6 +369,44 @@ class ScheduleDataWindowRegressionTest {
     }
 
     @Test
+    void loadAllBaseData_shouldPrecomputeSpecialMaterialEmbryoCodes() {
+        Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 17));
+        Date scheduleDate = LhScheduleTimeUtil.addDays(target, -2);
+        prepareRequiredBaseMocks();
+        when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+
+        FactoryMonthPlanProductionFinalResult hitPlan = new FactoryMonthPlanProductionFinalResult();
+        hitPlan.setMaterialCode("MAT-HIT");
+        hitPlan.setEmbryoCode("EMB-HIT");
+        FactoryMonthPlanProductionFinalResult missPlan = new FactoryMonthPlanProductionFinalResult();
+        missPlan.setMaterialCode("MAT-MISS");
+        missPlan.setEmbryoCode("EMB-MISS");
+        when(monthPlanMapper.selectList(any())).thenReturn(Arrays.asList(hitPlan, missPlan));
+
+        MdmMaterialConsumeDetail hitBom = new MdmMaterialConsumeDetail();
+        hitBom.setEmbryoCode("EMB-HIT");
+        hitBom.setChildMaterialCode("RAW-SPECIAL");
+        MdmMaterialConsumeDetail missBom = new MdmMaterialConsumeDetail();
+        missBom.setEmbryoCode("EMB-MISS");
+        missBom.setChildMaterialCode("RAW-NORMAL");
+        when(mdmMaterialConsumeDetailMapper.selectList(any())).thenReturn(Arrays.asList(hitBom, missBom));
+
+        RawSpecialMaterialRecord specialMaterial = new RawSpecialMaterialRecord();
+        specialMaterial.setMaterialCode("RAW-SPECIAL");
+        when(rawSpecialMaterialRecordMapper.selectList(any())).thenReturn(Collections.singletonList(specialMaterial));
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setScheduleTargetDate(target);
+        context.setScheduleDate(scheduleDate);
+
+        lhBaseDataService.loadAllBaseData(context);
+
+        assertTrue(context.getSpecialMaterialEmbryoCodeSet().contains("EMB-HIT"));
+        assertFalse(context.getSpecialMaterialEmbryoCodeSet().contains("EMB-MISS"));
+    }
+
+    @Test
     void loadAllBaseData_shouldAggregateMonthFinishedQtyUsingTargetMonthWhenWindowCrossesMonth() {
         Date target = LhScheduleTimeUtil.clearTime(date(2026, 5, 2));
         Date scheduleDate = LhScheduleTimeUtil.addDays(target, -2);
@@ -543,8 +589,22 @@ class ScheduleDataWindowRegressionTest {
         assertTrue(sqlSegment.contains(">="));
         assertTrue(sqlSegment.contains("<"));
         assertFalse(sqlSegment.contains("finish_date ="));
-        assertTrue(paramMap.containsValue(rangeStart));
-        assertTrue(paramMap.containsValue(rangeEnd));
+        assertTrue(paramMapContainsDate(paramMap, rangeStart));
+        assertTrue(paramMapContainsDate(paramMap, rangeEnd));
+    }
+
+    /**
+     * 判断查询参数中是否包含指定日期。
+     *
+     * @param paramMap 查询参数
+     * @param expectedDate 预期日期
+     * @return 是否包含指定日期
+     */
+    private boolean paramMapContainsDate(Map<String, Object> paramMap, Date expectedDate) {
+        return paramMap.values().stream()
+                .filter(Date.class::isInstance)
+                .map(Date.class::cast)
+                .anyMatch(date -> date.getTime() == expectedDate.getTime());
     }
 
     /**

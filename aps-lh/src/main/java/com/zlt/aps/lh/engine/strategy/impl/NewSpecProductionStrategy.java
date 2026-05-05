@@ -28,6 +28,7 @@ import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -539,6 +540,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         result.setRealScheduleDate(context.getScheduleDate());
         result.setProductionStatus("0");
         result.setMouldCode(resolveMouldCode(context, sku.getMaterialCode()));
+        result.setHasSpecialMaterial(LhSpecialMaterialUtil.resolveHasSpecialMaterial(context, sku));
         // 保存真实换模开始时间，供下游换模计划表直接复用。
         result.setMouldChangeStartTime(mouldChangeStartTime);
 

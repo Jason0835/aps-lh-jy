@@ -685,6 +685,14 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String mouldCode;
 
     /**
+     * 是否含特殊材料
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.hasSpecialMaterial", dictType = "biz_yes_no")
+    @ApiModelProperty(value = "是否含特殊材料", name = "hasSpecialMaterial")
+    @TableField(value = "HAS_SPECIAL_MATERIAL")
+    private String hasSpecialMaterial;
+
+    /**
      * 是否拆分
      */
     @Excel(name = "ui.data.column.lhScheduleResult.isSplit")

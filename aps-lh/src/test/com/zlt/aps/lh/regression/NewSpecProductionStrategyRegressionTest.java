@@ -930,6 +930,26 @@ class NewSpecProductionStrategyRegressionTest {
                 "只有基础首位机台真实失败后，才应顺序尝试下一台候选机台");
     }
 
+    @Test
+    void scheduleNewSpecs_shouldWriteSpecialMaterialFlagByEmbryoCode() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.getSpecialMaterialEmbryoCodeSet().add("EMB-SPECIAL");
+        SkuScheduleDTO sku = buildSku();
+        sku.setEmbryoCode("EMB-SPECIAL");
+        sku.setTargetScheduleQty(1);
+        sku.setShiftCapacity(1);
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = buildMachine("K1301", dateTime(2026, 4, 17, 6, 0));
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals("1", context.getScheduleResultList().get(0).getHasSpecialMaterial());
+    }
+
     private LhScheduleContext buildContext() {
         LhScheduleContext context = new LhScheduleContext();
         Date scheduleDate = dateTime(2026, 4, 17, 0, 0);

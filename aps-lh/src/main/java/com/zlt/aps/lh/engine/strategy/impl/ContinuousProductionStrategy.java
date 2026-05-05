@@ -26,6 +26,7 @@ import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
@@ -894,6 +895,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         result.setProductionVersion(sku.getProductionVersion());
         result.setIsTrial(sku.isTrial() ? "1" : "0");
         result.setMachineOrder(machine.getMachineOrder());
+        result.setHasSpecialMaterial(LhSpecialMaterialUtil.resolveHasSpecialMaterial(context, sku));
 
         // 生成工单号
         String orderNo = generateOrderNo(context);
