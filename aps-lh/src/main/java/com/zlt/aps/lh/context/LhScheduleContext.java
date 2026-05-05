@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.context;
 
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
@@ -27,6 +28,7 @@ import lombok.Data;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
+import java.math.BigDecimal;
 import java.util.*;
 import java.util.Objects;
 
@@ -63,6 +65,22 @@ public class LhScheduleContext {
     private String operator;
     /** 本次排程配置快照 */
     private LhScheduleConfig scheduleConfig;
+    /** 硫化开模时间 */
+    private Date curingOpenMoldTime;
+    /** 硫化停锅时间 */
+    private Date curingStopPotTime;
+    /** 开产班次 */
+    private ShiftProductionControlDTO openProductionShift;
+    /** 停产班次 */
+    private ShiftProductionControlDTO stopProductionShift;
+    /** 是否启用开停产管控 */
+    private boolean enableOpenStopProductionControl;
+    /** 是否处于开产模式 */
+    private boolean openProductionMode;
+    /** 是否处于停产模式 */
+    private boolean stopProductionMode;
+    /** 开产欠产阈值比例 */
+    private BigDecimal openProductionShortageThresholdRate;
 
     // ========== 硫化参数(从LhParams加载) ==========
 
@@ -149,6 +167,8 @@ public class LhScheduleContext {
     private Map<Integer, ShiftRuntimeState> shiftRuntimeStateMap = new LinkedHashMap<>(8);
     /** 本次排程解析后的班次窗口 */
     private List<LhShiftConfigVO> scheduleWindowShifts = new ArrayList<>();
+    /** 班次排产管控，key=班次索引 */
+    private Map<Integer, ShiftProductionControlDTO> shiftProductionControlMap = new LinkedHashMap<>(8);
     /** 机台已分配SKU Map, key=machineCode, value=已分配的排程结果 */
     private Map<String, List<LhScheduleResult>> machineAssignmentMap = new LinkedHashMap<>();
     /** 定点机台挤量预留切换开始时间, key=machineCode */

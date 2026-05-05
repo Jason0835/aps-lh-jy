@@ -26,6 +26,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -49,9 +51,18 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /** 无窗口计划量但存在余量/正向结转目标量提示 */
     private static final String TARGET_QTY_ONLY_WARN_TEMPLATE =
             "物料：%s 当前排程窗口没有计划量，但存在月计划余量/正向结转目标量[%d]，继续排产";
+    /** 开产管控缺口未排提示 */
+    private static final String OPEN_PRODUCTION_SHORTAGE_REASON_TEMPLATE =
+            "物料：%s 开产管控导致排产目标量低于待排量，待排量[%d]，目标量[%d]，缺口[%d]，缺口比例[%s]，阈值[%s]";
     /** 满排模式下无窗口计划量仍继续排产提示 */
     private static final String FULL_CAPACITY_WARN_TEMPLATE =
             "物料：%s 当前排程窗口没有计划量，但按产能满排模式生成排产目标量[%d]，继续排产";
+    /** 自动排程数据来源 */
+    private static final String DATA_SOURCE_AUTO = "0";
+    /** 正常删除标识 */
+    private static final int DELETE_FLAG_NORMAL = 0;
+    /** 比例展示小数位 */
+    private static final int RATE_DISPLAY_SCALE = 4;
     /** 月计划最小自然日 */
     private static final int MIN_DAY_OF_MONTH = 1;
     /** 月计划最大自然日 */
@@ -286,6 +297,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setEmbryoStock(context.getEmbryoRealtimeStockMap().getOrDefault(plan.getEmbryoCode(), -1));
         // 待排量以“余量/库存取大”为基线，再叠加滚动继承扣减与欠产传导，避免重复排产。
         int basePendingQty = Math.max(surplus.getSurplusQty(), Math.max(0, dto.getEmbryoStock()));
+        if (context.isStopProductionMode()) {
+            basePendingQty = resolveStopProductionDemandQty(context, plan, dto.getEmbryoStock());
+        }
         dto.setPendingQty(Math.max(0, basePendingQty - inheritedPlanQty) + carryForwardQty);
         dto.setDailyPlanQty(plan.getDayVulcanizationQty() != null ? plan.getDayVulcanizationQty() : 0);
 
@@ -306,6 +320,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 填充日硫化产能
         fillDailyCapacity(dto, capacity);
         dto.setTargetScheduleQty(getTargetScheduleQtyResolver().resolveInitialTargetQty(context, dto));
+        appendOpenProductionShortageIfNecessary(context, dto);
         log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 已完成: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
                 dto.getMaterialCode(), dto.getStructureName(), dto.getMonthPlanQty(), dto.getWindowPlanQty(),
                 dto.getFinishedQty(), dto.getSurplusQty(), dto.getPendingQty(), dto.getTargetScheduleQty(),
@@ -344,6 +359,98 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
+     * 解析停产收尾需求量。
+     *
+     * @param context 排程上下文
+     * @param plan 月计划
+     * @param embryoStock 胎胚库存
+     * @return 停产收尾需求量
+     */
+    private int resolveStopProductionDemandQty(LhScheduleContext context,
+                                               FactoryMonthPlanProductionFinalResult plan,
+                                               int embryoStock) {
+        int stopDayPlanQty = resolveStopDayPlanQty(context, plan);
+        int lossIncludedStopDayPlanQty = resolveLossIncludedStopDayPlanQty(plan, stopDayPlanQty);
+        int demandQty = Math.max(lossIncludedStopDayPlanQty, Math.max(0, embryoStock));
+        log.info("停产收尾需求量计算完成, materialCode={}, stopDayPlanQty={}, lossIncludedStopDayPlanQty={}, embryoStock={}, demandQty={}",
+                plan.getMaterialCode(), stopDayPlanQty, lossIncludedStopDayPlanQty, embryoStock, demandQty);
+        return demandQty;
+    }
+
+    /**
+     * 解析停产日月计划量。
+     *
+     * @param context 排程上下文
+     * @param plan 月计划
+     * @return 停产日计划量
+     */
+    private int resolveStopDayPlanQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
+        if (Objects.isNull(context.getCuringStopPotTime())) {
+            return 0;
+        }
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(context.getCuringStopPotTime());
+        return MonthPlanDayQtyUtil.resolveDayQty(plan, calendar.get(Calendar.DAY_OF_MONTH));
+    }
+
+    /**
+     * 按月计划含损耗需求折算停产日计划量。
+     *
+     * @param plan 月计划
+     * @param stopDayPlanQty 停产日计划量
+     * @return 含损耗停产日计划量
+     */
+    private int resolveLossIncludedStopDayPlanQty(FactoryMonthPlanProductionFinalResult plan, int stopDayPlanQty) {
+        if (stopDayPlanQty <= 0
+                || Objects.isNull(plan.getFactProdReqQty())
+                || Objects.isNull(plan.getTotalQty())
+                || plan.getTotalQty() <= 0
+                || plan.getFactProdReqQty() <= plan.getTotalQty()) {
+            return Math.max(stopDayPlanQty, 0);
+        }
+        return BigDecimal.valueOf(stopDayPlanQty)
+                .multiply(BigDecimal.valueOf(plan.getFactProdReqQty()))
+                .divide(BigDecimal.valueOf(plan.getTotalQty()), 0, RoundingMode.UP)
+                .intValue();
+    }
+
+    /**
+     * 达到开产欠产阈值时写入现有未排结果链路。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return void
+     */
+    private void appendOpenProductionShortageIfNecessary(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (!context.isOpenProductionMode() || Objects.isNull(sku)) {
+            return;
+        }
+        int pendingQty = Math.max(0, sku.getPendingQty());
+        int targetQty = Math.max(0, sku.resolveTargetScheduleQty());
+        int shortageQty = pendingQty - targetQty;
+        if (pendingQty <= 0 || shortageQty <= 0) {
+            return;
+        }
+        BigDecimal shortageRate = BigDecimal.valueOf(shortageQty)
+                .divide(BigDecimal.valueOf(pendingQty), RATE_DISPLAY_SCALE, RoundingMode.HALF_UP);
+        BigDecimal thresholdRate = Objects.nonNull(context.getOpenProductionShortageThresholdRate())
+                ? context.getOpenProductionShortageThresholdRate() : LhScheduleConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE;
+        if (shortageRate.compareTo(thresholdRate) < 0) {
+            return;
+        }
+        String reason = String.format(OPEN_PRODUCTION_SHORTAGE_REASON_TEMPLATE,
+                sku.getMaterialCode(), pendingQty, targetQty, shortageQty,
+                shortageRate.stripTrailingZeros().toPlainString(),
+                thresholdRate.stripTrailingZeros().toPlainString());
+        log.warn(reason);
+
+        LhUnscheduledResult unscheduled = buildBaseUnscheduledResult(context, sku);
+        unscheduled.setUnscheduledQty(shortageQty);
+        unscheduled.setUnscheduledReason(reason);
+        context.getUnscheduledResultList().add(unscheduled);
+    }
+
+    /**
      * 追加“无计划量不排产”的未排结果。
      *
      * @param context 排程上下文
@@ -353,6 +460,20 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         String reason = String.format(NO_PLAN_QTY_REASON_TEMPLATE, sku.getMaterialCode());
         log.warn(reason);
 
+        LhUnscheduledResult unscheduled = buildBaseUnscheduledResult(context, sku);
+        unscheduled.setUnscheduledQty(0);
+        unscheduled.setUnscheduledReason(reason);
+        context.getUnscheduledResultList().add(unscheduled);
+    }
+
+    /**
+     * 构建未排结果公共字段。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return 未排结果
+     */
+    private LhUnscheduledResult buildBaseUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku) {
         LhUnscheduledResult unscheduled = new LhUnscheduledResult();
         unscheduled.setFactoryCode(context.getFactoryCode());
         unscheduled.setBatchNo(context.getBatchNo());
@@ -365,12 +486,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
         unscheduled.setSpecCode(sku.getSpecCode());
         unscheduled.setEmbryoCode(sku.getEmbryoCode());
-        unscheduled.setUnscheduledQty(0);
-        unscheduled.setUnscheduledReason(reason);
         unscheduled.setMouldQty(sku.getMouldQty());
-        unscheduled.setDataSource("0");
-        unscheduled.setIsDelete(0);
-        context.getUnscheduledResultList().add(unscheduled);
+        unscheduled.setDataSource(DATA_SOURCE_AUTO);
+        unscheduled.setIsDelete(DELETE_FLAG_NORMAL);
+        return unscheduled;
     }
 
     private int resolveShiftFinishedQty(LhScheduleResult result, LhScheduleContext context) {

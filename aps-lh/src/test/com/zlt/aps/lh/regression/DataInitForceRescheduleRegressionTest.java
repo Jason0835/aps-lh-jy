@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.ValidationResult;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.chain.DataValidationChain;
+import com.zlt.aps.lh.engine.strategy.IProductionShutdownStrategy;
 import com.zlt.aps.lh.handler.DataInitHandler;
 import com.zlt.aps.lh.service.ILhBaseDataService;
 import com.zlt.aps.lh.service.ILhShiftConfigService;
@@ -48,6 +49,9 @@ class DataInitForceRescheduleRegressionTest {
     @Mock
     private RollingScheduleHandoffService rollingScheduleHandoffService;
 
+    @Mock
+    private IProductionShutdownStrategy productionShutdownStrategy;
+
     @BeforeEach
     void setUp() {
         handler = new DataInitHandler();
@@ -55,6 +59,7 @@ class DataInitForceRescheduleRegressionTest {
         ReflectionTestUtils.setField(handler, "baseDataService", baseDataService);
         ReflectionTestUtils.setField(handler, "lhShiftConfigService", lhShiftConfigService);
         ReflectionTestUtils.setField(handler, "rollingScheduleHandoffService", rollingScheduleHandoffService);
+        ReflectionTestUtils.setField(handler, "productionShutdownStrategy", productionShutdownStrategy);
         when(dataValidationChain.validateWithResult(any())).thenReturn(ValidationResult.pass());
     }
 

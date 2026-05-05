@@ -10,6 +10,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
@@ -31,6 +32,7 @@ import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
+import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import com.zlt.aps.lh.util.SingleMouldShiftQtyUtil;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
@@ -789,8 +791,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 return false;
             }
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-            Date firstProductionStartTime = ShiftCapacityResolverUtil.resolveFirstSchedulableStartIgnoringCleaning(
-                    context.getDevicePlanShutList(),
+            Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                    context,
                     machine.getMachineCode(),
                     inspectionTime,
                     shifts,
@@ -957,11 +959,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 started = true;
             }
 
-            Date effectiveStart = (startTime != null && startTime.after(shift.getShiftStartDateTime()))
-                    ? startTime : shift.getShiftStartDateTime();
-            if (effectiveStart.after(shift.getShiftEndDateTime())) {
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, startTime);
+            if (control == null || !control.isCanSchedule()) {
                 continue;
             }
+            Date effectiveStart = control.getEffectiveStartTime();
+            Date effectiveEnd = control.getEffectiveEndTime();
 
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
@@ -969,13 +972,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     maintenanceWindowList,
                     result.getLhMachineCode(),
                     effectiveStart,
-                    shift.getShiftEndDateTime(),
+                    effectiveEnd,
                     shiftCapacity,
                     lhTimeSeconds,
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
                     dryIceDurationHours);
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;
             }
@@ -991,7 +995,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     maintenanceWindowList,
                     result.getLhMachineCode(),
                     effectiveStart,
-                    shift.getShiftEndDateTime(),
+                    effectiveEnd,
                     shiftQty,
                     shiftMaxQty);
             setShiftPlanQty(result, shift.getShiftIndex(), shiftQty, effectiveStart, shiftPlanEndTime);
@@ -1120,22 +1124,27 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
                 continue;
             }
-            Date shiftStartTime = shift.getShiftStartDateTime();
-            Date effectiveStartTime = cursorStartTime != null && cursorStartTime.after(shiftStartTime)
-                    ? cursorStartTime : shiftStartTime;
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, cursorStartTime);
+            if (control == null || !control.isCanSchedule()) {
+                setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
+                continue;
+            }
+            Date effectiveStartTime = control.getEffectiveStartTime();
+            Date effectiveEndTime = control.getEffectiveEndTime();
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
                     maintenanceWindowList,
                     result.getLhMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     shiftCapacity,
                     result.getLhTime(),
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
                     dryIceDurationHours);
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
                 continue;
@@ -1152,12 +1161,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     maintenanceWindowList,
                     result.getLhMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     shiftQty,
                     shiftMaxQty);
             setShiftPlanQty(result, shift.getShiftIndex(), shiftQty, effectiveStartTime, shiftPlanEndTime);
             remaining -= shiftQty;
-            cursorStartTime = shift.getShiftEndDateTime();
+            cursorStartTime = effectiveEndTime;
         }
         refreshResultSummary(context, result, shifts);
     }

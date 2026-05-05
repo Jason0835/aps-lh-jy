@@ -7,6 +7,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -17,6 +18,7 @@ import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
+import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -340,8 +342,8 @@ public class LocalSearchMachineAllocatorStrategy {
         // 业务口径：换模总时长已包含首检时长，局部搜索与主流程保持一致，不再额外 +FIRST_INSPECTION_HOURS
         Date productionStartTime = inspectionTime;
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-        Date firstProductionStartTime = ShiftCapacityResolverUtil.resolveFirstSchedulableStartIgnoringCleaning(
-                context.getDevicePlanShutList(),
+        Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                context,
                 machineCode,
                 productionStartTime,
                 shifts,
@@ -435,11 +437,12 @@ public class LocalSearchMachineAllocatorStrategy {
                     continue;
                 }
             }
-            Date effectiveStartTime = cursorStartTime.after(shift.getShiftStartDateTime())
-                    ? cursorStartTime : shift.getShiftStartDateTime();
-            if (!effectiveStartTime.before(shift.getShiftEndDateTime())) {
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, cursorStartTime);
+            if (control == null || !control.isCanSchedule()) {
                 continue;
             }
+            Date effectiveStartTime = control.getEffectiveStartTime();
+            Date effectiveEndTime = control.getEffectiveEndTime();
 
             // 统一按班产主口径或回退公式估算残班/整班计划量。
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
@@ -447,13 +450,14 @@ public class LocalSearchMachineAllocatorStrategy {
                     cleaningWindowList,
                     machine.getMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     shiftCapacity,
                     lhTimeSeconds,
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
                     dryIceDurationHours);
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;
             }
@@ -470,11 +474,11 @@ public class LocalSearchMachineAllocatorStrategy {
                     cleaningWindowList,
                     machine.getMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     allocationQty,
                     shiftMaxQty);
             // 当前班次结束后再推进到下一班次，避免跨班次重叠计算
-            cursorStartTime = shift.getShiftEndDateTime();
+            cursorStartTime = effectiveEndTime;
         }
 
         if (totalQty <= 0 || specEndTime == null) {

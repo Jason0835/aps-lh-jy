@@ -237,6 +237,30 @@ public final class LhScheduleConstant {
     /** 开产首日产能比例(%) */
     public static final int STARTUP_FIRST_DAY_RATE = 50;
 
+    /** 开停产管控默认关闭 */
+    public static final int ENABLE_OPEN_STOP_PRODUCTION_CONTROL = 0;
+
+    /** 硫化开模时间默认值 */
+    public static final String CURING_OPEN_MOLD_TIME = "";
+
+    /** 硫化停锅时间默认值 */
+    public static final String CURING_STOP_POT_TIME = "";
+
+    /** 开产欠产阈值比例默认值 */
+    public static final BigDecimal OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE = new BigDecimal("0.5");
+
+    /** 开产雪地胎关键词默认值 */
+    public static final String OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS = "";
+
+    /** 开产雪地胎靠后分 */
+    public static final int OPEN_PRODUCTION_WINTER_TIRE_PENALTY = 1;
+
+    /** 开产不同英寸靠后分 */
+    public static final int OPEN_PRODUCTION_DIFFERENT_INCH_PENALTY = 1;
+
+    /** 开产特殊材料靠后分 */
+    public static final int OPEN_PRODUCTION_SPECIAL_MATERIAL_PENALTY = 1;
+
     // ======================== 试制量试 ========================
 
     /** 试制量试每日上限 */

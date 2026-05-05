@@ -142,6 +142,16 @@ public final class LhScheduleParamConstant {
     public static final String SHUTDOWN_DAY_MINUS_1_RATE = "SHUTDOWN_DAY_MINUS_1_RATE";
     /** 开产首日产能比例 */
     public static final String STARTUP_FIRST_DAY_RATE = "STARTUP_FIRST_DAY_RATE";
+    /** 开停产管控开关（0-关闭，1-开启） */
+    public static final String ENABLE_OPEN_STOP_PRODUCTION_CONTROL = "ENABLE_OPEN_STOP_PRODUCTION_CONTROL";
+    /** 硫化开模时间 */
+    public static final String CURING_OPEN_MOLD_TIME = "CURING_OPEN_MOLD_TIME";
+    /** 硫化停锅时间 */
+    public static final String CURING_STOP_POT_TIME = "CURING_STOP_POT_TIME";
+    /** 开产欠产阈值比例 */
+    public static final String OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE = "OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE";
+    /** 开产雪地胎关键词 */
+    public static final String OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS = "OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS";
     /** 试制量试每日上限 */
     public static final String TRIAL_DAILY_LIMIT = "TRIAL_DAILY_LIMIT";
     /** 模具交替计划天数 */

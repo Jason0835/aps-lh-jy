@@ -208,6 +208,16 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.SHUTDOWN_DAY_MINUS_1_RATE);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.STARTUP_FIRST_DAY_RATE,
                 LhScheduleConstant.STARTUP_FIRST_DAY_RATE);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_OPEN_STOP_PRODUCTION_CONTROL,
+                LhScheduleConstant.ENABLE_OPEN_STOP_PRODUCTION_CONTROL);
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CURING_OPEN_MOLD_TIME,
+                LhScheduleConstant.CURING_OPEN_MOLD_TIME);
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CURING_STOP_POT_TIME,
+                LhScheduleConstant.CURING_STOP_POT_TIME);
+        putDoubleValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE,
+                LhScheduleConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE.doubleValue());
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS,
+                LhScheduleConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.TRIAL_DAILY_LIMIT, LhScheduleConstant.TRIAL_DAILY_LIMIT);
 
         return new LhScheduleConfig(resolvedParamMap);

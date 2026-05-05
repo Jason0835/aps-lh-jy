@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
 import org.apache.commons.lang3.StringUtils;
 
+import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -83,6 +84,25 @@ public class LhScheduleConfig {
         }
         try {
             return Double.parseDouble(value.trim());
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    /**
+     * 获取高精度小数参数值。
+     *
+     * @param paramCode 参数编码
+     * @param defaultValue 默认值
+     * @return 参数值
+     */
+    public BigDecimal getParamBigDecimalValue(String paramCode, BigDecimal defaultValue) {
+        String value = resolvedParamMap.get(paramCode);
+        if (StringUtils.isEmpty(value)) {
+            return defaultValue;
+        }
+        try {
+            return new BigDecimal(value.trim());
         } catch (NumberFormatException e) {
             return defaultValue;
         }
@@ -360,6 +380,29 @@ public class LhScheduleConfig {
 
     public int getStartupFirstDayRate() {
         return getParamIntValue(LhScheduleParamConstant.STARTUP_FIRST_DAY_RATE, LhScheduleConstant.STARTUP_FIRST_DAY_RATE);
+    }
+
+    public boolean isOpenStopProductionControlEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.ENABLE_OPEN_STOP_PRODUCTION_CONTROL,
+                LhScheduleConstant.ENABLE_OPEN_STOP_PRODUCTION_CONTROL) == 1;
+    }
+
+    public String getCuringOpenMoldTime() {
+        return getParamValue(LhScheduleParamConstant.CURING_OPEN_MOLD_TIME, LhScheduleConstant.CURING_OPEN_MOLD_TIME);
+    }
+
+    public String getCuringStopPotTime() {
+        return getParamValue(LhScheduleParamConstant.CURING_STOP_POT_TIME, LhScheduleConstant.CURING_STOP_POT_TIME);
+    }
+
+    public BigDecimal getOpenProductionShortageThresholdRate() {
+        return getParamBigDecimalValue(LhScheduleParamConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE,
+                LhScheduleConstant.OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE);
+    }
+
+    public String getOpenProductionWinterTireKeywords() {
+        return getParamValue(LhScheduleParamConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS,
+                LhScheduleConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS);
     }
 
     public int getTrialDailyLimit() {

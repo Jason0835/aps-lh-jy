@@ -3,16 +3,18 @@ package com.zlt.aps.lh.handler;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
-import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
-import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ValidationResult;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
+import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.chain.DataValidationChain;
+import com.zlt.aps.lh.engine.strategy.IProductionShutdownStrategy;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.service.ILhBaseDataService;
@@ -84,6 +86,9 @@ public class DataInitHandler extends AbsScheduleStepHandler {
     @Resource
     private LhMaintenanceScheduleService maintenanceScheduleService;
 
+    @Resource
+    private IProductionShutdownStrategy productionShutdownStrategy;
+
     @Override
     protected void doHandle(LhScheduleContext context) {
         log.info("基础数据初始化开始, 工厂: {}, 目标日: {}, T日: {}, 月计划版本: {}",
@@ -125,6 +130,16 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         // S4.2.3.1 校验清洗计划配置约束，仅校验表数据，不生成或回写清洗计划。
         validateCleaningPlanRules(context);
         if (context.isInterrupted()) {
+            return;
+        }
+
+        // S4.2.3.2 准备工作日历与开停产班次管控，供后续机台状态和产能计算统一使用。
+        try {
+            productionShutdownStrategy.prepareOpenStopContext(context);
+        } catch (IllegalArgumentException e) {
+            log.error("开停产参数非法: {}", e.getMessage());
+            ScheduleDomainExceptionHelper.interrupt(context, ScheduleStepEnum.S4_2_DATA_INIT,
+                    ScheduleErrorCode.DATA_INCOMPLETE, e.getMessage());
             return;
         }
 
@@ -245,6 +260,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
 
             // 初始化各班次可用状态（默认全部可用）
             Arrays.fill(dto.getShiftAvailable(), true);
+            applyShiftProductionControl(context, dto);
             dto.setEstimatedEndTime(resolveInitialEstimatedEndTime(context, machineCode));
 
             machineScheduleMap.put(machineCode, dto);
@@ -302,6 +318,26 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         log.warn("机台初始结束时间未匹配班次窗口, 机台: {}, 使用T日: {}",
                 machineCode, LhScheduleTimeUtil.formatDate(context.getScheduleDate()));
         return context.getScheduleDate();
+    }
+
+    /**
+     * 按工作日历和开停产管控更新机台班次可用状态。
+     *
+     * @param context 排程上下文
+     * @param dto 机台状态对象
+     * @return void
+     */
+    private void applyShiftProductionControl(LhScheduleContext context, MachineScheduleDTO dto) {
+        if (Objects.isNull(context) || Objects.isNull(dto) || CollectionUtils.isEmpty(context.getShiftProductionControlMap())) {
+            return;
+        }
+        for (Map.Entry<Integer, ShiftProductionControlDTO> entry : context.getShiftProductionControlMap().entrySet()) {
+            int shiftIndex = entry.getKey();
+            if (shiftIndex <= 0 || shiftIndex >= dto.getShiftAvailable().length) {
+                continue;
+            }
+            dto.getShiftAvailable()[shiftIndex] = entry.getValue().isCanSchedule();
+        }
     }
 
     private Map<String, MachineScheduleDTO> copyMachineStateMap(Map<String, MachineScheduleDTO> sourceMap) {

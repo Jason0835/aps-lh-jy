@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -22,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
@@ -479,6 +481,40 @@ class ScheduleAdjustCarryForwardRegressionTest {
         assertEquals(300, sku.getPendingQty());
         assertEquals(128, sku.getTargetScheduleQty().intValue());
         assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    @Test
+    void doHandle_shouldAppendOpenProductionShortageWhenThresholdReached() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("1"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setOpenProductionMode(true);
+        context.setOpenProductionShortageThresholdRate(new BigDecimal("0.5"));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-OPEN-SHORT");
+        plan.setMaterialDesc("MAT-OPEN-SHORT-DESC");
+        plan.setStructureName("S-OPEN-SHORT");
+        plan.setSpecifications("SPEC-OPEN-SHORT");
+        plan.setTotalQty(300);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("MAT-OPEN-SHORT");
+        capacity.setClassCapacity(10);
+        context.getSkuLhCapacityMap().put("MAT-OPEN-SHORT", capacity);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-OPEN-SHORT").get(0);
+        LhUnscheduledResult unscheduled = context.getUnscheduledResultList().get(0);
+        assertEquals(80, sku.getTargetScheduleQty().intValue());
+        assertEquals(220, unscheduled.getUnscheduledQty().intValue());
+        assertTrue(unscheduled.getUnscheduledReason().contains("开产管控导致排产目标量低于待排量"));
     }
 
     @Test

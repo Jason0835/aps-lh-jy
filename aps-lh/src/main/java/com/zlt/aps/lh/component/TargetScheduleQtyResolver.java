@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
@@ -12,6 +13,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
+import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
@@ -112,7 +114,24 @@ public class TargetScheduleQtyResolver {
         if (CollectionUtils.isEmpty(shifts)) {
             return Math.max(0, sku.getPendingQty());
         }
-        return Math.max(0, sku.getShiftCapacity() * shifts.size());
+        int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(sku.getMouldQty());
+        int totalCapacity = 0;
+        for (LhShiftConfigVO shift : shifts) {
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(
+                    context, shift, shift.getShiftStartDateTime());
+            if (Objects.isNull(control) || !control.isCanSchedule()) {
+                continue;
+            }
+            long availableSeconds = (control.getEffectiveEndTime().getTime() - control.getEffectiveStartTime().getTime()) / 1000L;
+            int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacity(
+                    sku.getShiftCapacity(),
+                    sku.getLhTimeSeconds(),
+                    mouldQty,
+                    ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
+                    availableSeconds);
+            totalCapacity += ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+        }
+        return Math.max(0, totalCapacity);
     }
 
     /**
@@ -144,8 +163,8 @@ public class TargetScheduleQtyResolver {
             return 0;
         }
         int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-        Date firstProductionStartTime = ShiftCapacityResolverUtil.resolveFirstSchedulableStartIgnoringCleaning(
-                context.getDevicePlanShutList(),
+        Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                context,
                 machine.getMachineCode(),
                 productionStartTime,
                 shifts,
@@ -173,28 +192,30 @@ public class TargetScheduleQtyResolver {
                     continue;
                 }
             }
-            Date effectiveStartTime = cursorStartTime.after(shift.getShiftStartDateTime())
-                    ? cursorStartTime : shift.getShiftStartDateTime();
-            if (!effectiveStartTime.before(shift.getShiftEndDateTime())) {
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, cursorStartTime);
+            if (Objects.isNull(control) || !control.isCanSchedule()) {
                 continue;
             }
+            Date effectiveStartTime = control.getEffectiveStartTime();
+            Date effectiveEndTime = control.getEffectiveEndTime();
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
                     machine.getMachineCode(),
                     effectiveStartTime,
-                    shift.getShiftEndDateTime(),
+                    effectiveEndTime,
                     shiftCapacity,
                     lhTimeSeconds,
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
                     dryIceDurationHours);
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;
             }
             totalQty += shiftMaxQty;
-            cursorStartTime = shift.getShiftEndDateTime();
+            cursorStartTime = effectiveEndTime;
         }
         return Math.max(totalQty, 0);
     }

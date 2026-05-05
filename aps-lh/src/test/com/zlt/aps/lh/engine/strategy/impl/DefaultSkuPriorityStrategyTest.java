@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
@@ -12,6 +13,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -291,6 +293,38 @@ class DefaultSkuPriorityStrategyTest {
         assertTrue(processLog.getLogDetail().contains("锁交期"));
         assertTrue(processLog.getLogDetail().contains("命中结构全收尾优先"));
         assertTrue(processLog.getLogDetail().indexOf("MAT-L") < processLog.getLogDetail().indexOf("MAT-N"));
+    }
+
+    @Test
+    void sortByPriority_shouldMoveOpenProductionRestrictedSkuBehindWhenPriorityTied() {
+        SkuScheduleDTO winter = sku("MAT-A");
+        winter.setPattern("雪地");
+        winter.setProSize("17");
+        SkuScheduleDTO differentInch = sku("MAT-B");
+        differentInch.setProSize("18");
+        SkuScheduleDTO specialMaterial = sku("MAT-C");
+        specialMaterial.setEmbryoCode("EMB-S");
+        specialMaterial.setProSize("17");
+        SkuScheduleDTO normal = sku("MAT-Z");
+        normal.setProSize("17");
+
+        LhScheduleContext context = contextWithNewSpec(winter, differentInch, specialMaterial, normal);
+        context.setOpenProductionMode(true);
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS, "雪地")));
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K01");
+        machine.setPreviousProSize("17");
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.setSpecialMaterialEmbryoCodeSet(new HashSet<String>(Collections.singletonList("EMB-S")));
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-Z", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("MAT-A", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-B", context.getNewSpecSkuList().get(2).getMaterialCode());
+        assertEquals("MAT-C", context.getNewSpecSkuList().get(3).getMaterialCode());
     }
 
     private LhScheduleContext contextWithNewSpec(SkuScheduleDTO... skus) {
