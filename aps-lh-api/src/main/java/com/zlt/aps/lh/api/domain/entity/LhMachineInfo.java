@@ -63,7 +63,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
 
     /** 生产寸口范围上限，单位：英寸 */
     @ImportExcelValidated(required = true, number = true, min = 1, max = 9999)
-    @Excel(name = "ui.data.column.info.dimensionMaximum", cellType = Excel.ColumnType.NUMERIC, sort = 65)
+    @Excel(name = "ui.data.column.info.dimensionMaximum", cellType = Excel.ColumnType.NUMERIC, sort = 70)
     @ApiModelProperty(value = "生产寸口范围上限，单位：英寸", name = "dimensionMaximum")
     @TableField(value = "DIMENSION_MAXIMUM")
     private BigDecimal dimensionMaximum;
@@ -73,16 +73,16 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     @TableField(value = "CLASS_SHIFT")
     private String classShift;
 
-    /** 最大使用模具数量，范围 0-255 */
+    /** 最大使用模具数量，范围 0-255 单双模*/
     @ImportExcelValidated(required = true, digits = true, min = 0, max = 255)
-    @Excel(name = "ui.data.column.info.maxMoldNum", cellType = Excel.ColumnType.NUMERIC, sort = 85)
-    @ApiModelProperty(value = "模台数", name = "maxMoldNum")
+    @Excel(name = "ui.data.column.info.maxMoldNum", cellType = Excel.ColumnType.NUMERIC, sort = 80)
+    @ApiModelProperty(value = "模台数 单双模", name = "maxMoldNum")
     @TableField(value = "MAX_MOLD_NUM")
     private Integer maxMoldNum;
 
     /** 生产定额，单班一次生产量，单位：条 */
     @ImportExcelValidated(required = true, digits = true, min = 0, max = 9999)
-    @Excel(name = "ui.data.column.info.quota", cellType = Excel.ColumnType.NUMERIC, sort = 86)
+    @Excel(name = "ui.data.column.info.quota", cellType = Excel.ColumnType.NUMERIC, sort = 90)
     @ApiModelProperty(value = "生产定额，单班一次生产量，单位：条", name = "quota")
     @TableField(value = "QUOTA")
     private Integer quota;
@@ -110,12 +110,12 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     private String moldRelationList;
 
     @ImportExcelValidated(digits = true, min = 0, max = 9999)
-    @Excel(name = "ui.data.column.info.machineOrder", cellType = Excel.ColumnType.NUMERIC, sort = 90)
+    @Excel(name = "ui.data.column.info.machineOrder", cellType = Excel.ColumnType.NUMERIC, sort = 110)
     @ApiModelProperty(value = "机台顺序", name = "machineOrder")
     @TableField(value = "MACHINE_ORDER", updateStrategy = FieldStrategy.IGNORED, jdbcType = JdbcType.INTEGER)
     private Integer machineOrder;
 
-    @Excel(name = "ui.data.column.info.remark", sort = 110)
+    @Excel(name = "ui.data.column.info.remark", sort = 120)
     @ApiModelProperty(value = "备注", name = "remark")
     @TableField("REMARK")
     private String remark;
@@ -123,7 +123,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 厂家
      */
-    @Excel(name = "ui.data.column.info.manufacturer", sort = 35)
+    @Excel(name = "ui.data.column.info.manufacturer", sort = 25)
     @ApiModelProperty(value = "厂家", name = "manufacturer")
     @TableField("MANUFACTURER")
     private String manufacturer;
@@ -131,7 +131,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 尺寸
      */
-    @Excel(name = "ui.data.column.info.dimensionSize", sort = 45)
+    @Excel(name = "ui.data.column.info.dimensionSize", sort = 50)
     @ApiModelProperty(value = "尺寸", name = "dimensionSize")
     @TableField("DIMENSION_SIZE")
     private String dimensionSize;
@@ -139,7 +139,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 热板直径，单位：mm
      */
-    @Excel(name = "ui.data.column.info.hotPlateDiameter", sort = 50)
+    @Excel(name = "ui.data.column.info.hotPlateDiameter", sort = 51)
     @ApiModelProperty(value = "热板直径，单位：mm", name = "hotPlateDiameter")
     @TableField("HOT_PLATE_DIAMETER")
     private String hotPlateDiameter;
@@ -147,15 +147,15 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 模套型号，空值表示适配所有
      */
-    @Excel(name = "ui.data.column.info.mouldSetCode", sort = 55)
-    @ApiModelProperty(value = "模套型号", name = "mouldSetCode")
-    @TableField("MOULD_SET_CODE")
-    private String mouldSetCode;
+    @Excel(name = "ui.data.column.info.shellStandard", sort = 52)
+    @ApiModelProperty(value = "模套型号", name = "shellStandard")
+    @TableField("SHELL_STANDARD")
+    private String shellStandard;
 
     /**
      * 支持19.5寸宽基 0-否，1-是
      */
-    @Excel(name = "ui.data.column.info.support195WideBase", dictType = "biz_yes_no", sort = 70)
+    @Excel(name = "ui.data.column.info.support195WideBase", dictType = "biz_yes_no", sort = 75)
     @ApiModelProperty(value = "支持19.5寸宽基 0-否，1-是，字典：biz_yes_no", name = "support195WideBase")
     @TableField("SUPPORT195_WIDE_BASE")
     private String support195WideBase;
@@ -163,7 +163,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 支持22.5寸宽基 0-否，1-是
      */
-    @Excel(name = "ui.data.column.info.support225WideBase", dictType = "biz_yes_no", sort = 75)
+    @Excel(name = "ui.data.column.info.support225WideBase", dictType = "biz_yes_no", sort = 77)
     @ApiModelProperty(value = "支持22.5寸宽基 0-否，1-是，字典：biz_yes_no", name = "support225WideBase")
     @TableField("SUPPORT225_WIDE_BASE")
     private String support225WideBase;
@@ -171,7 +171,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 支持芯片胎 0-否，1-是
      */
-    @Excel(name = "ui.data.column.info.supportChipTire", dictType = "biz_yes_no", sort = 80)
+    @Excel(name = "ui.data.column.info.supportChipTire", dictType = "biz_yes_no", sort = 79)
     @ApiModelProperty(value = "支持芯片胎 0-否，1-是，字典：biz_yes_no", name = "supportChipTire")
     @TableField("SUPPORT_CHIP_TIRE")
     private String supportChipTire;

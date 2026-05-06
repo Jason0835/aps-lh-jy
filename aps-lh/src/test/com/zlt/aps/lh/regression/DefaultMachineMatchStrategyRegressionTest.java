@@ -462,7 +462,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO machine = machine("M-SHELL", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-A");
-        machine.setMouldSetCode(" H420 , H450 ");
+        machine.setShellStandard(" H420 , H450 ");
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
         context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-1")));
         context.getModelInfoMap().put("MOULD-1", modelInfo("MOULD-1", "H450"));
@@ -480,7 +480,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO machine = machine("M-SHELL", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-A");
-        machine.setMouldSetCode("H450");
+        machine.setShellStandard("H450");
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
         context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-1")));
         context.getModelInfoMap().put("MOULD-1", modelInfo("MOULD-1", null));
@@ -497,7 +497,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO machine = machine("M-UNIVERSAL", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-A");
-        machine.setMouldSetCode(" 通用 ");
+        machine.setShellStandard(" 通用 ");
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
         context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-1")));
         context.getModelInfoMap().put("MOULD-1", modelInfo("MOULD-1", null));

@@ -85,7 +85,7 @@ public final class LhMachineHardMatchUtil {
     public static boolean isMouldSetMatched(LhScheduleContext context,
                                             SkuScheduleDTO sku,
                                             MachineScheduleDTO machine) {
-        String machineMouldSetCode = normalizeToken(Objects.isNull(machine) ? null : machine.getMouldSetCode());
+        String machineMouldSetCode = normalizeToken(Objects.isNull(machine) ? null : machine.getShellStandard());
         if (StringUtils.isEmpty(machineMouldSetCode)
                 || StringUtils.equals(machineMouldSetCode, UNIVERSAL_MOULD_SET_CODE)) {
             return true;
