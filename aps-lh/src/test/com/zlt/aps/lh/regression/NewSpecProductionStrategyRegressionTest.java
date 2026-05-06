@@ -931,14 +931,13 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldWriteSpecialMaterialFlagByEmbryoCode() throws Exception {
+    void scheduleNewSpecs_shouldWriteSpecialMaterialFlagByMaterialCode() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
 
         LhScheduleContext context = buildContext();
-        context.getSpecialMaterialEmbryoCodeSet().add("EMB-SPECIAL");
+        context.getSpecialMaterialCategoryByMaterialCode().put("MAT-1", "01");
         SkuScheduleDTO sku = buildSku();
-        sku.setEmbryoCode("EMB-SPECIAL");
         sku.setTargetScheduleQty(1);
         sku.setShiftCapacity(1);
         context.getNewSpecSkuList().add(sku);

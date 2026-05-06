@@ -626,6 +626,35 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
+    void scheduleTypeBlockChange_shouldFilterSpecialSkuWhenMachineDoesNotSupportCategory() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine = buildMachine("M1", "MAT-C1");
+        machine.setSupportChipTire("0");
+        context.getMachineScheduleMap().put("M1", machine);
+        context.getContinuousSkuList().add(buildContinuousSku("MAT-C1", "M1", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 1));
+        context.getNewSpecSkuList().add(buildNewSku("MAT-T1", "EMB-9", "STRUCT-B", "SPEC-B", "PAT-A", 4));
+        context.getSpecialMaterialCategoryByMaterialCode().put("MAT-T1", "03");
+        putMaterialInfo(context, "MAT-C1", "胎胚描述-A", "SPEC-A", "PAT-A", "PAT-A");
+        putMaterialInfo(context, "MAT-T1", "胎胚描述-A", "SPEC-B", "PAT-A", "PAT-A");
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO sku = invocation.getArgument(1);
+            return sku != null && "MAT-C1".equals(sku.getMaterialCode());
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        assertEquals("MAT-C1", context.getScheduleResultList().get(0).getMaterialCode());
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertEquals("MAT-T1", context.getNewSpecSkuList().get(0).getMaterialCode());
+    }
+
+    @Test
     void scheduleTypeBlockChange_shouldStopWhenPriorityOneAndTwoBothMiss() {
         LhScheduleContext context = newContext();
         context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));

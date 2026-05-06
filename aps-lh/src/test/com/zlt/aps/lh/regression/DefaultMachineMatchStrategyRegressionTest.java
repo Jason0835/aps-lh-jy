@@ -12,6 +12,7 @@ import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +42,8 @@ class DefaultMachineMatchStrategyRegressionTest {
                 "SPEC-A", "22.5", "MAT-NORMAL");
         MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 30),
                 "SPEC-X", "22.5", "MAT-SPECIFY");
+        // 定点机台即使维护了特殊支持能力，也不能盖过限制作业优先级。
+        specifyMachine.setSupport225WideBase("1");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
         context.getMachineScheduleMap().put(specifyMachine.getMachineCode(), specifyMachine);
         context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
@@ -404,6 +407,108 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void matchMachines_shouldPreferNormalMachineForNonSpecialSku() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO specialSupportMachine = machine("M-SPECIAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-SPECIAL");
+        specialSupportMachine.setSupport195WideBase("1");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 9, 0),
+                "SPEC-X", "20.0", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(specialSupportMachine.getMachineCode(), specialSupportMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size());
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode(),
+                "非特殊材料应优先使用普通机台，普通机台不足时才使用特殊支持机台");
+    }
+
+    @Test
+    void matchMachines_shouldFilterSpecialMaterialByMachineSupportCategory() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.getSpecialMaterialCategoryByMaterialCode().put("MAT-195", "01");
+        context.getSpecialMaterialCategoryByMaterialCode().put("MAT-225", "02");
+        context.getSpecialMaterialCategoryByMaterialCode().put("MAT-CHIP", "03");
+
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        MachineScheduleDTO support195Machine = machine("M-195", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-195");
+        support195Machine.setSupport195WideBase("1");
+        MachineScheduleDTO support225Machine = machine("M-225", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-225");
+        support225Machine.setSupport225WideBase("1");
+        MachineScheduleDTO supportChipMachine = machine("M-CHIP", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-CHIP");
+        supportChipMachine.setSupportChipTire("1");
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getMachineScheduleMap().put(support195Machine.getMachineCode(), support195Machine);
+        context.getMachineScheduleMap().put(support225Machine.getMachineCode(), support225Machine);
+        context.getMachineScheduleMap().put(supportChipMachine.getMachineCode(), supportChipMachine);
+
+        assertEquals("M-195", strategy.matchMachines(context, sku("MAT-195", "SPEC-A", "22.5")).get(0).getMachineCode());
+        assertEquals("M-225", strategy.matchMachines(context, sku("MAT-225", "SPEC-A", "22.5")).get(0).getMachineCode());
+        assertEquals("M-CHIP", strategy.matchMachines(context, sku("MAT-CHIP", "SPEC-A", "22.5")).get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldMatchMachineMouldSetByTrimmedShellStandard() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO machine = machine("M-SHELL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        machine.setMouldSetCode(" H420 , H450 ");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-1")));
+        context.getModelInfoMap().put("MOULD-1", modelInfo("MOULD-1", "H450"));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size());
+        assertEquals("M-SHELL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldExcludeMachineWhenMouldSetConfiguredButSkuShellStandardMissing() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO machine = machine("M-SHELL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        machine.setMouldSetCode("H450");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-1")));
+        context.getModelInfoMap().put("MOULD-1", modelInfo("MOULD-1", null));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertTrue(candidates.isEmpty(), "机台指定模套型号时，SKU缺少SHELL_STANDARD不应通过模套硬匹配");
+    }
+
+    @Test
+    void matchMachines_shouldTreatUniversalMouldSetAsMatchAll() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO machine = machine("M-UNIVERSAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        machine.setMouldSetCode(" 通用 ");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-1")));
+        context.getModelInfoMap().put("MOULD-1", modelInfo("MOULD-1", null));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "机台模套型号为通用时，应等同空值并适配所有SKU");
+        assertEquals("M-UNIVERSAL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
     void matchMachines_shouldExcludeMachineWhenFutureLongStopOverlapsScheduleWindow() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
@@ -429,6 +534,13 @@ class DefaultMachineMatchStrategyRegressionTest {
         MdmSkuMouldRel rel = new MdmSkuMouldRel();
         rel.setMouldCode(mouldCode);
         return rel;
+    }
+
+    private MdmModelInfo modelInfo(String mouldCode, String shellStandard) {
+        MdmModelInfo modelInfo = new MdmModelInfo();
+        modelInfo.setMouldCode(mouldCode);
+        modelInfo.setShellStandard(shellStandard);
+        return modelInfo;
     }
 
     private LhSpecifyMachine specifyMachine(String materialCode, String machineCode, String jobType) {

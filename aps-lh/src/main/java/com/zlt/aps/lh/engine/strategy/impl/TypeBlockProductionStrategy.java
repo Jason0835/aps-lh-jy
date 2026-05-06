@@ -24,6 +24,7 @@ import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
+import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
@@ -405,7 +406,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         List<SkuScheduleDTO> candidateList = new ArrayList<>(context.getNewSpecSkuList().size());
         for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
             // 优先级1：同时命中胎胚描述和主花纹，才进入本层候选集。
-            if (isSameEmbryoDesc(context, machine, sku)
+            if (isMachineHardMatched(context, machine, sku)
+                    && isSameEmbryoDesc(context, machine, sku)
                     && isSameMainPatternStrict(context, machine, sku)) {
                 candidateList.add(sku);
             }
@@ -423,7 +425,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private List<SkuScheduleDTO> filterSameSpecCandidates(LhScheduleContext context, MachineScheduleDTO machine) {
         List<SkuScheduleDTO> candidateList = new ArrayList<>(context.getNewSpecSkuList().size());
         for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
-            if (isSameSpec(context, machine, sku)) {
+            if (isMachineHardMatched(context, machine, sku) && isSameSpec(context, machine, sku)) {
                 candidateList.add(sku);
             }
         }
@@ -455,6 +457,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                          MachineScheduleDTO machine,
                                          SkuScheduleDTO sku) {
         if (sku == null) {
+            return false;
+        }
+        if (!isMachineHardMatched(context, machine, sku)) {
+            log.debug("换活字块候选SKU未通过机台硬性准入, machineCode: {}, materialCode: {}",
+                    machine == null ? null : machine.getMachineCode(), sku.getMaterialCode());
             return false;
         }
         if (!isSameEmbryo(context, machine, sku)) {
@@ -736,6 +743,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 || StringUtils.isEmpty(machine.getMachineCode())) {
             return false;
         }
+        if (!isMachineHardMatched(context, machine, specifySku)) {
+            log.debug("定点物料预判未通过机台硬性准入, machineCode: {}, materialCode: {}",
+                    machine.getMachineCode(), specifySku.getMaterialCode());
+            return false;
+        }
         if (isTypeBlockCandidate(context, machine, specifySku)) {
             Date typeBlockStartTime = calcTypeBlockStartTime(context, machine, endingTime);
             if (typeBlockStartTime == null) {
@@ -757,6 +769,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             return true;
         }
         return canScheduleSpecifySkuByNewSpecPath(context, machine, specifySku, shifts, endingTime);
+    }
+
+    /**
+     * 判断候选SKU是否满足机台硬性准入。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param sku SKU
+     * @return true-满足，false-不满足
+     */
+    private boolean isMachineHardMatched(LhScheduleContext context,
+                                         MachineScheduleDTO machine,
+                                         SkuScheduleDTO sku) {
+        return LhMachineHardMatchUtil.isMachineHardMatched(context, sku, machine);
     }
 
     /**

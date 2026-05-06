@@ -13,7 +13,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -303,7 +302,6 @@ class DefaultSkuPriorityStrategyTest {
         SkuScheduleDTO differentInch = sku("MAT-B");
         differentInch.setProSize("18");
         SkuScheduleDTO specialMaterial = sku("MAT-C");
-        specialMaterial.setEmbryoCode("EMB-S");
         specialMaterial.setProSize("17");
         SkuScheduleDTO normal = sku("MAT-Z");
         normal.setProSize("17");
@@ -317,7 +315,7 @@ class DefaultSkuPriorityStrategyTest {
         machine.setPreviousProSize("17");
         context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
-        context.setSpecialMaterialEmbryoCodeSet(new HashSet<String>(Collections.singletonList("EMB-S")));
+        context.getSpecialMaterialCategoryByMaterialCode().put("MAT-C", "01");
 
         strategy.sortByPriority(context);
 

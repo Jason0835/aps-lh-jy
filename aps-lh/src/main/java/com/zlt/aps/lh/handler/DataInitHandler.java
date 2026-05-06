@@ -208,6 +208,9 @@ public class DataInitHandler extends AbsScheduleStepHandler {
             dto.setDimensionMaximum(machineInfo.getDimensionMaximum());
             dto.setMachineOrder(machineInfo.getMachineOrder() != null ? machineInfo.getMachineOrder() : 0);
             dto.setMouldSetCode(machineInfo.getMouldSetCode());
+            dto.setSupport195WideBase(machineInfo.getSupport195WideBase());
+            dto.setSupport225WideBase(machineInfo.getSupport225WideBase());
+            dto.setSupportChipTire(machineInfo.getSupportChipTire());
 
             // 初始化在产规格（来自MES在机信息）
             dto.setCurrentMaterialCode(null);

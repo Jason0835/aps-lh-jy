@@ -1,0 +1,96 @@
+-- ============================================
+-- 特殊物料清单与硫化机台匹配字段迁移脚本
+-- 目标：启用 LhSpecialMaterialBom 新口径，并补齐机台特殊支持能力字段
+-- ============================================
+
+CREATE TABLE T_LH_SPECIAL_MATERIAL_BOM (
+    ID bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    FACTORY_CODE varchar(20) NOT NULL COMMENT '分厂编号',
+    STRUCTURE_NAME varchar(300) DEFAULT NULL COMMENT '结构名称',
+    MATERIAL_CODE varchar(50) DEFAULT NULL COMMENT '物料编码',
+    MATERIAL_DESC varchar(300) DEFAULT NULL COMMENT '物料描述',
+    CATEGORY varchar(2) NOT NULL COMMENT '分类 01-19.5寸宽基 02-22.5寸宽基 03-芯片胎',
+    CREATE_BY varchar(30) DEFAULT NULL COMMENT '创建人',
+    CREATE_TIME datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    UPDATE_BY varchar(30) DEFAULT NULL COMMENT '修改人',
+    UPDATE_TIME datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    IS_DELETE tinyint(1) DEFAULT '0' COMMENT '删除标识 0-未删除 1-已删除',
+    REMARK varchar(500) DEFAULT NULL COMMENT '备注',
+    PRIMARY KEY (ID),
+    KEY IDX_LH_SPECIAL_MATERIAL_CODE (FACTORY_CODE, MATERIAL_CODE, IS_DELETE),
+    KEY IDX_LH_SPECIAL_STRUCTURE_NAME (FACTORY_CODE, STRUCTURE_NAME, IS_DELETE),
+    CONSTRAINT CK_LH_SPECIAL_CATEGORY CHECK (CATEGORY IN ('01', '02', '03')),
+    CONSTRAINT CK_LH_SPECIAL_KEY CHECK (
+        (MATERIAL_CODE IS NOT NULL AND MATERIAL_CODE <> '')
+        OR (STRUCTURE_NAME IS NOT NULL AND STRUCTURE_NAME <> '')
+    )
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='硫化特殊物料清单配置';
+
+-- 旧口径通过“胎胚BOM命中特殊原材料”识别特殊物料，没有直接分类字段。
+-- 迁移时沿成品物料口径回填：19.5寸宽基 -> 01，22.5寸宽基 -> 02，其余旧特殊物料 -> 03（芯片胎）。
+INSERT INTO T_LH_SPECIAL_MATERIAL_BOM (
+    FACTORY_CODE,
+    STRUCTURE_NAME,
+    MATERIAL_CODE,
+    MATERIAL_DESC,
+    CATEGORY,
+    CREATE_BY,
+    CREATE_TIME,
+    UPDATE_BY,
+    UPDATE_TIME,
+    IS_DELETE,
+    REMARK
+)
+SELECT DISTINCT
+    material.FACTORY_CODE,
+    NULLIF(TRIM(material.STRUCTURE_NAME), ''),
+    NULLIF(TRIM(material.MATERIAL_CODE), ''),
+    material.MATERIAL_DESC,
+    CASE
+        WHEN TRIM(material.PRO_SIZE) = '19.5'
+            OR material.MATERIAL_DESC LIKE '%19.5%'
+            OR material.SPECIFICATIONS LIKE '%19.5%' THEN '01'
+        WHEN TRIM(material.PRO_SIZE) = '22.5'
+            OR material.MATERIAL_DESC LIKE '%22.5%'
+            OR material.SPECIFICATIONS LIKE '%22.5%' THEN '02'
+        ELSE '03'
+    END AS CATEGORY,
+    'migration',
+    NOW(),
+    'migration',
+    NOW(),
+    0,
+    '历史特殊物料配置迁移'
+FROM T_MDM_MATERIAL_INFO material
+INNER JOIN T_MDM_MATERIAL_CONSUME_DETAIL consume
+    ON material.FACTORY_CODE = consume.FACTORY_CODE
+    AND material.EMBRYO_CODE = consume.EMBRYO_CODE
+    AND consume.IS_DELETE = 0
+INNER JOIN T_MDM_SPECIAL_MATERIAL_RECORD special_record
+    ON consume.FACTORY_CODE = special_record.FACTORY_CODE
+    AND consume.CHILD_MATERIAL_CODE = special_record.MATERIAL_CODE
+    AND special_record.IS_DELETE = 0
+WHERE material.IS_DELETE = 0
+  AND NULLIF(TRIM(material.MATERIAL_CODE), '') IS NOT NULL
+  AND NOT EXISTS (
+      SELECT 1
+      FROM T_LH_SPECIAL_MATERIAL_BOM bom
+      WHERE bom.FACTORY_CODE = material.FACTORY_CODE
+        AND bom.MATERIAL_CODE = material.MATERIAL_CODE
+        AND bom.IS_DELETE = 0
+  );
+
+ALTER TABLE T_LH_MACHINE_INFO
+    ADD COLUMN SUPPORT195_WIDE_BASE varchar(1) NOT NULL DEFAULT '0' COMMENT '支持19.5寸宽基 0-否 1-是'
+    AFTER MOULD_SET_CODE,
+    ADD COLUMN SUPPORT225_WIDE_BASE varchar(1) NOT NULL DEFAULT '0' COMMENT '支持22.5寸宽基 0-否 1-是'
+    AFTER SUPPORT195_WIDE_BASE,
+    ADD COLUMN SUPPORT_CHIP_TIRE varchar(1) NOT NULL DEFAULT '0' COMMENT '支持芯片胎 0-否 1-是'
+    AFTER SUPPORT225_WIDE_BASE;
+
+UPDATE T_LH_MACHINE_INFO
+SET MOULD_SET_CODE = NULL
+WHERE MOULD_SET_CODE = '通用';
+
+ALTER TABLE T_LH_MACHINE_INFO
+    MODIFY COLUMN MOULD_SET_CODE varchar(255) DEFAULT NULL COMMENT '模套型号，空值表示适配所有';

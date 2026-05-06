@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
@@ -19,6 +20,7 @@ import com.zlt.aps.lh.mapper.LhMachineInfoMapper;
 import com.zlt.aps.lh.mapper.LhMouldCleanPlanMapper;
 import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
 import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
+import com.zlt.aps.lh.mapper.LhSpecialMaterialBomEntityMapper;
 import com.zlt.aps.lh.mapper.LhSpecifyMachineMapper;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.mapper.LhPrecisionPlanMapper;
@@ -31,15 +33,11 @@ import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
-import com.zlt.aps.lh.mapper.MdmMaterialConsumeDetailMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
-import com.zlt.aps.lh.mapper.RawSpecialMaterialRecordMapper;
 import com.zlt.aps.lh.service.impl.LhBaseDataServiceImpl;
-import com.zlt.aps.mp.api.domain.entity.MdmMaterialConsumeDetail;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
-import com.zlt.aps.mp.api.domain.entity.RawSpecialMaterialRecord;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.Test;
@@ -67,6 +65,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 /**
  * 排程数据窗口回归：典型目标日 → T 日 → [startDate, endDate) 与日历/清洗/停机查询一致。
@@ -85,9 +84,7 @@ class ScheduleDataWindowRegressionTest {
     @Mock
     private MdmDevicePlanShutMapper devicePlanShutMapper;
     @Mock
-    private MdmMaterialConsumeDetailMapper mdmMaterialConsumeDetailMapper;
-    @Mock
-    private RawSpecialMaterialRecordMapper rawSpecialMaterialRecordMapper;
+    private LhSpecialMaterialBomEntityMapper lhSpecialMaterialBomEntityMapper;
     @Mock
     private MdmSkuMouldRelMapper skuMouldRelMapper;
     @Mock
@@ -369,31 +366,28 @@ class ScheduleDataWindowRegressionTest {
     }
 
     @Test
-    void loadAllBaseData_shouldPrecomputeSpecialMaterialEmbryoCodes() {
+    void loadAllBaseData_shouldPrecomputeSpecialMaterialCategoryMaps() {
         Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 17));
         Date scheduleDate = LhScheduleTimeUtil.addDays(target, -2);
         prepareRequiredBaseMocks();
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
 
-        FactoryMonthPlanProductionFinalResult hitPlan = new FactoryMonthPlanProductionFinalResult();
-        hitPlan.setMaterialCode("MAT-HIT");
-        hitPlan.setEmbryoCode("EMB-HIT");
-        FactoryMonthPlanProductionFinalResult missPlan = new FactoryMonthPlanProductionFinalResult();
-        missPlan.setMaterialCode("MAT-MISS");
-        missPlan.setEmbryoCode("EMB-MISS");
-        when(monthPlanMapper.selectList(any())).thenReturn(Arrays.asList(hitPlan, missPlan));
+        FactoryMonthPlanProductionFinalResult materialHitPlan = new FactoryMonthPlanProductionFinalResult();
+        materialHitPlan.setMaterialCode("MAT-HIT");
+        materialHitPlan.setStructureName("STRUCT-HIT");
+        FactoryMonthPlanProductionFinalResult structureHitPlan = new FactoryMonthPlanProductionFinalResult();
+        structureHitPlan.setMaterialCode("MAT-STRUCT");
+        structureHitPlan.setStructureName("STRUCT-ONLY");
+        when(monthPlanMapper.selectList(any())).thenReturn(Arrays.asList(materialHitPlan, structureHitPlan));
 
-        MdmMaterialConsumeDetail hitBom = new MdmMaterialConsumeDetail();
-        hitBom.setEmbryoCode("EMB-HIT");
-        hitBom.setChildMaterialCode("RAW-SPECIAL");
-        MdmMaterialConsumeDetail missBom = new MdmMaterialConsumeDetail();
-        missBom.setEmbryoCode("EMB-MISS");
-        missBom.setChildMaterialCode("RAW-NORMAL");
-        when(mdmMaterialConsumeDetailMapper.selectList(any())).thenReturn(Arrays.asList(hitBom, missBom));
-
-        RawSpecialMaterialRecord specialMaterial = new RawSpecialMaterialRecord();
-        specialMaterial.setMaterialCode("RAW-SPECIAL");
-        when(rawSpecialMaterialRecordMapper.selectList(any())).thenReturn(Collections.singletonList(specialMaterial));
+        LhSpecialMaterialBom materialBom = new LhSpecialMaterialBom();
+        materialBom.setMaterialCode("MAT-HIT");
+        materialBom.setStructureName("STRUCT-HIT");
+        materialBom.setCategory("02");
+        LhSpecialMaterialBom structureBom = new LhSpecialMaterialBom();
+        structureBom.setStructureName("STRUCT-ONLY");
+        structureBom.setCategory("03");
+        when(lhSpecialMaterialBomEntityMapper.selectList(any())).thenReturn(Arrays.asList(materialBom, structureBom));
 
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("FC01");
@@ -402,8 +396,10 @@ class ScheduleDataWindowRegressionTest {
 
         lhBaseDataService.loadAllBaseData(context);
 
-        assertTrue(context.getSpecialMaterialEmbryoCodeSet().contains("EMB-HIT"));
-        assertFalse(context.getSpecialMaterialEmbryoCodeSet().contains("EMB-MISS"));
+        assertEquals("02", context.getSpecialMaterialCategoryByMaterialCode().get("MAT-HIT"));
+        assertEquals("03", context.getSpecialMaterialCategoryByStructureName().get("STRUCT-ONLY"));
+        assertFalse(context.getSpecialMaterialCategoryByMaterialCode().containsKey("MAT-STRUCT"),
+                "只配置结构名称时，不应误写物料编码特殊分类Map");
     }
 
     @Test
@@ -472,6 +468,7 @@ class ScheduleDataWindowRegressionTest {
         when(devicePlanShutMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(skuMouldRelMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(mdmModelInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+        lenient().when(lhSpecialMaterialBomEntityMapper.selectList(any())).thenReturn(Collections.emptyList());
 
         LhMachineInfo machine = new LhMachineInfo();
         machine.setMachineCode("M1");

@@ -9,7 +9,9 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
+import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
@@ -24,7 +26,6 @@ import com.zlt.aps.lh.mapper.MdmDevicePlanShutMapper;
 import com.zlt.aps.lh.mapper.LhMachineOnlineInfoMapper;
 import com.zlt.aps.lh.mapper.LhRepairCapsuleMapper;
 import com.zlt.aps.lh.mapper.MdmCapsuleChuckMapper;
-import com.zlt.aps.lh.mapper.MdmMaterialConsumeDetailMapper;
 import com.zlt.aps.lh.mapper.MdmMaterialInfoMapper;
 import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
@@ -32,8 +33,8 @@ import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
-import com.zlt.aps.lh.mapper.RawSpecialMaterialRecordMapper;
 import com.zlt.aps.lh.mapper.CxStockMapper;
+import com.zlt.aps.lh.mapper.LhSpecialMaterialBomEntityMapper;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.service.ILhBaseDataService;
@@ -51,10 +52,8 @@ import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
-import com.zlt.aps.mp.api.domain.entity.MdmMaterialConsumeDetail;
 import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
-import com.zlt.aps.mp.api.domain.entity.RawSpecialMaterialRecord;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import lombok.extern.slf4j.Slf4j;
@@ -69,7 +68,6 @@ import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -109,12 +107,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private MdmDevicePlanShutMapper devicePlanShutMapper;
-
-    @Resource
-    private MdmMaterialConsumeDetailMapper mdmMaterialConsumeDetailMapper;
-
-    @Resource
-    private RawSpecialMaterialRecordMapper rawSpecialMaterialRecordMapper;
 
     @Resource
     private MdmSkuMouldRelMapper skuMouldRelMapper;
@@ -161,6 +153,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     @Resource
     private CxStockMapper cxStockMapper;
 
+    @Resource
+    private LhSpecialMaterialBomEntityMapper lhSpecialMaterialBomEntityMapper;
+
     @Override
     public void loadAllBaseData(LhScheduleContext context) {
         String factoryCode = context.getFactoryCode();
@@ -187,8 +182,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         // 2. 加载月生产计划
         loadMonthPlan(context, factoryCode, year, month);
 
-        // 3. 加载特殊材料胎胚集合
-        loadSpecialMaterialEmbryoCodes(context, factoryCode);
+        // 3. 加载特殊物料清单，并构建物料编码/结构名称分类Map
+        loadSpecialMaterialBom(context, factoryCode);
 
         // 4. 加载胎胚实时库存
         loadEmbryoRealtimeStock(context, factoryCode, startDate);
@@ -508,70 +503,143 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载含特殊材料的胎胚编码集合。
+     * 加载特殊物料清单，并按当前月计划范围构建分类Map。
      *
      * @param context 排程上下文
      * @param factoryCode 分厂编号
      */
-    private void loadSpecialMaterialEmbryoCodes(LhScheduleContext context, String factoryCode) {
-        List<String> embryoCodeList = context.getMonthPlanList().stream()
-                .map(FactoryMonthPlanProductionFinalResult::getEmbryoCode)
-                .filter(StringUtils::isNotEmpty)
-                .distinct()
-                .collect(java.util.stream.Collectors.toList());
-        Set<String> specialMaterialEmbryoCodeSet = new HashSet<>(Math.max(16, embryoCodeList.size()));
-        if (CollectionUtils.isEmpty(embryoCodeList)) {
-            context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
-            log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
+    private void loadSpecialMaterialBom(LhScheduleContext context, String factoryCode) {
+        Set<String> materialCodeSet = resolveMonthPlanMaterialCodeSet(context);
+        Set<String> structureNameSet = resolveMonthPlanStructureNameSet(context);
+        List<LhSpecialMaterialBom> specialMaterialBomList = new ArrayList<>();
+        Map<String, String> categoryByMaterialCode = new HashMap<>(Math.max(16, materialCodeSet.size()));
+        Map<String, String> categoryByStructureName = new HashMap<>(Math.max(16, structureNameSet.size()));
+        if (CollectionUtils.isEmpty(materialCodeSet) && CollectionUtils.isEmpty(structureNameSet)) {
+            attachSpecialMaterialConfig(context, specialMaterialBomList,
+                    categoryByMaterialCode, categoryByStructureName);
             return;
         }
 
-        // 先按本次月计划胎胚范围加载BOM明细，避免扫描无关胎胚。
-        List<MdmMaterialConsumeDetail> consumeDetailList = mdmMaterialConsumeDetailMapper.selectList(
-                new LambdaQueryWrapper<MdmMaterialConsumeDetail>()
-                        .eq(MdmMaterialConsumeDetail::getFactoryCode, factoryCode)
-                        .eq(MdmMaterialConsumeDetail::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
-                        .in(MdmMaterialConsumeDetail::getEmbryoCode, embryoCodeList));
-        if (CollectionUtils.isEmpty(consumeDetailList)) {
-            context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
-            log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
-            return;
+        LambdaQueryWrapper<LhSpecialMaterialBom> wrapper = new LambdaQueryWrapper<LhSpecialMaterialBom>()
+                .eq(LhSpecialMaterialBom::getFactoryCode, factoryCode)
+                .eq(LhSpecialMaterialBom::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
+                .orderByAsc(LhSpecialMaterialBom::getId);
+        wrapper.and(condition -> {
+            boolean hasMaterialCode = !CollectionUtils.isEmpty(materialCodeSet);
+            boolean hasStructureName = !CollectionUtils.isEmpty(structureNameSet);
+            if (hasMaterialCode) {
+                condition.in(LhSpecialMaterialBom::getMaterialCode, materialCodeSet);
+            }
+            if (hasMaterialCode && hasStructureName) {
+                condition.or();
+            }
+            if (hasStructureName) {
+                condition.in(LhSpecialMaterialBom::getStructureName, structureNameSet);
+            }
+        });
+        List<LhSpecialMaterialBom> queryList = lhSpecialMaterialBomEntityMapper.selectList(wrapper);
+        if (!CollectionUtils.isEmpty(queryList)) {
+            specialMaterialBomList.addAll(queryList);
+            for (LhSpecialMaterialBom bom : queryList) {
+                buildSpecialMaterialCategoryMap(bom, materialCodeSet, structureNameSet,
+                        categoryByMaterialCode, categoryByStructureName);
+            }
         }
+        attachSpecialMaterialConfig(context, specialMaterialBomList,
+                categoryByMaterialCode, categoryByStructureName);
+    }
 
-        Set<String> childMaterialCodeSet = consumeDetailList.stream()
-                .map(MdmMaterialConsumeDetail::getChildMaterialCode)
+    /**
+     * 解析月计划涉及的物料编码集合。
+     *
+     * @param context 排程上下文
+     * @return 物料编码集合
+     */
+    private Set<String> resolveMonthPlanMaterialCodeSet(LhScheduleContext context) {
+        return context.getMonthPlanList().stream()
+                .map(FactoryMonthPlanProductionFinalResult::getMaterialCode)
+                .map(this::normalizeText)
                 .filter(StringUtils::isNotEmpty)
                 .collect(java.util.stream.Collectors.toSet());
-        if (CollectionUtils.isEmpty(childMaterialCodeSet)) {
-            context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
-            log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
+    }
+
+    /**
+     * 解析月计划涉及的结构名称集合。
+     *
+     * @param context 排程上下文
+     * @return 结构名称集合
+     */
+    private Set<String> resolveMonthPlanStructureNameSet(LhScheduleContext context) {
+        return context.getMonthPlanList().stream()
+                .map(FactoryMonthPlanProductionFinalResult::getStructureName)
+                .map(this::normalizeText)
+                .filter(StringUtils::isNotEmpty)
+                .collect(java.util.stream.Collectors.toSet());
+    }
+
+    /**
+     * 构建特殊物料分类Map。
+     *
+     * @param bom 特殊物料清单配置
+     * @param materialCodeSet 当前月计划物料编码集合
+     * @param structureNameSet 当前月计划结构名称集合
+     * @param categoryByMaterialCode 物料编码分类Map
+     * @param categoryByStructureName 结构名称分类Map
+     */
+    private void buildSpecialMaterialCategoryMap(LhSpecialMaterialBom bom,
+                                                 Set<String> materialCodeSet,
+                                                 Set<String> structureNameSet,
+                                                 Map<String, String> categoryByMaterialCode,
+                                                 Map<String, String> categoryByStructureName) {
+        if (Objects.isNull(bom) || !LhSpecialMaterialCategoryEnum.isValid(bom.getCategory())) {
             return;
         }
-
-        List<RawSpecialMaterialRecord> specialMaterialList = rawSpecialMaterialRecordMapper.selectList(
-                new LambdaQueryWrapper<RawSpecialMaterialRecord>()
-                        .eq(RawSpecialMaterialRecord::getFactoryCode, factoryCode)
-                        .eq(RawSpecialMaterialRecord::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
-                        .in(RawSpecialMaterialRecord::getMaterialCode, childMaterialCodeSet));
-        Set<String> specialMaterialCodeSet = new HashSet<>(Math.max(16,
-                CollectionUtils.isEmpty(specialMaterialList) ? 0 : specialMaterialList.size()));
-        if (!CollectionUtils.isEmpty(specialMaterialList)) {
-            for (RawSpecialMaterialRecord specialMaterial : specialMaterialList) {
-                if (StringUtils.isNotEmpty(specialMaterial.getMaterialCode())) {
-                    specialMaterialCodeSet.add(specialMaterial.getMaterialCode());
-                }
-            }
+        String materialCode = normalizeText(bom.getMaterialCode());
+        String structureName = normalizeText(bom.getStructureName());
+        // 物料编码配置优先进入物料维度Map。
+        if (StringUtils.isNotEmpty(materialCode) && materialCodeSet.contains(materialCode)) {
+            categoryByMaterialCode.putIfAbsent(materialCode, bom.getCategory());
+            return;
         }
-
-        // 按BOM胎胚与特殊材料编码交集，形成结果字段判定集合。
-        for (MdmMaterialConsumeDetail detail : consumeDetailList) {
-            if (StringUtils.isNotEmpty(detail.getEmbryoCode())
-                    && specialMaterialCodeSet.contains(detail.getChildMaterialCode())) {
-                specialMaterialEmbryoCodeSet.add(detail.getEmbryoCode());
-            }
+        // 结构名称只处理未维护物料编码的配置。
+        if (StringUtils.isEmpty(materialCode)
+                && StringUtils.isNotEmpty(structureName)
+                && structureNameSet.contains(structureName)) {
+            categoryByStructureName.putIfAbsent(structureName, bom.getCategory());
         }
-        context.setSpecialMaterialEmbryoCodeSet(specialMaterialEmbryoCodeSet);
-        log.debug("特殊材料胎胚集合加载完成, 数量: {}", specialMaterialEmbryoCodeSet.size());
+    }
+
+    /**
+     * 写入特殊物料配置到排程上下文。
+     *
+     * @param context 排程上下文
+     * @param specialMaterialBomList 特殊物料配置列表
+     * @param categoryByMaterialCode 物料编码分类Map
+     * @param categoryByStructureName 结构名称分类Map
+     */
+    private void attachSpecialMaterialConfig(LhScheduleContext context,
+                                             List<LhSpecialMaterialBom> specialMaterialBomList,
+                                             Map<String, String> categoryByMaterialCode,
+                                             Map<String, String> categoryByStructureName) {
+        context.setSpecialMaterialBomList(specialMaterialBomList);
+        context.setSpecialMaterialCategoryByMaterialCode(categoryByMaterialCode);
+        context.setSpecialMaterialCategoryByStructureName(categoryByStructureName);
+        log.info("特殊物料清单加载完成, 配置数: {}, 物料编码Map数: {}, 结构名称Map数: {}",
+                specialMaterialBomList.size(), categoryByMaterialCode.size(), categoryByStructureName.size());
+    }
+
+    /**
+     * 清洗配置匹配文本。
+     *
+     * @param value 原始值
+     * @return 清洗后文本
+     */
+    private String normalizeText(String value) {
+        if (StringUtils.isEmpty(value)) {
+            return null;
+        }
+        String trimValue = value.trim();
+        return StringUtils.isEmpty(trimValue) ? null : trimValue;
     }
 
     /**
