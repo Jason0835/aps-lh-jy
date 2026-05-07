@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
@@ -942,6 +943,44 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
+    void scheduleTypeBlockChange_shouldUseMaintenanceOverlapSwitchHoursAndInspection() {
+        LhScheduleContext context = newContext();
+        context.setScheduleDate(date(2026, 4, 22));
+        context.setScheduleTargetDate(date(2026, 4, 22));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        Map<String, String> paramMap = new HashMap<>(8);
+        paramMap.put(LhScheduleParamConstant.MAINTENANCE_START_HOUR, "8");
+        paramMap.put(LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS, "7");
+        paramMap.put(LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS, "2.5");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+
+        MachineScheduleDTO machine = buildMachine("K2030", "MAT-C1");
+        machine.setEnding(true);
+        machine.setEstimatedEndTime(dateTime(2026, 4, 22, 6, 0, 0));
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getMaintenancePlanMap().put(machine.getMachineCode(),
+                buildPrecisionPlan(machine.getMachineCode(), date(2026, 5, 10)));
+        context.getNewSpecSkuList().add(buildNewSku("MAT-T1", "EMB-1", "STRUCT-B", "SPEC-A", "PAT-B", 8));
+        putMaterialInfo(context, "MAT-C1", "胎胚描述-A", "SPEC-A", "PAT-A", "PAT-A");
+        putMaterialInfo(context, "MAT-T1", "胎胚描述-A", "SPEC-A", "PAT-B", "PAT-B");
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(1, context.getScheduleResultList().size(), "维保与换活字块重叠时应正常生成衔接结果");
+        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(0);
+        assertEquals(dateTime(2026, 4, 22, 20, 0, 0), resolveFirstStartTime(typeBlockResult),
+                "维保与换活字块重叠时，开产时间应为15:00+4小时换活字块+1小时首检");
+        assertEquals(dateTime(2026, 4, 22, 15, 0, 0),
+                ReflectionTestUtils.getField(typeBlockResult, "mouldChangeStartTime"),
+                "维保重叠时，换活字块开始时间应从维保结束时刻起算");
+    }
+
+    @Test
     void scheduleTypeBlockChange_shouldDelayTypeBlockToNextMorningWhenDowntimeOverlapsAndNightForbidden() {
         LhScheduleContext context = newContext();
         context.setScheduleDate(date(2026, 4, 21));
@@ -1180,6 +1219,15 @@ class ContinuousProductionTypeBlockRegressionTest {
         machine.setMaxMoldNum(1);
         machine.setEstimatedEndTime(dateTime(2026, 4, 18, 6, 0, 0));
         return machine;
+    }
+
+    private LhPrecisionPlan buildPrecisionPlan(String machineCode, Date dueDate) {
+        LhPrecisionPlan plan = new LhPrecisionPlan();
+        plan.setFactoryCode("116");
+        plan.setMachineCode(machineCode);
+        plan.setDueDate(dueDate);
+        plan.setCompletionStatus("0");
+        return plan;
     }
 
     private SkuScheduleDTO buildContinuousSku(String materialCode,

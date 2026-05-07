@@ -196,6 +196,9 @@ public final class LhScheduleConstant {
     /** 胶囊预热时间（小时） */
     public static final BigDecimal CAPSULE_PREHEAT_HOURS = new BigDecimal("2.5");
 
+    /** 维保重叠切换耗时（小时） */
+    public static final int MAINTENANCE_OVERLAP_SWITCH_HOURS = 4;
+
     // ======================== 停机超时阈值 ========================
 
     /** 停机超时阈值（小时） */

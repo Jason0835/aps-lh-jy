@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
+import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import lombok.extern.slf4j.Slf4j;
@@ -25,6 +26,8 @@ import java.util.Date;
 @Slf4j
 @Component
 public class DefaultCapacityCalculateStrategy implements ICapacityCalculateStrategy {
+
+    private final LhMaintenanceScheduleService maintenanceScheduleService = new LhMaintenanceScheduleService();
 
     @Override
     public int calculateShiftCapacity(LhScheduleContext context, int lhTimeSeconds, int mouldQty) {
@@ -47,7 +50,7 @@ public class DefaultCapacityCalculateStrategy implements ICapacityCalculateStrat
 
         // 判断机台是否有保养/维修计划，若有则取最晚时间。
         // 清洗与换模/换活字块的重叠判定已下沉到后续切换链路，不在这里提前固化 readyTime。
-        Date maintenanceStartTime = calculateMaintenanceStartTime(context, machineCode);
+        Date maintenanceStartTime = calculateMaintenanceStartTime(context, machineCode, baseReadyTime);
         Date repairStartTime = calculateRepairStartTime(context, machineCode);
 
         // 取三者最大值：基础可用时间、保养后可用时间、维修后可用时间
@@ -99,29 +102,12 @@ public class DefaultCapacityCalculateStrategy implements ICapacityCalculateStrat
      * @param machineCode 机台编号
      * @return 保养后的开产时间，null表示无保养计划
      */
-    private Date calculateMaintenanceStartTime(LhScheduleContext context, String machineCode) {
+    private Date calculateMaintenanceStartTime(LhScheduleContext context, String machineCode, Date baseReadyTime) {
         MachineScheduleDTO machineDTO = context.getMachineScheduleMap().get(machineCode);
         if (machineDTO == null || !machineDTO.isHasMaintenancePlan()) {
             return null;
         }
-
-        // 保养固定从8:00开始
-        Date maintenancePlanDate = machineDTO.getMaintenancePlanTime();
-        if (maintenancePlanDate == null) {
-            return null;
-        }
-
-        int maintenanceStartHour = context.getParamIntValue(LhScheduleParamConstant.MAINTENANCE_START_HOUR,
-                LhScheduleConstant.MAINTENANCE_START_HOUR);
-        Date maintenanceStart = LhScheduleTimeUtil.buildTime(maintenancePlanDate, maintenanceStartHour, 0, 0);
-
-        // 保养时间7小时
-        int maintenanceDurationHours = context.getParamIntValue(LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS,
-                LhScheduleConstant.MAINTENANCE_DURATION_HOURS);
-        Date maintenanceEnd = LhScheduleTimeUtil.addHours(maintenanceStart, maintenanceDurationHours);
-
-        // 语义为机台保养完成后的就绪时间
-        return maintenanceEnd;
+        return maintenanceScheduleService.resolveMaintenanceResumeProductionTime(context, machineDTO, baseReadyTime);
     }
 
     /**

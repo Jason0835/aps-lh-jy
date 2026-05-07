@@ -129,6 +129,57 @@ public class LhMaintenanceScheduleService {
         return adjustedStartTime;
     }
 
+    /**
+     * 解析维保恢复后的开产时间。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param defaultReadyTime 默认就绪时间
+     * @return 恢复后的开产时间
+     */
+    public Date resolveMaintenanceResumeProductionTime(LhScheduleContext context,
+                                                       MachineScheduleDTO machine,
+                                                       Date defaultReadyTime) {
+        Date maintenanceEndTime = resolveMaintenanceEndTime(context, machine, null);
+        if (Objects.isNull(maintenanceEndTime)) {
+            return defaultReadyTime;
+        }
+        Date resumeProductionTime = LhScheduleTimeUtil.addMinutes(
+                maintenanceEndTime, LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
+        if (Objects.isNull(defaultReadyTime) || resumeProductionTime.after(defaultReadyTime)) {
+            return resumeProductionTime;
+        }
+        return defaultReadyTime;
+    }
+
+    /**
+     * 判断当前切换是否应套用维保重叠专用时长。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param referenceTime 切换参考起点
+     * @return true-需要套用；false-不需要
+     */
+    public boolean shouldApplyMaintenanceOverlapSwitchRule(LhScheduleContext context,
+                                                           MachineScheduleDTO machine,
+                                                           Date referenceTime) {
+        Date maintenanceEndTime = resolveMaintenanceEndTime(context, machine, referenceTime);
+        return Objects.nonNull(referenceTime)
+                && Objects.nonNull(maintenanceEndTime)
+                && referenceTime.before(maintenanceEndTime);
+    }
+
+    /**
+     * 解析机台当前生效的维保结束时间。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @return 维保结束时间；未命中返回 null
+     */
+    public Date resolveMaintenanceEndTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        return resolveMaintenanceEndTime(context, machine, null);
+    }
+
     private boolean attachMaintenanceWindow(LhScheduleContext context,
                                             MachineScheduleDTO machine,
                                             LhPrecisionPlan plan,
@@ -216,6 +267,46 @@ public class LhMaintenanceScheduleService {
             }
         }
         return false;
+    }
+
+    private Date resolveMaintenanceEndTime(LhScheduleContext context,
+                                           MachineScheduleDTO machine,
+                                           Date referenceTime) {
+        if (Objects.isNull(machine) || !machine.isHasMaintenancePlan()) {
+            return null;
+        }
+        Date matchedEndTime = null;
+        if (!CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            for (MachineMaintenanceWindowDTO maintenanceWindow : machine.getMaintenanceWindowList()) {
+                if (Objects.isNull(maintenanceWindow)
+                        || Objects.isNull(maintenanceWindow.getMaintenanceStartTime())
+                        || Objects.isNull(maintenanceWindow.getMaintenanceEndTime())
+                        || !maintenanceWindow.getMaintenanceStartTime().before(maintenanceWindow.getMaintenanceEndTime())) {
+                    continue;
+                }
+                if (Objects.nonNull(referenceTime) && !referenceTime.before(maintenanceWindow.getMaintenanceEndTime())) {
+                    continue;
+                }
+                matchedEndTime = later(matchedEndTime, maintenanceWindow.getMaintenanceEndTime());
+            }
+            if (Objects.nonNull(matchedEndTime)) {
+                return matchedEndTime;
+            }
+        }
+        if (Objects.isNull(machine.getMaintenancePlanTime())) {
+            return null;
+        }
+        int maintenanceStartHour = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_START_HOUR,
+                LhScheduleConstant.MAINTENANCE_START_HOUR);
+        int maintenanceDurationHours = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS,
+                LhScheduleConstant.MAINTENANCE_DURATION_HOURS);
+        Date maintenanceStartTime = LhScheduleTimeUtil.buildTime(
+                machine.getMaintenancePlanTime(), maintenanceStartHour, 0, 0);
+        Date maintenanceEndTime = LhScheduleTimeUtil.addHours(maintenanceStartTime, maintenanceDurationHours);
+        if (Objects.nonNull(referenceTime) && !referenceTime.before(maintenanceEndTime)) {
+            return null;
+        }
+        return maintenanceEndTime;
     }
 
     private void increaseDailyMaintenanceCount(LhScheduleContext context, Date planDate) {

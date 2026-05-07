@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -307,6 +308,55 @@ class NewSpecProductionStrategyRegressionTest {
                 "不再计入喷砂清洗时间后，首个完整中班应保留整班产量");
         assertEquals("模具清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, firstPlannedShiftIndex),
                 "喷砂重叠但不再顺延时，首个排产班次仍应保留模具清洗+换模原因分析");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldUseMaintenanceOverlapSwitchHoursAndInspection() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 22, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+        Map<String, String> scheduleParamMap = new HashMap<>(8);
+        scheduleParamMap.put(LhScheduleParamConstant.MAINTENANCE_START_HOUR, "8");
+        scheduleParamMap.put(LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS, "7");
+        scheduleParamMap.put(LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS, "2.5");
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2028");
+        machine.setMachineName("K2028");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(dateTime(2026, 4, 22, 6, 0));
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getMaintenancePlanMap().put(machine.getMachineCode(),
+                buildPrecisionPlan(machine.getMachineCode(), dateTime(2026, 5, 10, 0, 0)));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("MAT-MAINTENANCE");
+        sku.setMaterialDesc("维保换模重叠测试物料");
+        sku.setPendingQty(8);
+        sku.setDailyPlanQty(8);
+        sku.setTargetScheduleQty(8);
+        sku.setShiftCapacity(8);
+        context.getNewSpecSkuList().add(sku);
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
+                new DefaultMouldChangeBalanceStrategy(),
+                new com.zlt.aps.lh.engine.strategy.impl.DefaultFirstInspectionBalanceStrategy(),
+                new DefaultCapacityCalculateStrategy());
+
+        assertEquals(1, context.getScheduleResultList().size(), "维保与换模重叠时应正常生成新增排产结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(dateTime(2026, 4, 22, 15, 0), result.getMouldChangeStartTime(),
+                "维保重叠时，实际换模开始时间应从维保结束时刻起算");
+        int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
+        assertEquals(2, firstPlannedShiftIndex, "维保重叠后的首个排产班次应落在当日中班");
+        assertEquals(dateTime(2026, 4, 22, 20, 0), ShiftFieldUtil.getShiftStartTime(result, firstPlannedShiftIndex),
+                "维保与换模重叠时，开产时间应为15:00+4小时换模+1小时首检");
     }
 
     @Test
@@ -988,6 +1038,15 @@ class NewSpecProductionStrategyRegressionTest {
         machine.setPreviousProSize("22.5");
         machine.setPreviousMaterialCode("PREV-" + machineCode);
         return machine;
+    }
+
+    private LhPrecisionPlan buildPrecisionPlan(String machineCode, Date dueDate) {
+        LhPrecisionPlan plan = new LhPrecisionPlan();
+        plan.setFactoryCode("116");
+        plan.setMachineCode(machineCode);
+        plan.setDueDate(dueDate);
+        plan.setCompletionStatus("0");
+        return plan;
     }
 
     private SkuScheduleDTO buildRealIssueSku(String materialCode, String pattern, int scheduleOrder) {

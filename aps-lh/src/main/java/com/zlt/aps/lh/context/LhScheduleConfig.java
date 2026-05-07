@@ -347,6 +347,11 @@ public class LhScheduleConfig {
                 LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue());
     }
 
+    public int getMaintenanceOverlapSwitchHours() {
+        return getParamIntValue(LhScheduleParamConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS,
+                LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS);
+    }
+
     public int getMachineStopTimeoutHours() {
         return getParamIntValue(LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
     }

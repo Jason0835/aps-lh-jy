@@ -209,23 +209,31 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(context, candidateMachine, endingTime);
                 Date machineReadyTime = capacityCalculate.calculateStartTime(context,
                         machineCode, endingTime);
-                machineReadyTime = resolveSpecifyReservedReadyTime(context, sku, machineCode, machineReadyTime);
+                boolean maintenanceOverlapSwitch = getMaintenanceScheduleService()
+                        .shouldApplyMaintenanceOverlapSwitchRule(context, candidateMachine, endingTime);
+                Date switchReadyTime = maintenanceOverlapSwitch
+                        ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, candidateMachine)
+                        : machineReadyTime;
+                switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, machineCode, switchReadyTime);
 
                 // 4. 分配换模窗口；模具清洗即便重叠，也不再顺延换模起点。
                 Date mouldChangeStartTime = null;
                 Date mouldChangeCompleteTime = null;
                 Date inspectionTime = null;
+                Date productionStartTime = null;
                 NewSpecFailReasonEnum switchAllocateFailReason = null;
-                mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(context, machineCode, machineReadyTime);
+                mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(context, machineCode, switchReadyTime);
                 if (mouldChangeStartTime == null) {
                     log.debug("新增SKU换模窗口分配失败, materialCode: {}, 机台: {}, 机台就绪: {}, 目标量: {}",
                             sku.getMaterialCode(), machineCode,
-                            LhScheduleTimeUtil.formatDateTime(machineReadyTime), sku.resolveTargetScheduleQty());
+                            LhScheduleTimeUtil.formatDateTime(switchReadyTime), sku.resolveTargetScheduleQty());
                     switchAllocateFailReason = NewSpecFailReasonEnum.MOULD_CHANGE_SHIFT_ALLOCATE_FAILED;
                 }
                 if (mouldChangeStartTime != null) {
-                    mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(
-                            mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+                    int switchDurationHours = maintenanceOverlapSwitch
+                            ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
+                            : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+                    mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
                     inspectionTime = inspectionBalance.allocateInspection(context, machineCode, mouldChangeCompleteTime);
                     if (inspectionTime == null) {
                         log.debug("新增SKU首检分配失败, materialCode: {}, 机台: {}, 换模开始: {}, 换模完成: {}",
@@ -235,6 +243,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         mouldChangeBalance.rollbackMouldChange(context, mouldChangeStartTime);
                         mouldChangeStartTime = null;
                         switchAllocateFailReason = NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED;
+                    } else {
+                        productionStartTime = maintenanceOverlapSwitch
+                                ? LhScheduleTimeUtil.addHours(
+                                        inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
+                                : inspectionTime;
                     }
                 }
                 if (mouldChangeStartTime == null) {
@@ -247,9 +260,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
 
                 // 6. 基于首检分配时间生成新增规格排产结果，并校验当日是否有有效产能
-                // 业务口径：换模总时长已包含首检时长，不再额外叠加 FIRST_INSPECTION_HOURS
-                // 时间链路固定为：机台可开工 -> 换模开始 -> 换模/首检结束 -> 实际开产。
-                Date productionStartTime = inspectionTime;
+                // 普通换模沿用“总时长已含首检”的旧口径；
+                // 维保重叠时改为“4小时切换 + 1小时首检”的专用口径。
                 int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(candidateMachine);
                 Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
                         context,
@@ -317,7 +329,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 scheduled = true;
                 log.debug("新增排产完成, SKU: {}, 机台: {}, 机台就绪: {}, 换模开始: {}, 换模结束: {}, 首检开始: {}, 开产时间: {}",
                         sku.getMaterialCode(), machineCode,
-                        LhScheduleTimeUtil.formatDateTime(machineReadyTime),
+                        LhScheduleTimeUtil.formatDateTime(switchReadyTime),
                         LhScheduleTimeUtil.formatDateTime(mouldChangeStartTime),
                         LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime),
                         LhScheduleTimeUtil.formatDateTime(inspectionTime),

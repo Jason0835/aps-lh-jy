@@ -624,25 +624,47 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (machine == null || estimatedEndTime == null) {
             return null;
         }
+        Date switchStartTime = calcTypeBlockSwitchStartTime(context, machine, estimatedEndTime);
+        return resolveTypeBlockProductionStartTime(context, machine, estimatedEndTime, switchStartTime);
+    }
+
+    /**
+     * 基于指定收尾时间计算换活字块开始时间。
+     */
+    private Date calcTypeBlockSwitchStartTime(LhScheduleContext context,
+                                              MachineScheduleDTO machine,
+                                              Date estimatedEndTime) {
+        if (machine == null || estimatedEndTime == null) {
+            return null;
+        }
+        if (getMaintenanceScheduleService().shouldApplyMaintenanceOverlapSwitchRule(context, machine, estimatedEndTime)) {
+            return getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine);
+        }
         Date switchStartTime = resolveAllowedSwitchStartTime(
                 context, machine.getMachineCode(), estimatedEndTime);
         switchStartTime = getMaintenanceScheduleService().delaySwitchStartByMaintenance(
                 machine, switchStartTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
-        // 换活字块：允许切换时间 + 换活字块总耗时
-        return LhScheduleTimeUtil.addHours(switchStartTime,
-                LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+        return switchStartTime;
     }
 
     /**
-     * 根据换活字块后的开产时间反推真实换活字块开始时间。
+     * 基于换活字块开始时间计算开产时间。
      */
-    private Date resolveTypeBlockChangeStartTime(LhScheduleContext context, Date productionStartTime) {
-        if (productionStartTime == null) {
+    private Date resolveTypeBlockProductionStartTime(LhScheduleContext context,
+                                                     MachineScheduleDTO machine,
+                                                     Date estimatedEndTime,
+                                                     Date switchStartTime) {
+        if (switchStartTime == null) {
             return null;
         }
-        // 换活字块结果里记录“真实切换开始时间”，方便换模计划表与结果时间口径一致。
+        if (getMaintenanceScheduleService().shouldApplyMaintenanceOverlapSwitchRule(context, machine, estimatedEndTime)) {
+            Date inspectionStartTime = LhScheduleTimeUtil.addHours(
+                    switchStartTime, LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context));
+            return LhScheduleTimeUtil.addHours(
+                    inspectionStartTime, LhScheduleTimeUtil.getFirstInspectionHours(context));
+        }
         return LhScheduleTimeUtil.addHours(
-                productionStartTime, -LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+                switchStartTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
     }
 
     /**
@@ -734,15 +756,17 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return false;
         }
         if (isTypeBlockCandidate(context, machine, specifySku)) {
-            Date typeBlockStartTime = calcTypeBlockStartTime(context, machine, endingTime);
-            if (typeBlockStartTime == null) {
+            Date typeBlockSwitchStartTime = calcTypeBlockSwitchStartTime(context, machine, endingTime);
+            Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
+                    context, machine, endingTime, typeBlockSwitchStartTime);
+            if (typeBlockStartTime == null || typeBlockSwitchStartTime == null) {
                 return false;
             }
             int refinedTargetQty = getTargetScheduleQtyResolver().refineTargetQtyByMachineCapacity(
                     context,
                     specifySku,
                     machine,
-                    resolveTypeBlockChangeStartTime(context, typeBlockStartTime),
+                    typeBlockSwitchStartTime,
                     typeBlockStartTime,
                     shifts);
             if (refinedTargetQty <= 0) {
@@ -773,8 +797,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                        Date endingTime) {
         Date machineReadyTime = getCapacityCalculateStrategy().calculateStartTime(
                 context, machine.getMachineCode(), endingTime);
+        boolean maintenanceOverlapSwitch = getMaintenanceScheduleService()
+                .shouldApplyMaintenanceOverlapSwitchRule(context, machine, endingTime);
+        Date switchReadyTime = maintenanceOverlapSwitch
+                ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine)
+                : machineReadyTime;
         Date mouldChangeStartTime = getMouldChangeBalanceStrategy().allocateMouldChange(
-                context, machine.getMachineCode(), machineReadyTime);
+                context, machine.getMachineCode(), switchReadyTime);
         if (mouldChangeStartTime == null) {
             log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 无可用换模窗口",
                     machine.getMachineCode(), specifySku.getMaterialCode());
@@ -782,8 +811,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         Date inspectionTime = null;
         try {
-            Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(
-                    mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+            int switchDurationHours = maintenanceOverlapSwitch
+                    ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
+                    : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+            Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
             inspectionTime = getFirstInspectionBalanceStrategy().allocateInspection(
                     context, machine.getMachineCode(), mouldChangeCompleteTime);
             if (inspectionTime == null) {
@@ -791,11 +822,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                         machine.getMachineCode(), specifySku.getMaterialCode());
                 return false;
             }
+            Date productionStartTime = maintenanceOverlapSwitch
+                    ? LhScheduleTimeUtil.addHours(inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
+                    : inspectionTime;
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
             Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
                     context,
                     machine.getMachineCode(),
-                    inspectionTime,
+                    productionStartTime,
                     shifts,
                     specifySku.getShiftCapacity(),
                     specifySku.getLhTimeSeconds(),

@@ -81,6 +81,7 @@ INSERT INTO T_LH_PARAMS (FACTORY_CODE, PARAM_CODE, PARAM_VALUE, PARAM_NAME, REMA
 ('116', 'MAINTENANCE_FORCE_CHECK_DAYS', '3', '长期在机提前检查天数', '到期前 N 天检查长期在机'),
 ('116', 'ALLOW_MAINTENANCE_ON_INVENTORY_DAY', '0', '是否允许盘点日保养', '0-不允许，1-允许'),
 ('116', 'CAPSULE_PREHEAT_HOURS', '2.5', '胶囊预热时间', '单位：小时'),
+('116', 'MAINTENANCE_OVERLAP_SWITCH_HOURS', '4', '维保重叠切换耗时', '维保与换模/换活字块重叠时的切换耗时，单位：小时'),
 
 -- ======================== 停机超时阈值 ========================
 ('116', 'MACHINE_STOP_TIMEOUT_HOURS', '24', '停机超时阈值', '单位：小时'),

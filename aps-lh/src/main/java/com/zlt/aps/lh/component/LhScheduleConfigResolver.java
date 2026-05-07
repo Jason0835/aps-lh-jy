@@ -171,6 +171,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.ALLOW_MAINTENANCE_ON_INVENTORY_DAY);
         putDoubleValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS,
                 LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue());
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS,
+                LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS);
 
         // 排程窗口与设备约束参数
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SCHEDULE_DAYS, LhScheduleConstant.SCHEDULE_DAYS, 1);

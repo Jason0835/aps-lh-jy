@@ -112,6 +112,8 @@ public final class LhScheduleParamConstant {
     public static final String ALLOW_MAINTENANCE_ON_INVENTORY_DAY = "ALLOW_MAINTENANCE_ON_INVENTORY_DAY";
     /** 胶囊预热时间（小时） */
     public static final String CAPSULE_PREHEAT_HOURS = "CAPSULE_PREHEAT_HOURS";
+    /** 维保重叠切换耗时（小时） */
+    public static final String MAINTENANCE_OVERLAP_SWITCH_HOURS = "MAINTENANCE_OVERLAP_SWITCH_HOURS";
     /** 排程天数 */
     public static final String SCHEDULE_DAYS = "SCHEDULE_DAYS";
     /** 是否按产能满排 */

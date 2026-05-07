@@ -176,16 +176,19 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                             machineCode, machineTriggerSourceMap.get(machineCode),
                             priorityOneCandidates.size(), priorityTwoCandidates.size());
                     traceTypeBlockDecision(context, machine, priorityOneCandidates, priorityTwoCandidates,
-                            null, matchedLayer, false, null, machineTriggerSourceMap.get(machineCode));
+                            null, matchedLayer, false, null, null, machineTriggerSourceMap.get(machineCode));
                     completedMachineMap.put(machineCode, true);
                     continue;
                 }
                 getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                         context, machine, machine.getEstimatedEndTime());
-                Date typeBlockStartTime = calcTypeBlockStartTime(context, machine);
-                boolean success = appendFollowUpResult(context, machine, typeBlockSku, typeBlockStartTime, shifts);
+                Date typeBlockSwitchStartTime = calcTypeBlockSwitchStartTime(context, machine);
+                Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
+                        context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
+                boolean success = appendFollowUpResult(
+                        context, machine, typeBlockSku, typeBlockStartTime, typeBlockSwitchStartTime, shifts);
                 traceTypeBlockDecision(context, machine, priorityOneCandidates, priorityTwoCandidates,
-                        typeBlockSku, matchedLayer, success, typeBlockStartTime,
+                        typeBlockSku, matchedLayer, success, typeBlockSwitchStartTime, typeBlockStartTime,
                         machineTriggerSourceMap.get(machineCode));
                 if (!success) {
                     log.warn("换活字块排产失败, 机台: {}, materialCode: {}, 结构: {}, 开始时间: {}, 匹配层级: {}",
@@ -296,8 +299,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                  SkuScheduleDTO specifySku,
                                                  List<LhShiftConfigVO> shifts,
                                                  Map<String, Boolean> completedMachineMap) {
-        Date typeBlockStartTime = calcTypeBlockStartTime(context, machine);
-        boolean success = appendFollowUpResult(context, machine, specifySku, typeBlockStartTime, shifts);
+        Date typeBlockSwitchStartTime = calcTypeBlockSwitchStartTime(context, machine);
+        Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
+                context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
+        boolean success = appendFollowUpResult(
+                context, machine, specifySku, typeBlockStartTime, typeBlockSwitchStartTime, shifts);
         if (success) {
             completedMachineMap.put(machine.getMachineCode(), true);
             log.info("收尾机台命中定点物料衔接, machineCode: {}, materialCode: {}, startTime: {}",
@@ -552,7 +558,15 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (machine == null) {
             return null;
         }
-        return calcTypeBlockStartTime(context, machine, machine.getEstimatedEndTime());
+        Date switchStartTime = calcTypeBlockSwitchStartTime(context, machine, machine.getEstimatedEndTime());
+        return resolveTypeBlockProductionStartTime(context, machine, machine.getEstimatedEndTime(), switchStartTime);
+    }
+
+    private Date calcTypeBlockSwitchStartTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (machine == null) {
+            return null;
+        }
+        return calcTypeBlockSwitchStartTime(context, machine, machine.getEstimatedEndTime());
     }
 
     /**
@@ -569,29 +583,58 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (machine == null || estimatedEndTime == null) {
             return null;
         }
+        Date switchStartTime = calcTypeBlockSwitchStartTime(context, machine, estimatedEndTime);
+        return resolveTypeBlockProductionStartTime(context, machine, estimatedEndTime, switchStartTime);
+    }
+
+    /**
+     * 基于指定收尾时间计算换活字块开始时间。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param estimatedEndTime 预计收尾时间
+     * @return 换活字块开始时间
+     */
+    private Date calcTypeBlockSwitchStartTime(LhScheduleContext context,
+                                              MachineScheduleDTO machine,
+                                              Date estimatedEndTime) {
+        if (machine == null || estimatedEndTime == null) {
+            return null;
+        }
+        if (getMaintenanceScheduleService().shouldApplyMaintenanceOverlapSwitchRule(context, machine, estimatedEndTime)) {
+            return getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine);
+        }
         Date switchStartTime = resolveAllowedSwitchStartTime(
                 context, machine.getMachineCode(), estimatedEndTime);
         switchStartTime = getMaintenanceScheduleService().delaySwitchStartByMaintenance(
                 machine, switchStartTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
-        // 换活字块：允许切换时间 + 换活字块总耗时。
-        return LhScheduleTimeUtil.addHours(switchStartTime,
-                LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+        return switchStartTime;
     }
 
     /**
-     * 根据换活字块后的开产时间反推真实换活字块开始时间。
+     * 基于换活字块开始时间计算开产时间。
      *
      * @param context 排程上下文
-     * @param productionStartTime 开产时间
-     * @return 换活字块开始时间
+     * @param machine 机台
+     * @param estimatedEndTime 预计收尾时间
+     * @param switchStartTime 换活字块开始时间
+     * @return 开产时间
      */
-    private Date resolveTypeBlockChangeStartTime(LhScheduleContext context, Date productionStartTime) {
-        if (productionStartTime == null) {
+    private Date resolveTypeBlockProductionStartTime(LhScheduleContext context,
+                                                     MachineScheduleDTO machine,
+                                                     Date estimatedEndTime,
+                                                     Date switchStartTime) {
+        if (switchStartTime == null) {
             return null;
         }
-        // 换活字块结果里记录真实切换开始时间，保证换模计划表与结果时间口径一致。
-        return LhScheduleTimeUtil.addHours(
-                productionStartTime, -LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+        if (getMaintenanceScheduleService().shouldApplyMaintenanceOverlapSwitchRule(context, machine, estimatedEndTime)) {
+            Date inspectionStartTime = LhScheduleTimeUtil.addHours(
+                    switchStartTime, LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context));
+            return LhScheduleTimeUtil.addHours(
+                    inspectionStartTime, LhScheduleTimeUtil.getFirstInspectionHours(context));
+        }
+        return LhScheduleTimeUtil.addHours(switchStartTime,
+                LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
     }
 
     /**
@@ -680,6 +723,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                          MachineScheduleDTO machine,
                                          SkuScheduleDTO sku,
                                          Date startTime,
+                                         Date switchStartTime,
                                          List<LhShiftConfigVO> shifts) {
         if (startTime == null) {
             return false;
@@ -688,7 +732,6 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
         sku.setMouldQty(machineMouldQty);
-        Date switchStartTime = resolveTypeBlockChangeStartTime(context, startTime);
         LhScheduleResult result = buildScheduleResult(
                 context, machine, sku, startTime, switchStartTime, shifts, machineMouldQty, isEnding);
         if (result == null || result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
@@ -749,15 +792,17 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             return false;
         }
         if (isTypeBlockCandidate(context, machine, specifySku)) {
-            Date typeBlockStartTime = calcTypeBlockStartTime(context, machine, endingTime);
-            if (typeBlockStartTime == null) {
+            Date typeBlockSwitchStartTime = calcTypeBlockSwitchStartTime(context, machine, endingTime);
+            Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
+                    context, machine, endingTime, typeBlockSwitchStartTime);
+            if (typeBlockStartTime == null || typeBlockSwitchStartTime == null) {
                 return false;
             }
             int refinedTargetQty = getTargetScheduleQtyResolver().refineTargetQtyByMachineCapacity(
                     context,
                     specifySku,
                     machine,
-                    resolveTypeBlockChangeStartTime(context, typeBlockStartTime),
+                    typeBlockSwitchStartTime,
                     typeBlockStartTime,
                     shifts);
             if (refinedTargetQty <= 0) {
@@ -802,8 +847,13 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                        Date endingTime) {
         Date machineReadyTime = getCapacityCalculateStrategy().calculateStartTime(
                 context, machine.getMachineCode(), endingTime);
+        boolean maintenanceOverlapSwitch = getMaintenanceScheduleService()
+                .shouldApplyMaintenanceOverlapSwitchRule(context, machine, endingTime);
+        Date switchReadyTime = maintenanceOverlapSwitch
+                ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine)
+                : machineReadyTime;
         Date mouldChangeStartTime = getMouldChangeBalanceStrategy().allocateMouldChange(
-                context, machine.getMachineCode(), machineReadyTime);
+                context, machine.getMachineCode(), switchReadyTime);
         if (mouldChangeStartTime == null) {
             log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 无可用换模窗口",
                     machine.getMachineCode(), specifySku.getMaterialCode());
@@ -811,8 +861,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         Date inspectionTime = null;
         try {
-            Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(
-                    mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+            int switchDurationHours = maintenanceOverlapSwitch
+                    ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
+                    : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+            Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
             inspectionTime = getFirstInspectionBalanceStrategy().allocateInspection(
                     context, machine.getMachineCode(), mouldChangeCompleteTime);
             if (inspectionTime == null) {
@@ -820,11 +872,14 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                         machine.getMachineCode(), specifySku.getMaterialCode());
                 return false;
             }
+            Date productionStartTime = maintenanceOverlapSwitch
+                    ? LhScheduleTimeUtil.addHours(inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
+                    : inspectionTime;
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
             Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
                     context,
                     machine.getMachineCode(),
-                    inspectionTime,
+                    productionStartTime,
                     shifts,
                     specifySku.getShiftCapacity(),
                     specifySku.getLhTimeSeconds(),
@@ -890,6 +945,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      * @param selectedSku 选中SKU
      * @param matchedLayer 命中层级
      * @param success 是否成功
+     * @param switchStartTime 换活字块开始时间
      * @param startTime 开产时间
      * @param triggerSource 触发来源
      */
@@ -899,6 +955,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                         SkuScheduleDTO selectedSku,
                                         String matchedLayer,
                                         boolean success,
+                                        Date switchStartTime,
                                         Date startTime,
                                         String triggerSource) {
         if (!PriorityTraceLogHelper.isEnabled(context)) {
@@ -923,7 +980,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 "衔接结果=" + (success ? "成功" : "未衔接")
                         + ", 换活字块开始时间=" + PriorityTraceLogHelper.formatDateTime(
-                        startTime == null ? null : resolveTypeBlockChangeStartTime(context, startTime))
+                        switchStartTime)
                         + ", 开产时间=" + PriorityTraceLogHelper.formatDateTime(startTime));
         String detail = detailBuilder.toString().trim();
         log.info("{}\n{}", title, detail);
