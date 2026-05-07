@@ -57,7 +57,8 @@ public interface ILhScheduleResultService {
     int countReleasedByDate(Date scheduleDate, String factoryCode);
 
     /**
-     * 生成下一个排程批次号（LHPC+yyyyMMdd+流水），流水由 Redis 原子自增分配（见 {@link com.zlt.aps.lh.component.LhBatchNoRedisGenerator}）
+     * 生成下一个排程批次号（LHPC+yyyyMMdd+流水），流水按目标排程日由 Redis 原子自增全局分配
+     * （见 {@link com.zlt.aps.lh.component.LhBatchNoRedisGenerator}）
      *
      * @param scheduleDate 排程日期
      * @param factoryCode  分厂编号

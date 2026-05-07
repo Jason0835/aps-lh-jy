@@ -79,7 +79,8 @@ public class PreValidationHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 生成排程批次号（规则见 {@link ILhScheduleResultService#generateNextBatchNo}，由 Redis 自增分配流水）
+     * 生成排程批次号（规则见 {@link ILhScheduleResultService#generateNextBatchNo}，
+     * 批次号格式保持不变，流水按目标排程日由 Redis 自增全局分配）
      *
      * @param context 排程上下文
      */
