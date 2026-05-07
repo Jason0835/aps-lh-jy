@@ -8,12 +8,10 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
-import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.handler.ResultValidationHandler;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Calendar;
@@ -21,7 +19,6 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 结果校验处理器左右模回归测试。
@@ -363,7 +360,7 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
     }
 
     @Test
-    void validateManualSundaySandBlastThreshold_shouldInterruptWhenAlternatePlanCountReachesThreshold() throws Exception {
+    void validateManualSundaySandBlastThreshold_shouldOnlyWarnWhenAlternatePlanCountReachesThreshold() throws Exception {
         ResultValidationHandler handler = new ResultValidationHandler();
         LhScheduleContext context = newContext();
         context.setScheduleTargetDate(date(2026, 4, 19));
@@ -390,9 +387,14 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
 
         ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
 
-        ScheduleException exception = invokeManualSundaySandBlastValidation(handler, context);
-        assertTrue(exception.getMessage().contains("周日手工喷砂交替计划数量超限"));
-        assertTrue(exception.getMessage().contains("2026-04-19"));
+        invokeManualSundaySandBlastValidationWithoutException(handler, context);
+        assertEquals(2, context.getMouldChangePlanList().size());
+        assertEquals(1, context.getMouldChangePlanList().stream()
+                .filter(plan -> MouldChangeTypeEnum.REGULAR.getCode().equals(plan.getChangeMouldType()))
+                .count());
+        assertEquals(1, context.getMouldChangePlanList().stream()
+                .filter(plan -> MouldChangeTypeEnum.SAND_BLAST.getCode().equals(plan.getChangeMouldType()))
+                .count());
     }
 
     @Test
@@ -433,22 +435,6 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
         context.setBatchNo("LHPC20260417003");
         context.setScheduleTargetDate(date(2026, 4, 17));
         return context;
-    }
-
-    private ScheduleException invokeManualSundaySandBlastValidation(ResultValidationHandler handler, LhScheduleContext context)
-            throws Exception {
-        Method method = ResultValidationHandler.class.getDeclaredMethod(
-                "validateManualSundaySandBlastThreshold", LhScheduleContext.class);
-        method.setAccessible(true);
-        try {
-            method.invoke(handler, context);
-        } catch (InvocationTargetException ex) {
-            if (ex.getCause() instanceof ScheduleException) {
-                return (ScheduleException) ex.getCause();
-            }
-            throw ex;
-        }
-        throw new AssertionError("预期抛出 ScheduleException");
     }
 
     private void invokeManualSundaySandBlastValidationWithoutException(ResultValidationHandler handler, LhScheduleContext context)

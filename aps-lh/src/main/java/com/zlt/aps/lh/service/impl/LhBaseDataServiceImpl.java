@@ -166,6 +166,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         Date startDate = LhScheduleTimeUtil.clearTime(scheduleDate);
         int scheduleDays = LhScheduleTimeUtil.getScheduleDays(context);
         Date endDate = LhScheduleTimeUtil.addDays(startDate, scheduleDays);
+        // 喷砂时间允许前移一天，工作日历与设备停机需覆盖 T-1；清洗计划仍按当前排程窗口加载。
+        Date calendarControlStartDate = LhScheduleTimeUtil.addDays(startDate, -1);
 
         // 获取年月信息（按排程目标日取月计划所属年月）
         Calendar cal = Calendar.getInstance();
@@ -192,13 +194,13 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         loadAdjustResult(context, factoryCode, year, month);
 
         // 6. 加载工作日历
-        loadWorkCalendar(context, factoryCode, startDate, endDate);
+        loadWorkCalendar(context, factoryCode, calendarControlStartDate, endDate);
 
         // 7. 加载SKU日硫化产能
         loadSkuLhCapacity(context, factoryCode);
 
         // 8. 加载设备停机计划
-        loadDevicePlanShut(context, factoryCode, startDate, endDate);
+        loadDevicePlanShut(context, factoryCode, calendarControlStartDate, endDate);
 
         // 9. 加载SKU与模具关系
         loadSkuMouldRel(context, factoryCode);

@@ -10,6 +10,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
@@ -36,6 +37,8 @@ import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
 import com.zlt.aps.lh.service.impl.LhBaseDataServiceImpl;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
+import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -142,11 +145,14 @@ class ScheduleDataWindowRegressionTest {
     }
 
     @Test
-    void loadAllBaseData_invokesWorkCalendarShutAndCleaningWithScheduleWindow() {
+    void loadAllBaseData_shouldExtendCalendarAndShutWindowButKeepCleaningScheduleWindow() {
         String factoryCode = "FC01";
         Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 4));
         int offsetDays = Math.max(0, LhScheduleConstant.SCHEDULE_DAYS - 1);
         Date scheduleDate = LhScheduleTimeUtil.addDays(target, -offsetDays);
+        Date startDate = LhScheduleTimeUtil.clearTime(scheduleDate);
+        Date endDate = LhScheduleTimeUtil.addDays(startDate, LhScheduleConstant.SCHEDULE_DAYS);
+        Date controlStartDate = LhScheduleTimeUtil.addDays(startDate, -1);
 
         prepareRequiredBaseMocks();
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
@@ -158,10 +164,17 @@ class ScheduleDataWindowRegressionTest {
 
         lhBaseDataService.loadAllBaseData(context);
 
-        // [startDate,endDate) 与 T～T+2 对齐见 scheduleWindow_targetDayTDayAndHalfOpenEndMatchFormula；此处仅确认三类数据按该窗口加载
-        verify(workCalendarMapper).selectList(any());
-        verify(devicePlanShutMapper).selectList(any());
-        verify(lhMouldCleanPlanMapper).selectList(any());
+        // 喷砂可前移一天，因此工作日历与设备停机需要覆盖 T-1；清洗计划仍只加载当前排程窗口。
+        LambdaQueryWrapper<MdmWorkCalendar> workCalendarWrapper = captureWorkCalendarWrapper();
+        LambdaQueryWrapper<MdmDevicePlanShut> devicePlanShutWrapper = captureDevicePlanShutWrapper();
+        LambdaQueryWrapper<LhMouldCleanPlan> cleaningPlanWrapper = captureCleaningPlanWrapper();
+        assertWrapperContainsDate(workCalendarWrapper, controlStartDate);
+        assertWrapperContainsDate(workCalendarWrapper, endDate);
+        assertWrapperContainsDate(devicePlanShutWrapper, controlStartDate);
+        assertWrapperContainsDate(devicePlanShutWrapper, endDate);
+        assertWrapperContainsDate(cleaningPlanWrapper, startDate);
+        assertWrapperContainsDate(cleaningPlanWrapper, endDate);
+        assertWrapperNotContainsDate(cleaningPlanWrapper, controlStartDate);
         verify(lhScheduleResultMapper).selectList(any());
     }
 
@@ -541,6 +554,45 @@ class ScheduleDataWindowRegressionTest {
     }
 
     /**
+     * 抓取工作日历查询条件。
+     *
+     * @return 工作日历查询 wrapper
+     */
+    @SuppressWarnings("unchecked")
+    private LambdaQueryWrapper<MdmWorkCalendar> captureWorkCalendarWrapper() {
+        initializeTableInfo(MdmWorkCalendar.class);
+        ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(workCalendarMapper).selectList(captor.capture());
+        return (LambdaQueryWrapper<MdmWorkCalendar>) captor.getValue();
+    }
+
+    /**
+     * 抓取设备停机计划查询条件。
+     *
+     * @return 设备停机计划查询 wrapper
+     */
+    @SuppressWarnings("unchecked")
+    private LambdaQueryWrapper<MdmDevicePlanShut> captureDevicePlanShutWrapper() {
+        initializeTableInfo(MdmDevicePlanShut.class);
+        ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(devicePlanShutMapper).selectList(captor.capture());
+        return (LambdaQueryWrapper<MdmDevicePlanShut>) captor.getValue();
+    }
+
+    /**
+     * 抓取模具清洗计划查询条件。
+     *
+     * @return 模具清洗计划查询 wrapper
+     */
+    @SuppressWarnings("unchecked")
+    private LambdaQueryWrapper<LhMouldCleanPlan> captureCleaningPlanWrapper() {
+        initializeTableInfo(LhMouldCleanPlan.class);
+        ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(lhMouldCleanPlanMapper).selectList(captor.capture());
+        return (LambdaQueryWrapper<LhMouldCleanPlan>) captor.getValue();
+    }
+
+    /**
      * 校验胎胚编码集合参数。
      *
      * @param wrapper 查询条件
@@ -602,6 +654,28 @@ class ScheduleDataWindowRegressionTest {
                 .filter(Date.class::isInstance)
                 .map(Date.class::cast)
                 .anyMatch(date -> date.getTime() == expectedDate.getTime());
+    }
+
+    /**
+     * 校验查询条件包含指定日期参数。
+     *
+     * @param wrapper 查询条件
+     * @param expectedDate 预期日期
+     */
+    private void assertWrapperContainsDate(LambdaQueryWrapper<?> wrapper, Date expectedDate) {
+        wrapper.getSqlSegment();
+        assertTrue(paramMapContainsDate(wrapper.getParamNameValuePairs(), expectedDate));
+    }
+
+    /**
+     * 校验查询条件不包含指定日期参数。
+     *
+     * @param wrapper 查询条件
+     * @param unexpectedDate 非预期日期
+     */
+    private void assertWrapperNotContainsDate(LambdaQueryWrapper<?> wrapper, Date unexpectedDate) {
+        wrapper.getSqlSegment();
+        assertFalse(paramMapContainsDate(wrapper.getParamNameValuePairs(), unexpectedDate));
     }
 
     /**

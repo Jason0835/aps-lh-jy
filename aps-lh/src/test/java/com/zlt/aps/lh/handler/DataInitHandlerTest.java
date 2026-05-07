@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.service.impl.LhCleaningScheduleService;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
@@ -17,6 +18,8 @@ import java.time.ZoneId;
 import java.util.Collections;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.List;
+import java.util.Map;
 
 /**
  * DataInitHandler 清洗窗口构建测试。
@@ -106,74 +109,85 @@ public class DataInitHandlerTest {
     }
 
     /**
-     * 用例说明：喷砂清洗同日超过配置上限时，应中断并提示具体日期和机台。
+     * 用例说明：喷砂清洗同日超过配置上限时，初始化校验不再中断，第二台按时间顺序顺延到次日。
      *
      * @throws Exception 反射调用异常
      */
     @Test
-    public void shouldInterruptWhenSandBlastDailyLimitExceeded() throws Exception {
+    public void shouldShiftSecondSandBlastToNextDayWhenDailyLimitExceeded() throws Exception {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");
         context.getLhParamsMap().put(LhScheduleParamConstant.SAND_BLAST_DAILY_LIMIT, "1");
+        LhMouldCleanPlan firstPlan = buildCleanPlan("K1313", CleaningTypeEnum.SAND_BLAST.getCode(),
+                toDate(2026, 4, 22, 9, 0, 0));
+        LhMouldCleanPlan secondPlan = buildCleanPlan("K1314", CleaningTypeEnum.SAND_BLAST.getCode(),
+                toDate(2026, 4, 22, 10, 0, 0));
         context.setCleaningPlanList(Arrays.asList(
-                buildCleanPlan("K1313", CleaningTypeEnum.SAND_BLAST.getCode(), toDate(2026, 4, 22, 9, 0, 0)),
-                buildCleanPlan("K1314", CleaningTypeEnum.SAND_BLAST.getCode(), toDate(2026, 4, 22, 10, 0, 0))));
+                firstPlan,
+                secondPlan));
 
-        invokeValidateCleaningPlanRules(context);
+        Map<String, List<MachineCleaningWindowDTO>> windowMap = invokeResolveScheduledCleaningWindowMap(context);
+        MachineCleaningWindowDTO firstWindow = windowMap.get("K1313").get(0);
+        MachineCleaningWindowDTO secondWindow = windowMap.get("K1314").get(0);
 
-        Assertions.assertTrue(context.isInterrupted());
-        Assertions.assertTrue(context.getInterruptReason().contains("2026-04-22"));
-        Assertions.assertTrue(context.getInterruptReason().contains("K1313,K1314"));
+        Assertions.assertFalse(context.isInterrupted());
+        Assertions.assertEquals(toDate(2026, 4, 22, 9, 0, 0), firstWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 23, 10, 0, 0), secondWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 23, 22, 0, 0), secondWindow.getCleanEndTime());
+        Assertions.assertEquals(toDate(2026, 4, 23, 20, 0, 0), secondWindow.getReadyTime());
     }
 
     /**
-     * 用例说明：喷砂清洗命中维保日且未开启手工例外时，应中断并提示机台。
+     * 用例说明：喷砂清洗命中维保日时不再中断，运行态清洗窗口前移到前一日。
      *
      * @throws Exception 反射调用异常
      */
     @Test
-    public void shouldInterruptWhenSandBlastOnMaintenanceDateWithoutPermission() throws Exception {
+    public void shouldMoveSandBlastWindowToPreviousDayWhenMaintenanceDateMatched() throws Exception {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");
         context.getLhParamsMap().put(LhScheduleParamConstant.SAND_BLAST_MAINTENANCE_DATES, "15,28");
         context.getLhParamsMap().put(LhScheduleParamConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE, "0");
-        context.setCleaningPlanList(Collections.singletonList(
-                buildCleanPlan("K1313", CleaningTypeEnum.SAND_BLAST.getCode(), toDate(2026, 4, 15, 9, 0, 0))));
+        LhMouldCleanPlan plan = buildCleanPlan("K1313", CleaningTypeEnum.SAND_BLAST.getCode(),
+                toDate(2026, 4, 15, 9, 0, 0));
+        context.setCleaningPlanList(Collections.singletonList(plan));
 
-        invokeValidateCleaningPlanRules(context);
+        MachineCleaningWindowDTO window = invokeResolveScheduledCleaningWindowMap(context).get("K1313").get(0);
 
-        Assertions.assertTrue(context.isInterrupted());
-        Assertions.assertTrue(context.getInterruptReason().contains("喷砂机维保日"));
-        Assertions.assertTrue(context.getInterruptReason().contains("K1313"));
+        Assertions.assertFalse(context.isInterrupted());
+        Assertions.assertEquals(toDate(2026, 4, 14, 9, 0, 0), window.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 14, 21, 0, 0), window.getCleanEndTime());
+        Assertions.assertEquals(toDate(2026, 4, 14, 19, 0, 0), window.getReadyTime());
     }
 
     /**
-     * 用例说明：维保日喷砂例外只允许手工计划，系统来源即使开启配置也应阻断。
+     * 用例说明：系统来源喷砂命中维保日时也按运行态窗口前移处理，不再按来源阻断。
      *
      * @throws Exception 反射调用异常
      */
     @Test
-    public void shouldInterruptSystemSandBlastOnMaintenanceDateEvenWhenPermissionEnabled() throws Exception {
+    public void shouldAllowSystemSandBlastOnMaintenanceDateAndMoveRuntimeWindow() throws Exception {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");
         context.getLhParamsMap().put(LhScheduleParamConstant.SAND_BLAST_MAINTENANCE_DATES, "15,28");
         context.getLhParamsMap().put(LhScheduleParamConstant.SAND_BLAST_ALLOW_ON_MAINTENANCE_DATE, "1");
-        context.setCleaningPlanList(Collections.singletonList(
-                buildCleanPlan("K1313", CleaningTypeEnum.SAND_BLAST.getCode(), toDate(2026, 4, 15, 9, 0, 0))));
+        LhMouldCleanPlan plan = buildCleanPlan("K1313", CleaningTypeEnum.SAND_BLAST.getCode(),
+                toDate(2026, 4, 15, 9, 0, 0));
+        context.setCleaningPlanList(Collections.singletonList(plan));
 
-        invokeValidateCleaningPlanRules(context);
+        MachineCleaningWindowDTO window = invokeResolveScheduledCleaningWindowMap(context).get("K1313").get(0);
 
-        Assertions.assertTrue(context.isInterrupted());
-        Assertions.assertTrue(context.getInterruptReason().contains("喷砂机维保日"));
+        Assertions.assertFalse(context.isInterrupted());
+        Assertions.assertEquals(toDate(2026, 4, 14, 9, 0, 0), window.getCleanStartTime());
     }
 
     /**
-     * 用例说明：维保日喷砂在开启配置且计划为手工来源时允许通过。
+     * 用例说明：维保日手工喷砂也统一按运行态窗口前移处理。
      *
      * @throws Exception 反射调用异常
      */
     @Test
-    public void shouldAllowManualSandBlastOnMaintenanceDateWhenPermissionEnabled() throws Exception {
+    public void shouldMoveManualSandBlastWindowOnMaintenanceDate() throws Exception {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");
         context.getLhParamsMap().put(LhScheduleParamConstant.SAND_BLAST_MAINTENANCE_DATES, "15,28");
@@ -183,9 +197,31 @@ public class DataInitHandlerTest {
         plan.setDataSource("0");
         context.setCleaningPlanList(Collections.singletonList(plan));
 
-        invokeValidateCleaningPlanRules(context);
+        MachineCleaningWindowDTO window = invokeResolveScheduledCleaningWindowMap(context).get("K1313").get(0);
 
         Assertions.assertFalse(context.isInterrupted());
+        Assertions.assertEquals(toDate(2026, 4, 14, 9, 0, 0), window.getCleanStartTime());
+    }
+
+    /**
+     * 用例说明：喷砂命中连续禁排日时，应继续前移到更早的可排日期，而不是错误顺延到后一天。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldContinueMoveSandBlastBackwardWhenPreviousDayStillForbidden() throws Exception {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.getLhParamsMap().put(LhScheduleParamConstant.SAND_BLAST_MAINTENANCE_DATES, "17");
+
+        LhMouldCleanPlan plan = buildCleanPlan("K1313", CleaningTypeEnum.SAND_BLAST.getCode(),
+                toDate(2026, 4, 19, 9, 0, 0));
+        context.setCleaningPlanList(Collections.singletonList(plan));
+        context.setWorkCalendarList(Collections.singletonList(buildHolidayCalendar(toDate(2026, 4, 18, 0, 0, 0))));
+
+        MachineCleaningWindowDTO window = invokeResolveScheduledCleaningWindowMap(context).get("K1313").get(0);
+
+        Assertions.assertEquals(toDate(2026, 4, 16, 9, 0, 0), window.getCleanStartTime());
     }
 
     /**
@@ -205,9 +241,83 @@ public class DataInitHandlerTest {
         plan.setDataSource("0");
         context.setCleaningPlanList(Collections.singletonList(plan));
 
-        invokeValidateCleaningPlanRules(context);
+        Assertions.assertFalse(context.isInterrupted());
+    }
+
+    /**
+     * 用例说明：干冰早班超过 2 台时不再中断，第三台按时间顺序顺延到中班。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldShiftDryIceToAfternoonWhenMorningLimitExceeded() throws Exception {
+        LhScheduleContext context = buildDryIceLimitContext();
+        LhMouldCleanPlan firstPlan = buildCleanPlan("K1301", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 7, 30, 0));
+        LhMouldCleanPlan secondPlan = buildCleanPlan("K1302", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 8, 30, 0));
+        LhMouldCleanPlan thirdPlan = buildCleanPlan("K1303", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 9, 30, 0));
+        context.setCleaningPlanList(Arrays.asList(firstPlan, secondPlan, thirdPlan));
+
+        Map<String, List<MachineCleaningWindowDTO>> windowMap = invokeResolveScheduledCleaningWindowMap(context);
+        MachineCleaningWindowDTO firstWindow = windowMap.get("K1301").get(0);
+        MachineCleaningWindowDTO secondWindow = windowMap.get("K1302").get(0);
+        MachineCleaningWindowDTO thirdWindow = windowMap.get("K1303").get(0);
 
         Assertions.assertFalse(context.isInterrupted());
+        Assertions.assertEquals(toDate(2026, 4, 22, 7, 30, 0), firstWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 22, 8, 30, 0), secondWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 22, 14, 0, 0), thirdWindow.getCleanStartTime());
+    }
+
+    /**
+     * 用例说明：干冰中班超过 1 台时不再中断，第二台按时间顺序顺延到次日早班。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldShiftDryIceToNextMorningWhenAfternoonLimitExceeded() throws Exception {
+        LhScheduleContext context = buildDryIceLimitContext();
+        LhMouldCleanPlan firstPlan = buildCleanPlan("K1301", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 14, 0, 0));
+        LhMouldCleanPlan secondPlan = buildCleanPlan("K1302", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 15, 0, 0));
+        context.setCleaningPlanList(Arrays.asList(firstPlan, secondPlan));
+
+        Map<String, List<MachineCleaningWindowDTO>> windowMap = invokeResolveScheduledCleaningWindowMap(context);
+        MachineCleaningWindowDTO firstWindow = windowMap.get("K1301").get(0);
+        MachineCleaningWindowDTO secondWindow = windowMap.get("K1302").get(0);
+
+        Assertions.assertFalse(context.isInterrupted());
+        Assertions.assertEquals(toDate(2026, 4, 22, 14, 0, 0), firstWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 23, 7, 30, 0), secondWindow.getCleanStartTime());
+    }
+
+    /**
+     * 用例说明：干冰同日超过 3 台时不再中断，第四台按时间顺序顺延到次日早班。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldShiftDryIceToNextMorningWhenDailyLimitExceeded() throws Exception {
+        LhScheduleContext context = buildDryIceLimitContext();
+        context.getLhParamsMap().put(LhScheduleParamConstant.DRY_ICE_MORNING_SHIFT_LIMIT, "3");
+        context.getLhParamsMap().put(LhScheduleParamConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT, "3");
+        LhMouldCleanPlan firstPlan = buildCleanPlan("K1301", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 7, 30, 0));
+        LhMouldCleanPlan secondPlan = buildCleanPlan("K1302", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 8, 30, 0));
+        LhMouldCleanPlan thirdPlan = buildCleanPlan("K1303", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 14, 0, 0));
+        LhMouldCleanPlan fourthPlan = buildCleanPlan("K1304", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 15, 0, 0));
+        context.setCleaningPlanList(Arrays.asList(firstPlan, secondPlan, thirdPlan, fourthPlan));
+
+        MachineCleaningWindowDTO fourthWindow = invokeResolveScheduledCleaningWindowMap(context).get("K1304").get(0);
+
+        Assertions.assertFalse(context.isInterrupted());
+        Assertions.assertEquals(toDate(2026, 4, 23, 7, 30, 0), fourthWindow.getCleanStartTime());
     }
 
     /**
@@ -271,24 +381,28 @@ public class DataInitHandlerTest {
      */
     private MachineCleaningWindowDTO invokeBuildCleaningWindow(LhScheduleContext context, LhMouldCleanPlan plan)
             throws Exception {
-        DataInitHandler handler = new DataInitHandler();
-        Method method = DataInitHandler.class.getDeclaredMethod(
+        LhCleaningScheduleService service = new LhCleaningScheduleService();
+        Method method = LhCleaningScheduleService.class.getDeclaredMethod(
                 "buildCleaningWindow", LhScheduleContext.class, LhMouldCleanPlan.class);
         method.setAccessible(true);
-        return (MachineCleaningWindowDTO) method.invoke(handler, context, plan);
+        return (MachineCleaningWindowDTO) method.invoke(service, context, plan);
     }
 
     /**
-     * 反射调用私有方法 validateCleaningPlanRules。
+     * 反射调用私有方法 resolveScheduledCleaningWindowMap。
      *
      * @param context 排程上下文
+     * @return 运行态清洗窗口Map
      * @throws Exception 反射异常
      */
-    private void invokeValidateCleaningPlanRules(LhScheduleContext context) throws Exception {
-        DataInitHandler handler = new DataInitHandler();
-        Method method = DataInitHandler.class.getDeclaredMethod("validateCleaningPlanRules", LhScheduleContext.class);
+    @SuppressWarnings("unchecked")
+    private Map<String, List<MachineCleaningWindowDTO>> invokeResolveScheduledCleaningWindowMap(LhScheduleContext context)
+            throws Exception {
+        LhCleaningScheduleService service = new LhCleaningScheduleService();
+        Method method = LhCleaningScheduleService.class.getDeclaredMethod(
+                "buildScheduledCleaningWindowMap", LhScheduleContext.class);
         method.setAccessible(true);
-        method.invoke(handler, context);
+        return (Map<String, List<MachineCleaningWindowDTO>>) method.invoke(service, context);
     }
 
     /**
@@ -310,6 +424,22 @@ public class DataInitHandlerTest {
     }
 
     /**
+     * 构建干冰清洗数量约束测试上下文。
+     *
+     * @return 排程上下文
+     */
+    private LhScheduleContext buildDryIceLimitContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.getLhParamsMap().put(LhScheduleParamConstant.DRY_ICE_WORK_START_TIME, "07:30");
+        context.getLhParamsMap().put(LhScheduleParamConstant.DRY_ICE_WORK_END_TIME, "17:00");
+        context.getLhParamsMap().put(LhScheduleParamConstant.DRY_ICE_DAILY_LIMIT, "3");
+        context.getLhParamsMap().put(LhScheduleParamConstant.DRY_ICE_MORNING_SHIFT_LIMIT, "2");
+        context.getLhParamsMap().put(LhScheduleParamConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT, "1");
+        return context;
+    }
+
+    /**
      * 构建包含单条停机记录的上下文。
      *
      * @param machineCode 机台编号
@@ -325,6 +455,14 @@ public class DataInitHandlerTest {
         stop.setEndDate(stopEnd);
         context.setDevicePlanShutList(Arrays.asList(stop));
         return context;
+    }
+
+    private com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar buildHolidayCalendar(Date holidayDate) {
+        com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar calendar =
+                new com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar();
+        calendar.setProductionDate(holidayDate);
+        calendar.setDayFlag("0");
+        return calendar;
     }
 
     /**

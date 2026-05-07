@@ -39,12 +39,36 @@ class CleaningPlanScheduleImpactRegressionTest {
         Date shiftStartTime = shifts.get(0).getShiftStartDateTime();
 
         Integer remainingQty = ReflectionTestUtils.invokeMethod(strategy, "distributeToShifts",
-                context, result, shifts, shiftStartTime, 18, 1600, 1, 18, machine.getCleaningWindowList());
+                context, result, shifts, shiftStartTime, 18, 1600, 1, 18,
+                machine.getCleaningWindowList(), Collections.emptyList());
         ReflectionTestUtils.invokeMethod(strategy, "refreshResultSummary", context, result);
 
         assertEquals(7, remainingQty.intValue(), "单班排产时，干冰清洗按剩余时间折算后仍应保留未排数量");
         assertEquals(11, result.getDailyPlanQty(), "新增排产班次计划量应按剩余有效时间折算");
         assertEquals(11, result.getClass1PlanQty());
+        assertEquals(dateTime(2026, 4, 21, 14, 0, 0), result.getSpecEndTime());
+        assertEquals(result.getSpecEndTime(), result.getTdaySpecEndTime());
+    }
+
+    @Test
+    void newSpecDistributeToShifts_shouldNotApplyCleaningLossWhenWindowNotAttachedToMachine() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildSingleShiftContext();
+        MachineScheduleDTO machine = buildMachineWithoutAttachedCleaningWindow();
+        context.getMachineScheduleMap().put("K1514", machine);
+
+        LhScheduleResult result = buildResult("K1514", "02");
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Date shiftStartTime = shifts.get(0).getShiftStartDateTime();
+
+        Integer remainingQty = ReflectionTestUtils.invokeMethod(strategy, "distributeToShifts",
+                context, result, shifts, shiftStartTime, 18, 1600, 1, 18,
+                machine.getCleaningWindowList(), Collections.emptyList());
+        ReflectionTestUtils.invokeMethod(strategy, "refreshResultSummary", context, result);
+
+        assertEquals(0, remainingQty.intValue(), "未挂入机台清洗窗口列表的清洗不应参与班次产能扣减");
+        assertEquals(18, result.getDailyPlanQty());
+        assertEquals(18, result.getClass1PlanQty());
         assertEquals(dateTime(2026, 4, 21, 14, 0, 0), result.getSpecEndTime());
         assertEquals(result.getSpecEndTime(), result.getTdaySpecEndTime());
     }
@@ -125,6 +149,16 @@ class CleaningPlanScheduleImpactRegressionTest {
         List<MachineCleaningWindowDTO> cleaningWindowList = new ArrayList<>();
         cleaningWindowList.add(cleaningWindow);
         machine.setCleaningWindowList(cleaningWindowList);
+        return machine;
+    }
+
+    private MachineScheduleDTO buildMachineWithoutAttachedCleaningWindow() {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1514");
+        machine.setMaxMoldNum(1);
+        // 仅设置清洗摘要标识，不挂入清洗窗口列表，验证产能扣减只认运行态窗口。
+        machine.setHasDryIceCleaning(true);
+        machine.setCleaningWindowList(Collections.emptyList());
         return machine;
     }
 

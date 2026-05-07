@@ -283,7 +283,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 校验周日手工喷砂是否满足交替计划条数阈值。
+     * 诊断周日手工喷砂是否满足交替计划条数阈值。
      *
      * @param context 排程上下文
      */
@@ -312,13 +312,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                             && !isCleaningMouldChangePlan(plan))
                     .count();
             if (alternatePlanCount >= threshold) {
-                throw new ScheduleException(ScheduleStepEnum.S4_6_RESULT_VALIDATION,
-                        ScheduleErrorCode.RESULT_VALIDATION_FAILED,
-                        context.getFactoryCode(), context.getBatchNo(),
-                        "周日手工喷砂交替计划数量超限, 日期: " + dateKey
-                                + ", 机台: " + resolveCleaningMachineCode(item.getKey(), cleaningWindow)
-                                + ", 阈值: " + threshold
-                                + ", 实际条数: " + alternatePlanCount);
+                log.warn("周日手工喷砂交替计划数量达到诊断阈值, 日期: {}, 机台: {}, 阈值: {}, 实际条数: {}",
+                        dateKey, resolveCleaningMachineCode(item.getKey(), cleaningWindow),
+                        threshold, alternatePlanCount);
             }
         }
     }
