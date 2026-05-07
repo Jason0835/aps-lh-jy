@@ -321,6 +321,44 @@ public class DataInitHandlerTest {
     }
 
     /**
+     * 用例说明：干冰因停机顺延后若实际跨入中班，应占用中班名额，后续同日中班清洗需顺延到次日。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldTreatDowntimeDelayedDryIceAsAfternoonUsageWhenWindowCrossesAfternoon() throws Exception {
+        LhScheduleContext context = buildDryIceLimitContext();
+        Date afternoonCrossStopStart = toDate(2026, 4, 22, 7, 0, 0);
+        Date afternoonCrossStopEnd = toDate(2026, 4, 22, 13, 30, 0);
+        MdmDevicePlanShut stop = new MdmDevicePlanShut();
+        stop.setMachineCode("K1313");
+        stop.setBeginDate(afternoonCrossStopStart);
+        stop.setEndDate(afternoonCrossStopEnd);
+        context.setDevicePlanShutList(Collections.singletonList(stop));
+
+        LhMouldCleanPlan firstPlan = buildCleanPlan("K1313", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 7, 30, 0));
+        LhMouldCleanPlan secondPlan = buildCleanPlan("K1206", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 8, 0, 0));
+        LhMouldCleanPlan thirdPlan = buildCleanPlan("K1110", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 9, 0, 0));
+        LhMouldCleanPlan fourthPlan = buildCleanPlan("K2024", CleaningTypeEnum.DRY_ICE.getCode(),
+                toDate(2026, 4, 22, 14, 0, 0));
+        context.setCleaningPlanList(Arrays.asList(firstPlan, secondPlan, thirdPlan, fourthPlan));
+
+        Map<String, List<MachineCleaningWindowDTO>> windowMap = invokeResolveScheduledCleaningWindowMap(context);
+        MachineCleaningWindowDTO firstWindow = windowMap.get("K1313").get(0);
+        MachineCleaningWindowDTO secondWindow = windowMap.get("K1206").get(0);
+        MachineCleaningWindowDTO thirdWindow = windowMap.get("K1110").get(0);
+        MachineCleaningWindowDTO fourthWindow = windowMap.get("K2024").get(0);
+
+        Assertions.assertEquals(toDate(2026, 4, 22, 13, 30, 0), firstWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 22, 8, 0, 0), secondWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 22, 9, 0, 0), thirdWindow.getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 23, 7, 30, 0), fourthWindow.getCleanStartTime());
+    }
+
+    /**
      * 用例说明：干冰清洗时间命中计划停机时，清洗开始时间应顺延到停机结束时刻。
      *
      * @throws Exception 反射调用异常

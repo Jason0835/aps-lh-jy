@@ -35,6 +35,11 @@ import java.util.stream.Collectors;
 @Component
 public class LhCleaningScheduleService {
 
+    /** 干冰清洗早班额度 */
+    private static final String DRY_ICE_SHIFT_MORNING = "MORNING";
+    /** 干冰清洗中班额度 */
+    private static final String DRY_ICE_SHIFT_AFTERNOON = "AFTERNOON";
+
     /** 工作日历停产标记 */
     private static final String WORK_CALENDAR_STOP_FLAG = "0";
     /** 启用配置值 */
@@ -266,12 +271,14 @@ public class LhCleaningScheduleService {
                 || dryIceDailyCountMap.getOrDefault(dateKey, 0) >= dryIceDailyLimit) {
             return false;
         }
-        if (LhScheduleTimeUtil.isMorningShift(context, cleanStartTime)) {
+        String dryIceShiftBucket = resolveDryIceShiftBucket(
+                context, cleanStartTime, resolveCleanDurationHours(context, cleanType));
+        if (StringUtils.equals(DRY_ICE_SHIFT_MORNING, dryIceShiftBucket)) {
             int morningLimit = context.getParamIntValue(LhScheduleParamConstant.DRY_ICE_MORNING_SHIFT_LIMIT,
                     LhScheduleConstant.DRY_ICE_MORNING_SHIFT_LIMIT);
             return dryIceMorningCountMap.getOrDefault(dateKey, 0) < morningLimit;
         }
-        if (LhScheduleTimeUtil.isAfternoonShift(context, cleanStartTime)) {
+        if (StringUtils.equals(DRY_ICE_SHIFT_AFTERNOON, dryIceShiftBucket)) {
             int afternoonLimit = context.getParamIntValue(LhScheduleParamConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT,
                     LhScheduleConstant.DRY_ICE_AFTERNOON_SHIFT_LIMIT);
             return dryIceAfternoonCountMap.getOrDefault(dateKey, 0) < afternoonLimit;
@@ -295,12 +302,41 @@ public class LhCleaningScheduleService {
         }
         if (CleaningTypeEnum.DRY_ICE.getCode().equals(cleanType)) {
             increaseCount(dryIceDailyCountMap, dateKey);
-            if (LhScheduleTimeUtil.isMorningShift(context, cleanStartTime)) {
+            String dryIceShiftBucket = resolveDryIceShiftBucket(
+                    context, cleanStartTime, resolveCleanDurationHours(context, cleanType));
+            if (StringUtils.equals(DRY_ICE_SHIFT_MORNING, dryIceShiftBucket)) {
                 increaseCount(dryIceMorningCountMap, dateKey);
-            } else if (LhScheduleTimeUtil.isAfternoonShift(context, cleanStartTime)) {
+            } else if (StringUtils.equals(DRY_ICE_SHIFT_AFTERNOON, dryIceShiftBucket)) {
                 increaseCount(dryIceAfternoonCountMap, dateKey);
             }
         }
+    }
+
+    /**
+     * 解析干冰清洗应占用的班次额度。
+     * <p>若顺延后的干冰窗口跨入中班，则中班额度应优先被占用，避免同日中班实际排入多台。</p>
+     *
+     * @param context 排程上下文
+     * @param cleanStartTime 清洗开始时间
+     * @param cleanDurationHours 清洗时长（小时）
+     * @return MORNING/AFTERNOON；无法归属时返回 null
+     */
+    private String resolveDryIceShiftBucket(LhScheduleContext context, Date cleanStartTime, int cleanDurationHours) {
+        if (Objects.isNull(context) || Objects.isNull(cleanStartTime) || cleanDurationHours <= 0) {
+            return null;
+        }
+        Date afternoonShiftStart = LhScheduleTimeUtil.getAfternoonShiftStart(context, cleanStartTime);
+        Date cleanEndTime = LhScheduleTimeUtil.addHours(cleanStartTime, cleanDurationHours);
+        if (cleanStartTime.before(afternoonShiftStart) && cleanEndTime.after(afternoonShiftStart)) {
+            return DRY_ICE_SHIFT_AFTERNOON;
+        }
+        if (LhScheduleTimeUtil.isMorningShift(context, cleanStartTime)) {
+            return DRY_ICE_SHIFT_MORNING;
+        }
+        if (LhScheduleTimeUtil.isAfternoonShift(context, cleanStartTime)) {
+            return DRY_ICE_SHIFT_AFTERNOON;
+        }
+        return null;
     }
 
     private void increaseCount(Map<String, Integer> countMap, String dateKey) {
