@@ -11,6 +11,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -100,6 +101,16 @@ public class LhCleaningScheduleService {
                                                             Map<String, Integer> dryIceAfternoonCountMap,
                                                             Map<String, Integer> sandBlastDailyCountMap) {
         if (!isValidCleaningPlan(cleaningPlan, cleaningPlan != null ? cleaningPlan.getCleanType() : null)) {
+            return null;
+        }
+        // 机台当前在机物料近收尾（剩余天数 <= 阈值），跳过清洗避免无效停机
+        String machineMaterial = resolveMachineMaterial(context, cleaningPlan.getLhCode());
+        if (isMachineEndingSoon(context, cleaningPlan, machineMaterial)) {
+            log.info("机台当前物料近收尾，跳过清洗, 机台: {}, 物料: {}, 清洗类型: {}, 清洗时间: {}",
+                    cleaningPlan.getLhCode(),
+                    StringUtils.isEmpty(machineMaterial) ? "N/A" : machineMaterial,
+                    cleaningPlan.getCleanType(),
+                    LhScheduleTimeUtil.formatDateTime(cleaningPlan.getCleanTime()));
             return null;
         }
         String cleanType = cleaningPlan.getCleanType();
@@ -609,5 +620,107 @@ public class LhCleaningScheduleService {
             return current;
         }
         return candidate.after(current) ? candidate : current;
+    }
+
+    /**
+     * 判断机台当前在机物料是否近收尾，近收尾时跳过清洗避免无效停机。
+     * <p>计算口径与收尾判定策略一致：剩余排产天数 = ceil(月计划余量 / 日硫化量)</p>
+     *
+     * @param context        排程上下文
+     * @param cleaningPlan   清洗计划
+     * @param machineMaterial 机台当前在机物料编码（由调用方提前查询，避免重复遍历 onlineInfoMap）
+     * @return true-近收尾应跳过清洗；false-允许清洗
+     * @author APS
+     * @since 2026-05-09
+     */
+    private boolean isMachineEndingSoon(LhScheduleContext context, LhMouldCleanPlan cleaningPlan,
+                                        String machineMaterial) {
+        if (context == null || cleaningPlan == null || StringUtils.isEmpty(cleaningPlan.getLhCode())) {
+            return false;
+        }
+        int threshold = context.getParamIntValue(LhScheduleParamConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD,
+                LhScheduleConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD);
+        // 阈值为 0 时关闭此特性
+        if (threshold <= 0) {
+            return false;
+        }
+        if (StringUtils.isEmpty(machineMaterial)) {
+            return false;
+        }
+        int remainingDays = resolveEndingRemainingDays(context, machineMaterial);
+        return remainingDays >= 0 && remainingDays <= threshold;
+    }
+
+    /**
+     * 计算机台当前在机物料的剩余排产天数。
+     * <p>按 月计划余量 / 日硫化量 向上取整，与收尾判定策略规则2口径一致。</p>
+     * <p>余量取值：优先使用 differenceQty（月计划定稿中"差异量/未排产数量"），
+     * 该字段由月计划流程写入，与 ScheduleAdjustHandler 中 surplusQty = monthPlanQty - finishedQty
+     * 语义等价；differenceQty 缺失时回退到 totalQty 作为保守估计。</p>
+     *
+     * @param context      排程上下文
+     * @param materialCode 物料编码
+     * @return 剩余排产天数；-1 表示无法判定（无月计划/日产能为0等）
+     * @author APS
+     * @since 2026-05-09
+     */
+    private int resolveEndingRemainingDays(LhScheduleContext context, String materialCode) {
+        if (context == null || StringUtils.isEmpty(materialCode)) {
+            return -1;
+        }
+        List<FactoryMonthPlanProductionFinalResult> monthPlanList = context.getMonthPlanList();
+        if (CollectionUtils.isEmpty(monthPlanList)) {
+            return -1;
+        }
+        FactoryMonthPlanProductionFinalResult matchedPlan = null;
+        for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
+            if (plan != null && StringUtils.equals(materialCode, plan.getMaterialCode())) {
+                matchedPlan = plan;
+                break;
+            }
+        }
+        if (matchedPlan == null) {
+            return -1;
+        }
+        // 余量优先使用 differenceQty（未排产数量），与 ScheduleAdjustHandler 中 surplusQty 语义等价；
+        // differenceQty 缺失时回退到 totalQty 作为保守估计
+        int remainingQty = matchedPlan.getDifferenceQty() != null
+                ? matchedPlan.getDifferenceQty() : 0;
+        if (remainingQty <= 0 && matchedPlan.getTotalQty() != null) {
+            remainingQty = Math.max(matchedPlan.getTotalQty(), 0);
+        }
+        if (remainingQty <= 0) {
+            return 0;
+        }
+        int dailyCapacity = matchedPlan.getDayVulcanizationQty() != null
+                ? matchedPlan.getDayVulcanizationQty() : 0;
+        if (dailyCapacity <= 0) {
+            return -1;
+        }
+        return (int) Math.ceil((double) remainingQty / dailyCapacity);
+    }
+
+    /**
+     * 从 MES 在机信息中获取机台当前物料编码。
+     *
+     * @param context     排程上下文
+     * @param machineCode 机台编码
+     * @return 物料编码；无在机物料时返回 null
+     * @author APS
+     * @since 2026-05-09
+     */
+    private String resolveMachineMaterial(LhScheduleContext context, String machineCode) {
+        if (context == null || StringUtils.isEmpty(machineCode)) {
+            return null;
+        }
+        Map<String, LhMachineOnlineInfo> onlineInfoMap = context.getMachineOnlineInfoMap();
+        if (CollectionUtils.isEmpty(onlineInfoMap)) {
+            return null;
+        }
+        LhMachineOnlineInfo onlineInfo = onlineInfoMap.get(machineCode);
+        if (onlineInfo == null || StringUtils.isEmpty(onlineInfo.getMaterialCode())) {
+            return null;
+        }
+        return onlineInfo.getMaterialCode();
     }
 }

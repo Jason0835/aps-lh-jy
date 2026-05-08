@@ -371,6 +371,17 @@ public class LhScheduleConfig {
                 LhScheduleConstant.MOULD_CLEANING_ADVANCE_DAYS));
     }
 
+    /**
+     * 获取清洗跳过近收尾天数阈值。
+     * <p>机台当前物料剩余排产天数 <= 该阈值时跳过干冰/喷砂清洗，设为 0 关闭此特性。</p>
+     *
+     * @return 阈值天数（最小 0）
+     */
+    public int getCleaningSkipEndingDayThreshold() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD,
+                LhScheduleConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD));
+    }
+
     public int getShutdownDayMinus3Rate() {
         return getParamIntValue(LhScheduleParamConstant.SHUTDOWN_DAY_MINUS_3_RATE, LhScheduleConstant.SHUTDOWN_DAY_MINUS_3_RATE);
     }

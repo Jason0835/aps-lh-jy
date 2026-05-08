@@ -130,6 +130,8 @@ public final class LhScheduleParamConstant {
     public static final String ENABLE_SPECIFY_MACHINE_RULE = "ENABLE_SPECIFY_MACHINE_RULE";
     /** 模具清洗提前天数 */
     public static final String MOULD_CLEANING_ADVANCE_DAYS = "MOULD_CLEANING_ADVANCE_DAYS";
+    /** 清洗跳过近收尾天数阈值（机台当前物料剩余天数 <= 该值时跳过清洗） */
+    public static final String CLEANING_SKIP_ENDING_DAY_THRESHOLD = "CLEANING_SKIP_ENDING_DAY_THRESHOLD";
     /** 胶囊预警次数 */
     public static final String CAPSULE_WARNING_COUNT = "CAPSULE_WARNING_COUNT";
     /** 胶囊强制下机次数 */

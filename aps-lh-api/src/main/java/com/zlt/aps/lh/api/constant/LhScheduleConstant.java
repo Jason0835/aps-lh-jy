@@ -210,6 +210,9 @@ public final class LhScheduleConstant {
     /** 模具清洗提前天数 */
     public static final int MOULD_CLEANING_ADVANCE_DAYS = 2;
 
+    /** 清洗跳过近收尾天数阈值（机台当前物料剩余天数 <= 该值时跳过清洗） */
+    public static final int CLEANING_SKIP_ENDING_DAY_THRESHOLD = 2;
+
     // ======================== 胶囊相关 ========================
 
     /** 胶囊预警次数 */
