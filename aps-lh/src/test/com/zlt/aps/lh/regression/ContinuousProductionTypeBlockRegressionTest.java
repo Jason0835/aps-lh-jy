@@ -367,7 +367,7 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
-    void scheduleTypeBlockChange_shouldConsumeSharedMouldChangeQuota() {
+    void scheduleTypeBlockChange_shouldNotConsumeMouldChangeQuota() {
         LhScheduleContext context = newContext();
         context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
         context.getContinuousSkuList().add(buildContinuousSku("MAT-C1", "M1", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 1));
@@ -384,8 +384,32 @@ class ContinuousProductionTypeBlockRegressionTest {
         strategy.scheduleContinuousEnding(context);
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
-        assertArrayEquals(new int[]{1, 0}, context.getDailyMouldChangeCountMap().get("2026-04-18"),
-                "换活字块成功后应占用与新增换模共享的当日切换配额");
+        assertArrayEquals(new int[]{0, 0}, context.getDailyMouldChangeCountMap()
+                        .getOrDefault("2026-04-18", new int[]{0, 0}),
+                "换活字块不应占用新增换模的早中班配额");
+    }
+
+    @Test
+    void scheduleTypeBlockChange_shouldKeepMorningQuotaForFollowingNewSpecMouldChange() {
+        LhScheduleContext context = newContext();
+        context.getDailyMouldChangeCountMap().put("2026-04-18", new int[]{5, 0});
+        context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
+        context.getContinuousSkuList().add(buildContinuousSku("MAT-C1", "M1", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 1));
+        context.getNewSpecSkuList().add(buildNewSku("MAT-T1", "EMB-1", "STRUCT-B", "SPEC-A", "PAT-B", 4));
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO sku = invocation.getArgument(1);
+            return sku != null && "MAT-C1".equals(sku.getMaterialCode());
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertArrayEquals(new int[]{5, 0}, context.getDailyMouldChangeCountMap().get("2026-04-18"),
+                "换活字块完成后，不应挤占后续新增换模的早班配额");
     }
 
     @Test

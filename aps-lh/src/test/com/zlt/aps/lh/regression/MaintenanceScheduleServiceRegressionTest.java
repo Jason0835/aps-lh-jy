@@ -29,6 +29,7 @@ class MaintenanceScheduleServiceRegressionTest {
     void tryAttachMaintenanceAfterFirstEnding_shouldCreateFixedMorningWindowWhenDueSoon() {
         LhScheduleContext context = buildContext(date(2026, 4, 20));
         context.getMaintenancePlanMap().put("K1001", buildPrecisionPlan("K1001", date(2026, 5, 10), 20));
+        context.getMachineOnlineInfoMap().put("K1001", buildOnlineInfo("K1001", date(2026, 3, 25)));
         MachineScheduleDTO machine = buildMachine("K1001");
 
         boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
@@ -44,18 +45,19 @@ class MaintenanceScheduleServiceRegressionTest {
 
     @Test
     void tryAttachMaintenanceAfterFirstEnding_shouldDelayWhenSundayInventoryAndHolidayBeforeDaysBlocked() {
-        LhScheduleContext context = buildContext(date(2026, 5, 31));
-        context.getMaintenancePlanMap().put("K1001", buildPrecisionPlan("K1001", date(2026, 6, 10), 10));
-        context.getWorkCalendarList().add(buildHoliday(date(2026, 6, 2)));
+        LhScheduleContext context = buildContext(date(2026, 5, 3));
+        context.getMaintenancePlanMap().put("K1001", buildPrecisionPlan("K1001", date(2026, 5, 13), 10));
+        context.getMachineOnlineInfoMap().put("K1001", buildOnlineInfo("K1001", date(2026, 4, 5)));
+        context.getWorkCalendarList().add(buildHoliday(date(2026, 5, 5)));
         MachineScheduleDTO machine = buildMachine("K1001");
 
         boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
-                context, machine, dateTime(2026, 5, 31, 9, 0));
+                context, machine, dateTime(2026, 5, 3, 9, 0));
 
         assertTrue(scheduled, "保养日期应向后顺延到满足约束的日期");
         MachineMaintenanceWindowDTO window = machine.getMaintenanceWindowList().get(0);
-        assertEquals(dateTime(2026, 6, 3, 8, 0), window.getMaintenanceStartTime());
-        assertEquals(dateTime(2026, 6, 3, 15, 0), window.getMaintenanceEndTime());
+        assertEquals(dateTime(2026, 5, 6, 8, 0), window.getMaintenanceStartTime());
+        assertEquals(dateTime(2026, 5, 6, 15, 0), window.getMaintenanceEndTime());
     }
 
     @Test
@@ -80,6 +82,7 @@ class MaintenanceScheduleServiceRegressionTest {
     void tryAttachMaintenanceAfterFirstEnding_shouldUseDaysToDueWhenDueDateMissing() {
         LhScheduleContext context = buildContext(date(2026, 4, 27));
         context.getMaintenancePlanMap().put("K2025", buildPrecisionPlan("K2025", null, 18));
+        context.getMachineOnlineInfoMap().put("K2025", buildOnlineInfo("K2025", date(2026, 3, 28)));
         MachineScheduleDTO machine = buildMachine("K2025");
 
         boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
@@ -90,6 +93,34 @@ class MaintenanceScheduleServiceRegressionTest {
         MachineMaintenanceWindowDTO window = machine.getMaintenanceWindowList().get(0);
         assertEquals(dateTime(2026, 4, 27, 8, 0), window.getMaintenanceStartTime());
         assertEquals(dateTime(2026, 4, 27, 15, 0), window.getMaintenanceEndTime());
+    }
+
+    @Test
+    void tryAttachMaintenanceAfterFirstEnding_shouldSkipIdleMachineWithoutRecentOnlineRecord() {
+        LhScheduleContext context = buildContext(date(2026, 5, 3));
+        context.getMaintenancePlanMap().put("K1105", buildPrecisionPlan("K1105", null, 5));
+        MachineScheduleDTO machine = buildMachine("K1105");
+
+        boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
+                context, machine, dateTime(2026, 5, 3, 6, 0));
+
+        assertTrue(!scheduled, "一个月内无 MES 在机记录且当前无在机物料时，不应提前触发首个规格收尾后的精度计划");
+        assertTrue(machine.getMaintenanceWindowList().isEmpty(), "未满足首个规格收尾条件时，不应写入保养窗口");
+    }
+
+    @Test
+    void tryAttachMaintenanceAfterFirstEnding_shouldSkipMachineWithOnlyCurrentMaterialButNoRecentMesOnline() {
+        LhScheduleContext context = buildContext(date(2026, 5, 3));
+        context.getMaintenancePlanMap().put("K1105", buildPrecisionPlan("K1105", null, 5));
+        context.getMachineOnlineInfoMap().put("K1105", buildOnlineInfo("K1105", date(2026, 3, 1)));
+        MachineScheduleDTO machine = buildMachine("K1105");
+        machine.setCurrentMaterialCode("3302002391");
+
+        boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
+                context, machine, dateTime(2026, 5, 3, 6, 0));
+
+        assertTrue(!scheduled, "仅有运行态当前物料、但近30天无MES在机记录时，不应提前触发首个规格收尾后的精度计划");
+        assertTrue(machine.getMaintenanceWindowList().isEmpty(), "近30天无MES在机记录时，不应写入保养窗口");
     }
 
     private static LhScheduleContext buildContext(Date scheduleDate) {
@@ -124,6 +155,14 @@ class MaintenanceScheduleServiceRegressionTest {
         plan.setDaysToDue(daysToDue);
         plan.setCompletionStatus("0");
         return plan;
+    }
+
+    private static LhMachineOnlineInfo buildOnlineInfo(String machineCode, Date onlineDate) {
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode(machineCode);
+        onlineInfo.setOnlineDate(onlineDate);
+        onlineInfo.setMaterialCode("MAT-ONLINE");
+        return onlineInfo;
     }
 
     private static MdmWorkCalendar buildHoliday(Date productionDate) {

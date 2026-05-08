@@ -53,7 +53,13 @@ public class LhMaintenanceScheduleService {
             return false;
         }
         String lookupMachineCode = LhSingleControlMachineUtil.resolveLookupMachineCode(context, machine.getMachineCode());
+        if (!hasRecentOnlineRecord(context, lookupMachineCode)) {
+            return false;
+        }
         LhPrecisionPlan plan = context.getMaintenancePlanMap().get(lookupMachineCode);
+        if (!isPlanUncompleted(plan)) {
+            return false;
+        }
         if (!isPlanDueSoon(context, plan)) {
             return false;
         }
@@ -272,6 +278,33 @@ public class LhMaintenanceScheduleService {
     }
 
     /**
+     * 判断机台是否满足“首个规格收尾后”触发保养的基本前提。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param lookupMachineCode 查询机台编码
+     * @return true-满足触发前提；false-不满足
+     */
+    private boolean hasRecentOnlineRecord(LhScheduleContext context, String lookupMachineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(lookupMachineCode)
+                || Objects.isNull(context.getScheduleDate())) {
+            return false;
+        }
+        LhMachineOnlineInfo onlineInfo = context.getMachineOnlineInfoMap().get(lookupMachineCode);
+        if (Objects.isNull(onlineInfo)
+                || Objects.isNull(onlineInfo.getOnlineDate())
+                || (StringUtils.isEmpty(onlineInfo.getMaterialCode())
+                && StringUtils.isEmpty(onlineInfo.getMesMaterialCode()))) {
+            return false;
+        }
+        // MES在机信息中本月有该机台记录时，不触发首个规格收尾后保养
+        if (sameMonth(onlineInfo.getOnlineDate(), context.getScheduleDate())) {
+            return false;
+        }
+        return diffDays(onlineInfo.getOnlineDate(), context.getScheduleDate()) <= LONG_ONLINE_DAYS;
+    }
+
+    /**
      * 解析距离到期天数。
      *
      * @param plan 精度保养计划
@@ -282,6 +315,16 @@ public class LhMaintenanceScheduleService {
             return null;
         }
         return plan.getDaysToDue();
+    }
+
+    /**
+     * 判断精度保养计划是否未完成。
+     *
+     * @param plan 精度保养计划
+     * @return true-未完成；false-已完成或计划缺失
+     */
+    private boolean isPlanUncompleted(LhPrecisionPlan plan) {
+        return Objects.nonNull(plan) && "0".equals(plan.getCompletionStatus());
     }
 
     private boolean isHolidayOrHolidayBeforeDay(LhScheduleContext context, Date targetDate) {
@@ -363,6 +406,18 @@ public class LhMaintenanceScheduleService {
     private boolean isInventoryDayAllowed(LhScheduleContext context) {
         return getParamInt(context, LhScheduleParamConstant.ALLOW_MAINTENANCE_ON_INVENTORY_DAY,
                 LhScheduleConstant.ALLOW_MAINTENANCE_ON_INVENTORY_DAY) == ENABLED;
+    }
+
+    private boolean sameMonth(Date left, Date right) {
+        if (Objects.isNull(left) || Objects.isNull(right)) {
+            return false;
+        }
+        Calendar cal1 = Calendar.getInstance();
+        cal1.setTime(left);
+        Calendar cal2 = Calendar.getInstance();
+        cal2.setTime(right);
+        return cal1.get(Calendar.YEAR) == cal2.get(Calendar.YEAR)
+                && cal1.get(Calendar.MONTH) == cal2.get(Calendar.MONTH);
     }
 
     private boolean isSunday(Date date) {

@@ -449,6 +449,35 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldNotSkipTrialSkuWhenTargetSundayButWindowStartsOnWorkday() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        Date targetDate = dateTime(2026, 5, 3, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(targetDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001575");
+        sku.setTrial(true);
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = buildMachine("K1501L", dateTime(2026, 5, 1, 6, 0));
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "目标日为周日但窗口起点仍有可排工作日时，试制SKU不应在进入选机前被整单拦截");
+        assertEquals(0, context.getUnscheduledResultList().size());
+        assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode());
+    }
+
+    @Test
     void scheduleNewSpecs_shouldIgnoreSandBlastDelayAndOnlyKeepMouldChangeDuration() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

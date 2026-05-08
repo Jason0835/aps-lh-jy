@@ -933,7 +933,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                       Date switchStartTime,
                                                       List<LhShiftConfigVO> shifts) {
         boolean success = appendFollowUpResult(context, machine, sku, startTime, switchStartTime, shifts);
-        if (!success && switchStartTime != null) {
+        if (switchStartTime != null) {
+            // 换活字块仍要遵守禁止时段和停机顺延，但不再占用新增换模早/中班配额。
             getMouldChangeBalanceStrategy().rollbackMouldChange(context, switchStartTime);
         }
         return success;

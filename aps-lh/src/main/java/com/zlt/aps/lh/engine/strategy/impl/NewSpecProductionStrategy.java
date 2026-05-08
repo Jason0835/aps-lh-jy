@@ -1047,18 +1047,36 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (sku == null || !sku.isTrial()) {
             return false;
         }
-        Date targetDate = context.getScheduleTargetDate() != null
-                ? context.getScheduleTargetDate()
-                : context.getScheduleDate();
         ITrialProductionStrategy strategy = getTrialProductionStrategy();
-        if (!strategy.canScheduleTrialSkuOnDate(context, sku, targetDate)) {
-            log.info("试制量试SKU当日不排产, materialCode: {}, 日期: {}",
-                    sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(targetDate));
-            return true;
+        Date firstBlockedDate = null;
+        boolean hasSchedulableBusinessDay = false;
+        Set<String> checkedDateSet = new HashSet<>(8);
+        for (LhShiftConfigVO shift : LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate())) {
+            if (shift == null || shift.getWorkDate() == null) {
+                continue;
+            }
+            String workDateKey = LhScheduleTimeUtil.formatDate(shift.getWorkDate());
+            if (!checkedDateSet.add(workDateKey)) {
+                continue;
+            }
+            Date workDate = shift.getWorkDate();
+            if (!strategy.canScheduleTrialSkuOnDate(context, sku, workDate)) {
+                if (firstBlockedDate == null) {
+                    firstBlockedDate = workDate;
+                }
+                continue;
+            }
+            if (strategy.isDailyTrialLimitReached(context, workDate, sku.getMaterialCode())) {
+                continue;
+            }
+            hasSchedulableBusinessDay = true;
+            break;
         }
-        if (strategy.isDailyTrialLimitReached(context, targetDate, sku.getMaterialCode())) {
-            log.info("试制量试SKU达到每日不同物料数限制, materialCode: {}, 日期: {}",
-                    sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(targetDate));
+        if (!hasSchedulableBusinessDay) {
+            Date logDate = firstBlockedDate != null ? firstBlockedDate
+                    : (context.getScheduleDate() != null ? context.getScheduleDate() : context.getScheduleTargetDate());
+            log.info("试制量试SKU排程窗口内无可排业务日, materialCode: {}, 日期: {}",
+                    sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(logDate));
             return true;
         }
         return false;

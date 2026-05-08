@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.regression;
 
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.EventTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -18,6 +19,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -66,6 +68,16 @@ class PrecisionPlanScheduleDateFillListenerTest {
                 buildResult("M3", "116", null)
         ));
 
+        MachineScheduleDTO m1 = new MachineScheduleDTO();
+        m1.setMachineCode("M1");
+        m1.setHasMaintenancePlan(true);
+        MachineScheduleDTO m2 = new MachineScheduleDTO();
+        m2.setMachineCode("M2");
+        m2.setHasMaintenancePlan(true);
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("M1", m1);
+        context.getMachineScheduleMap().put("M2", m2);
+
         when(lhPrecisionPlanService.batchFillScheduleDate(anyList())).thenReturn(2);
 
         publisher.publish(ScheduleEvent.completed(context));
@@ -98,6 +110,41 @@ class PrecisionPlanScheduleDateFillListenerTest {
     }
 
     @Test
+    void publish_shouldOnlyFillMachinesWithMaintenancePlan() {
+        ScheduleEventPublisher publisher = new ScheduleEventPublisher();
+        ReflectionTestUtils.setField(publisher, "listeners", Collections.singletonList(listener));
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setBatchNo("LHPC20260507003");
+        context.setFactoryCode("116");
+        Date realScheduleDate = new Date();
+        context.setScheduleResultList(Arrays.asList(
+                buildResult("K1105", "116", realScheduleDate),
+                buildResult("K1113", "116", realScheduleDate)
+        ));
+
+        MachineScheduleDTO k1105 = new MachineScheduleDTO();
+        k1105.setMachineCode("K1105");
+        k1105.setHasMaintenancePlan(false);
+        MachineScheduleDTO k1113 = new MachineScheduleDTO();
+        k1113.setMachineCode("K1113");
+        k1113.setHasMaintenancePlan(true);
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("K1105", k1105);
+        context.getMachineScheduleMap().put("K1113", k1113);
+
+        when(lhPrecisionPlanService.batchFillScheduleDate(anyList())).thenReturn(1);
+
+        publisher.publish(ScheduleEvent.completed(context));
+
+        ArgumentCaptor<List> captor = ArgumentCaptor.forClass(List.class);
+        verify(lhPrecisionPlanService).batchFillScheduleDate(captor.capture());
+        List<Map<String, Object>> fillList = captor.getValue();
+        assertEquals(1, fillList.size());
+        assertEquals("K1113", fillList.get(0).get("machineCode"));
+    }
+
+    @Test
     void publish_shouldNotPropagateExceptionWhenFillServiceFails() {
         ScheduleEventPublisher publisher = new ScheduleEventPublisher();
         ReflectionTestUtils.setField(publisher, "listeners", Collections.singletonList(listener));
@@ -106,6 +153,12 @@ class PrecisionPlanScheduleDateFillListenerTest {
         context.setBatchNo("LHPC20260507004");
         context.setFactoryCode("116");
         context.setScheduleResultList(Collections.singletonList(buildResult("M1", "116", new Date())));
+
+        MachineScheduleDTO m1 = new MachineScheduleDTO();
+        m1.setMachineCode("M1");
+        m1.setHasMaintenancePlan(true);
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("M1", m1);
 
         when(lhPrecisionPlanService.batchFillScheduleDate(anyList())).thenThrow(new RuntimeException("fill failed"));
 

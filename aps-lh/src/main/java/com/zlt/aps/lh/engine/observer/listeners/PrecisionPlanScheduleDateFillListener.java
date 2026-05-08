@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.engine.observer.listeners;
 
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.EventTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -51,7 +52,7 @@ public class PrecisionPlanScheduleDateFillListener implements IScheduleEventList
             return;
         }
 
-        List<Map<String, Object>> fillList = buildFillList(scheduleResults, context.getBatchNo());
+        List<Map<String, Object>> fillList = buildFillList(context, scheduleResults, context.getBatchNo());
         log.info("精度计划排程日期回填准备完成，批次号: {}，工厂: {}，原始结果数: {}，去重后待回填数: {}",
                 context.getBatchNo(), context.getFactoryCode(), scheduleResults.size(), fillList.size());
         if (CollectionUtils.isEmpty(fillList)) {
@@ -75,7 +76,9 @@ public class PrecisionPlanScheduleDateFillListener implements IScheduleEventList
      * @param batchNo 批次号
      * @return 回填入参列表
      */
-    private List<Map<String, Object>> buildFillList(List<LhScheduleResult> scheduleResults, String batchNo) {
+    private List<Map<String, Object>> buildFillList(LhScheduleContext context,
+                                                    List<LhScheduleResult> scheduleResults,
+                                                    String batchNo) {
         Map<String, Map<String, Object>> distinctMap = new LinkedHashMap<>(scheduleResults.size());
         for (LhScheduleResult scheduleResult : scheduleResults) {
             if (Objects.isNull(scheduleResult)) {
@@ -90,6 +93,11 @@ public class PrecisionPlanScheduleDateFillListener implements IScheduleEventList
                 log.warn("精度计划排程日期回填跳过无效结果，批次号: {}，机台: {}，工厂: {}，实际排程日期: {}，物料编码: {}",
                         batchNo, machineCode, factoryCode, LhScheduleTimeUtil.formatDate(realScheduleDate),
                         scheduleResult.getMaterialCode());
+                continue;
+            }
+            if (!hasMaintenancePlan(context, machineCode)) {
+                log.debug("精度计划排程日期回填跳过未挂保养窗口机台，批次号: {}，机台: {}，物料编码: {}",
+                        batchNo, machineCode, scheduleResult.getMaterialCode());
                 continue;
             }
 
@@ -115,5 +123,23 @@ public class PrecisionPlanScheduleDateFillListener implements IScheduleEventList
      */
     private String buildDistinctKey(String machineCode, String factoryCode, Date realScheduleDate) {
         return machineCode + "_" + factoryCode + "_" + LhScheduleTimeUtil.formatDate(realScheduleDate);
+    }
+
+    /**
+     * 判断机台在本次排程中是否真实挂载了精度保养窗口。
+     *
+     * @param scheduleResult 排程结果
+     * @param machineCode 机台编码
+     * @return true-已挂保养窗口；false-未挂保养窗口
+     */
+    private boolean hasMaintenancePlan(LhScheduleContext context, String machineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)) {
+            return false;
+        }
+        if (CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
+            return false;
+        }
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        return Objects.nonNull(machine) && machine.isHasMaintenancePlan();
     }
 }
