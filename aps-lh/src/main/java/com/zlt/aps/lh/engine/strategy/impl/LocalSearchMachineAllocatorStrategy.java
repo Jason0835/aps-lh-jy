@@ -342,12 +342,14 @@ public class LocalSearchMachineAllocatorStrategy {
         // 业务口径：换模总时长已包含首检时长，局部搜索与主流程保持一致，不再额外 +FIRST_INSPECTION_HOURS
         Date productionStartTime = inspectionTime;
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+        int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                context, machine, sku.getShiftCapacity());
         Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
                 context,
                 machineCode,
                 productionStartTime,
                 shifts,
-                sku.getShiftCapacity(),
+                runtimeShiftCapacity,
                 sku.getLhTimeSeconds(),
                 machineMouldQty);
         if (firstProductionStartTime == null) {
@@ -409,7 +411,8 @@ public class LocalSearchMachineAllocatorStrategy {
         }
         int lhTimeSeconds = sku.getLhTimeSeconds();
         int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-        int shiftCapacity = sku.getShiftCapacity();
+        int shiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                context, machine, sku.getShiftCapacity());
         int remainingQty = sku.resolveTargetScheduleQty();
         if (lhTimeSeconds <= 0 || remainingQty <= 0) {
             return LocalSearchCapacityEstimate.empty();

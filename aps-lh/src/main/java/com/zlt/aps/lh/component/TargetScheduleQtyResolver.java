@@ -157,7 +157,8 @@ public class TargetScheduleQtyResolver {
                 || CollectionUtils.isEmpty(shifts)) {
             return 0;
         }
-        int shiftCapacity = sku.getShiftCapacity();
+        int shiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                context, machine, sku.getShiftCapacity());
         int lhTimeSeconds = sku.getLhTimeSeconds();
         if (shiftCapacity <= 0 && lhTimeSeconds <= 0) {
             return 0;

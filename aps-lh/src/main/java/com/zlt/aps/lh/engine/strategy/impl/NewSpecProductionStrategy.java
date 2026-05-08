@@ -272,12 +272,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 // 普通换模沿用“总时长已含首检”的旧口径；
                 // 维保重叠时改为“4小时切换 + 1小时首检”的专用口径。
                 int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(candidateMachine);
+                int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                        context, candidateMachine, sku.getShiftCapacity());
                 Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
                         context,
                         machineCode,
                         productionStartTime,
                         shifts,
-                        sku.getShiftCapacity(),
+                        runtimeShiftCapacity,
                         sku.getLhTimeSeconds(),
                         machineMouldQty);
                 if (firstProductionStartTime == null) {
@@ -540,7 +542,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         result.setScheduleDate(context.getScheduleTargetDate());
         result.setLhTime(sku.getLhTimeSeconds());
         result.setMouldQty(mouldQty);
-        result.setSingleMouldShiftQty(SingleMouldShiftQtyUtil.resolveSingleMouldShiftQty(context, sku, mouldQty));
+        int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                context, machine, sku.getShiftCapacity());
+        result.setSingleMouldShiftQty(SingleMouldShiftQtyUtil.resolveSingleMouldShiftQty(
+                context, sku, machine, mouldQty));
         result.setDailyPlanQty(0);
         result.setTotalDailyPlanQty(sku.getMonthPlanQty());
         result.setMouldSurplusQty(sku.getSurplusQty());
@@ -574,7 +579,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         List<MachineMaintenanceWindowDTO> maintenanceWindowList = resolveMachineMaintenanceWindowList(
                 context, result.getLhMachineCode());
         distributeToShifts(context, result, shifts, startTime,
-                sku.getShiftCapacity(), sku.getLhTimeSeconds(), mouldQty, pendingQty, cleaningWindowList,
+                runtimeShiftCapacity, sku.getLhTimeSeconds(), mouldQty, pendingQty, cleaningWindowList,
                 maintenanceWindowList);
         refreshResultSummary(context, result);
         applyCleaningMouldChangeAnalysis(context, result);

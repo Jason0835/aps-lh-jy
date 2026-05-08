@@ -256,6 +256,37 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldUseHalfShiftCapacityForSingleControlSplitMachine() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setPendingQty(100);
+        sku.setDailyPlanQty(100);
+        sku.setTargetScheduleQty(100);
+        sku.setShiftCapacity(35);
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501L");
+        machine.setMachineName("K1501L");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(dateTime(2026, 4, 17, 6, 0));
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "单控拆分机台应正常生成新增排产结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(17, result.getSingleMouldShiftQty().intValue(),
+                "K1501L 这类单控拆分机台应按整机班产均分到单侧，并向下取整");
+        int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
+        assertEquals(17, ShiftFieldUtil.getShiftPlanQty(result, firstPlannedShiftIndex).intValue(),
+                "单控拆分机台首个完整班次的排产量应同步使用折半后的单侧班产");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldIgnoreSandBlastDelayAndOnlyKeepMouldChangeDuration() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

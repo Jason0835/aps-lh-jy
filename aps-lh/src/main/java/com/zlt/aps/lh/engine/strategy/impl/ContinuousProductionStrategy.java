@@ -826,12 +826,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     ? LhScheduleTimeUtil.addHours(inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
                     : inspectionTime;
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+            int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                    context, machine, specifySku.getShiftCapacity());
             Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
                     context,
                     machine.getMachineCode(),
                     productionStartTime,
                     shifts,
-                    specifySku.getShiftCapacity(),
+                    runtimeShiftCapacity,
                     specifySku.getLhTimeSeconds(),
                     machineMouldQty);
             if (firstProductionStartTime == null) {
@@ -913,7 +915,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         result.setScheduleDate(context.getScheduleTargetDate());
         result.setLhTime(sku.getLhTimeSeconds());
         result.setMouldQty(mouldQty);
-        result.setSingleMouldShiftQty(SingleMouldShiftQtyUtil.resolveSingleMouldShiftQty(context, sku, mouldQty));
+        int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                context, machine, sku.getShiftCapacity());
+        result.setSingleMouldShiftQty(SingleMouldShiftQtyUtil.resolveSingleMouldShiftQty(
+                context, sku, machine, mouldQty));
         result.setDailyPlanQty(0);
         result.setTotalDailyPlanQty(sku.getMonthPlanQty());
         result.setMouldSurplusQty(sku.getSurplusQty());
@@ -948,7 +953,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         // 按班次分配计划量
         int remaining = refinedTargetQty;
         distributeToShifts(context, result, shifts, startTime,
-                sku.getShiftCapacity(), sku.getLhTimeSeconds(), mouldQty, remaining, cleaningWindowList,
+                runtimeShiftCapacity, sku.getLhTimeSeconds(), mouldQty, remaining, cleaningWindowList,
                 maintenanceWindowList);
 
         refreshResultSummary(context, result, shifts);

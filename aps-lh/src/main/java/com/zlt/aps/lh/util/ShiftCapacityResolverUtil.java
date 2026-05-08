@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.apache.commons.lang3.StringUtils;
@@ -32,6 +33,8 @@ public final class ShiftCapacityResolverUtil {
     private static final int SECONDS_PER_MINUTE = 60;
     /** 每小时秒数 */
     private static final int SECONDS_PER_HOUR = 3600;
+    /** 单控拆分机台固定按左右两侧拆分班产 */
+    private static final int SINGLE_CONTROL_SPLIT_SIDE_COUNT = 2;
 
     private ShiftCapacityResolverUtil() {
     }
@@ -57,6 +60,29 @@ public final class ShiftCapacityResolverUtil {
      */
     public static int resolveMachineMouldQty(int maxMoldNum) {
         return maxMoldNum > 0 ? maxMoldNum : DEFAULT_MOULD_QTY;
+    }
+
+    /**
+     * 解析运行态机台班产。
+     * <p>单控基准机台会在运行态拆成左右两台单模机台，SKU主数据班产仍是整机口径，
+     * 因此拆分侧别后需要按左右两侧均分，并向下取整。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 运行态机台
+     * @param shiftCapacity 班产
+     * @return 运行态可用班产
+     */
+    public static int resolveRuntimeShiftCapacity(LhScheduleContext context,
+                                                  MachineScheduleDTO machine,
+                                                  int shiftCapacity) {
+        if (shiftCapacity <= 0
+                || Objects.isNull(context)
+                || Objects.isNull(machine)
+                || StringUtils.isEmpty(machine.getMachineCode())
+                || !LhSingleControlMachineUtil.isSingleControlSplitMachine(context, machine.getMachineCode())) {
+            return shiftCapacity;
+        }
+        return shiftCapacity / SINGLE_CONTROL_SPLIT_SIDE_COUNT;
     }
 
     /**
