@@ -17,6 +17,7 @@ import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.NewSpecFailReasonEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
@@ -188,6 +189,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // 1.1 小规模候选机台场景下，局部搜索仅做评估，不再改写当前SKU基础首选机台
             MachineScheduleDTO localSearchSuggestedMachine = selectPreferredMachineByLocalSearch(
                     context, sku, candidates, shifts, machineMatch, mouldChangeBalance, inspectionBalance, capacityCalculate);
+            MachineScheduleDTO preferredTrialMachine = resolvePreferredTrialMachine(context, sku, candidates);
 
             // 2. 基于策略选择最优机台，失败后排除并继续选择下一台
             boolean scheduled = false;
@@ -197,8 +199,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             MachineScheduleDTO finalMachine = null;
             Date finalProductionStartTime = null;
             while (true) {
-                MachineScheduleDTO candidateMachine = machineMatch.selectBestMachine(
-                        context, sku, candidates, excludedMachineCodes);
+                MachineScheduleDTO candidateMachine = selectCandidateMachine(
+                        context, sku, candidates, excludedMachineCodes, machineMatch, preferredTrialMachine);
                 if (candidateMachine == null) {
                     break;
                 }
@@ -414,6 +416,53 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         return localSearchMachineAllocator.selectBestMachine(
                 context, windowSkuList, candidates, shifts, machineMatch, mouldChangeBalance, inspectionBalance, capacityCalculate);
+    }
+
+    private MachineScheduleDTO selectCandidateMachine(LhScheduleContext context,
+                                                      SkuScheduleDTO sku,
+                                                      List<MachineScheduleDTO> candidates,
+                                                      Set<String> excludedMachineCodes,
+                                                      IMachineMatchStrategy machineMatch,
+                                                      MachineScheduleDTO preferredTrialMachine) {
+        if (preferredTrialMachine != null
+                && !excludedMachineCodes.contains(preferredTrialMachine.getMachineCode())) {
+            log.info("新增排产优先尝试试制/小批量预选机台, materialCode: {}, machineCode: {}",
+                    sku.getMaterialCode(), preferredTrialMachine.getMachineCode());
+            return preferredTrialMachine;
+        }
+        return machineMatch.selectBestMachine(context, sku, candidates, excludedMachineCodes);
+    }
+
+    private MachineScheduleDTO resolvePreferredTrialMachine(LhScheduleContext context,
+                                                            SkuScheduleDTO sku,
+                                                            List<MachineScheduleDTO> candidates) {
+        if (sku == null || CollectionUtils.isEmpty(candidates)) {
+            return null;
+        }
+        if (!shouldPreferTrialMachine(sku)) {
+            return null;
+        }
+        String preferredMachineCode = getTrialProductionStrategy().matchTrialMachine(context, sku);
+        if (StringUtils.isEmpty(preferredMachineCode)) {
+            return null;
+        }
+        for (MachineScheduleDTO candidate : candidates) {
+            if (candidate != null && StringUtils.equals(preferredMachineCode, candidate.getMachineCode())) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    private boolean shouldPreferTrialMachine(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return false;
+        }
+        if (sku.isTrial() || sku.isSmallBatchValidation()) {
+            return true;
+        }
+        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage());
     }
 
     /**

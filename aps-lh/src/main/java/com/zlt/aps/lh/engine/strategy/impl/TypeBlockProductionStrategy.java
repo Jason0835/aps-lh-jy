@@ -140,7 +140,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 break;
             }
             activeMachines.sort((leftMachine, rightMachine) -> compareTypeBlockMachine(
-                    leftMachine, rightMachine, machineTriggerSourceMap));
+                    context, leftMachine, rightMachine, machineTriggerSourceMap));
 
             boolean scheduledInCurrentRound = false;
             for (MachineScheduleDTO machine : activeMachines) {
@@ -268,7 +268,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      * @param machineTriggerSourceMap 机台触发来源
      * @return 排序结果
      */
-    private int compareTypeBlockMachine(MachineScheduleDTO leftMachine,
+    private int compareTypeBlockMachine(LhScheduleContext context,
+                                        MachineScheduleDTO leftMachine,
                                         MachineScheduleDTO rightMachine,
                                         Map<String, String> machineTriggerSourceMap) {
         String leftTriggerSource = machineTriggerSourceMap.get(leftMachine.getMachineCode());
@@ -279,10 +280,24 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (triggerOrderCompare != 0) {
             return triggerOrderCompare;
         }
+        Date leftReadyTime = resolveTypeBlockSortReadyTime(context, leftMachine);
+        Date rightReadyTime = resolveTypeBlockSortReadyTime(context, rightMachine);
+        if (leftReadyTime == null && rightReadyTime != null) {
+            return 1;
+        }
+        if (leftReadyTime != null && rightReadyTime == null) {
+            return -1;
+        }
+        if (leftReadyTime != null && rightReadyTime != null) {
+            int readyTimeCompare = leftReadyTime.compareTo(rightReadyTime);
+            if (readyTimeCompare != 0) {
+                return readyTimeCompare;
+            }
+        }
         Date leftEndTime = leftMachine.getEstimatedEndTime();
         Date rightEndTime = rightMachine.getEstimatedEndTime();
         if (leftEndTime == null && rightEndTime == null) {
-            return 0;
+            return compareMachineIdentity(leftMachine, rightMachine);
         }
         if (leftEndTime == null) {
             return 1;
@@ -290,7 +305,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (rightEndTime == null) {
             return -1;
         }
-        return leftEndTime.compareTo(rightEndTime);
+        int endTimeCompare = leftEndTime.compareTo(rightEndTime);
+        if (endTimeCompare != 0) {
+            return endTimeCompare;
+        }
+        return compareMachineIdentity(leftMachine, rightMachine);
     }
 
     /**
@@ -682,6 +701,13 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 machine, switchStartTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
     }
 
+    private Date resolveTypeBlockSortReadyTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (machine == null || machine.getEstimatedEndTime() == null) {
+            return null;
+        }
+        return resolveTypeBlockSwitchReadyTime(context, machine, machine.getEstimatedEndTime());
+    }
+
     private int resolveTypeBlockSwitchDurationHours(LhScheduleContext context,
                                                     MachineScheduleDTO machine,
                                                     Date estimatedEndTime) {
@@ -747,6 +773,15 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         log.warn("换活字块切换起点达到最大尝试次数, 机台: {}, 原始时间: {}",
                 machineCode, LhScheduleTimeUtil.formatDateTime(endingTime));
         return adjustedTime;
+    }
+
+    private int compareMachineIdentity(MachineScheduleDTO leftMachine, MachineScheduleDTO rightMachine) {
+        int machineOrderCompare = Integer.compare(leftMachine.getMachineOrder(), rightMachine.getMachineOrder());
+        if (machineOrderCompare != 0) {
+            return machineOrderCompare;
+        }
+        return Comparator.nullsLast(String::compareTo)
+                .compare(leftMachine.getMachineCode(), rightMachine.getMachineCode());
     }
 
     /**
@@ -1084,7 +1119,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                             + ", 当前物料=" + PriorityTraceLogHelper.safeText(machine.getCurrentMaterialCode())
                             + ", 基准时间=" + PriorityTraceLogHelper.formatDateTime(estimatedEndTime)
                             + ", 实际切换起点=" + PriorityTraceLogHelper.formatDateTime(
-                            resolveAllowedSwitchStartTime(context, machine.getMachineCode(), estimatedEndTime)));
+                            resolveTypeBlockSortReadyTime(context, machine)));
         }
         String detail = detailBuilder.toString().trim();
         log.info("{}\n{}", title, detail);

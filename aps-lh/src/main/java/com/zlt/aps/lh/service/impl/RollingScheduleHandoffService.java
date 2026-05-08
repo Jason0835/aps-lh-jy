@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
@@ -101,6 +102,7 @@ public class RollingScheduleHandoffService {
 
         // Step5: 继承重叠窗口内的模具交替计划
         inheritMouldChangePlans(context, appendStartTime);
+        backfillInheritedMouldChangeQuota(context);
         // Step6: 回写机台继承终态，空闲机台推进到追加起点
         syncMachineState(context, inheritedResults, appendStartTime);
         context.setRollingScheduleHandoff(true);
@@ -274,6 +276,38 @@ public class RollingScheduleHandoffService {
             inheritedPlan.setUpdateTime(null);
             context.getMouldChangePlanList().add(inheritedPlan);
         }
+    }
+
+    /**
+     * 将继承换模计划折算到当日早中班配额，避免本批次继续按空白配额分配。
+     *
+     * @param context 排程上下文
+     */
+    private void backfillInheritedMouldChangeQuota(LhScheduleContext context) {
+        if (context == null || CollectionUtils.isEmpty(context.getMouldChangePlanList())) {
+            return;
+        }
+        for (LhMouldChangePlan plan : context.getMouldChangePlanList()) {
+            if (!shouldCountInheritedMouldChangePlan(plan) || plan.getPlanDate() == null) {
+                continue;
+            }
+            String dateKey = LhScheduleTimeUtil.formatDate(plan.getPlanDate());
+            int[] dailyCounts = context.getDailyMouldChangeCountMap()
+                    .computeIfAbsent(dateKey, key -> new int[]{0, 0});
+            if (LhScheduleTimeUtil.isMorningShift(context, plan.getPlanDate())) {
+                dailyCounts[0]++;
+            } else if (LhScheduleTimeUtil.isAfternoonShift(context, plan.getPlanDate())) {
+                dailyCounts[1]++;
+            }
+        }
+    }
+
+    private boolean shouldCountInheritedMouldChangePlan(LhMouldChangePlan plan) {
+        if (plan == null || !Objects.equals(plan.getIsDelete(), NORMAL_DELETE_FLAG)) {
+            return false;
+        }
+        return MouldChangeTypeEnum.REGULAR.getCode().equals(plan.getChangeMouldType())
+                || MouldChangeTypeEnum.TYPE_BLOCK.getCode().equals(plan.getChangeMouldType());
     }
 
     /**

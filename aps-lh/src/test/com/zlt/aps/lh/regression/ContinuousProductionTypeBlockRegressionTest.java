@@ -1256,6 +1256,48 @@ class ContinuousProductionTypeBlockRegressionTest {
         assertTrue(logText.contains("第一层"));
     }
 
+    @Test
+    void scheduleTypeBlockChange_shouldPrioritizeMachineWithEarlierSwitchReadyTime() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine1 = buildMachine("M1", "MAT-C1");
+        MachineScheduleDTO machine2 = buildMachine("M2", "MAT-C2");
+        machine2.setEstimatedEndTime(dateTime(2026, 4, 18, 7, 0, 0));
+        context.getMachineScheduleMap().put("M1", machine1);
+        context.getMachineScheduleMap().put("M2", machine2);
+        context.getContinuousSkuList().add(buildContinuousSku("MAT-C1", "M1", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 1));
+        context.getContinuousSkuList().add(buildContinuousSku("MAT-C2", "M2", "EMB-2", "STRUCT-B", "SPEC-B", "PAT-B", 1));
+        context.getNewSpecSkuList().add(buildNewSku("MAT-T1", "EMB-9", "STRUCT-T", "SPEC-T", "PAT-T", 4));
+        putMaterialInfo(context, "MAT-C1", "共享胎胚", "SPEC-A", "PAT-A", "PAT-A");
+        putMaterialInfo(context, "MAT-C2", "共享胎胚", "SPEC-B", "PAT-B", "PAT-B");
+        putMaterialInfo(context, "MAT-T1", "共享胎胚", "SPEC-T", "PAT-T", "PAT-T");
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-C2", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO sku = invocation.getArgument(1);
+            return sku != null && ("MAT-C1".equals(sku.getMaterialCode()) || "MAT-C2".equals(sku.getMaterialCode()));
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        Date machine1EndTime = context.getScheduleResultList().stream()
+                .filter(result -> "M1".equals(result.getLhMachineCode()))
+                .findFirst()
+                .map(LhScheduleResult::getSpecEndTime)
+                .orElse(null);
+        assertNotNull(machine1EndTime);
+        context.getDevicePlanShutList().add(buildDevicePlanShut(
+                "M1", machine1EndTime, dateTime(2026, 4, 18, 14, 0, 0)));
+
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(3, context.getScheduleResultList().size());
+        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(2);
+        assertEquals("M2", typeBlockResult.getLhMachineCode(),
+                "理论收尾更早但真实切换被停机顺延的机台，不应排在真实可切换更早的机台前面");
+    }
+
     private LhScheduleContext newContext() {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");

@@ -33,6 +33,7 @@ import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -69,6 +70,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
             // S4.6.2 生成模具交替计划
             generateMouldChangePlan(context);
+            validateMouldChangePlanQuota(context);
             validateManualSundaySandBlastThreshold(context);
 
             // S4.6.3 补全工单号和发布状态
@@ -203,6 +205,61 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
         planOrder = appendCleaningMouldChangePlans(context, plans, planOrder, changeResults);
         log.info("生成模具交替计划完成, 共 {} 条", plans.size());
+    }
+
+    /**
+     * 对最终换模计划执行早中班配额校验，避免超限结果落库。
+     *
+     * @param context 排程上下文
+     */
+    private void validateMouldChangePlanQuota(LhScheduleContext context) {
+        if (context == null || CollectionUtils.isEmpty(context.getMouldChangePlanList())) {
+            return;
+        }
+        Map<String, List<String>> morningMachineMap = new LinkedHashMap<>();
+        Map<String, List<String>> afternoonMachineMap = new LinkedHashMap<>();
+        for (LhMouldChangePlan plan : context.getMouldChangePlanList()) {
+            if (!shouldCountMouldChangePlan(plan) || plan.getPlanDate() == null) {
+                continue;
+            }
+            String dateKey = LhScheduleTimeUtil.formatDate(plan.getPlanDate());
+            if (LhScheduleTimeUtil.isMorningShift(context, plan.getPlanDate())) {
+                morningMachineMap.computeIfAbsent(dateKey, key -> new ArrayList<>()).add(plan.getLhMachineCode());
+                continue;
+            }
+            if (LhScheduleTimeUtil.isAfternoonShift(context, plan.getPlanDate())) {
+                afternoonMachineMap.computeIfAbsent(dateKey, key -> new ArrayList<>()).add(plan.getLhMachineCode());
+            }
+        }
+        validateMouldChangeShiftLimit(context, morningMachineMap,
+                LhScheduleTimeUtil.getMorningMouldChangeLimit(context), "早班");
+        validateMouldChangeShiftLimit(context, afternoonMachineMap,
+                LhScheduleTimeUtil.getAfternoonMouldChangeLimit(context), "中班");
+    }
+
+    private void validateMouldChangeShiftLimit(LhScheduleContext context,
+                                               Map<String, List<String>> machineMap,
+                                               int limit,
+                                               String shiftName) {
+        for (Map.Entry<String, List<String>> entry : machineMap.entrySet()) {
+            if (CollectionUtils.isEmpty(entry.getValue()) || entry.getValue().size() <= limit) {
+                continue;
+            }
+            throw new ScheduleException(ScheduleStepEnum.S4_6_RESULT_VALIDATION,
+                    ScheduleErrorCode.RESULT_VALIDATION_FAILED,
+                    context.getFactoryCode(), context.getBatchNo(),
+                    String.format("模具交替计划超限：日期[%s]班次[%s]数量[%d]超出上限[%d]，机台=%s",
+                            entry.getKey(), shiftName, entry.getValue().size(), limit,
+                            String.join(",", entry.getValue())));
+        }
+    }
+
+    private boolean shouldCountMouldChangePlan(LhMouldChangePlan plan) {
+        if (plan == null || !Objects.equals(plan.getIsDelete(), 0)) {
+            return false;
+        }
+        return StringUtils.equals(MouldChangeTypeEnum.REGULAR.getCode(), plan.getChangeMouldType())
+                || StringUtils.equals(MouldChangeTypeEnum.TYPE_BLOCK.getCode(), plan.getChangeMouldType());
     }
 
     /**

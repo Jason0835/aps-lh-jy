@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -17,6 +18,7 @@ import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
+import com.zlt.aps.lh.engine.strategy.ITrialProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultCapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMouldChangeBalanceStrategy;
@@ -37,6 +39,7 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -284,6 +287,165 @@ class NewSpecProductionStrategyRegressionTest {
         int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
         assertEquals(17, ShiftFieldUtil.getShiftPlanQty(result, firstPlannedShiftIndex).intValue(),
                 "单控拆分机台首个完整班次的排产量应同步使用折半后的单侧班产");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldPreferTrialMatchedMachineBeforeGeneralSelection() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, new ITrialProductionStrategy() {
+            @Override
+            public List<SkuScheduleDTO> filterTrialSkus(LhScheduleContext context, List<SkuScheduleDTO> allSkus) {
+                return allSkus;
+            }
+
+            @Override
+            public boolean canScheduleTrialOnDate(LhScheduleContext context, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public boolean canScheduleTrialSkuOnDate(LhScheduleContext context, SkuScheduleDTO trialSku, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate) {
+                return false;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate, String materialCode) {
+                return false;
+            }
+
+            @Override
+            public String matchTrialMachine(LhScheduleContext context, SkuScheduleDTO trialSku) {
+                return "K1501L";
+            }
+        });
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setTrial(true);
+        sku.setMaterialCode("3302001575");
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO normalMachine = new MachineScheduleDTO();
+        normalMachine.setMachineCode("K1401");
+        normalMachine.setMachineName("普通机台");
+        normalMachine.setEstimatedEndTime(dateTime(2026, 4, 17, 6, 0));
+
+        MachineScheduleDTO trialMachine = new MachineScheduleDTO();
+        trialMachine.setMachineCode("K1501L");
+        trialMachine.setMachineName("单控机台");
+        trialMachine.setEstimatedEndTime(dateTime(2026, 4, 17, 6, 0));
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                return Arrays.asList(normalMachine, trialMachine);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (!excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size());
+        assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "试制量试 SKU 命中预选机台时，应先尝试该单控机台，而不是继续按通用顺序抢普通机台");
+        assertFalse(context.getScheduleResultList().get(0).getLhMachineCode().equals("K1401"));
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldPreferTrialMatchedMachineForMassTrialConstructionStage() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, new ITrialProductionStrategy() {
+            @Override
+            public List<SkuScheduleDTO> filterTrialSkus(LhScheduleContext context, List<SkuScheduleDTO> allSkus) {
+                return allSkus;
+            }
+
+            @Override
+            public boolean canScheduleTrialOnDate(LhScheduleContext context, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public boolean canScheduleTrialSkuOnDate(LhScheduleContext context, SkuScheduleDTO trialSku, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate) {
+                return false;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate, String materialCode) {
+                return false;
+            }
+
+            @Override
+            public String matchTrialMachine(LhScheduleContext context, SkuScheduleDTO trialSku) {
+                return "K1501R";
+            }
+        });
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002637");
+        sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO normalMachine = new MachineScheduleDTO();
+        normalMachine.setMachineCode("K1402");
+        normalMachine.setMachineName("普通机台");
+        normalMachine.setEstimatedEndTime(dateTime(2026, 4, 17, 6, 0));
+
+        MachineScheduleDTO trialMachine = new MachineScheduleDTO();
+        trialMachine.setMachineCode("K1501R");
+        trialMachine.setMachineName("单控机台");
+        trialMachine.setEstimatedEndTime(dateTime(2026, 4, 17, 6, 0));
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                return Arrays.asList(normalMachine, trialMachine);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (!excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size());
+        assertEquals("K1501R", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "量试施工阶段 SKU 即使未显式打 isTrial，也应命中试制机台硬优先");
     }
 
     @Test
@@ -1219,6 +1381,13 @@ class NewSpecProductionStrategyRegressionTest {
         Field localSearchField = NewSpecProductionStrategy.class.getDeclaredField("localSearchMachineAllocator");
         localSearchField.setAccessible(true);
         localSearchField.set(strategy, allocator);
+    }
+
+    private void injectTrialProductionStrategy(NewSpecProductionStrategy strategy,
+                                               ITrialProductionStrategy trialProductionStrategy) throws Exception {
+        Field trialStrategyField = NewSpecProductionStrategy.class.getDeclaredField("trialProductionStrategy");
+        trialStrategyField.setAccessible(true);
+        trialStrategyField.set(strategy, trialProductionStrategy);
     }
 
     private int resolveFirstPlannedShiftIndex(LhScheduleResult result) {
