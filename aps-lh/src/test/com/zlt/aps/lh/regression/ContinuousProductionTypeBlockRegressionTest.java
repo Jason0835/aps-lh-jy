@@ -274,6 +274,35 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
+    void scheduleTypeBlockChange_shouldDeferDifferentMouldCandidateToNewSpecStage() {
+        LhScheduleContext context = newContext();
+        context.getMachineScheduleMap().put("K1105", buildMachine("K1105", "3302001585"));
+        context.getContinuousSkuList().add(buildContinuousSku(
+                "3302001585", "K1105", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 1));
+        context.getNewSpecSkuList().add(buildNewSku("3302002654", "EMB-1", "STRUCT-B", "SPEC-A", "PAT-B", 4));
+        putMaterialInfo(context, "3302001585", "胎胚描述-A", "SPEC-A", "PAT-A", "PAT-A");
+        putMaterialInfo(context, "3302002654", "胎胚描述-B", "SPEC-A", "PAT-B", "PAT-B");
+        putMouldRel(context, "3302001585", "MOULD-OLD");
+        putMouldRel(context, "3302002654", "MOULD-NEW");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO sku = invocation.getArgument(1);
+            return sku != null && "3302001585".equals(sku.getMaterialCode());
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "不同模具候选应留给S4.5新增换模主链，S4.4不能直接按换活字块抢跑");
+        assertEquals("3302001585", context.getScheduleResultList().get(0).getMaterialCode());
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertEquals("3302002654", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("3302001585", context.getMachineScheduleMap().get("K1105").getCurrentMaterialCode());
+    }
+
+    @Test
     void scheduleTypeBlockChange_shouldUpdateMachineEstimatedEndTimeWithActualCompletion() {
         LhScheduleContext context = newContext();
         context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));

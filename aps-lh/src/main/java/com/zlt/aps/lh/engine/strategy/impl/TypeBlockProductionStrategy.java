@@ -47,8 +47,10 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -178,6 +180,12 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     traceTypeBlockDecision(context, machine, priorityOneCandidates, priorityTwoCandidates,
                             null, matchedLayer, false, null, null, machineTriggerSourceMap.get(machineCode));
                     completedMachineMap.put(machineCode, true);
+                    continue;
+                }
+                if (shouldReserveMachineForNewSpecPath(context, machine, typeBlockSku, shifts)) {
+                    completedMachineMap.put(machineCode, true);
+                    log.info("候选SKU需走新增换模主链，当前阶段预留机台, machineCode: {}, materialCode: {}",
+                            machineCode, typeBlockSku.getMaterialCode());
                     continue;
                 }
                 getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
@@ -345,10 +353,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                           MachineScheduleDTO machine,
                                                           SkuScheduleDTO specifySku,
                                                           List<LhShiftConfigVO> shifts) {
-        if (specifySku == null || isTypeBlockCandidate(context, machine, specifySku)) {
+        if (specifySku == null || !shouldPreferNewSpecPath(context, machine, specifySku)) {
             return false;
         }
-        boolean schedulable = canScheduleSpecifySkuOnMachine(
+        boolean schedulable = canScheduleSpecifySkuByNewSpecPath(
                 context, machine, specifySku, shifts, machine.getEstimatedEndTime());
         if (!schedulable) {
             return false;
@@ -356,6 +364,26 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         log.debug("机台命中需走新增换模链路的定点物料预留, machineCode: {}, materialCode: {}, reason: {}",
                 machine.getMachineCode(), specifySku.getMaterialCode(), TYPE_BLOCK_SKIP_REASON_LIMIT_SPECIFY_RESERVED);
         return true;
+    }
+
+    /**
+     * 判断普通候选是否应预留到新增换模主链处理。
+     *
+     * @param context 排程上下文
+     * @param machine 当前机台
+     * @param sku 候选SKU
+     * @param shifts 排程窗口班次
+     * @return true-当前阶段应预留，false-仍可在S4.4处理
+     */
+    private boolean shouldReserveMachineForNewSpecPath(LhScheduleContext context,
+                                                       MachineScheduleDTO machine,
+                                                       SkuScheduleDTO sku,
+                                                       List<LhShiftConfigVO> shifts) {
+        if (sku == null || !shouldPreferNewSpecPath(context, machine, sku)) {
+            return false;
+        }
+        return canScheduleSpecifySkuByNewSpecPath(
+                context, machine, sku, shifts, machine.getEstimatedEndTime());
     }
 
     /**
@@ -817,6 +845,21 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
+     * 判断候选SKU是否应优先走新增换模主链。
+     *
+     * @param context 排程上下文
+     * @param machine 当前机台
+     * @param sku 候选SKU
+     * @return true-应走新增换模主链
+     */
+    private boolean shouldPreferNewSpecPath(LhScheduleContext context,
+                                            MachineScheduleDTO machine,
+                                            SkuScheduleDTO sku) {
+        return !isTypeBlockCandidate(context, machine, sku)
+                || requiresMouldChangeBalance(context, machine, sku);
+    }
+
+    /**
      * 判断候选SKU是否满足机台硬性准入。
      *
      * @param context 排程上下文
@@ -903,6 +946,37 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             }
             getMouldChangeBalanceStrategy().rollbackMouldChange(context, mouldChangeStartTime);
         }
+    }
+
+    /**
+     * 判断当前候选是否需要走真实换模均衡能力。
+     *
+     * @param context 排程上下文
+     * @param machine 当前机台
+     * @param sku 候选SKU
+     * @return true-需走新增换模主链
+     */
+    private boolean requiresMouldChangeBalance(LhScheduleContext context,
+                                               MachineScheduleDTO machine,
+                                               SkuScheduleDTO sku) {
+        if (context == null
+                || machine == null
+                || sku == null
+                || StringUtils.isEmpty(machine.getCurrentMaterialCode())
+                || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return false;
+        }
+        Set<String> currentMouldCodes = resolveMouldCodeSet(context, machine.getCurrentMaterialCode());
+        Set<String> targetMouldCodes = resolveMouldCodeSet(context, sku.getMaterialCode());
+        if (CollectionUtils.isEmpty(currentMouldCodes) || CollectionUtils.isEmpty(targetMouldCodes)) {
+            return false;
+        }
+        for (String targetMouldCode : targetMouldCodes) {
+            if (currentMouldCodes.contains(targetMouldCode)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -1868,6 +1942,29 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             }
         }
         return null;
+    }
+
+    /**
+     * 解析物料对应的模具编码集合。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @return 模具编码集合
+     */
+    private Set<String> resolveMouldCodeSet(LhScheduleContext context, String materialCode) {
+        Set<String> mouldCodeSet = new LinkedHashSet<>(4);
+        if (context == null
+                || StringUtils.isEmpty(materialCode)
+                || !context.getSkuMouldRelMap().containsKey(materialCode)) {
+            return mouldCodeSet;
+        }
+        for (MdmSkuMouldRel mouldRel : context.getSkuMouldRelMap().get(materialCode)) {
+            if (mouldRel == null || StringUtils.isEmpty(mouldRel.getMouldCode())) {
+                continue;
+            }
+            mouldCodeSet.add(mouldRel.getMouldCode());
+        }
+        return mouldCodeSet;
     }
 
     /**

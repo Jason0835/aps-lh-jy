@@ -1,6 +1,5 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
-import cn.hutool.core.date.DatePattern;
 import cn.hutool.core.date.DateUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
@@ -47,7 +46,11 @@ public class DefaultProductionShutdownStrategy implements IProductionShutdownStr
     /** 比例小数位 */
     private static final int RATE_SCALE = 2;
     /** 日期时间格式提示 */
-    private static final String DATE_TIME_PATTERN_TEXT = "yyyy-MM-dd HH:mm:ss";
+    private static final String DATE_TIME_PATTERN_TEXT = "yyyy-MM-dd HH:mm";
+    /** 秒级兼容格式 */
+    private static final String DATE_TIME_PATTERN_WITH_SECOND_TEXT = "yyyy-MM-dd HH:mm:ss";
+    /** 停产执行截止前置分钟数 */
+    private static final int STOP_PRODUCTION_CUTOFF_ADVANCE_MINUTES = 60;
     /** 班次时间缺失 */
     private static final String REASON_SHIFT_TIME_MISSING = "班次时间缺失";
     /** 工作日历日期停产或节假日 */
@@ -95,8 +98,8 @@ public class DefaultProductionShutdownStrategy implements IProductionShutdownStr
         Map<Integer, ShiftProductionControlDTO> controlMap = buildShiftControlMap(context);
         context.setShiftProductionControlMap(controlMap);
         log.info("硫化开停产参数读取完成, enable={}, openMoldTime={}, stopPotTime={}, openShift={}, stopShift={}, shiftControls={}",
-                enableOpenStopControl, LhScheduleTimeUtil.formatDateTime(openMoldTime),
-                LhScheduleTimeUtil.formatDateTime(stopPotTime),
+                enableOpenStopControl, formatControlTime(openMoldTime),
+                formatControlTime(stopPotTime),
                 Objects.nonNull(openShift) ? openShift.getShiftIndex() : null,
                 Objects.nonNull(stopShift) ? stopShift.getShiftIndex() : null,
                 controlMap.size());
@@ -116,13 +119,13 @@ public class DefaultProductionShutdownStrategy implements IProductionShutdownStr
             }
             if (shift.isNightShift()) {
                 log.info("硫化开模时间落在夜班或夜班候选, openMoldTime={}, shiftIndex={}, 顺延",
-                        LhScheduleTimeUtil.formatDateTime(curingOpenMoldTime), shift.getShiftIndex());
+                        formatControlTime(curingOpenMoldTime), shift.getShiftIndex());
                 continue;
             }
             ShiftProductionControlDTO control = buildCalendarControl(context, shift, processCode);
             if (!control.isCanSchedule()) {
                 log.info("硫化开产班次候选不可排, openMoldTime={}, shiftIndex={}, reason={}",
-                        LhScheduleTimeUtil.formatDateTime(curingOpenMoldTime),
+                        formatControlTime(curingOpenMoldTime),
                         shift.getShiftIndex(), control.getUnavailableReason());
                 continue;
             }
@@ -135,13 +138,13 @@ public class DefaultProductionShutdownStrategy implements IProductionShutdownStr
                 continue;
             }
             log.info("硫化开产班次推算完成, openMoldTime={}, shiftDate={}, shiftCode={}, canSchedule={}",
-                    LhScheduleTimeUtil.formatDateTime(curingOpenMoldTime),
+                    formatControlTime(curingOpenMoldTime),
                     LhScheduleTimeUtil.formatDate(control.getWorkDate()),
                     control.getShiftCode(), control.isCanSchedule());
             return control;
         }
         log.info("硫化开产班次未命中排程窗口, openMoldTime={}",
-                LhScheduleTimeUtil.formatDateTime(curingOpenMoldTime));
+                formatControlTime(curingOpenMoldTime));
         return null;
     }
 
@@ -164,13 +167,13 @@ public class DefaultProductionShutdownStrategy implements IProductionShutdownStr
             ShiftProductionControlDTO control = buildCalendarControl(context, shift, processCode);
             control.setEffectiveEndTime(curingStopPotTime);
             log.info("硫化停产班次推算完成, stopPotTime={}, shiftDate={}, shiftCode={}, cutoffTime={}",
-                    LhScheduleTimeUtil.formatDateTime(curingStopPotTime),
+                    formatControlTime(curingStopPotTime),
                     LhScheduleTimeUtil.formatDate(control.getWorkDate()),
-                    control.getShiftCode(), LhScheduleTimeUtil.formatDateTime(curingStopPotTime));
+                    control.getShiftCode(), formatControlTime(resolveStopProductionCutoffTime(curingStopPotTime)));
             return control;
         }
         log.info("硫化停产班次未命中排程窗口, stopPotTime={}",
-                LhScheduleTimeUtil.formatDateTime(curingStopPotTime));
+                formatControlTime(curingStopPotTime));
         return null;
     }
 
@@ -428,17 +431,19 @@ public class DefaultProductionShutdownStrategy implements IProductionShutdownStr
             return;
         }
         Date stopPotTime = context.getCuringStopPotTime();
-        if (Objects.isNull(stopPotTime)) {
+        Date cutoffTime = resolveStopProductionCutoffTime(stopPotTime);
+        if (Objects.isNull(cutoffTime)) {
             return;
         }
-        if (!control.getEffectiveStartTime().before(stopPotTime)) {
+        if (!control.getEffectiveStartTime().before(cutoffTime)) {
             markUnavailable(control, REASON_AFTER_STOP_TIME);
             return;
         }
-        if (control.getEffectiveEndTime().after(stopPotTime)) {
-            control.setEffectiveEndTime(stopPotTime);
-            log.info("停锅班次产能截断, shiftIndex={}, shiftCode={}, cutoffTime={}",
-                    control.getShiftIndex(), control.getShiftCode(), LhScheduleTimeUtil.formatDateTime(stopPotTime));
+        if (control.getEffectiveEndTime().after(cutoffTime)) {
+            control.setEffectiveEndTime(cutoffTime);
+            log.info("停锅班次产能截断, shiftIndex={}, shiftCode={}, stopPotTime={}, cutoffTime={}",
+                    control.getShiftIndex(), control.getShiftCode(),
+                    formatControlTime(stopPotTime), formatControlTime(cutoffTime));
         }
         if (!control.getEffectiveStartTime().before(control.getEffectiveEndTime())) {
             markUnavailable(control, REASON_AFTER_STOP_TIME);
@@ -506,10 +511,41 @@ public class DefaultProductionShutdownStrategy implements IProductionShutdownStr
             return null;
         }
         try {
-            return DateUtil.parse(value.trim(), DatePattern.NORM_DATETIME_PATTERN);
+            String text = value.trim();
+            try {
+                return DateUtil.parse(text, DATE_TIME_PATTERN_TEXT);
+            } catch (Exception minutePatternException) {
+                return DateUtil.parse(text, DATE_TIME_PATTERN_WITH_SECOND_TEXT);
+            }
         } catch (Exception e) {
             throw new IllegalArgumentException(paramName + "格式必须为" + DATE_TIME_PATTERN_TEXT + ", 当前值: " + value, e);
         }
+    }
+
+    /**
+     * 解析停产执行截止时刻。
+     *
+     * @param stopPotTime 原始停锅时间
+     * @return 停产执行截止时刻
+     */
+    private Date resolveStopProductionCutoffTime(Date stopPotTime) {
+        if (Objects.isNull(stopPotTime)) {
+            return null;
+        }
+        return LhScheduleTimeUtil.addMinutes(stopPotTime, -STOP_PRODUCTION_CUTOFF_ADVANCE_MINUTES);
+    }
+
+    /**
+     * 按分钟口径格式化开停产控制时间。
+     *
+     * @param date 时间
+     * @return 分钟级格式字符串
+     */
+    private String formatControlTime(Date date) {
+        if (Objects.isNull(date)) {
+            return null;
+        }
+        return DateUtil.format(date, DATE_TIME_PATTERN_TEXT);
     }
 
     /**

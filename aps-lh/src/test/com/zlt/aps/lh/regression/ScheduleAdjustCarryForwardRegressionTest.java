@@ -231,6 +231,40 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
+    void resolveStopProductionDemandQty_shouldPreferEmbryoStockWhenEmbryoIsHigher() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setCuringStopPotTime(dateTime(2026, 4, 13, 22, 1));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-STOP-STOCK");
+        plan.setTotalQty(100);
+        plan.setFactProdReqQty(150);
+        plan.setDay13(40);
+
+        Integer demandQty = ReflectionTestUtils.invokeMethod(
+                handler, "resolveStopProductionDemandQty", context, plan, 80);
+
+        assertEquals(80, demandQty.intValue());
+    }
+
+    @Test
+    void resolveStopProductionDemandQty_shouldPreferLossIncludedStopDayPlanQtyWhenPlanIsHigher() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setCuringStopPotTime(dateTime(2026, 4, 13, 22, 1));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-STOP-PLAN");
+        plan.setTotalQty(100);
+        plan.setFactProdReqQty(150);
+        plan.setDay13(40);
+
+        Integer demandQty = ReflectionTestUtils.invokeMethod(
+                handler, "resolveStopProductionDemandQty", context, plan, 50);
+
+        assertEquals(60, demandQty.intValue());
+    }
+
+    @Test
     void doHandle_shouldAllocateEmbryoStockBySameEmbryoStandardCapacity() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 

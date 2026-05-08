@@ -98,8 +98,8 @@ INSERT INTO T_LH_PARAMS (FACTORY_CODE, PARAM_CODE, PARAM_VALUE, PARAM_NAME, REMA
 ('116', 'SHUTDOWN_DAY_MINUS_1_RATE', '70', '停产前第 1 天产能比例', '单位：%'),
 ('116', 'STARTUP_FIRST_DAY_RATE', '50', '开产首日产能比例', '单位：%'),
 ('116', 'ENABLE_OPEN_STOP_PRODUCTION_CONTROL', '0', '硫化开停产管控开关', '0-关闭，1-开启'),
-('116', 'CURING_OPEN_MOLD_TIME', '', '硫化开模时间', '格式：yyyy-MM-dd HH:mm:ss'),
-('116', 'CURING_STOP_POT_TIME', '', '硫化停锅时间', '格式：yyyy-MM-dd HH:mm:ss'),
+('116', 'CURING_OPEN_MOLD_TIME', '', '硫化开模时间', '格式：yyyy-MM-dd HH:mm'),
+('116', 'CURING_STOP_POT_TIME', '', '硫化停锅时间', '格式：yyyy-MM-dd HH:mm'),
 ('116', 'OPEN_PRODUCTION_SHORTAGE_THRESHOLD_RATE', '0.5', '开产欠产阈值比例', '达到该比例时记录开产缺口'),
 ('116', 'OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS', '', '开产雪地胎关键词', '多个关键词用逗号分隔'),
 

@@ -302,6 +302,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 待排量以“余量/库存取大”为基线，再叠加滚动继承扣减与欠产传导，避免重复排产。
         int basePendingQty = Math.max(surplus.getSurplusQty(), Math.max(0, dto.getEmbryoStock()));
         if (context.isStopProductionMode()) {
+            // 停产收尾按“停产日含损耗计划量”和“胎胚库存”取大，优先把停锅前可收的量拉齐。
             basePendingQty = resolveStopProductionDemandQty(context, plan, dto.getEmbryoStock());
         }
         dto.setPendingQty(Math.max(0, basePendingQty - inheritedPlanQty) + carryForwardQty);
