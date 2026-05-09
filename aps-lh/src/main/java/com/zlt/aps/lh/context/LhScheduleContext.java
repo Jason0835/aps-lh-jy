@@ -116,6 +116,8 @@ public class LhScheduleContext {
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
     /** 月累计完成量Map（截至目标排产日期含当天）, key=materialCode */
     private Map<String, Integer> materialMonthFinishedQtyMap = new HashMap<>();
+    /** T日排程班次完成量Map, key=materialCode, value=T日class1FinishQty按物料汇总值 */
+    private Map<String, Integer> materialScheDayFinishQtyMap = new HashMap<>();
     /** 物料信息Map, key=materialCode */
     private Map<String, MdmMaterialInfo> materialInfoMap = new HashMap<>();
     /** 胶囊规格分组Map, key=规格, value=归一化后的分组编码 */

@@ -16,6 +16,7 @@ import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
+import com.zlt.aps.lh.mapper.LhScheFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhMachineInfoMapper;
 import com.zlt.aps.lh.mapper.LhMouldCleanPlanMapper;
 import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
@@ -56,6 +57,7 @@ import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhScheFinishQty;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
@@ -126,6 +128,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private LhDayFinishQtyMapper lhDayFinishQtyMapper;
+
+    @Resource
+    private LhScheFinishQtyMapper lhScheFinishQtyMapper;
 
     @Resource
     private MdmMaterialInfoMapper mdmMaterialInfoMapper;
@@ -224,6 +229,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
         // 15. 加载月累计完成量（截至排产T-1日（包含），按目标日所在月份统计）
         loadMaterialMonthFinishedQty(context, factoryCode, LhScheduleTimeUtil.addDays(scheduleDate, -1));
+
+        // 15.1 加载T日排程班次完成量（来自LhScheFinishQty表，scheduleDate=T日，按物料汇总class1FinishQty）
+        loadScheDayFinishQty(context, factoryCode, scheduleDate);
 
         // 16. 加载物料信息
         loadMaterialInfo(context, factoryCode);
@@ -817,7 +825,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载指定日期的物料日完成量，按“物料+完成日期”建立Map。
+     * 加载指定日期的物料日完成量，按"物料+完成日期"建立Map。
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
@@ -894,7 +902,47 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 生成“物料+完成日期”聚合Key。
+     * 加载T日排程班次完成量（来自LhScheFinishQty表），按物料编号汇总class1FinishQty。
+     * <p>同一物料在同一T日可能有多条记录（不同机台），需按materialCode汇总。</p>
+     *
+     * @param context       排程上下文
+     * @param factoryCode   分厂编号
+     * @param scheduleDate  排程窗口起点T日
+     */
+    private void loadScheDayFinishQty(LhScheduleContext context, String factoryCode, Date scheduleDate) {
+        Date tDay = LhScheduleTimeUtil.clearTime(scheduleDate);
+        Date nextDay = LhScheduleTimeUtil.addDays(tDay, 1);
+
+        List<LhScheFinishQty> scheFinishQtyList = lhScheFinishQtyMapper.selectList(
+                new LambdaQueryWrapper<LhScheFinishQty>()
+                        .eq(LhScheFinishQty::getFactoryCode, factoryCode)
+                        .ge(LhScheFinishQty::getScheduleDate, tDay)
+                        .lt(LhScheFinishQty::getScheduleDate, nextDay)
+                        .and(wrapper -> wrapper.eq(LhScheFinishQty::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
+                                .or()
+                                .isNull(LhScheFinishQty::getIsDelete)));
+
+        Map<String, Integer> materialScheDayFinishQtyMap = new HashMap<>(64);
+        if (!CollectionUtils.isEmpty(scheFinishQtyList)) {
+            for (LhScheFinishQty scheFinishQty : scheFinishQtyList) {
+                if (StringUtils.isEmpty(scheFinishQty.getMaterialCode())) {
+                    continue;
+                }
+                materialScheDayFinishQtyMap.merge(
+                        scheFinishQty.getMaterialCode(),
+                        resolveFinishQtyValue(scheFinishQty.getClass1FinishQty()),
+                        Integer::sum);
+            }
+        }
+
+        context.setMaterialScheDayFinishQtyMap(materialScheDayFinishQtyMap);
+        log.debug("T日排程班次完成量加载完成, 数量: {}, T日: {}",
+                materialScheDayFinishQtyMap.size(),
+                LhScheduleTimeUtil.formatDate(tDay));
+    }
+
+    /**
+     * 生成"物料+完成日期"聚合Key。
      *
      * @param materialCode 物料编码
      * @param finishDate 完成日期
@@ -1045,7 +1093,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载MES硫化在机信息，按机台编号建立“追溯窗口内最近记录”Map
+     * 加载MES硫化在机信息，按机台编号建立"追溯窗口内最近记录"Map
      *
      * @param context       排程上下文
      * @param factoryCode   分厂编号
