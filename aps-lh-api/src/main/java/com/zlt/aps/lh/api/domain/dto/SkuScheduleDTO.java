@@ -115,6 +115,10 @@ public class SkuScheduleDTO {
     /** 胎胚可供硫化时长(小时) */
     private double embryoSupplyHours;
 
+    // ========== 多机台排产相关 ==========
+    /** 多机台拆量剩余排产量（收尾上调后由TargetScheduleQtyResolver写入，后续每台机台排产后递减） */
+    private int remainingScheduleQty;
+
     // ========== 月计划版本信息 ==========
     /** 月计划需求版本 */
     private String monthPlanVersion;

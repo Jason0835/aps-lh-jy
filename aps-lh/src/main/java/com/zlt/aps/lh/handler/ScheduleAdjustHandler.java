@@ -314,10 +314,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setWindowPlanQty(windowPlanQty);
         dto.setSurplusQty(surplus.getSurplusQty());
         dto.setEmbryoStock(resolveAllocatedEmbryoStock(context, plan, embryoStandardCapacitySumMap));
-        // 待排量以“余量/库存取大”为基线，再叠加滚动继承扣减与欠产传导，避免重复排产。
-        int basePendingQty = Math.max(surplus.getSurplusQty(), Math.max(0, dto.getEmbryoStock()));
+        // 待排量基线以月计划余量为准，不再无条件取胎胚库存大值。
+        // 非停产场景下，胎胚库存上调交由收尾判定后的 TargetScheduleQtyResolver 处理，避免非收尾SKU被异常放大。
+        int basePendingQty = surplus.getSurplusQty();
         if (context.isStopProductionMode()) {
-            // 停产收尾按“停产日含损耗计划量”和“胎胚库存”取大，优先把停锅前可收的量拉齐。
+            // 停产收尾按"停产日含损耗计划量"和"胎胚库存"取大，优先把停锅前可收的量拉齐。
             basePendingQty = resolveStopProductionDemandQty(context, plan, dto.getEmbryoStock());
         }
         dto.setPendingQty(Math.max(0, basePendingQty - inheritedPlanQty) + carryForwardQty);
@@ -551,7 +552,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 追加“无计划量不排产”的未排结果。
+     * 追加"无计划量不排产"的未排结果。
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
@@ -643,7 +644,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 获取指定日期的物料日完成量（按“物料+日期”聚合）。
+     * 获取指定日期的物料日完成量（按"物料+日期"聚合）。
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
@@ -660,7 +661,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 构建“物料+日期”聚合Key。
+     * 构建"物料+日期"聚合Key。
      *
      * @param materialCode 物料编码
      * @param date 日期

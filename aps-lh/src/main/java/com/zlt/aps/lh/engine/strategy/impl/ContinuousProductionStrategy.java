@@ -1289,27 +1289,37 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      *
      * @param context 排程上下文
      */
+    /**
+     * 基于最终计划量复核续作结果收尾标记（按物料编码汇总多机台排产量后统一判断）。
+     *
+     * @param context 排程上下文
+     */
     private void refreshContinuousEndingFlagByResult(LhScheduleContext context) {
         if (context == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
             return;
         }
+        // 按物料编码汇总续作结果的总计划量
+        Map<String, Integer> materialTotalPlanQtyMap = new LinkedHashMap<>(16);
+        Map<String, Integer> materialEndingDemandQtyMap = new LinkedHashMap<>(16);
         for (LhScheduleResult result : context.getScheduleResultList()) {
-            refreshContinuousEndingFlagByResult(result);
+            if (!isContinuousPhaseResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
+                continue;
+            }
+            int planQty = ShiftFieldUtil.resolveScheduledQty(result);
+            materialTotalPlanQtyMap.merge(result.getMaterialCode(), planQty, Integer::sum);
+            if (!materialEndingDemandQtyMap.containsKey(result.getMaterialCode())) {
+                materialEndingDemandQtyMap.put(result.getMaterialCode(), resolveEndingDemandQty(result));
+            }
         }
-    }
-
-    /**
-     * 基于结果行“最终计划量 vs max(硫化余量, 胎胚库存)”复核续作收尾标记。
-     *
-     * @param result 排程结果
-     */
-    private void refreshContinuousEndingFlagByResult(LhScheduleResult result) {
-        if (!isContinuousPhaseResult(result)) {
-            return;
+        // 基于汇总计划量统一设置同物料所有结果的收尾标记
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!isContinuousPhaseResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
+                continue;
+            }
+            int totalPlanQty = materialTotalPlanQtyMap.getOrDefault(result.getMaterialCode(), 0);
+            int endingDemandQty = materialEndingDemandQtyMap.getOrDefault(result.getMaterialCode(), 0);
+            result.setIsEnd(totalPlanQty >= endingDemandQty && endingDemandQty > 0 ? "1" : "0");
         }
-        int finalPlanQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
-        int endingDemandQty = resolveEndingDemandQty(result);
-        result.setIsEnd(finalPlanQty >= endingDemandQty && endingDemandQty > 0 ? "1" : "0");
     }
 
     /**

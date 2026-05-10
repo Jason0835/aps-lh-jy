@@ -1242,6 +1242,176 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals("1", context.getScheduleResultList().get(0).getHasSpecialMaterial());
     }
 
+    /**
+     * 多机台拆量排产：一台机台产能不足以排完目标量时，应继续尝试下一台机台。
+     * <p>Machine A 起排时间较晚（仅剩 2 个班次），Machine B 起点正常（8 个班次），
+     * 目标量 5 需由两台机台共同完成。</p>
+     */
+    @Test
+    void scheduleNewSpecs_shouldScheduleAcrossMultipleMachinesWhenOneInsufficient() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setLhTimeSeconds(14400);
+        sku.setShiftCapacity(1);
+        sku.setTargetScheduleQty(5);
+        sku.setPendingQty(5);
+        sku.setSurplusQty(10);
+        sku.setEmbryoStock(-1);
+        context.getNewSpecSkuList().add(sku);
+
+        // Machine A: 起排时间较晚，窗口内仅剩约 2 个班次
+        MachineScheduleDTO machineA = buildMachine("M-LATE", dateTime(2026, 4, 19, 10, 0));
+        // Machine B: 起点正常，覆盖全部 8 个班次
+        MachineScheduleDTO machineB = buildMachine("M-EARLY", dateTime(2026, 4, 17, 6, 0));
+
+        IMachineMatchStrategy multiMachineMatch = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO s) {
+                return Arrays.asList(machineA, machineB);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO s,
+                                                        List<MachineScheduleDTO> candidates, Set<String> excluded) {
+                for (MachineScheduleDTO c : candidates) {
+                    if (c != null && !excluded.contains(c.getMachineCode())) {
+                        return c;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, multiMachineMatch, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertFalse(context.getScheduleResultList().isEmpty(), "应生成排程结果");
+        int resultCount = context.getScheduleResultList().size();
+        int totalPlanQty = context.getScheduleResultList().stream()
+                .mapToInt(r -> r.getDailyPlanQty() != null ? r.getDailyPlanQty() : 0).sum();
+        assertTrue(totalPlanQty > 0, "总排产量应大于0");
+        assertTrue(resultCount >= 1, "应至少生成1条排程结果");
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "SKU全部排完应从待排列表移除");
+        assertEquals(0, context.getUnscheduledResultList().size(), "全部完成不应有未排记录");
+    }
+
+    /**
+     * 多机台产能不足：所有候选机台总产能仍不足以排完目标量时，
+     * 应记录已排部分并将剩余量计入未排结果。
+     */
+    @Test
+    void scheduleNewSpecs_shouldRecordRemainingUnscheduledWhenAllMachinesExhausted() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setLhTimeSeconds(14400);
+        sku.setShiftCapacity(1);
+        sku.setTargetScheduleQty(20);
+        sku.setPendingQty(20);
+        sku.setSurplusQty(30);
+        sku.setEmbryoStock(-1);
+        context.getNewSpecSkuList().add(sku);
+
+        // 两台机台起排均较晚，各自仅剩少量班次产能
+        MachineScheduleDTO machineA = buildMachine("M-A", dateTime(2026, 4, 18, 22, 0));
+        MachineScheduleDTO machineB = buildMachine("M-B", dateTime(2026, 4, 19, 8, 0));
+
+        IMachineMatchStrategy limitedMatch = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO s) {
+                return Arrays.asList(machineA, machineB);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO s,
+                                                        List<MachineScheduleDTO> candidates, Set<String> excluded) {
+                for (MachineScheduleDTO c : candidates) {
+                    if (c != null && !excluded.contains(c.getMachineCode())) {
+                        return c;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, limitedMatch, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        // 应有排程结果
+        assertFalse(context.getScheduleResultList().isEmpty(), "应至少生成部分排程结果");
+        int totalPlanQty = context.getScheduleResultList().stream()
+                .mapToInt(r -> r.getDailyPlanQty() != null ? r.getDailyPlanQty() : 0).sum();
+        assertTrue(totalPlanQty > 0, "应有部分排产量");
+        assertTrue(totalPlanQty < 20, "总排产量应小于目标量（产能不足）");
+        // 应有未排记录
+        assertFalse(context.getUnscheduledResultList().isEmpty(), "产能不足应有未排记录");
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "SKU应从待排列表移除");
+    }
+
+    /**
+     * 非收尾 SKU 目标量不应因胎胚库存大而上调。
+     * <p>胎胚库存虽大，但非收尾时目标量应仍由待排量（基于余量）决定。</p>
+     */
+    @Test
+    void scheduleNewSpecs_shouldNotInflateTargetByEmbryoStockForNonEnding() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setShiftCapacity(1);
+        sku.setPendingQty(30);
+        sku.setTargetScheduleQty(30);
+        sku.setSurplusQty(50);
+        sku.setEmbryoStock(500);
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = buildMachine("M-NORMAL", dateTime(2026, 4, 17, 6, 0));
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "应生成1条排程结果");
+        int planQty = context.getScheduleResultList().get(0).getDailyPlanQty() != null
+                ? context.getScheduleResultList().get(0).getDailyPlanQty() : 0;
+        // 目标量 30 未因胎胚库存 500 而上调
+        assertTrue(planQty <= 30, "非收尾SKU排产量不应因胎胚库存(500)而上调超过目标量(30)");
+    }
+
+    /**
+     * 收尾 SKU 排产前应将目标量上调到胎胚库存（不超过月计划余量）。
+     * <p>收尾判定为 true 后，调用 upsizeEndingTargetQty 将目标量上调到 max(原目标, min(胎胚库存, 余量))。</p>
+     */
+    @Test
+    void scheduleNewSpecs_shouldUpsizeTargetForEndingSkuByEmbryoStock() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setShiftCapacity(1);
+        // pendingQty=30（基于余量），targetScheduleQty=30（初始目标量）
+        sku.setPendingQty(30);
+        sku.setTargetScheduleQty(30);
+        sku.setSurplusQty(50);
+        sku.setEmbryoStock(80);
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = buildMachine("M-END", dateTime(2026, 4, 17, 6, 0));
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        // 收尾上调后目标量 = max(30, min(80, 50)) = 50
+        assertEquals(1, context.getScheduleResultList().size(), "应生成1条排程结果");
+        assertEquals("1", context.getScheduleResultList().get(0).getIsEnd(), "收尾SKU标记应为1");
+    }
+
     private LhScheduleContext buildContext() {
         LhScheduleContext context = new LhScheduleContext();
         Date scheduleDate = dateTime(2026, 4, 17, 0, 0);

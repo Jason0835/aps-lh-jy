@@ -262,6 +262,9 @@ public class ContinuousProductionStrategyTest {
         result1.setMouldSurplusQty(100);
         result1.setEmbryoStock(120);
         result1.setIsEnd("1");
+        result1.setLhTime(3600);
+        result1.setMouldQty(2);
+        result1.setSingleMouldShiftQty(30);
         ShiftFieldUtil.setShiftPlanQty(result1, 1, 60, null, null);
         ShiftFieldUtil.syncDailyPlanQty(result1);
 
@@ -274,6 +277,9 @@ public class ContinuousProductionStrategyTest {
         result2.setMouldSurplusQty(100);
         result2.setEmbryoStock(120);
         result2.setIsEnd("1");
+        result2.setLhTime(3600);
+        result2.setMouldQty(2);
+        result2.setSingleMouldShiftQty(30);
         ShiftFieldUtil.setShiftPlanQty(result2, 1, 60, null, null);
         ShiftFieldUtil.syncDailyPlanQty(result2);
 
