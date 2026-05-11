@@ -146,7 +146,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             scaleShiftPlanQty(context, result, ratio);
             refreshResultSummary(context, result);
         }
-        // 多机台余量和胎胚库存按实际排产量占比分摊，尾差由最大余数法补齐
+        // 多机台余量和胎胚库存按机台数均分，最后一台补尾差
         distributeMultiMachineSurplusAndStock(context);
         finalizeZeroPlanNewSpecResults(context);
         // 新增结果在库存裁剪后需按最终计划量复核收尾语义，避免"未收完却标收尾"。
@@ -504,7 +504,54 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     sku.getMaterialCode(), preferredTrialMachine.getMachineCode());
             return preferredTrialMachine;
         }
+        MachineScheduleDTO finishRemainingFirstMachine = resolveCanFinishRemainingQtyFirst(
+                context, sku, candidates, excludedMachineCodes);
+        if (finishRemainingFirstMachine != null) {
+            log.info("新增排产优先选择可单机收完剩余量的机台, materialCode: {}, machineCode: {}, remainingQty: {}",
+                    sku.getMaterialCode(), finishRemainingFirstMachine.getMachineCode(),
+                    Math.max(0, sku.getRemainingScheduleQty()));
+            return finishRemainingFirstMachine;
+        }
         return machineMatch.selectBestMachine(context, sku, candidates, excludedMachineCodes);
+    }
+
+    /**
+     * 优先选择窗口内可单机收完剩余量的候选机台。
+     * <p>仅在试制优选机台未命中时生效，避免中间机台被无谓占用。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param candidates 候选机台
+     * @param excludedMachineCodes 已排除机台
+     * @return 可单机收完剩余量的机台；不存在时返回 null
+     */
+    private MachineScheduleDTO resolveCanFinishRemainingQtyFirst(LhScheduleContext context,
+                                                                 SkuScheduleDTO sku,
+                                                                 List<MachineScheduleDTO> candidates,
+                                                                 Set<String> excludedMachineCodes) {
+        if (context == null || sku == null || CollectionUtils.isEmpty(candidates)) {
+            return null;
+        }
+        int remainingQty = sku.getRemainingScheduleQty() > 0
+                ? sku.getRemainingScheduleQty()
+                : sku.resolveTargetScheduleQty();
+        if (remainingQty <= 0) {
+            return null;
+        }
+        for (MachineScheduleDTO candidate : candidates) {
+            if (candidate == null
+                    || StringUtils.isEmpty(candidate.getMachineCode())
+                    || (!CollectionUtils.isEmpty(excludedMachineCodes)
+                    && excludedMachineCodes.contains(candidate.getMachineCode()))) {
+                continue;
+            }
+            int machineCapacity = getTargetScheduleQtyResolver()
+                    .calcMachineAvailableCapacityInWindow(context, sku, candidate);
+            if (machineCapacity >= remainingQty) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     private MachineScheduleDTO resolvePreferredTrialMachine(LhScheduleContext context,
@@ -1617,9 +1664,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 多机台余量和胎胚库存按实际排产量占比分摊。
+     * 多机台余量和胎胚库存按机台条数均分。
      * <p>对新增阶段结果按物料分组，委托 {@link LhMultiMachineDistributionUtil#distributeForSingleMaterial}
-     * 按各机台实际排产量占比分摊。</p>
+     * 按机台结果条数均分，最后一条补尾差。</p>
      *
      * @param context 排程上下文
      */
@@ -1642,7 +1689,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
             materialResultsMap.computeIfAbsent(result.getMaterialCode(), k -> new ArrayList<>()).add(result);
         }
-        // 委托工具类按排产量占比分摊
+        // 委托工具类按机台条数均分
         for (Map.Entry<String, List<LhScheduleResult>> entry : materialResultsMap.entrySet()) {
             List<LhScheduleResult> materialResults = entry.getValue();
             if (materialResults.size() <= 1) {
@@ -1657,7 +1704,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             int totalEmbryoStock = Math.max(0, sku.getEmbryoStock());
             LhMultiMachineDistributionUtil.distributeForSingleMaterial(
                     materialResults, totalSurplus, totalEmbryoStock);
-            log.debug("多机台新增余量/胎胚库存分摊完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
+            log.debug("多机台新增余量/胎胚库存均分完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
                     materialCode, materialResults.size(), totalSurplus, totalEmbryoStock);
         }
     }

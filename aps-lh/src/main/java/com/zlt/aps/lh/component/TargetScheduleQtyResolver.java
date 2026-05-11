@@ -306,12 +306,33 @@ public class TargetScheduleQtyResolver {
         }
         int totalCapacity = 0;
         for (MachineScheduleDTO machine : candidates) {
-            int machineCapacity = calcMachineAvailableCapacityInWindow(context, sku, machine, shifts);
+            int machineCapacity = calculateMachineAvailableCapacityInWindow(context, sku, machine, shifts);
             totalCapacity += machineCapacity;
         }
         log.debug("SKU多机台合计产能计算完成, materialCode: {}, 候选机台数: {}, 合计产能: {}",
                 sku.getMaterialCode(), candidates.size(), totalCapacity);
         return totalCapacity;
+    }
+
+    /**
+     * 计算单台机台在排程窗口内的可用产能。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machine 机台
+     * @return 机台窗口可排量
+     */
+    public int calcMachineAvailableCapacityInWindow(LhScheduleContext context,
+                                                    SkuScheduleDTO sku,
+                                                    MachineScheduleDTO machine) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(machine)) {
+            return 0;
+        }
+        List<LhShiftConfigVO> shifts = resolveScheduleShifts(context);
+        if (CollectionUtils.isEmpty(shifts)) {
+            return 0;
+        }
+        return calculateMachineAvailableCapacityInWindow(context, sku, machine, shifts);
     }
 
     /**
@@ -324,10 +345,10 @@ public class TargetScheduleQtyResolver {
      * @param shifts 排程窗口班次
      * @return 该机台在窗口内的可排产量
      */
-    private int calcMachineAvailableCapacityInWindow(LhScheduleContext context,
-                                                     SkuScheduleDTO sku,
-                                                     MachineScheduleDTO machine,
-                                                     List<LhShiftConfigVO> shifts) {
+    private int calculateMachineAvailableCapacityInWindow(LhScheduleContext context,
+                                                          SkuScheduleDTO sku,
+                                                          MachineScheduleDTO machine,
+                                                          List<LhShiftConfigVO> shifts) {
         if (Objects.isNull(machine) || Objects.isNull(sku)) {
             return 0;
         }

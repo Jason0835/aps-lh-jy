@@ -437,10 +437,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 构建同胎胚标准产能汇总Map。
+     * 构建同胎胚日硫化量汇总Map。
+     * <p>保留原方法名，避免扩大调用点改动范围；内部口径改为同胎胚 SKU 日硫化量汇总。</p>
      *
      * @param context 排程上下文
-     * @return 同胎胚标准产能汇总Map，key=胎胚编号
+     * @return 同胎胚日硫化量汇总Map，key=胎胚编号
      */
     private Map<String, Integer> buildEmbryoStandardCapacitySumMap(LhScheduleContext context) {
         Map<String, Integer> embryoStandardCapacitySumMap = new LinkedHashMap<>();
@@ -448,11 +449,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             if (StringUtils.isEmpty(plan.getEmbryoCode())) {
                 continue;
             }
-            MdmSkuLhCapacity capacity = context.getSkuLhCapacityMap().get(plan.getMaterialCode());
-            if (Objects.nonNull(capacity)
-                    && Objects.nonNull(capacity.getStandardCapacity())
-                    && capacity.getStandardCapacity() > 0) {
-                embryoStandardCapacitySumMap.merge(plan.getEmbryoCode(), capacity.getStandardCapacity(), Integer::sum);
+            int dailyPlanQty = safeInt(plan.getDayVulcanizationQty());
+            if (dailyPlanQty > 0) {
+                embryoStandardCapacitySumMap.merge(plan.getEmbryoCode(), dailyPlanQty, Integer::sum);
             }
         }
         return embryoStandardCapacitySumMap;
@@ -463,7 +462,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      *
      * @param context 排程上下文
      * @param plan 月计划
-     * @param embryoStandardCapacitySumMap 同胎胚标准产能汇总Map
+     * @param embryoStandardCapacitySumMap 同胎胚日硫化量汇总Map
      * @return SKU分摊胎胚库存，-1表示库存未知
      */
     private int resolveAllocatedEmbryoStock(LhScheduleContext context,
@@ -473,14 +472,18 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                 || !context.getEmbryoRealtimeStockMap().containsKey(plan.getEmbryoCode())) {
             return -1;
         }
-        MdmSkuLhCapacity capacity = context.getSkuLhCapacityMap().get(plan.getMaterialCode());
         Integer embryoStock = context.getEmbryoRealtimeStockMap().get(plan.getEmbryoCode());
         Integer embryoStandardCapacitySum = embryoStandardCapacitySumMap.get(plan.getEmbryoCode());
-        int allocatedStock = (int) (embryoStock.longValue() * capacity.getStandardCapacity()
+        int dailyPlanQty = safeInt(plan.getDayVulcanizationQty());
+        if (Objects.isNull(embryoStock) || dailyPlanQty <= 0
+                || Objects.isNull(embryoStandardCapacitySum) || embryoStandardCapacitySum <= 0) {
+            return 0;
+        }
+        int allocatedStock = (int) (embryoStock.longValue() * dailyPlanQty
                 / embryoStandardCapacitySum);
-        log.debug("同胎胚库存按标准产能分摊, materialCode: {}, embryoCode: {}, standardCapacity: {}, "
-                        + "embryoStandardCapacitySum: {}, embryoStock: {}, allocatedStock: {}",
-                plan.getMaterialCode(), plan.getEmbryoCode(), capacity.getStandardCapacity(),
+        log.debug("同胎胚库存按日硫化量分摊, materialCode: {}, embryoCode: {}, dayVulcanizationQty: {}, "
+                        + "embryoDailyPlanQtySum: {}, embryoStock: {}, allocatedStock: {}",
+                plan.getMaterialCode(), plan.getEmbryoCode(), dailyPlanQty,
                 embryoStandardCapacitySum, embryoStock, allocatedStock);
         return allocatedStock;
     }

@@ -1405,9 +1405,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 多机台余量和胎胚库存按实际排产量占比分摊。
+     * 多机台余量和胎胚库存按机台条数均分。
      * <p>对续作阶段结果按物料分组，委托 {@link LhMultiMachineDistributionUtil#distributeForSingleMaterial}
-     * 按各机台实际排产量占比分摊。</p>
+     * 按机台结果条数均分，最后一条补尾差。</p>
      *
      * @param context 排程上下文
      */
@@ -1426,7 +1426,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             materialResultsMap.computeIfAbsent(result.getMaterialCode(), k -> new ArrayList<>()).add(result);
         }
-        // 委托工具类按排产量占比分摊
+        // 委托工具类按机台条数均分
         for (Map.Entry<String, List<LhScheduleResult>> entry : materialResultsMap.entrySet()) {
             List<LhScheduleResult> materialResults = entry.getValue();
             if (materialResults.size() <= 1) {
@@ -1441,7 +1441,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int totalEmbryoStock = Math.max(0, sku.getEmbryoStock());
             LhMultiMachineDistributionUtil.distributeForSingleMaterial(
                     materialResults, totalSurplus, totalEmbryoStock);
-            log.debug("多机台续作余量/胎胚库存分摊完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
+            log.debug("多机台续作余量/胎胚库存均分完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
                     materialCode, materialResults.size(), totalSurplus, totalEmbryoStock);
         }
     }
