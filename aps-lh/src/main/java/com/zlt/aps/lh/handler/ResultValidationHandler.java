@@ -15,12 +15,15 @@ import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.component.IncrSerialGenerator;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEvent;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
+import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -28,6 +31,8 @@ import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Comparator;
@@ -81,6 +86,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
             // S4.6.5 添加排程汇总日志
             addSummaryLog(context);
+
+            // S4.6.5.1 按SKU+日期汇总校验日计划完成情况
+            addDailyPlanSummaryLog(context);
 
             // S4.6.6 保存排程结果到数据库
             schedulePersistenceService.replaceScheduleAtomically(context);
@@ -521,6 +529,101 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         ));
         summaryLog.setIsDelete(0);
         context.getScheduleLogList().add(summaryLog);
+    }
+
+    /**
+     * 按SKU+日期汇总排产量，对比月计划dayN，输出日计划完成情况日志。
+     * <p>汇总口径：遍历所有排程结果，按班次归属日期聚合各SKU的实际排产量，
+     * 与月计划对应 dayN 的计划量做对比，识别超排/欠产/满班补齐超排等异常。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void addDailyPlanSummaryLog(LhScheduleContext context) {
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        if (CollectionUtils.isEmpty(shifts)) {
+            shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
+        }
+        if (CollectionUtils.isEmpty(shifts)) {
+            return;
+        }
+
+        // 构建月计划物料->记录映射，用于快速查找日计划量
+        Map<String, FactoryMonthPlanProductionFinalResult> monthPlanMap = new LinkedHashMap<>();
+        if (!CollectionUtils.isEmpty(context.getMonthPlanList())) {
+            for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
+                if (StringUtils.isNotEmpty(plan.getMaterialCode())) {
+                    monthPlanMap.put(plan.getMaterialCode(), plan);
+                }
+            }
+        }
+
+        // 按 materialCode + productionDate 汇总实际排产量
+        Map<String, Map<LocalDate, Integer>> materialDayScheduledMap = new LinkedHashMap<>();
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (result == null || StringUtils.isEmpty(result.getMaterialCode())) {
+                continue;
+            }
+            String materialCode = result.getMaterialCode();
+            for (LhShiftConfigVO shift : shifts) {
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                if (planQty == null || planQty <= 0) {
+                    continue;
+                }
+                Date workDate = shift.getWorkDate();
+                if (workDate == null) {
+                    continue;
+                }
+                LocalDate productionDate = workDate.toInstant()
+                        .atZone(ZoneId.systemDefault()).toLocalDate();
+                materialDayScheduledMap
+                        .computeIfAbsent(materialCode, k -> new LinkedHashMap<>())
+                        .merge(productionDate, planQty, Integer::sum);
+            }
+        }
+
+        // 收集SKU的满班超排量信息（从上下文累加器读取，覆盖已移除和仍在待排列表的所有SKU）
+        Map<String, Integer> skuShiftFillOverMap = context.getSkuShiftFillOverQtyMap();
+
+        // 汇总并输出每个SKU每日的日计划完成情况
+        int totalOverPlanCount = 0;
+        int totalShortageCount = 0;
+        int totalShiftFillOverQty = 0;
+        for (Map.Entry<String, Map<LocalDate, Integer>> materialEntry : materialDayScheduledMap.entrySet()) {
+            String materialCode = materialEntry.getKey();
+            FactoryMonthPlanProductionFinalResult plan = monthPlanMap.get(materialCode);
+            for (Map.Entry<LocalDate, Integer> dayEntry : materialEntry.getValue().entrySet()) {
+                LocalDate productionDate = dayEntry.getKey();
+                int actualQty = dayEntry.getValue();
+                int dayOfMonth = productionDate.getDayOfMonth();
+                int dayPlanQty = plan != null ? MonthPlanDayQtyUtil.resolveDayQty(plan, dayOfMonth) : 0;
+                int diffQty = actualQty - dayPlanQty;
+                if (diffQty > 0) {
+                    totalOverPlanCount++;
+                    log.warn("日计划超排, 物料: {}, 日期: {}, 日计划量: {}, 实际排产: {}, 超出: {}",
+                            materialCode, productionDate, dayPlanQty, actualQty, diffQty);
+                } else if (diffQty < 0) {
+                    totalShortageCount++;
+                    log.info("日计划欠产, 物料: {}, 日期: {}, 日计划量: {}, 实际排产: {}, 欠产: {}",
+                            materialCode, productionDate, dayPlanQty, actualQty, -diffQty);
+                }
+            }
+        }
+
+        // 输出满班补齐超排汇总
+        for (Map.Entry<String, Integer> entry : skuShiftFillOverMap.entrySet()) {
+            totalShiftFillOverQty += entry.getValue();
+            log.info("满班补齐超排汇总, 物料: {}, 超排量: {}", entry.getKey(), entry.getValue());
+        }
+
+        LhScheduleProcessLog dailyPlanLog = new LhScheduleProcessLog();
+        dailyPlanLog.setBatchNo(context.getBatchNo());
+        dailyPlanLog.setTitle("日计划完成校验");
+        dailyPlanLog.setBusiCode(context.getFactoryCode());
+        dailyPlanLog.setLogDetail(String.format(
+                "日计划校验完成: 超排日期数%d, 欠产日期数%d, 满班补齐超排SKU数%d, 满班超排总量%d",
+                totalOverPlanCount, totalShortageCount, skuShiftFillOverMap.size(), totalShiftFillOverQty));
+        dailyPlanLog.setIsDelete(0);
+        context.getScheduleLogList().add(dailyPlanLog);
     }
 
     /**

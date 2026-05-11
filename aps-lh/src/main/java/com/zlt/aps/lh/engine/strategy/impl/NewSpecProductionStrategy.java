@@ -7,6 +7,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -45,6 +46,8 @@ import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
@@ -359,6 +362,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context.getScheduleResultList().add(result);
                 updateMachineState(context, candidateMachine, sku, result);
                 registerMachineAssignment(context, machineCode, result);
+                // 按班次日期扣减日计划额度账本，记录满班补齐超排量
+                applyBlockToDailyQuota(context, sku, result, shifts);
                 clearSpecifyReservation(context, machineCode, sku.getMaterialCode());
                 scheduledCount++;
                 scheduled = true;
@@ -369,18 +374,26 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 totalScheduledQty += machineScheduledQty;
                 remainingQty = Math.max(0, remainingQty - machineScheduledQty);
                 sku.setRemainingScheduleQty(remainingQty);
-                log.debug("新增排产本机台完成, SKU: {}, 机台: {}, 本机台排产量: {}, 累计已排: {}, 剩余: {}, 机台就绪: {}, 换模开始: {}, 换模结束: {}, 首检开始: {}, 开产时间: {}",
+                log.debug("新增排产本机台完成, SKU: {}, 机台: {}, 本机台排产量: {}, 累计已排: {}, 剩余: {}, 满班超排: {}, 机台就绪: {}, 换模开始: {}, 换模结束: {}, 首检开始: {}, 开产时间: {}",
                         sku.getMaterialCode(), machineCode, machineScheduledQty, totalScheduledQty, remainingQty,
+                        sku.getShiftFillOverQty(),
                         LhScheduleTimeUtil.formatDateTime(switchReadyTime),
                         LhScheduleTimeUtil.formatDateTime(mouldChangeStartTime),
                         LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime),
                         LhScheduleTimeUtil.formatDateTime(inspectionTime),
                         LhScheduleTimeUtil.formatDateTime(productionStartTime));
-                if (remainingQty <= 0) {
-                    // 全部排完，移出待排队列
+                if (remainingQty <= 0 || !needMoreMachine(sku)) {
+                    // 全部排完（总量满足 且 每日额度满足），移出待排队列
                     iterator.remove();
-                    log.info("新增SKU多机台排产全部完成, materialCode: {}, 使用机台数: {}, 总排产量: {}",
-                            sku.getMaterialCode(), excludedMachineCodes.size() + 1, totalScheduledQty);
+                    if (remainingQty <= 0) {
+                        log.info("新增SKU多机台排产全部完成, materialCode: {}, 使用机台数: {}, 总排产量: {}",
+                                sku.getMaterialCode(), excludedMachineCodes.size() + 1, totalScheduledQty);
+                    } else {
+                        log.info("新增SKU日计划额度已满足, materialCode: {}, 使用机台数: {}, 总排产量: {}, "
+                                        + "剩余总量: {}, 满班超排: {}",
+                                sku.getMaterialCode(), excludedMachineCodes.size() + 1, totalScheduledQty,
+                                remainingQty, sku.getShiftFillOverQty());
+                    }
                     break;
                 }
                 // 一台排不完，将剩余量作为下一台机台的目标量继续尝试
@@ -407,11 +420,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
             } else {
                 // 即使部分成功（remainingQty > 0 但无更多候选机台），也记录
-                if (remainingQty > 0) {
-                    log.warn("新增SKU多机台排产未全部完成, materialCode: {}, 已排: {}, 剩余: {}, 候选机台已耗尽",
-                            sku.getMaterialCode(), totalScheduledQty, remainingQty);
+                if (remainingQty > 0 && needMoreMachine(sku)) {
+                    log.warn("新增SKU多机台排产未全部完成, materialCode: {}, 已排: {}, 剩余: {}, 满班超排: {}, 候选机台已耗尽",
+                            sku.getMaterialCode(), totalScheduledQty, remainingQty, sku.getShiftFillOverQty());
                     // 剩余未排量计入未排结果
                     addUnscheduledResult(context, sku, "多机台产能不足，剩余" + remainingQty + "未排", unscheduledReasonCountMap);
+                    iterator.remove();
+                } else if (remainingQty > 0) {
+                    // 总量上仍有剩余（可能来自欠产传导），但日计划额度已满足，移出待排队列
+                    log.info("新增SKU日计划额度已满足但总量仍有剩余, materialCode: {}, 已排: {}, 总量剩余: {}, 满班超排: {}",
+                            sku.getMaterialCode(), totalScheduledQty, remainingQty, sku.getShiftFillOverQty());
                     iterator.remove();
                 }
                 traceNewSpecMachineDecision(context, sku, candidates, localSearchSuggestedMachine, finalMachine,
@@ -1269,6 +1287,124 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                       Map<String, Integer> reasonCountMap) {
         addUnscheduledResult(context, sku, reason);
         reasonCountMap.merge(reason, 1, Integer::sum);
+    }
+
+    /**
+     * 将排产块的班次数量按生产日期回写到SKU日计划额度账本。
+     * <p>遍历排产结果中每个有排产量的班次，按班次归属日期扣减对应日期的剩余额度。
+     * 如果班次产能大于当日剩余额度，排满班次并记录满班补齐超排量，
+     * 超出部分优先冲抵窗口内后续日期的同SKU计划。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @param result 排程结果
+     * @param shifts 排程窗口班次列表
+     */
+    private void applyBlockToDailyQuota(LhScheduleContext context,
+                                        SkuScheduleDTO sku,
+                                        LhScheduleResult result,
+                                        List<LhShiftConfigVO> shifts) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
+        if (quotaMap == null || quotaMap.isEmpty()) {
+            return;
+        }
+        int totalShiftFillOverQty = 0;
+        for (LhShiftConfigVO shift : shifts) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+            if (planQty == null || planQty <= 0) {
+                continue;
+            }
+            Date workDate = shift.getWorkDate();
+            if (workDate == null) {
+                continue;
+            }
+            LocalDate productionDate = workDate.toInstant()
+                    .atZone(ZoneId.systemDefault()).toLocalDate();
+            SkuDailyPlanQuotaDTO quota = quotaMap.get(productionDate);
+            if (quota == null) {
+                continue;
+            }
+            // 扣减当日计划额度
+            int consumed = Math.min(planQty, quota.getRemainingQty());
+            quota.setRemainingQty(Math.max(0, quota.getRemainingQty() - consumed));
+            quota.setScheduledQty(quota.getScheduledQty() + consumed);
+
+            int overQty = planQty - consumed;
+            if (overQty > 0) {
+                // 超出当日计划部分，优先冲抵窗口内后续日期的同SKU计划
+                int offsetFutureQty = consumeFutureDailyQuota(quotaMap, productionDate, overQty);
+                overQty -= offsetFutureQty;
+            }
+            if (overQty > 0) {
+                // 无法冲抵的部分记录为满班补齐超排量
+                quota.setShiftFillOverQty(quota.getShiftFillOverQty() + overQty);
+                totalShiftFillOverQty += overQty;
+                log.debug("班次满班补齐超排, materialCode: {}, 日期: {}, 班次: {}, 排产量: {}, 超排: {}",
+                        sku.getMaterialCode(), productionDate, shift.getShiftIndex(), planQty, overQty);
+            }
+            // 检查当日计划是否完成
+            if (quota.getRemainingQty() <= 0) {
+                quota.setCompleted(true);
+            }
+        }
+        if (totalShiftFillOverQty > 0) {
+            sku.setShiftFillOverQty(sku.getShiftFillOverQty() + totalShiftFillOverQty);
+            // 同步写入上下文累加器，确保SKU从待排列表移除后汇总日志仍可读取
+            context.getSkuShiftFillOverQtyMap().merge(sku.getMaterialCode(), totalShiftFillOverQty, Integer::sum);
+        }
+    }
+
+    /**
+     * 将满班补齐超排量优先冲抵窗口内后续日期的同SKU剩余计划额度。
+     *
+     * @param quotaMap 日计划额度账本
+     * @param currentDate 当前生产日期
+     * @param overQty 待冲抵的超排量
+     * @return 实际冲抵量
+     */
+    private int consumeFutureDailyQuota(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+                                        LocalDate currentDate,
+                                        int overQty) {
+        if (overQty <= 0 || quotaMap == null || quotaMap.isEmpty()) {
+            return 0;
+        }
+        int totalOffset = 0;
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            // 仅冲抵当前日期之后的日期
+            if (!entry.getKey().isAfter(currentDate)) {
+                continue;
+            }
+            SkuDailyPlanQuotaDTO quota = entry.getValue();
+            if (quota.getRemainingQty() <= 0) {
+                continue;
+            }
+            int offset = Math.min(quota.getRemainingQty(), overQty - totalOffset);
+            quota.setRemainingQty(Math.max(0, quota.getRemainingQty() - offset));
+            quota.setScheduledQty(quota.getScheduledQty() + offset);
+            totalOffset += offset;
+            if (totalOffset >= overQty) {
+                break;
+            }
+        }
+        return totalOffset;
+    }
+
+    /**
+     * 判断SKU是否需要继续尝试下一台机台排产。
+     * <p>同时检查总量剩余和日计划额度剩余，两者都满足时才不需要继续。</p>
+     *
+     * @param sku SKU排程DTO
+     * @return true-需要继续多机台排产，false-已满足
+     */
+    private boolean needMoreMachine(SkuScheduleDTO sku) {
+        if (sku.getRemainingScheduleQty() > 0) {
+            return true;
+        }
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
+        if (quotaMap == null || quotaMap.isEmpty()) {
+            return false;
+        }
+        return quotaMap.values().stream().anyMatch(day -> day.getRemainingQty() > 0);
     }
 
     /**

@@ -161,6 +161,8 @@ public class LhScheduleContext {
     private List<SkuScheduleDTO> newSpecSkuList = new ArrayList<>();
     /** 前一日欠产/超产向当日传导的净值，key=materialCode */
     private Map<String, Integer> carryForwardQtyMap = new HashMap<>();
+    /** 满班补齐超排量累加器，key=materialCode，供最终汇总日志使用（不受SKU从待排列表中移除影响） */
+    private Map<String, Integer> skuShiftFillOverQtyMap = new LinkedHashMap<>();
 
     // ========== 机台分配状态 ==========
 

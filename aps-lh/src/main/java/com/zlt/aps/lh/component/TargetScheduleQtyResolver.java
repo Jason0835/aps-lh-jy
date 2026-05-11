@@ -40,6 +40,8 @@ public class TargetScheduleQtyResolver {
 
     /**
      * 解析 SKU 的初始目标排产量。
+     * <p>非满排模式（按需求排产）：目标量 = min(窗口日计划剩余量, 月计划余量)。</p>
+     * <p>满排模式（按产能满排）：目标量 = min(待排量, 理论窗口产能上限)。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -57,7 +59,17 @@ public class TargetScheduleQtyResolver {
         if (isFullCapacityMode(context)) {
             upperLimitQty = resolveTheoreticalWindowCapacity(context, sku);
         } else {
-            upperLimitQty = pendingQty;
+            // 按需求排产：目标量 = min(窗口日计划剩余量, 月计划余量)
+            // 不因胎胚库存或欠产传导上调目标量，避免非收尾SKU被异常放大
+            int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
+            if (windowRemainingPlanQty > 0) {
+                // 有日计划额度账本：按窗口日计划剩余量 与 月计划余量 取小
+                int surplusQty = Math.max(0, sku.getSurplusQty());
+                upperLimitQty = Math.min(windowRemainingPlanQty, surplusQty);
+            } else {
+                // 无日计划额度账本（旧测试场景/未初始化）：回退到待排量口径
+                upperLimitQty = pendingQty;
+            }
         }
         return Math.max(0, Math.min(pendingQty, upperLimitQty));
     }
@@ -382,7 +394,8 @@ public class TargetScheduleQtyResolver {
     /**
      * 收尾场景下上调目标排产量（考虑胎胚库存）。
      * <p>仅在收尾判定完成后调用，非收尾SKU不应调用此方法。</p>
-     * <p>公式：max(windowRemainingPlanQty, embryoStock)，不超过月计划余量。</p>
+     * <p>公式：endingTargetQty = min(max(windowRemainingPlanQty, embryoStock), surplusQty)。</p>
+     * <p>收尾时允许将目标量上调到胎胚库存量，但不允许超过月计划余量。</p>
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
@@ -393,16 +406,26 @@ public class TargetScheduleQtyResolver {
             return 0;
         }
         int currentTargetQty = Math.max(0, sku.resolveTargetScheduleQty());
+        int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
         int embryoStock = Math.max(0, sku.getEmbryoStock());
-        if (embryoStock <= currentTargetQty) {
+        // 收尾基线：日计划剩余量与胎胚库存取大，确保收尾时胎胚尽量清完
+        int endingBaseQty = Math.max(windowRemainingPlanQty, embryoStock);
+        if (endingBaseQty <= currentTargetQty) {
             return currentTargetQty;
         }
-        // 收尾场景下允许上调到胎胚库存量，但不超过月计划余量
+        // 收尾上调不超过月计划余量（默认不超月计划）
         int surplusQty = Math.max(0, sku.getSurplusQty());
-        int upsizeTargetQty = Math.min(embryoStock, surplusQty);
+        int upsizeTargetQty = Math.min(endingBaseQty, surplusQty);
+        // 多机台合计产能封顶
+        int totalAvailableCapacity = calcSkuTotalAvailableCapacityInWindow(context, sku);
+        if (totalAvailableCapacity > 0) {
+            upsizeTargetQty = Math.min(upsizeTargetQty, totalAvailableCapacity);
+        }
         if (upsizeTargetQty > currentTargetQty) {
-            log.info("收尾SKU目标量上调, materialCode: {}, 原目标量: {}, 上调后: {}, 胎胚库存: {}, 月计划余量: {}",
-                    sku.getMaterialCode(), currentTargetQty, upsizeTargetQty, embryoStock, surplusQty);
+            log.info("收尾SKU目标量上调, materialCode: {}, 原目标量: {}, 上调后: {}, "
+                            + "窗口日计划剩余: {}, 胎胚库存: {}, 月计划余量: {}, 多机台合计产能: {}",
+                    sku.getMaterialCode(), currentTargetQty, upsizeTargetQty,
+                    windowRemainingPlanQty, embryoStock, surplusQty, totalAvailableCapacity);
             sku.setTargetScheduleQty(upsizeTargetQty);
             sku.setRemainingScheduleQty(upsizeTargetQty);
             return upsizeTargetQty;
