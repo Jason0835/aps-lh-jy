@@ -31,6 +31,7 @@ import com.zlt.aps.lh.engine.strategy.ITrialProductionStrategy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.lh.util.LhMultiMachineDistributionUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
@@ -145,6 +146,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             scaleShiftPlanQty(context, result, ratio);
             refreshResultSummary(context, result);
         }
+        // 多机台余量和胎胚库存按实际排产量占比分摊，尾差由最大余数法补齐
+        distributeMultiMachineSurplusAndStock(context);
         finalizeZeroPlanNewSpecResults(context);
         // 新增结果在库存裁剪后需按最终计划量复核收尾语义，避免"未收完却标收尾"。
         refreshNewSpecEndingFlagByResult(context);
@@ -790,7 +793,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             int planQty = ShiftFieldUtil.resolveScheduledQty(result);
             materialTotalPlanQtyMap.merge(materialCode, planQty, Integer::sum);
             if (!materialEndingDemandQtyMap.containsKey(materialCode)) {
-                materialEndingDemandQtyMap.put(materialCode, resolveEndingDemandQty(result));
+                materialEndingDemandQtyMap.put(materialCode, resolveEndingDemandQty(context, result));
             }
         }
         // 基于汇总计划量统一设置同物料所有结果的收尾标记
@@ -806,15 +809,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 计算结果行收尾比较量。
+     * 计算结果行收尾比较量（从SKU DTO取全量值，避免多机台分摊后偏小）。
      *
+     * @param context 排程上下文
      * @param result 排程结果
      * @return max(硫化余量, 胎胚库存)
      */
-    private int resolveEndingDemandQty(LhScheduleResult result) {
-        int surplusQty = result.getMouldSurplusQty() != null ? result.getMouldSurplusQty() : 0;
-        int embryoStock = result.getEmbryoStock() != null ? result.getEmbryoStock() : 0;
-        return Math.max(Math.max(surplusQty, 0), Math.max(embryoStock, 0));
+    private int resolveEndingDemandQty(LhScheduleContext context, LhScheduleResult result) {
+        SkuScheduleDTO sku = findSkuDto(context, result.getMaterialCode());
+        int surplusQty = sku != null ? Math.max(0, sku.getSurplusQty()) : 0;
+        int embryoStock = sku != null ? Math.max(0, sku.getEmbryoStock()) : 0;
+        return Math.max(surplusQty, embryoStock);
     }
 
     /**
@@ -1608,6 +1613,52 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (assignedResults.isEmpty()) {
                 iterator.remove();
             }
+        }
+    }
+
+    /**
+     * 多机台余量和胎胚库存按实际排产量占比分摊。
+     * <p>对新增阶段结果按物料分组，委托 {@link LhMultiMachineDistributionUtil#distributeForSingleMaterial}
+     * 按各机台实际排产量占比分摊。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void distributeMultiMachineSurplusAndStock(LhScheduleContext context) {
+        if (context == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        // 按物料编码汇总新增结果（排除换活字块）
+        Map<String, List<LhScheduleResult>> materialResultsMap = new LinkedHashMap<>(16);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!NEW_SPEC_SCHEDULE_TYPE.equals(result.getScheduleType())
+                    || "1".equals(result.getIsTypeBlock())) {
+                continue;
+            }
+            if (StringUtils.isEmpty(result.getMaterialCode())) {
+                continue;
+            }
+            if (result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
+                continue;
+            }
+            materialResultsMap.computeIfAbsent(result.getMaterialCode(), k -> new ArrayList<>()).add(result);
+        }
+        // 委托工具类按排产量占比分摊
+        for (Map.Entry<String, List<LhScheduleResult>> entry : materialResultsMap.entrySet()) {
+            List<LhScheduleResult> materialResults = entry.getValue();
+            if (materialResults.size() <= 1) {
+                continue;
+            }
+            String materialCode = entry.getKey();
+            SkuScheduleDTO sku = findSkuDto(context, materialCode);
+            if (sku == null) {
+                continue;
+            }
+            int totalSurplus = Math.max(0, sku.getSurplusQty());
+            int totalEmbryoStock = Math.max(0, sku.getEmbryoStock());
+            LhMultiMachineDistributionUtil.distributeForSingleMaterial(
+                    materialResults, totalSurplus, totalEmbryoStock);
+            log.debug("多机台新增余量/胎胚库存分摊完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
+                    materialCode, materialResults.size(), totalSurplus, totalEmbryoStock);
         }
     }
 
