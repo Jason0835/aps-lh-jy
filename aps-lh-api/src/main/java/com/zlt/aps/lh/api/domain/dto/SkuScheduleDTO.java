@@ -130,6 +130,10 @@ public class SkuScheduleDTO {
     /** 满班补齐导致的窗口内超排量（因班次需排满而超出日计划的累计量） */
     private int shiftFillOverQty;
 
+    // ========== 目标量控制字段 ==========
+    /** 是否严格限制目标量（试制/收尾=true，正式/量试=false）。为true时禁止超出dayN补满班次 */
+    private boolean strictTargetQty;
+
     // ========== 月计划版本信息 ==========
     /** 月计划需求版本 */
     private String monthPlanVersion;

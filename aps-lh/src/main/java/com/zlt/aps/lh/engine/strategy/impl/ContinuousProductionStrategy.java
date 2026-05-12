@@ -120,6 +120,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
 
+            // 收尾SKU严格限制目标量，不允许为了填满班次而超排
+            if (isEnding) {
+                sku.setStrictTargetQty(true);
+            }
+
             // 滚动衔接时沿用机台继承后的可用时间，避免从重叠窗口首班重复起排。
             Date startTime = resolveContinuousStartTime(context, machine, shifts);
             Date specifySwitchStartTime = !isEnding

@@ -405,6 +405,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setMonthPlanVersion(plan.getMonthPlanVersion());
         dto.setProductionVersion(plan.getProductionVersion());
 
+        // 试制SKU严格限制目标量，不允许超出dayN补满班次
+        if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), dto.getConstructionStage())) {
+            dto.setStrictTargetQty(true);
+        }
+
         // 默认标记为常规
         dto.setSkuTag(SkuTagEnum.NORMAL.getCode());
 
@@ -1081,6 +1086,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 胎胚信息
         copy.setEmbryoStock(source.getEmbryoStock());
         copy.setEmbryoSupplyHours(source.getEmbryoSupplyHours());
+        // 目标量控制字段
+        copy.setStrictTargetQty(source.isStrictTargetQty());
         // 多机台排产相关 —— 共享日计划额度账本
         copy.setRemainingScheduleQty(source.getRemainingScheduleQty());
         copy.setDailyPlanQuotaMap(source.getDailyPlanQuotaMap());

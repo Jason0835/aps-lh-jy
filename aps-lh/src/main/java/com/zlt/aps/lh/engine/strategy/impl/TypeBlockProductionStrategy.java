@@ -884,6 +884,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
         boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
+        // 收尾SKU严格限制目标量，不允许为了填满班次而超排
+        if (isEnding) {
+            sku.setStrictTargetQty(true);
+        }
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
         sku.setMouldQty(machineMouldQty);
         LhScheduleResult result = buildScheduleResult(
