@@ -1444,9 +1444,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             int totalSurplus = Math.max(0, sku.getSurplusQty());
             int totalEmbryoStock = Math.max(0, sku.getEmbryoStock());
+            // 仅分摊胎胚库存，余量不按机台均分（各机台结果保留原始全量值）
             LhMultiMachineDistributionUtil.distributeForSingleMaterial(
                     materialResults, totalSurplus, totalEmbryoStock);
-            log.debug("多机台续作余量/胎胚库存均分完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
+            log.debug("多机台续作胎胚库存分摊完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
                     materialCode, materialResults.size(), totalSurplus, totalEmbryoStock);
         }
     }
