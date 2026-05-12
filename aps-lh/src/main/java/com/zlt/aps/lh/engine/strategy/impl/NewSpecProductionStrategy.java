@@ -41,6 +41,7 @@ import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import com.zlt.aps.lh.util.SingleMouldShiftQtyUtil;
 import com.zlt.aps.lh.component.OrderNoGenerator;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -751,6 +752,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         result.setIsChangeMould("1");
         result.setIsTypeBlock("0");
         result.setConstructionStage(sku.getConstructionStage());
+        // 设置产品状态（取自SKU与示方书关系的硫化示方书类型）
+        MdmSkuConstructionRef constructionRef = context.getSkuConstructionRefMap().get(sku.getMaterialCode());
+        result.setTrialStatus(constructionRef != null ? constructionRef.getLhType() : null);
         result.setEmbryoNo(sku.getEmbryoNo());
         result.setTextNo(sku.getTextNo());
         result.setLhNo(sku.getLhNo());

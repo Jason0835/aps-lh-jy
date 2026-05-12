@@ -37,6 +37,7 @@ import com.zlt.aps.lh.util.SingleMouldShiftQtyUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -1470,6 +1471,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setScheduleType(ScheduleTypeEnum.TYPE_BLOCK.getCode());
         result.setIsTypeBlock(YES_FLAG);
         result.setConstructionStage(sku.getConstructionStage());
+        // 设置产品状态（取自SKU与示方书关系的硫化示方书类型）
+        MdmSkuConstructionRef constructionRef = context.getSkuConstructionRefMap().get(sku.getMaterialCode());
+        result.setTrialStatus(constructionRef != null ? constructionRef.getLhType() : null);
         result.setEmbryoNo(sku.getEmbryoNo());
         result.setTextNo(sku.getTextNo());
         result.setLhNo(sku.getLhNo());

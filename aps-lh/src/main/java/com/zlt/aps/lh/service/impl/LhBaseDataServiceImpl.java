@@ -30,6 +30,7 @@ import com.zlt.aps.lh.mapper.MdmCapsuleChuckMapper;
 import com.zlt.aps.lh.mapper.MdmMaterialInfoMapper;
 import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
+import com.zlt.aps.lh.mapper.MdmSkuConstructionRefMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
@@ -49,6 +50,7 @@ import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmMonthSurplus;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
@@ -162,6 +164,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     @Resource
     private LhSpecialMaterialBomEntityMapper lhSpecialMaterialBomEntityMapper;
 
+    @Resource
+    private MdmSkuConstructionRefMapper skuConstructionRefMapper;
+
     @Override
     public void loadAllBaseData(LhScheduleContext context) {
         String factoryCode = context.getFactoryCode();
@@ -258,6 +263,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         loadPreviousScheduleResults(context, factoryCode, targetDate);
         // 22. 加载前日模具交替计划，供滚动衔接继承
         loadPreviousMouldChangePlans(context, factoryCode, targetDate);
+        // 23. 加载SKU与示方书关系
+        loadSkuConstructionRef(context, factoryCode);
 
         log.info("基础数据加载完成, 工厂: {}, 目标日: {}, T日: {}",
                 factoryCode, LhScheduleTimeUtil.formatDate(targetDate), LhScheduleTimeUtil.formatDate(scheduleDate));
@@ -1226,6 +1233,29 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
         context.setMaintenancePlanMap(maintenancePlanMap);
         log.debug("硫化精度保养计划加载完成, 年度: {}, 数量: {}", scheduleYear, maintenancePlanMap.size());
+    }
+
+    /**
+     * 加载SKU与示方书关系
+     *
+     * @param context     排程上下文
+     * @param factoryCode 分厂编号
+     */
+    private void loadSkuConstructionRef(LhScheduleContext context, String factoryCode) {
+        List<MdmSkuConstructionRef> refList = skuConstructionRefMapper.selectList(
+                new LambdaQueryWrapper<MdmSkuConstructionRef>()
+                        .eq(MdmSkuConstructionRef::getFactoryCode, factoryCode)
+                        .eq(MdmSkuConstructionRef::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
+        Map<String, MdmSkuConstructionRef> refMap = new HashMap<>(256);
+        if (refList != null) {
+            for (MdmSkuConstructionRef ref : refList) {
+                if (StringUtils.isNotEmpty(ref.getMaterialCode())) {
+                    refMap.put(ref.getMaterialCode(), ref);
+                }
+            }
+        }
+        context.setSkuConstructionRefMap(refMap);
+        log.debug("SKU与示方书关系加载完成, 数量: {}", refMap.size());
     }
 
     /**

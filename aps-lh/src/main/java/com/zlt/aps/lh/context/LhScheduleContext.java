@@ -20,6 +20,7 @@ import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmMonthSurplus;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
@@ -140,6 +141,8 @@ public class LhScheduleContext {
     private Map<String, Set<String>> specialMaterialCategoryByMaterialCode = new HashMap<>();
     /** 特殊物料分类Map, key=结构名称, value=分类集合 */
     private Map<String, Set<String>> specialMaterialCategoryByStructureName = new HashMap<>();
+    /** SKU与示方书关系Map, key=materialCode */
+    private Map<String, MdmSkuConstructionRef> skuConstructionRefMap = new HashMap<>();
 
     // ========== 中间计算结果(S4.3) ==========
 

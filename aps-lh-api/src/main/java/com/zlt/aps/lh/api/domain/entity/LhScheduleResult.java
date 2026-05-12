@@ -743,6 +743,14 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
 
 
     /**
+     * 产品状态
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.trialStatus", dictType = "trial_status")
+    @ApiModelProperty(value = "产品状态", name = "trialStatus")
+    @TableField(value = "TRIAL_STATUS")
+    private String trialStatus;
+
+    /**
      * 删除标识（0未删除；1已删除）
      */
     @Excel(name = "ui.data.column.lhScheduleResult.isDelete")
