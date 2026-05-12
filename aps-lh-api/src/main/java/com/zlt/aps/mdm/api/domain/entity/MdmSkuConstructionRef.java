@@ -11,19 +11,6 @@ import lombok.Data;
 
 import java.math.BigDecimal;
 
-/**
- * Copyright (c) 2022, All rights reserved。
- * 文件名称：MdmSkuConstructionRef.java
- * 描    述：SKU与施工（示方书）关系对象 t_mdm_sku_construction_ref
- *@author zlt
- *@date 2025-12-06
- *@version 1.0
- *
- *  修改记录：
- *     修改时间：...
- *     修 改 人：zlt
- *     修改内容：...
- */
 
 @ApiModel(value = "SKU与施工（示方书）关系对象", description = "SKU与施工（示方书）关系对象 ")
 @Data
