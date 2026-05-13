@@ -413,4 +413,15 @@
 如果需求与现有逻辑冲突，先说明冲突点，再给最小改动方案。
 输出方案时必须能直接作为开发任务拆解依据。
 
+# 应用启动方式：
+mvn spring-boot:run -pl aps-lh -Dmaven.test.skip=true 2>&1 | tee aps-lh-start.log | grep -E "(Started|ERROR|Application Lh is running|启动|port:)" | head -1
+或者
+sh '/Applications/IntelliJ IDEA.app/Contents/plugins/maven/lib/maven3/bin/mvn' -pl aps-lh -am -DskipTests dependency:copy-dependencies -DincludeScope=runtime
+
+# 接口验证方式：
+curl -X POST 'http://localhost:9669/lhScheduleResult/execute' \
+  -H 'Content-Type: application/json' \
+  -d '{"factoryCode":"116","scheduleDate":"需填写排程日期"}' 
+  
+
 ```
