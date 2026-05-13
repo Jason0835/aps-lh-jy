@@ -3,6 +3,7 @@ package com.zlt.aps.lh.regression;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
@@ -28,12 +29,15 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Field;
+import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -180,6 +184,42 @@ class NewSpecProductionStrategyRegressionTest {
 
         assertEquals(1, context.getScheduleResultList().size(), "应生成新增排产结果");
         assertEquals("0", context.getScheduleResultList().get(0).getIsEnd(), "非收尾SKU应写入is_end=0");
+    }
+
+    @Test
+    void applyBlockToDailyQuota_shouldTrimResultQtyWhenWindowQuotaIsExhausted() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        MachineScheduleDTO machine = buildMachine("M-QUOTA", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayShift = resolveNextWorkDateShift(shifts, firstShift);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("MAT-QUOTA");
+        sku.setDailyPlanQuotaMap(buildQuotaMap(firstShift, nextDayShift, 6, 4));
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("MAT-QUOTA");
+        result.setScheduleType("02");
+        result.setLhMachineCode("M-QUOTA");
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 8,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, nextDayShift.getShiftIndex(), 8,
+                nextDayShift.getShiftStartDateTime(), nextDayShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+
+        ReflectionTestUtils.invokeMethod(strategy, "applyBlockToDailyQuota", context, sku, result, shifts);
+
+        assertEquals(10, result.getDailyPlanQty().intValue(), "窗口总量用尽后，结果行计划量必须同步回裁");
+        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()));
+        assertEquals(Integer.valueOf(2), ShiftFieldUtil.getShiftPlanQty(result, nextDayShift.getShiftIndex()));
+        assertEquals(6, context.getSkuShiftFillOverQtyMap().get("MAT-QUOTA").intValue());
     }
 
     @Test
@@ -1438,6 +1478,40 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setPendingQty(1);
         sku.setDailyPlanQty(1);
         return sku;
+    }
+
+    private LhShiftConfigVO resolveNextWorkDateShift(List<LhShiftConfigVO> shifts, LhShiftConfigVO firstShift) {
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift.getWorkDate() != null
+                    && firstShift.getWorkDate() != null
+                    && shift.getWorkDate().after(firstShift.getWorkDate())) {
+                return shift;
+            }
+        }
+        throw new IllegalStateException("测试夹具未找到跨天班次");
+    }
+
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> buildQuotaMap(LhShiftConfigVO firstShift,
+                                                               LhShiftConfigVO nextDayShift,
+                                                               int firstDayQty,
+                                                               int nextDayQty) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(firstShift), quota("MAT-QUOTA", toLocalDate(firstShift), firstDayQty));
+        quotaMap.put(toLocalDate(nextDayShift), quota("MAT-QUOTA", toLocalDate(nextDayShift), nextDayQty));
+        return quotaMap;
+    }
+
+    private SkuDailyPlanQuotaDTO quota(String materialCode, LocalDate productionDate, int dayPlanQty) {
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setMaterialCode(materialCode);
+        quota.setProductionDate(productionDate);
+        quota.setDayPlanQty(dayPlanQty);
+        quota.setRemainingQty(dayPlanQty);
+        return quota;
+    }
+
+    private LocalDate toLocalDate(LhShiftConfigVO shift) {
+        return shift.getWorkDate().toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate();
     }
 
     private MachineScheduleDTO buildMachine(String machineCode, Date estimatedEndTime) {

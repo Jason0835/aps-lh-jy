@@ -93,6 +93,44 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
+    void doHandle_shouldKeepDemandQtyAndLeaveWindowCapToDailyQuotaLedger() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleDate(date(2026, 5, 3));
+        context.setScheduleTargetDate(date(2026, 5, 5));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("3302001724");
+        plan.setMaterialDesc("3302001724-DESC");
+        plan.setStructureName("S-ROLLING-LOSS");
+        plan.setSpecifications("SPEC-ROLLING-LOSS");
+        plan.setTotalQty(1000);
+        plan.setDay3(96);
+        plan.setDay4(48);
+        plan.setDay5(14);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        LhScheduleResult previous = new LhScheduleResult();
+        previous.setLhMachineCode("K1105");
+        previous.setMaterialCode("3302001724");
+        previous.setClass1PlanQty(96);
+        context.setPreviousScheduleResultList(Collections.singletonList(previous));
+        context.getMaterialDayFinishedQtyMap().put("3302001724_2026-05-02", 32);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-ROLLING-LOSS").get(0);
+        assertEquals(64, context.getCarryForwardQtyMap().get("3302001724").intValue());
+        assertEquals(158, sku.getWindowPlanQty());
+        assertEquals(222, sku.getWindowRemainingPlanQty());
+        assertEquals(1032, sku.getPendingQty());
+        assertEquals(1032, sku.getTargetScheduleQty().intValue());
+    }
+
+    @Test
     void doHandle_shouldNotDoubleDeductWhenSameMaterialHasMultipleMachines() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 

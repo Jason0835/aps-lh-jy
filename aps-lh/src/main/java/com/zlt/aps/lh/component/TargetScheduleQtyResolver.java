@@ -40,7 +40,7 @@ public class TargetScheduleQtyResolver {
 
     /**
      * 解析 SKU 的初始目标排产量。
-     * <p>非满排模式（按需求排产）：目标量 = min(窗口日计划剩余量, 月计划余量)。</p>
+     * <p>非满排模式（按需求排产）：目标量 = 待排量；窗口总量封顶交由日计划账本消费链路约束。</p>
      * <p>满排模式（按产能满排）：目标量 = min(待排量, 理论窗口产能上限)。</p>
      *
      * @param context 排程上下文
@@ -69,17 +69,10 @@ public class TargetScheduleQtyResolver {
             // 正式/量试SKU允许超出dayN补满班次，按理论窗口产能封顶
             upperLimitQty = resolveTheoreticalWindowCapacity(context, sku);
         } else {
-            // 按需求排产：目标量 = min(窗口日计划剩余量, 月计划余量)
-            // 不因胎胚库存或欠产传导上调目标量，避免非收尾SKU被异常放大
-            int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
-            if (windowRemainingPlanQty > 0) {
-                // 有日计划额度账本：按窗口日计划剩余量 与 月计划余量 取小
-                int surplusQty = Math.max(0, sku.getSurplusQty());
-                upperLimitQty = Math.min(windowRemainingPlanQty, surplusQty);
-            } else {
-                // 无日计划额度账本（旧测试场景/未初始化）：回退到待排量口径
-                upperLimitQty = pendingQty;
-            }
+            // 按需求排产只保留“需求口径”，不在此阶段按窗口额度压缩目标量。
+            // 欠产滚动、未来预占、窗口总量封顶统一交由日计划账本消费链路处理，
+            // 避免 DTO 初始化后再次把需求量压回 dayN 额度。
+            upperLimitQty = pendingQty;
         }
         return Math.max(0, Math.min(pendingQty, upperLimitQty));
     }

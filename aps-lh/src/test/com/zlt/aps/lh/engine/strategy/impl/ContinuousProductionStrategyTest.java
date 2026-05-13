@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -15,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Field;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Arrays;
@@ -230,6 +232,110 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void syncContinuousDailyPlanQuota_shouldTrimResultQtyAndAvoidDoubleConsume() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 4, 25, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 4, 27, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("M-QUOTA");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayShift = resolveNextWorkDateShift(shifts, firstShift);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-QUOTA");
+        sku.setDailyPlanQuotaMap(buildQuotaMap(firstShift, nextDayShift, 6, 4));
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setScheduleType("01");
+        result.setIsTypeBlock("0");
+        result.setMaterialCode("MAT-QUOTA");
+        result.setLhMachineCode("M-QUOTA");
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 8,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, nextDayShift.getShiftIndex(), 8,
+                nextDayShift.getShiftStartDateTime(), nextDayShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(strategy, "syncContinuousDailyPlanQuota", context, shifts);
+        ReflectionTestUtils.invokeMethod(strategy, "syncContinuousDailyPlanQuota", context, shifts);
+
+        assertEquals(10, result.getDailyPlanQty().intValue(), "续作账本同步后，结果行计划量必须被窗口总量硬封顶");
+        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()));
+        assertEquals(Integer.valueOf(2), ShiftFieldUtil.getShiftPlanQty(result, nextDayShift.getShiftIndex()));
+        assertEquals(6, sku.getShiftFillOverQty(), "重复同步同一上下文时，不应再次累计超排量");
+        assertEquals(6, context.getSkuShiftFillOverQtyMap().get("MAT-QUOTA").intValue());
+    }
+
+    @Test
+    public void syncContinuousDailyPlanQuota_shouldUseSourceSkuMapForDuplicateMaterialCode() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 4, 25, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 4, 27, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayShift = resolveNextWorkDateShift(shifts, firstShift);
+
+        SkuScheduleDTO firstSku = new SkuScheduleDTO();
+        firstSku.setMaterialCode("MAT-DUP");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> firstQuotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        firstQuotaMap.put(toLocalDate(firstShift), quota("MAT-DUP", toLocalDate(firstShift), 6));
+        firstQuotaMap.put(toLocalDate(nextDayShift), quota("MAT-DUP", toLocalDate(nextDayShift), 0));
+        firstSku.setDailyPlanQuotaMap(firstQuotaMap);
+
+        SkuScheduleDTO secondSku = new SkuScheduleDTO();
+        secondSku.setMaterialCode("MAT-DUP");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> secondQuotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        secondQuotaMap.put(toLocalDate(firstShift), quota("MAT-DUP", toLocalDate(firstShift), 0));
+        secondQuotaMap.put(toLocalDate(nextDayShift), quota("MAT-DUP", toLocalDate(nextDayShift), 4));
+        secondSku.setDailyPlanQuotaMap(secondQuotaMap);
+        context.setContinuousSkuList(Arrays.asList(firstSku, secondSku));
+
+        LhScheduleResult firstResult = new LhScheduleResult();
+        firstResult.setScheduleType("01");
+        firstResult.setIsTypeBlock("0");
+        firstResult.setMaterialCode("MAT-DUP");
+        ShiftFieldUtil.setShiftPlanQty(firstResult, firstShift.getShiftIndex(), 8,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(firstResult);
+
+        LhScheduleResult secondResult = new LhScheduleResult();
+        secondResult.setScheduleType("01");
+        secondResult.setIsTypeBlock("0");
+        secondResult.setMaterialCode("MAT-DUP");
+        ShiftFieldUtil.setShiftPlanQty(secondResult, nextDayShift.getShiftIndex(), 8,
+                nextDayShift.getShiftStartDateTime(), nextDayShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(secondResult);
+
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, firstSku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, secondSku);
+
+        ReflectionTestUtils.invokeMethod(strategy, "syncContinuousDailyPlanQuota", context, shifts);
+
+        assertEquals(6, firstResult.getDailyPlanQty().intValue(), "首条重复物料结果应只消费自己的首日额度");
+        assertEquals(4, secondResult.getDailyPlanQty().intValue(), "第二条重复物料结果应消费自己的次日额度");
+        assertEquals(2, firstSku.getShiftFillOverQty(), "首条结果的超排量应记录在首个来源SKU账本");
+        assertEquals(4, secondSku.getShiftFillOverQty(), "第二条结果的超排量应记录在第二个来源SKU账本");
+    }
+
+    @Test
     public void scheduleReduceMould_shouldRecheckIsEndAfterPlanQtyReduced() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
 
@@ -293,6 +399,67 @@ public class ContinuousProductionStrategyTest {
                 "降模后计划量低于max(硫化余量,胎胚库存)时，应回写为正常");
         assertEquals("0", context.getScheduleResultList().get(1).getIsEnd(),
                 "降模后计划量低于max(硫化余量,胎胚库存)时，应回写为正常");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldKeepFullEmbryoStockAfterZeroPlanResultRemoved() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 4, 25, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 4, 27, 0, 0, 0));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+
+        MachineScheduleDTO machine1 = new MachineScheduleDTO();
+        machine1.setMachineCode("M1");
+        machine1.setCapsuleUsageCount(1);
+        context.getMachineScheduleMap().put("M1", machine1);
+        MachineScheduleDTO machine2 = new MachineScheduleDTO();
+        machine2.setMachineCode("M2");
+        machine2.setCapsuleUsageCount(2);
+        context.getMachineScheduleMap().put("M2", machine2);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-STOCK");
+        sku.setEmbryoStock(120);
+        sku.setTargetScheduleQty(60);
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result1 = new LhScheduleResult();
+        result1.setScheduleType("01");
+        result1.setIsTypeBlock("0");
+        result1.setMaterialCode("MAT-STOCK");
+        result1.setLhMachineCode("M1");
+        result1.setEmbryoCode("EMB-1");
+        result1.setEmbryoStock(120);
+        result1.setMouldQty(2);
+        result1.setSingleMouldShiftQty(30);
+        ShiftFieldUtil.setShiftPlanQty(result1, 1, 60, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(result1);
+
+        LhScheduleResult result2 = new LhScheduleResult();
+        result2.setScheduleType("01");
+        result2.setIsTypeBlock("0");
+        result2.setMaterialCode("MAT-STOCK");
+        result2.setLhMachineCode("M2");
+        result2.setEmbryoCode("EMB-1");
+        result2.setEmbryoStock(120);
+        result2.setMouldQty(2);
+        result2.setSingleMouldShiftQty(30);
+        ShiftFieldUtil.setShiftPlanQty(result2, 1, 60, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(result2);
+
+        context.getScheduleResultList().add(result1);
+        context.getScheduleResultList().add(result2);
+        context.getScheduleResultSourceSkuMap().put(result1, sku);
+        context.getScheduleResultSourceSkuMap().put(result2, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(1, context.getScheduleResultList().size(), "零计划续作结果应在收口阶段移除");
+        assertEquals("M1", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals(120, context.getScheduleResultList().get(0).getEmbryoStock(),
+                "多机台续作被裁成单条后，应保留来源SKU的完整胎胚库存口径");
     }
 
     /**
@@ -419,6 +586,40 @@ public class ContinuousProductionStrategyTest {
         sku.setEmbryoCode(embryoCode);
         sku.setEmbryoStock(embryoStock);
         return sku;
+    }
+
+    private LhShiftConfigVO resolveNextWorkDateShift(List<LhShiftConfigVO> shifts, LhShiftConfigVO firstShift) {
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift.getWorkDate() != null
+                    && firstShift.getWorkDate() != null
+                    && shift.getWorkDate().after(firstShift.getWorkDate())) {
+                return shift;
+            }
+        }
+        throw new IllegalStateException("测试夹具未找到跨天班次");
+    }
+
+    private LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO> buildQuotaMap(LhShiftConfigVO firstShift,
+                                                                         LhShiftConfigVO nextDayShift,
+                                                                         int firstDayQty,
+                                                                         int nextDayQty) {
+        LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(firstShift), quota("MAT-QUOTA", toLocalDate(firstShift), firstDayQty));
+        quotaMap.put(toLocalDate(nextDayShift), quota("MAT-QUOTA", toLocalDate(nextDayShift), nextDayQty));
+        return quotaMap;
+    }
+
+    private SkuDailyPlanQuotaDTO quota(String materialCode, LocalDate productionDate, int dayPlanQty) {
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setMaterialCode(materialCode);
+        quota.setProductionDate(productionDate);
+        quota.setDayPlanQty(dayPlanQty);
+        quota.setRemainingQty(dayPlanQty);
+        return quota;
+    }
+
+    private LocalDate toLocalDate(LhShiftConfigVO shift) {
+        return shift.getWorkDate().toInstant().atZone(ZONE_ID).toLocalDate();
     }
 
     /**

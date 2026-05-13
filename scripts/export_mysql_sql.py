@@ -40,7 +40,8 @@ TABLE_NAMES = [
     "T_MDM_MATERIAL_CONSUME_DETAIL",
     "T_MDM_SPECIAL_MATERIAL_RECORD",
     "T_LH_PRECISION_PLAN",
-    "T_MP_ADJUST_RESULT"
+    "T_MP_ADJUST_RESULT",
+    "T_MDM_SKU_CONSTRUCTION_REF"
 ]
 
 # ====================== 导出文件配置 ======================

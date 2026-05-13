@@ -166,6 +166,10 @@ public class LhScheduleContext {
     private Map<String, Integer> carryForwardQtyMap = new HashMap<>();
     /** 满班补齐超排量累加器，key=materialCode，供最终汇总日志使用（不受SKU从待排列表中移除影响） */
     private Map<String, Integer> skuShiftFillOverQtyMap = new LinkedHashMap<>();
+    /** 续作结果日额度账本是否已完成最终同步，防止同一上下文重复扣账 */
+    private boolean continuousDailyQuotaSynced;
+    /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中 */
+    private Map<LhScheduleResult, SkuScheduleDTO> scheduleResultSourceSkuMap = new IdentityHashMap<>();
 
     // ========== 机台分配状态 ==========
 
