@@ -8,7 +8,6 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.engine.strategy.ITrialProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
-import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -16,6 +15,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Objects;
@@ -113,7 +113,7 @@ public class DefaultTrialProductionStrategy implements ITrialProductionStrategy 
         // 按限制作业机台顺序选择第一台启用机台
         for (LhSpecifyMachine specify : specifyList) {
             for (String runtimeMachineCode
-                    : LhSingleControlMachineUtil.expandRuntimeMachineCodes(context, specify.getMachineCode())) {
+                    : Collections.singletonList(specify.getMachineCode())) {
                 com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO machine =
                         context.getMachineScheduleMap().get(runtimeMachineCode);
                 if (Objects.nonNull(machine) && MachineStatusUtil.isEnabled(machine.getStatus())) {

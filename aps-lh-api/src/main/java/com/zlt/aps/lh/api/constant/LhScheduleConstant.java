@@ -272,8 +272,9 @@ public final class LhScheduleConstant {
     /** 试制量试每日上限 */
     public static final int TRIAL_DAILY_LIMIT = 2;
 
-    /** 单控基准机台默认不启用 */
-    public static final String SINGLE_CONTROL_MACHINE_CODES = "K1501,K1502";
+    /** @deprecated 单控基准机台已废弃：机台已在 T_LH_MACHINE_INFO 表中直接拆分为 L/R 后缀编码 */
+    @Deprecated
+    public static final String SINGLE_CONTROL_MACHINE_CODES = "";
 
     /** 小批量验证SKU默认阈值 */
     public static final int SMALL_BATCH_SKU_THRESHOLD = 100;

@@ -27,6 +27,7 @@ import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
@@ -175,11 +176,6 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         for (Map.Entry<String, LhMachineInfo> entry : context.getMachineInfoMap().entrySet()) {
             String machineCode = entry.getKey();
             LhMachineInfo machineInfo = entry.getValue();
-            if (LhSingleControlMachineUtil.isSingleControlBaseMachine(context, machineCode)) {
-                addSingleControlSplitMachine(context, machineInfo, machineScheduleMap, scheduledCleaningWindowMap);
-                continue;
-            }
-
             MachineScheduleDTO dto = new MachineScheduleDTO();
             dto.setMachineCode(machineCode);
             dto.setMachineName(machineInfo.getMachineName());
@@ -257,80 +253,6 @@ public class DataInitHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 添加单控拆分机台运行态。
-     *
-     * @param context 排程上下文
-     * @param machineInfo 基准机台信息
-     * @param machineScheduleMap 运行态机台Map
-     * @param scheduledCleaningWindowMap 已排清洗窗口Map
-     */
-    private void addSingleControlSplitMachine(LhScheduleContext context,
-                                              LhMachineInfo machineInfo,
-                                              Map<String, MachineScheduleDTO> machineScheduleMap,
-                                              Map<String, List<MachineCleaningWindowDTO>> scheduledCleaningWindowMap) {
-        addSplitMachine(context, machineInfo, LhScheduleConstant.LEFT_MOULD, machineScheduleMap, scheduledCleaningWindowMap);
-        addSplitMachine(context, machineInfo, LhScheduleConstant.RIGHT_MOULD, machineScheduleMap, scheduledCleaningWindowMap);
-    }
-
-    /**
-     * 添加单侧拆分机台运行态。
-     *
-     * @param context 排程上下文
-     * @param machineInfo 基准机台信息
-     * @param leftRightMould 左右模
-     * @param machineScheduleMap 运行态机台Map
-     * @param scheduledCleaningWindowMap 已排清洗窗口Map
-     */
-    private void addSplitMachine(LhScheduleContext context,
-                                 LhMachineInfo machineInfo,
-                                 String leftRightMould,
-                                 Map<String, MachineScheduleDTO> machineScheduleMap,
-                                 Map<String, List<MachineCleaningWindowDTO>> scheduledCleaningWindowMap) {
-        String splitMachineCode = LhSingleControlMachineUtil.buildSplitMachineCode(machineInfo.getMachineCode(), leftRightMould);
-        if (machineScheduleMap.containsKey(splitMachineCode)) {
-            return;
-        }
-        LhMachineInfo splitMachineInfo = copyMachineInfoForRuntime(machineInfo, splitMachineCode);
-        MachineScheduleDTO dto = new MachineScheduleDTO();
-        dto.setMachineCode(splitMachineCode);
-        dto.setMachineName(splitMachineInfo.getMachineName());
-        dto.setMaxMoldNum(1);
-        dto.setStatus(splitMachineInfo.getStatus());
-        dto.setDimensionMinimum(splitMachineInfo.getDimensionMinimum());
-        dto.setDimensionMaximum(splitMachineInfo.getDimensionMaximum());
-        dto.setMachineOrder(splitMachineInfo.getMachineOrder() != null ? splitMachineInfo.getMachineOrder() : 0);
-        dto.setShellStandard(splitMachineInfo.getShellStandard());
-        dto.setSupport195WideBase(splitMachineInfo.getSupport195WideBase());
-        dto.setSupport225WideBase(splitMachineInfo.getSupport225WideBase());
-        dto.setSupportChipTire(splitMachineInfo.getSupportChipTire());
-        fillMachineRuntimeState(context, splitMachineCode, dto, scheduledCleaningWindowMap);
-        machineScheduleMap.put(splitMachineCode, dto);
-    }
-
-    /**
-     * 复制单控拆分机台运行态基础信息。
-     *
-     * @param source 原机台信息
-     * @param splitMachineCode 拆分机台编码
-     * @return 拆分机台信息
-     */
-    private LhMachineInfo copyMachineInfoForRuntime(LhMachineInfo source, String splitMachineCode) {
-        LhMachineInfo target = new LhMachineInfo();
-        target.setMachineCode(splitMachineCode);
-        target.setMachineName(splitMachineCode);
-        target.setMaxMoldNum(1);
-        target.setStatus(source.getStatus());
-        target.setDimensionMinimum(source.getDimensionMinimum());
-        target.setDimensionMaximum(source.getDimensionMaximum());
-        target.setMachineOrder(source.getMachineOrder());
-        target.setShellStandard(source.getShellStandard());
-        target.setSupport195WideBase(source.getSupport195WideBase());
-        target.setSupport225WideBase(source.getSupport225WideBase());
-        target.setSupportChipTire(source.getSupportChipTire());
-        return target;
-    }
-
-    /**
      * 解析运行态模台数。
      *
      * @param context 排程上下文
@@ -339,7 +261,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
      * @return 模台数
      */
     private int resolveRuntimeMaxMoldNum(LhScheduleContext context, String machineCode, LhMachineInfo machineInfo) {
-        if (LhSingleControlMachineUtil.isSingleControlSplitMachine(context, machineCode)) {
+        if (LhSingleControlMachineUtil.isSingleMouldMachine(machineCode)) {
             return 1;
         }
         return machineInfo.getMaxMoldNum() != null ? machineInfo.getMaxMoldNum() : 1;
@@ -357,7 +279,6 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                                          String machineCode,
                                          MachineScheduleDTO dto,
                                          Map<String, List<MachineCleaningWindowDTO>> scheduledCleaningWindowMap) {
-        String lookupMachineCode = LhSingleControlMachineUtil.resolveLookupMachineCode(context, machineCode);
         dto.setCurrentMaterialCode(null);
         dto.setCurrentMaterialDesc(null);
         dto.setPreviousMaterialCode(null);
@@ -377,7 +298,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         }
 
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
-            if (LhSingleControlMachineUtil.isCompatibleMachineCode(context, machineCode, planShut.getMachineCode())) {
+            if (StringUtils.equals(machineCode, planShut.getMachineCode())) {
                 if (dto.getPlanStopStartTime() == null
                         || (planShut.getBeginDate() != null && planShut.getBeginDate().before(dto.getPlanStopStartTime()))) {
                     dto.setPlanStopStartTime(planShut.getBeginDate());
@@ -393,10 +314,10 @@ public class DataInitHandler extends AbsScheduleStepHandler {
             }
         }
 
-        attachCleaningPlanInfo(context, machineCode, dto, scheduledCleaningWindowMap.get(lookupMachineCode));
+        attachCleaningPlanInfo(context, machineCode, dto, scheduledCleaningWindowMap.get(machineCode));
 
-        if (context.getCapsuleUsageMap().containsKey(lookupMachineCode)) {
-            LhRepairCapsule capsule = context.getCapsuleUsageMap().get(lookupMachineCode);
+        if (context.getCapsuleUsageMap().containsKey(machineCode)) {
+            LhRepairCapsule capsule = context.getCapsuleUsageMap().get(machineCode);
             dto.setCapsuleUsageCount(capsule.getReplaceCapsuleCount() != null ? capsule.getReplaceCapsuleCount() : 0);
             dto.setCapsuleUsageCount2(capsule.getReplaceCapsuleCount2() != null ? capsule.getReplaceCapsuleCount2() : 0);
         }
@@ -436,7 +357,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
     private Date resolveInitialEstimatedEndTime(LhScheduleContext context, String machineCode) {
         Date latestSpecEndTime = null;
         for (com.zlt.aps.lh.api.domain.entity.LhScheduleResult result : context.getPreviousScheduleResultList()) {
-            if (!LhSingleControlMachineUtil.isCompatibleMachineCode(context, machineCode, result.getLhMachineCode())
+            if (!StringUtils.equals(machineCode, result.getLhMachineCode())
                     || !LhSingleControlMachineUtil.isLeftRightCompatible(machineCode, result.getLeftRightMould())
                     || result.getSpecEndTime() == null) {
                 continue;
@@ -533,7 +454,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         if (!CollectionUtils.isEmpty(scheduledCleaningWindowList)) {
             for (MachineCleaningWindowDTO cleaningWindow : scheduledCleaningWindowList) {
                 if (cleaningWindow == null
-                        || !LhSingleControlMachineUtil.isCompatibleMachineCode(context, machineCode, cleaningWindow.getLhCode())
+                        || !StringUtils.equals(machineCode, cleaningWindow.getLhCode())
                         || !LhSingleControlMachineUtil.isLeftRightCompatible(machineCode, cleaningWindow.getLeftRightMould())) {
                     continue;
                 }
@@ -553,11 +474,10 @@ public class DataInitHandler extends AbsScheduleStepHandler {
     }
 
     private LhMachineOnlineInfo resolveRuntimeOnlineInfo(LhScheduleContext context, String machineCode) {
-        String lookupMachineCode = LhSingleControlMachineUtil.resolveLookupMachineCode(context, machineCode);
-        if (!context.getMachineOnlineInfoMap().containsKey(lookupMachineCode)) {
+        if (!context.getMachineOnlineInfoMap().containsKey(machineCode)) {
             return null;
         }
-        LhMachineOnlineInfo onlineInfo = context.getMachineOnlineInfoMap().get(lookupMachineCode);
+        LhMachineOnlineInfo onlineInfo = context.getMachineOnlineInfoMap().get(machineCode);
         if (!LhSingleControlMachineUtil.isLeftRightCompatible(machineCode, onlineInfo.getLrMolds())) {
             return null;
         }

@@ -153,7 +153,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             if (candidate == null) {
                 continue;
             }
-            if (LhSingleControlMachineUtil.isSingleControlSplitMachine(context, candidate.getMachineCode())) {
+            if (LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
                 singleControlCandidates.add(candidate);
                 continue;
             }
@@ -336,8 +336,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         Date candidateWindowEndTime = resolveCandidateWindowEndTime(context, candidateReferenceTime);
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
             if (planShut == null || StringUtils.isEmpty(planShut.getMachineCode())
-                    || !LhSingleControlMachineUtil.isCompatibleMachineCode(
-                    context, machine.getMachineCode(), planShut.getMachineCode())) {
+                    || !StringUtils.equals(machine.getMachineCode(), planShut.getMachineCode())) {
                 continue;
             }
             if (planShut.getBeginDate() == null || planShut.getEndDate() == null
@@ -601,7 +600,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      */
     private int resolveSingleControlScore(LhScheduleContext context, SkuScheduleDTO sku, MachineScheduleDTO machine) {
         if (Objects.isNull(machine)
-                || !LhSingleControlMachineUtil.isSingleControlSplitMachine(context, machine.getMachineCode())) {
+                || !LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode())) {
             return 1;
         }
         if (shouldReserveSingleControlForTrialSku(sku)) {

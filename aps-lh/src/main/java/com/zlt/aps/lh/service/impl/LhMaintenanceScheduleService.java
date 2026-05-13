@@ -52,7 +52,7 @@ public class LhMaintenanceScheduleService {
                 || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
             return false;
         }
-        String lookupMachineCode = LhSingleControlMachineUtil.resolveLookupMachineCode(context, machine.getMachineCode());
+        String lookupMachineCode = machine.getMachineCode();
         if (!hasNoRecentOnlineRecord(context, lookupMachineCode)) {
             return false;
         }
@@ -78,7 +78,7 @@ public class LhMaintenanceScheduleService {
         if (!isBasicValid(context, machine) || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
             return false;
         }
-        String lookupMachineCode = LhSingleControlMachineUtil.resolveLookupMachineCode(context, machine.getMachineCode());
+        String lookupMachineCode = machine.getMachineCode();
         LhPrecisionPlan plan = context.getMaintenancePlanMap().get(lookupMachineCode);
         Integer daysToDue = resolveDaysToDue(plan);
         if (Objects.isNull(plan) || Objects.isNull(daysToDue) || Objects.isNull(context.getScheduleDate())) {

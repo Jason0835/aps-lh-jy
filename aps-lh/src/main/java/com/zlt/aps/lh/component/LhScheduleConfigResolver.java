@@ -223,6 +223,7 @@ public class LhScheduleConfigResolver {
         putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS,
                 LhScheduleConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.TRIAL_DAILY_LIMIT, LhScheduleConstant.TRIAL_DAILY_LIMIT);
+        // @deprecated 单控基准机台已废弃，机台已在 T_LH_MACHINE_INFO 表中直接拆分为 L/R 后缀编码
         putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES,
                 LhScheduleConstant.SINGLE_CONTROL_MACHINE_CODES);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,

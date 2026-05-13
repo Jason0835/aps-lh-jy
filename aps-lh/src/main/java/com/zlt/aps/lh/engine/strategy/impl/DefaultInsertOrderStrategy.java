@@ -5,7 +5,6 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.engine.strategy.IInsertOrderStrategy;
-import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -14,6 +13,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -100,7 +100,7 @@ public class DefaultInsertOrderStrategy implements IInsertOrderStrategy {
         }
         for (LhSpecifyMachine specify : specifyList) {
             for (String runtimeMachineCode
-                    : LhSingleControlMachineUtil.expandRuntimeMachineCodes(context, specify.getMachineCode())) {
+                    : Collections.singletonList(specify.getMachineCode())) {
                 MachineScheduleDTO machine = context.getMachineScheduleMap().get(runtimeMachineCode);
                 if (machine != null && MachineStatusUtil.isEnabled(machine.getStatus())) {
                     return runtimeMachineCode;

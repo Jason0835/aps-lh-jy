@@ -79,7 +79,7 @@ public final class ShiftCapacityResolverUtil {
                 || Objects.isNull(context)
                 || Objects.isNull(machine)
                 || StringUtils.isEmpty(machine.getMachineCode())
-                || !LhSingleControlMachineUtil.isSingleControlSplitMachine(context, machine.getMachineCode())) {
+                || !LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode())) {
             return shiftCapacity;
         }
         return shiftCapacity / SINGLE_CONTROL_SPLIT_SIDE_COUNT;

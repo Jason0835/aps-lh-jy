@@ -425,6 +425,11 @@ public class LhScheduleConfig {
         return getParamIntValue(LhScheduleParamConstant.TRIAL_DAILY_LIMIT, LhScheduleConstant.TRIAL_DAILY_LIMIT);
     }
 
+    /**
+     * @deprecated 单控基准机台已废弃，机台已在 T_LH_MACHINE_INFO 表中直接拆分为 L/R 后缀编码。
+     *             该方法不再被生产代码使用，仅保留以兼容旧参数配置。
+     */
+    @Deprecated
     public String getSingleControlMachineCodes() {
         return getParamValue(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES,
                 LhScheduleConstant.SINGLE_CONTROL_MACHINE_CODES);

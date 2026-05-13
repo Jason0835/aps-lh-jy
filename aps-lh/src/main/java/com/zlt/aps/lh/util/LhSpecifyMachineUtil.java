@@ -111,8 +111,7 @@ public final class LhSpecifyMachineUtil {
         Set<String> machineCodeSet = new HashSet<>(specifyMachineList.size() * 2);
         for (LhSpecifyMachine specifyMachine : specifyMachineList) {
             if (StringUtils.isNotEmpty(specifyMachine.getMachineCode())) {
-                machineCodeSet.addAll(LhSingleControlMachineUtil.expandRuntimeMachineCodes(
-                        context, specifyMachine.getMachineCode()));
+                machineCodeSet.add(specifyMachine.getMachineCode());
             }
         }
         return machineCodeSet;
@@ -132,8 +131,7 @@ public final class LhSpecifyMachineUtil {
         Set<String> machineCodeSet = new HashSet<>(specifyMachineList.size() * 2);
         for (LhSpecifyMachine specifyMachine : specifyMachineList) {
             if (StringUtils.isNotEmpty(specifyMachine.getMachineCode())) {
-                machineCodeSet.addAll(LhSingleControlMachineUtil.expandRuntimeMachineCodes(
-                        context, specifyMachine.getMachineCode()));
+                machineCodeSet.add(specifyMachine.getMachineCode());
             }
         }
         return machineCodeSet;
@@ -199,8 +197,7 @@ public final class LhSpecifyMachineUtil {
                 continue;
             }
             if (StringUtils.isNotEmpty(machineCode)
-                    && !LhSingleControlMachineUtil.isCompatibleMachineCode(
-                    context, machineCode, specifyMachine.getMachineCode())) {
+                    && !StringUtils.equals(machineCode, specifyMachine.getMachineCode())) {
                 continue;
             }
             resultList.add(specifyMachine);

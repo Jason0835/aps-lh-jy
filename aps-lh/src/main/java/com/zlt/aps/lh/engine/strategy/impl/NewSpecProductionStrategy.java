@@ -574,7 +574,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         && excludedMachineCodes.contains(candidate.getMachineCode())) {
                     continue;
                 }
-                if (LhSingleControlMachineUtil.isSingleControlSplitMachine(context, candidate.getMachineCode())) {
+                if (LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
                     trialStickToSingleControl = true;
                     break;
                 }
@@ -588,7 +588,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             if (trialStickToSingleControl
-                    && !LhSingleControlMachineUtil.isSingleControlSplitMachine(context, candidate.getMachineCode())) {
+                    && !LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
                 continue;
             }
             int machineCapacity = getTargetScheduleQtyResolver()
