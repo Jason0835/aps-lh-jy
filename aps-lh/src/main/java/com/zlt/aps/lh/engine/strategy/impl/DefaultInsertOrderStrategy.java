@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -98,9 +99,12 @@ public class DefaultInsertOrderStrategy implements IInsertOrderStrategy {
             return null;
         }
         for (LhSpecifyMachine specify : specifyList) {
-            MachineScheduleDTO machine = context.getMachineScheduleMap().get(specify.getMachineCode());
-            if (machine != null && MachineStatusUtil.isEnabled(machine.getStatus())) {
-                return specify.getMachineCode();
+            for (String runtimeMachineCode
+                    : Collections.singletonList(specify.getMachineCode())) {
+                MachineScheduleDTO machine = context.getMachineScheduleMap().get(runtimeMachineCode);
+                if (machine != null && MachineStatusUtil.isEnabled(machine.getStatus())) {
+                    return runtimeMachineCode;
+                }
             }
         }
         return null;

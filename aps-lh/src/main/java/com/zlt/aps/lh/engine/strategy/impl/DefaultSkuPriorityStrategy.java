@@ -10,7 +10,9 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
+import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
@@ -52,8 +54,12 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 context.getContinuousSkuList().size(), context.getNewSpecSkuList().size());
 
         Map<String, StructurePriorityMeta> structurePriorityMap = buildStructurePriorityMap(context);
-        Comparator<SkuScheduleDTO> comparator = buildSkuComparator(context, structurePriorityMap);
-        Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(context, comparator);
+        Map<String, Boolean> singleCandidateSpecialPriorityMap = buildSingleCandidateSpecialPriorityMap(context);
+        Comparator<SkuScheduleDTO> priorityComparator = buildPriorityComparator(structurePriorityMap);
+        Comparator<SkuScheduleDTO> tailComparator = buildTailComparator(context);
+        Comparator<SkuScheduleDTO> comparator = priorityComparator.thenComparing(tailComparator);
+        Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(
+                context, priorityComparator, tailComparator, singleCandidateSpecialPriorityMap);
         sortSkuList(context.getContinuousSkuList(), comparator);
         sortSkuList(context.getNewSpecSkuList(), newSpecComparator);
 
@@ -70,7 +76,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         }
 
         traceOpenProductionLateScore(context, orderedSkuList);
-        traceSortedSkuList(context, structurePriorityMap);
+        traceSortedSkuList(context, structurePriorityMap, singleCandidateSpecialPriorityMap);
         log.debug("SKU优先级排序完成, 排序后第一位: {}",
                 CollectionUtils.isEmpty(orderedSkuList) ? "空" : orderedSkuList.get(0).getMaterialCode());
     }
@@ -87,11 +93,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
      * </ol>
      * </p>
      *
-     * @param context 排程上下文
      * @return SKU比较器
      */
-    private Comparator<SkuScheduleDTO> buildSkuComparator(LhScheduleContext context,
-                                                          Map<String, StructurePriorityMeta> structurePriorityMap) {
+    private Comparator<SkuScheduleDTO> buildPriorityComparator(Map<String, StructurePriorityMeta> structurePriorityMap) {
         return Comparator
                 // 顺序1：锁定上机日期的优先。
                 .comparingInt((SkuScheduleDTO s) -> s.isDeliveryLocked() ? 0 : 1)
@@ -103,9 +107,19 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 .thenComparingInt((SkuScheduleDTO s) -> isStructureAllEndingPriority(structurePriorityMap, s)
                         && hasKnownEndingDays(s) ? 0 : 1)
                 .thenComparingInt((SkuScheduleDTO s) -> isStructureAllEndingPriority(structurePriorityMap, s)
-                        && hasKnownEndingDays(s) ? -s.getEndingDaysRemaining() : 0)
+                        && hasKnownEndingDays(s) ? -s.getEndingDaysRemaining() : 0);
+    }
+
+    /**
+     * 构建结构优先级后的尾部比较器。
+     *
+     * @param context 排程上下文
+     * @return 尾部比较器
+     */
+    private Comparator<SkuScheduleDTO> buildTailComparator(LhScheduleContext context) {
+        return Comparator
                 // 顺序4：供应链优先按四类待排量逐级比较。
-                .thenComparingInt((SkuScheduleDTO s) -> -s.getHighPriorityPendingQty())
+                .comparingInt((SkuScheduleDTO s) -> -s.getHighPriorityPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getCycleProductionPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getMidPriorityPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getConventionProductionPendingQty())
@@ -115,18 +129,87 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 构建新增SKU比较器，定点物料优先进入新增排产。
+     * 构建新增SKU比较器，定点物料、试制量试、小批量验证SKU优先进入新增排产。
      *
      * @param context 排程上下文
-     * @param baseComparator 原有SKU比较器
+     * @param priorityComparator 锁交期/延期/结构优先比较器
+     * @param tailComparator 供应链及尾部比较器
      * @return 新增SKU比较器
      */
     private Comparator<SkuScheduleDTO> buildNewSpecComparator(LhScheduleContext context,
-                                                              Comparator<SkuScheduleDTO> baseComparator) {
+                                                              Comparator<SkuScheduleDTO> priorityComparator,
+                                                              Comparator<SkuScheduleDTO> tailComparator,
+                                                              Map<String, Boolean> singleCandidateSpecialPriorityMap) {
         return Comparator
                 .comparingInt((SkuScheduleDTO sku) -> LhSpecifyMachineUtil.hasLimitSpecifyMachine(
                         context, sku.getMaterialCode()) ? 0 : 1)
-                .thenComparing(baseComparator);
+                .thenComparingInt(sku -> isSingleCandidateSpecialPriority(singleCandidateSpecialPriorityMap, sku) ? 0 : 1)
+                .thenComparing(priorityComparator)
+                .thenComparingInt(sku -> sku.isTrial() ? 0 : 1)
+                .thenComparingInt(sku -> sku.isSmallBatchValidation() ? 0 : 1)
+                .thenComparing(tailComparator);
+    }
+
+    /**
+     * 构建“特殊材料且唯一候选机台”优先级快照。
+     *
+     * @param context 排程上下文
+     * @return 物料编码 -> 是否命中唯一候选特殊材料优先
+     */
+    private Map<String, Boolean> buildSingleCandidateSpecialPriorityMap(LhScheduleContext context) {
+        Map<String, Boolean> priorityMap = new LinkedHashMap<>(16);
+        if (Objects.isNull(context)
+                || CollectionUtils.isEmpty(context.getNewSpecSkuList())
+                || CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
+            return priorityMap;
+        }
+        for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
+            if (sku == null || StringUtils.isEmpty(sku.getMaterialCode()) || !isSpecialMaterial(context, sku)) {
+                continue;
+            }
+            if (countAvailableCandidateMachines(context, sku) == 1) {
+                priorityMap.put(sku.getMaterialCode(), true);
+            }
+        }
+        return priorityMap;
+    }
+
+    /**
+     * 判断 SKU 是否命中“特殊材料且唯一候选机台”优先级。
+     *
+     * @param priorityMap 优先级快照
+     * @param sku SKU
+     * @return true-命中
+     */
+    private boolean isSingleCandidateSpecialPriority(Map<String, Boolean> priorityMap, SkuScheduleDTO sku) {
+        return sku != null
+                && StringUtils.isNotEmpty(sku.getMaterialCode())
+                && Boolean.TRUE.equals(priorityMap.get(sku.getMaterialCode()));
+    }
+
+    /**
+     * 统计 SKU 当前可用的硬匹配候选机台数。
+     * <p>只用于“唯一候选特殊材料前置”轻量优先级快照，不改主匹配流程。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 候选机台数
+     */
+    private int countAvailableCandidateMachines(LhScheduleContext context, SkuScheduleDTO sku) {
+        int candidateCount = 0;
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (machine == null
+                    || !MachineStatusUtil.isEnabled(machine.getStatus())
+                    || !LhMachineHardMatchUtil.isMachineHardMatched(context, sku, machine)
+                    || LhSpecifyMachineUtil.isNotAllowedMachine(context, machine.getMachineCode(), sku.getMaterialCode())) {
+                continue;
+            }
+            candidateCount++;
+            if (candidateCount > 1) {
+                return candidateCount;
+            }
+        }
+        return candidateCount;
     }
 
     /**
@@ -355,7 +438,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
      * @param context 排程上下文
      * @param structurePriorityMap 结构收尾优先级快照
      */
-    private void traceSortedSkuList(LhScheduleContext context, Map<String, StructurePriorityMeta> structurePriorityMap) {
+    private void traceSortedSkuList(LhScheduleContext context,
+                                    Map<String, StructurePriorityMeta> structurePriorityMap,
+                                    Map<String, Boolean> singleCandidateSpecialPriorityMap) {
         if (!PriorityTraceLogHelper.isEnabled(context)) {
             return;
         }
@@ -390,6 +475,10 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                                 + ", 锁交期=" + PriorityTraceLogHelper.yesNo(sku.isDeliveryLocked())
                                 + ", delayDays=" + sku.getDelayDays()
                                 + ", 命中结构全收尾优先=" + PriorityTraceLogHelper.yesNo(structureAllEndingPriority)
+                                + ", 唯一候选特殊材料=" + PriorityTraceLogHelper.yesNo(
+                                isSingleCandidateSpecialPriority(singleCandidateSpecialPriorityMap, sku))
+                                + ", 试制SKU=" + PriorityTraceLogHelper.yesNo(sku.isTrial())
+                                + ", 小批量SKU=" + PriorityTraceLogHelper.yesNo(sku.isSmallBatchValidation())
                                 + ", 收尾SKU=" + PriorityTraceLogHelper.yesNo(ending)
                                 + ", endingDaysRemaining=" + sku.getEndingDaysRemaining()
                                 + ", 高优待排=" + sku.getHighPriorityPendingQty()

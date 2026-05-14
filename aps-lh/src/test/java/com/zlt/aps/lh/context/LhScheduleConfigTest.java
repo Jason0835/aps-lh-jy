@@ -57,4 +57,19 @@ public class LhScheduleConfigTest {
 
         Assertions.assertTrue(config.isSpecifyMachineRuleEnabled());
     }
+
+    /**
+     * 用例说明：单控基准机台与小批量阈值应可从配置快照读取。
+     */
+    @Test
+    public void shouldReadSingleControlMachineAndSmallBatchConfig() {
+        Map<String, String> paramMap = new HashMap<>(2);
+        paramMap.put(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES, "K1501,K1502");
+        paramMap.put(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD, "80");
+
+        LhScheduleConfig config = new LhScheduleConfig(paramMap);
+
+        Assertions.assertEquals("K1501,K1502", config.getSingleControlMachineCodes());
+        Assertions.assertEquals(80, config.getSmallBatchSkuThreshold());
+    }
 }

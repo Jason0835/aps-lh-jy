@@ -1,8 +1,10 @@
 package com.zlt.aps.lh.regression;
 
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultCapacityCalculateStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -144,6 +146,35 @@ class DefaultCapacityCalculateStrategyRegressionTest {
 
         assertEquals(ending, startTime,
                 "清洗与换模/换活字块的重叠判定应下沉到后续切换链路，不在readyTime阶段处理");
+    }
+
+    @Test
+    void calculateStartTime_shouldAddCapsulePreheatAfterMaintenanceEnd() {
+        String machineCode = "M1";
+        LhScheduleContext context = new LhScheduleContext();
+        context.getLhParamsMap().put(LhScheduleParamConstant.MAINTENANCE_START_HOUR, "8");
+        context.getLhParamsMap().put(LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS, "7");
+        context.getLhParamsMap().put(LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS, "2.5");
+
+        MachineScheduleDTO dto = new MachineScheduleDTO();
+        dto.setMachineCode(machineCode);
+        dto.setHasMaintenancePlan(true);
+        dto.setMaintenancePlanTime(date(2026, 4, 3));
+        MachineMaintenanceWindowDTO maintenanceWindow = new MachineMaintenanceWindowDTO();
+        maintenanceWindow.setMachineCode(machineCode);
+        maintenanceWindow.setMaintenanceStartTime(dateTime(2026, 4, 3, 8, 0, 0));
+        maintenanceWindow.setMaintenanceEndTime(dateTime(2026, 4, 3, 15, 0, 0));
+        dto.setMaintenanceWindowList(Arrays.asList(maintenanceWindow));
+
+        LinkedHashMap<String, MachineScheduleDTO> machineScheduleMap = new LinkedHashMap<>();
+        machineScheduleMap.put(machineCode, dto);
+        context.setMachineScheduleMap(machineScheduleMap);
+
+        Date ending = dateTime(2026, 4, 3, 6, 0, 0);
+        Date startTime = strategy.calculateStartTime(context, machineCode, ending);
+
+        assertEquals(dateTime(2026, 4, 3, 17, 30, 0), startTime,
+                "只触发维保且无换模/换活字块时，开产时间应为维保结束后加2.5小时胶囊预热");
     }
 
     private static Date date(int y, int month, int day) {

@@ -63,7 +63,7 @@ class DefaultProductionShutdownStrategyTest {
     void prepareOpenStopContext_shouldMoveOpenMoldTimeFromNightToNextMorning() {
         LhScheduleContext context = buildContext(date(2026, 4, 22));
         Map<String, String> paramMap = openStopParams();
-        paramMap.put(LhScheduleParamConstant.CURING_OPEN_MOLD_TIME, "2026-04-22 23:00:00");
+        paramMap.put(LhScheduleParamConstant.CURING_OPEN_MOLD_TIME, "2026-04-22 23:00");
         context.setScheduleConfig(new LhScheduleConfig(paramMap));
 
         strategy.prepareOpenStopContext(context);
@@ -80,7 +80,7 @@ class DefaultProductionShutdownStrategyTest {
     void prepareOpenStopContext_shouldCutStopPotShiftByMinute() {
         LhScheduleContext context = buildContext(date(2026, 4, 22));
         Map<String, String> paramMap = openStopParams();
-        paramMap.put(LhScheduleParamConstant.CURING_STOP_POT_TIME, "2026-04-22 20:00:00");
+        paramMap.put(LhScheduleParamConstant.CURING_STOP_POT_TIME, "2026-04-22 20:00");
         context.setScheduleConfig(new LhScheduleConfig(paramMap));
 
         strategy.prepareOpenStopContext(context);
@@ -91,9 +91,28 @@ class DefaultProductionShutdownStrategyTest {
         assertNotNull(stopShift);
         assertEquals("03", stopShift.getShiftCode());
         assertTrue(afternoonControl.isCanSchedule());
-        assertEquals(dateTime(2026, 4, 22, 20, 0, 0), afternoonControl.getEffectiveEndTime());
+        assertEquals(dateTime(2026, 4, 22, 19, 0, 0), afternoonControl.getEffectiveEndTime());
         assertFalse(nightControl.isCanSchedule());
         assertEquals("停锅时间后不可排产", nightControl.getUnavailableReason());
+    }
+
+    @Test
+    void prepareOpenStopContext_shouldCutOffOneHourBeforeStopPotByMinute() {
+        LhScheduleContext context = buildContext(date(2026, 5, 7));
+        Map<String, String> paramMap = openStopParams();
+        paramMap.put(LhScheduleParamConstant.CURING_STOP_POT_TIME, "2026-05-07 22:01");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+
+        strategy.prepareOpenStopContext(context);
+
+        ShiftProductionControlDTO stopShift = context.getStopProductionShift();
+        ShiftProductionControlDTO secondControl = context.getShiftProductionControlMap().get(2);
+        ShiftProductionControlDTO thirdControl = context.getShiftProductionControlMap().get(3);
+        assertNotNull(stopShift);
+        assertEquals("03", stopShift.getShiftCode());
+        assertEquals(dateTime(2026, 5, 7, 21, 1, 0), secondControl.getEffectiveEndTime());
+        assertFalse(thirdControl.isCanSchedule());
+        assertEquals("停锅时间后不可排产", thirdControl.getUnavailableReason());
     }
 
     private LhScheduleContext buildContext(java.util.Date scheduleDate) {

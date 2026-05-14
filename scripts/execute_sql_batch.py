@@ -3,15 +3,13 @@ from pymysql.err import OperationalError, ProgrammingError
 
 # ====================== 【必须修改】数据库配置（和导出脚本一致） ======================
 DB_CONFIG = {
-    "host": "16.162.95.221",       # 数据库地址
-    "port": 3306,              # 端口
-    "user": "apslh",            # 用户名
-    "password": "747452",     # 密码
-    "database": "apslh",     # 数据库名
-    "charset": "utf8mb4"       # 字符集
+    "host": "127.0.0.1",       # 数据库地址  16.162.95.221
+    "port": 3307,              # 端口  3306
+    "user": "root",            # 用户名 apslh
+    "password": "123456",     # 密码 747452
+    "database": "apslh",     # 数据库名 apslh
+    "charset": "utf8mb4"       # 字符集 utf8mb4
 }
-
-
 
 # ====================== 配置项 ======================
 SQL_FILE_PATH = "table_structure_data.sql"  # SQL文件路径

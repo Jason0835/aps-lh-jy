@@ -4,6 +4,8 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
+import com.zlt.aps.lh.api.enums.JobTypeEnum;
+import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -11,6 +13,7 @@ import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -303,7 +306,6 @@ class DefaultSkuPriorityStrategyTest {
         SkuScheduleDTO differentInch = sku("MAT-B");
         differentInch.setProSize("18");
         SkuScheduleDTO specialMaterial = sku("MAT-C");
-        specialMaterial.setEmbryoCode("EMB-S");
         specialMaterial.setProSize("17");
         SkuScheduleDTO normal = sku("MAT-Z");
         normal.setProSize("17");
@@ -317,7 +319,7 @@ class DefaultSkuPriorityStrategyTest {
         machine.setPreviousProSize("17");
         context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
-        context.setSpecialMaterialEmbryoCodeSet(new HashSet<String>(Collections.singletonList("EMB-S")));
+        context.getSpecialMaterialCategoryByMaterialCode().put("MAT-C", Collections.singleton("01"));
 
         strategy.sortByPriority(context);
 
@@ -325,6 +327,86 @@ class DefaultSkuPriorityStrategyTest {
         assertEquals("MAT-A", context.getNewSpecSkuList().get(1).getMaterialCode());
         assertEquals("MAT-B", context.getNewSpecSkuList().get(2).getMaterialCode());
         assertEquals("MAT-C", context.getNewSpecSkuList().get(3).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldPreferTrialThenSmallBatchAfterSpecifyMachine() {
+        SkuScheduleDTO normal = sku("MAT-N");
+        normal.setHighPriorityPendingQty(999);
+        SkuScheduleDTO smallBatch = sku("MAT-S");
+        smallBatch.setSmallBatchValidation(true);
+        SkuScheduleDTO trial = sku("MAT-T");
+        trial.setTrial(true);
+        SkuScheduleDTO specify = sku("MAT-P");
+
+        LhScheduleContext context = contextWithNewSpec(normal, smallBatch, trial, specify);
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.ENABLE_SPECIFY_MACHINE_RULE, "1")));
+        context.getSpecifyMachineMap().put("MAT-P", Collections.singletonList(new com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine()));
+        context.getSpecifyMachineMap().get("MAT-P").get(0).setSpecCode("MAT-P");
+        context.getSpecifyMachineMap().get("MAT-P").get(0).setJobType(JobTypeEnum.RESTRICTED.getCode());
+        context.getSpecifyMachineMap().get("MAT-P").get(0).setMachineCode("K1501L");
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-P", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("MAT-T", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-S", context.getNewSpecSkuList().get(2).getMaterialCode());
+        assertEquals("MAT-N", context.getNewSpecSkuList().get(3).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldPreferStructureEndingBeforeTrialInNewSpecSort() {
+        SkuScheduleDTO trialSku = sku("3302001575");
+        trialSku.setStructureName("结构A");
+        trialSku.setTrial(true);
+        trialSku.setEndingDaysRemaining(1);
+
+        SkuScheduleDTO endingSku = sku("3302001724");
+        endingSku.setStructureName("结构B");
+        endingSku.setEndingDaysRemaining(3);
+
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(trialSku))).thenReturn(false);
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(endingSku))).thenReturn(true);
+
+        LhScheduleContext context = contextWithNewSpec(trialSku, endingSku);
+        Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("结构A", Collections.singletonList(trialSku));
+        structureSkuMap.put("结构B", Collections.singletonList(endingSku));
+        context.setStructureSkuMap(structureSkuMap);
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.STRUCTURE_ENDING_DAYS, "5")));
+
+        strategy.sortByPriority(context);
+
+        assertEquals("3302001724", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("3302001575", context.getNewSpecSkuList().get(1).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldPreferSpecialSkuWithSingleCandidateMachine() {
+        SkuScheduleDTO normalSku = sku("A-NORMAL");
+        normalSku.setStructureName("结构普通");
+        SkuScheduleDTO specialSku = sku("Z-SPECIAL");
+        specialSku.setStructureName("结构特殊");
+
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(normalSku))).thenReturn(false);
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(specialSku))).thenReturn(false);
+
+        LhScheduleContext context = contextWithNewSpec(normalSku, specialSku);
+        Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("结构普通", Collections.singletonList(normalSku));
+        structureSkuMap.put("结构特殊", Collections.singletonList(specialSku));
+        context.setStructureSkuMap(structureSkuMap);
+        context.getSpecialMaterialCategoryByMaterialCode().put("Z-SPECIAL",
+                new HashSet<String>(Collections.singletonList(LhSpecialMaterialCategoryEnum.CHIP_TIRE.getCode())));
+        context.getMachineScheduleMap().put("K1105", machine("K1105", "0", "0", "0"));
+        context.getMachineScheduleMap().put("K1001", machine("K1001", "0", "0", "1"));
+
+        strategy.sortByPriority(context);
+
+        assertEquals("Z-SPECIAL", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("A-NORMAL", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     private LhScheduleContext contextWithNewSpec(SkuScheduleDTO... skus) {
@@ -339,5 +421,20 @@ class DefaultSkuPriorityStrategyTest {
         sku.setDelayDays(0);
         sku.setStructureName("DEFAULT");
         return sku;
+    }
+
+    private MachineScheduleDTO machine(String machineCode,
+                                       String support195,
+                                       String support225,
+                                       String supportChip) {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setStatus("1");
+        machine.setDimensionMinimum(new BigDecimal("15"));
+        machine.setDimensionMaximum(new BigDecimal("30"));
+        machine.setSupport195WideBase(support195);
+        machine.setSupport225WideBase(support225);
+        machine.setSupportChipTire(supportChip);
+        return machine;
     }
 }

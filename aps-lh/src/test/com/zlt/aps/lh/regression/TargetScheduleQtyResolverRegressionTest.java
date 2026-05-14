@@ -71,6 +71,25 @@ class TargetScheduleQtyResolverRegressionTest {
         assertEquals(70, targetQty, "满排窗口理论产能应扣除工作日历停产班次");
     }
 
+    @Test
+    void upsizeEndingTargetQty_shouldIgnoreWindowPlanQtyForEndingSku() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002216");
+        sku.setTargetScheduleQty(16);
+        sku.setPendingQty(16);
+        sku.setSurplusQty(20);
+        sku.setEmbryoStock(18);
+        sku.setWindowPlanQty(16);
+        sku.setWindowRemainingPlanQty(16);
+
+        int targetQty = resolver.upsizeEndingTargetQty(context, sku);
+
+        assertEquals(20, targetQty, "收尾SKU目标量应按硫化余量/胎胚库存取大，不再受窗口计划量限制");
+        assertEquals(20, sku.resolveTargetScheduleQty(), "收尾目标量回写后应保持放大后的目标值");
+    }
+
     private static LhScheduleConfig createConfig(String fullCapacityMode) {
         Map<String, String> paramMap = new HashMap<>(4);
         paramMap.put(LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, fullCapacityMode);

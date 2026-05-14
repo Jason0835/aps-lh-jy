@@ -12,12 +12,11 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
-import java.text.SimpleDateFormat;
 import java.util.Date;
 
 /**
- * 默认换模均衡策略实现
- * <p>控制每日换模总数(最多15台)和早/中班换模均衡(早班8台, 中班7台), 夜班不换模</p>
+ * 默认模具切换均衡策略实现
+ * <p>控制每日模具切换总数(最多15台)和早/中班切换均衡(早班8台, 中班7台), 夜班不切换</p>
  *
  * @author APS
  */
@@ -28,7 +27,6 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
     /** dailyMouldChangeCountMap value数组下标：[0]=早班换模数, [1]=中班换模数 */
     private static final int IDX_MORNING = 0;
     private static final int IDX_AFTERNOON = 1;
-    private static final String DATE_KEY_FORMAT = "yyyy-MM-dd";
     private static final int MAX_ALLOCATION_ATTEMPTS = 16;
 
     @Override
@@ -42,6 +40,18 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
 
     @Override
     public Date allocateMouldChange(LhScheduleContext context, String machineCode, Date endingTime) {
+        return allocateMouldChange(
+                context,
+                machineCode,
+                endingTime,
+                LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+    }
+
+    @Override
+    public Date allocateMouldChange(LhScheduleContext context,
+                                    String machineCode,
+                                    Date endingTime,
+                                    int switchDurationHours) {
         if (endingTime == null) {
             return null;
         }
@@ -51,7 +61,8 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
         // 最多向后探索有限次数，避免极端数据导致死循环
         for (int attempt = 0; attempt < MAX_ALLOCATION_ATTEMPTS; attempt++) {
             // 先扣掉设备停机窗口，确保“停机后再换模”从停机结束时刻继续判断。
-            Date downtimeAdjustedTime = resolveDowntimeAdjustedStartTime(context, machineCode, adjustedTime);
+            Date downtimeAdjustedTime = resolveDowntimeAdjustedStartTime(
+                    context, machineCode, adjustedTime, switchDurationHours);
             if (downtimeAdjustedTime.after(adjustedTime)) {
                 adjustedTime = downtimeAdjustedTime;
                 continue;
@@ -134,7 +145,10 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
      * 解析扣除设备停机后的最早换模开始时间。
      * <p>若候选换模窗口命中设备停机，则顺延到该停机结束时间。</p>
      */
-    private Date resolveDowntimeAdjustedStartTime(LhScheduleContext context, String machineCode, Date candidateStartTime) {
+    private Date resolveDowntimeAdjustedStartTime(LhScheduleContext context,
+                                                  String machineCode,
+                                                  Date candidateStartTime,
+                                                  int switchDurationHours) {
         if (context == null
                 || StringUtils.isEmpty(machineCode)
                 || candidateStartTime == null
@@ -142,7 +156,7 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
             return candidateStartTime;
         }
         Date candidateEndTime = LhScheduleTimeUtil.addHours(
-                candidateStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+                candidateStartTime, switchDurationHours);
         Date latestOverlapEndTime = null;
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
             if (planShut == null
@@ -172,7 +186,7 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
     }
 
     private String formatDateKey(Date date) {
-        return new SimpleDateFormat(DATE_KEY_FORMAT).format(date);
+        return LhScheduleTimeUtil.formatDate(date);
     }
 
     private int getDailyLimit(LhScheduleContext context) {

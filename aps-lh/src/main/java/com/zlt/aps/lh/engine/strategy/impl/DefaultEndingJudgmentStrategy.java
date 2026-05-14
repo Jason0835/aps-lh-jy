@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
@@ -9,6 +10,8 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import org.springframework.util.CollectionUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+
+import javax.annotation.Resource;
 
 /**
  * 默认收尾判定策略实现
@@ -19,6 +22,9 @@ import org.springframework.stereotype.Component;
 @Slf4j
 @Component
 public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
+
+    @Resource
+    private TargetScheduleQtyResolver targetScheduleQtyResolver;
 
     @Override
     public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {
@@ -31,17 +37,17 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
         boolean fullCapacityMode = isFullCapacityMode(context);
         boolean endingBySurplusInFullModeEnabled = isEndingBySurplusInFullModeEnabled(context);
 
-        // 规则2：排产目标量 <= 排程期内可生产总产能。
-        // 满排模式下可选“按余量判定”开关，避免目标量封顶导致误判。
-        int totalScheduleShifts = getTotalScheduleShifts(context);
-        int shiftCapacity = sku.getShiftCapacity();
+        // 规则2：排产目标量 <= 多台可用机台在排程窗口内的合计产能。
+        // 不再使用单SKU理论产能（shiftCapacity * totalScheduleShifts），改为基于实际候选机台计算。
+        // 满排模式下可选"按余量判定"开关，避免目标量封顶导致误判。
         int rule2CandidateQty = resolveRule2CandidateQty(sku, targetScheduleQty, fullCapacityMode,
                 endingBySurplusInFullModeEnabled);
-        if (rule2CandidateQty > 0 && shiftCapacity > 0) {
-            int totalCapacity = shiftCapacity * totalScheduleShifts;
-            if (rule2CandidateQty <= totalCapacity) {
-                log.debug("SKU[{}]判定为收尾(规则2): 比较量{} <= 总产能{} (满排模式:{}, 满排余量开关:{})",
-                        sku.getMaterialCode(), rule2CandidateQty, totalCapacity, fullCapacityMode,
+        if (rule2CandidateQty > 0) {
+            int totalAvailableCapacity = getTargetScheduleQtyResolver()
+                    .calcSkuTotalAvailableCapacityInWindow(context, sku);
+            if (totalAvailableCapacity > 0 && rule2CandidateQty <= totalAvailableCapacity) {
+                log.debug("SKU[{}]判定为收尾(规则2): 比较量{} <= 多机台合计产能{} (满排模式:{}, 满排余量开关:{})",
+                        sku.getMaterialCode(), rule2CandidateQty, totalAvailableCapacity, fullCapacityMode,
                         endingBySurplusInFullModeEnabled);
                 return true;
             }
@@ -113,7 +119,7 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
     }
 
     /**
-     * 满排模式下是否启用“按余量判定规则2”。
+     * 满排模式下是否启用"按余量判定规则2"。
      *
      * @param context 排程上下文
      * @return true-启用，false-关闭
@@ -156,5 +162,16 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
      */
     private int resolveMaxDemandQty(int surplusQty, int embryoStock) {
         return Math.max(Math.max(surplusQty, 0), Math.max(embryoStock, 0));
+    }
+
+    /**
+     * 获取目标排产量解析器（带空安全回退）。
+     *
+     * @return 目标排产量解析器
+     */
+    private TargetScheduleQtyResolver getTargetScheduleQtyResolver() {
+        return targetScheduleQtyResolver != null
+                ? targetScheduleQtyResolver
+                : new TargetScheduleQtyResolver();
     }
 }

@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.util;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
@@ -266,6 +267,44 @@ public final class LhScheduleTimeUtil {
             return LhScheduleConstant.FIRST_INSPECTION_HOURS;
         }
         return context.getScheduleConfig().getFirstInspectionHours();
+    }
+
+    /**
+     * 获取维保重叠时的切换耗时（小时）
+     *
+     * @param context 排程上下文
+     * @return 切换耗时（小时）
+     */
+    public static int getMaintenanceOverlapSwitchHours(LhScheduleContext context) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleConfig())) {
+            return LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS;
+        }
+        return context.getScheduleConfig().getMaintenanceOverlapSwitchHours();
+    }
+
+    /**
+     * 获取胶囊预热时间（分钟）
+     *
+     * @param context 排程上下文
+     * @return 预热分钟数
+     */
+    public static int getCapsulePreheatMinutes(LhScheduleContext context) {
+        double capsulePreheatHours = LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue();
+        if (Objects.nonNull(context)) {
+            if (Objects.nonNull(context.getScheduleConfig())) {
+                capsulePreheatHours = context.getScheduleConfig().getCapsulePreheatHours();
+            } else {
+                String paramValue = context.getParamValue(
+                        LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS,
+                        LhScheduleConstant.CAPSULE_PREHEAT_HOURS.toPlainString());
+                try {
+                    capsulePreheatHours = Double.parseDouble(paramValue.trim());
+                } catch (NumberFormatException ignored) {
+                    capsulePreheatHours = LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue();
+                }
+            }
+        }
+        return (int) Math.round(capsulePreheatHours * 60D);
     }
 
     /**

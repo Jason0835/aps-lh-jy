@@ -1,9 +1,13 @@
 package com.zlt.aps.lh.util;
 
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -36,5 +40,60 @@ class ShiftFieldUtilTest {
         LhScheduleResult r = new LhScheduleResult();
         assertNull(ShiftFieldUtil.getShiftPlanQty(r, 0));
         assertNull(ShiftFieldUtil.getShiftPlanQty(r, 9));
+    }
+
+    @Test
+    void shouldPreserveSingleResultTotalWhenScalingShiftPlanQty() {
+        LhScheduleResult result = buildResult(16, 16, 16, 16, 16, 16, 16, 16);
+
+        ShiftFieldUtil.scaleGroupedShiftPlanQty(Arrays.asList(result), buildShifts(8), 15);
+
+        assertEquals(15, ShiftFieldUtil.resolveScheduledQty(result));
+        assertEquals(2, ShiftFieldUtil.getShiftPlanQty(result, 1));
+        assertEquals(1, ShiftFieldUtil.getShiftPlanQty(result, 8));
+    }
+
+    @Test
+    void shouldPreserveGroupedTotalWhenScalingMultipleResults() {
+        LhScheduleResult firstResult = buildResult(16, 16, 16, 16, 0, 0, 0, 0);
+        LhScheduleResult secondResult = buildResult(0, 0, 0, 0, 16, 16, 16, 16);
+
+        ShiftFieldUtil.scaleGroupedShiftPlanQty(
+                Arrays.asList(firstResult, secondResult), buildShifts(8), 15);
+
+        assertEquals(15,
+                ShiftFieldUtil.resolveScheduledQty(firstResult) + ShiftFieldUtil.resolveScheduledQty(secondResult));
+        assertEquals(8, ShiftFieldUtil.resolveScheduledQty(firstResult));
+        assertEquals(7, ShiftFieldUtil.resolveScheduledQty(secondResult));
+    }
+
+    private List<LhShiftConfigVO> buildShifts(int count) {
+        List<LhShiftConfigVO> shifts = new ArrayList<>(count);
+        for (int i = 1; i <= count; i++) {
+            LhShiftConfigVO shift = new LhShiftConfigVO();
+            shift.setShiftIndex(i);
+            shifts.add(shift);
+        }
+        return shifts;
+    }
+
+    private LhScheduleResult buildResult(int class1PlanQty,
+                                         int class2PlanQty,
+                                         int class3PlanQty,
+                                         int class4PlanQty,
+                                         int class5PlanQty,
+                                         int class6PlanQty,
+                                         int class7PlanQty,
+                                         int class8PlanQty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setClass1PlanQty(class1PlanQty);
+        result.setClass2PlanQty(class2PlanQty);
+        result.setClass3PlanQty(class3PlanQty);
+        result.setClass4PlanQty(class4PlanQty);
+        result.setClass5PlanQty(class5PlanQty);
+        result.setClass6PlanQty(class6PlanQty);
+        result.setClass7PlanQty(class7PlanQty);
+        result.setClass8PlanQty(class8PlanQty);
+        return result;
     }
 }

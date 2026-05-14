@@ -29,7 +29,13 @@ public class MachineScheduleDTO {
     /** 寸口范围上限 */
     private BigDecimal dimensionMaximum;
     /** 模套型号 */
-    private String mouldSetCode;
+    private String shellStandard;
+    /** 支持19.5寸宽基 0-否，1-是 */
+    private String support195WideBase;
+    /** 支持22.5寸宽基 0-否，1-是 */
+    private String support225WideBase;
+    /** 支持芯片胎 0-否，1-是 */
+    private String supportChipTire;
     /** 机台排序号 */
     private int machineOrder;
 

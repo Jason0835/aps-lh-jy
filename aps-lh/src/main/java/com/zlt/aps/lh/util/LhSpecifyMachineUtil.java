@@ -32,7 +32,7 @@ public final class LhSpecifyMachineUtil {
      */
     public static List<LhSpecifyMachine> listLimitSpecifyMachinesByMaterialCode(LhScheduleContext context,
                                                                                  String materialCode) {
-        return filterSpecifyMachines(listSpecifyMachinesByMaterialCode(context, materialCode),
+        return filterSpecifyMachines(context, listSpecifyMachinesByMaterialCode(context, materialCode),
                 JobTypeEnum.RESTRICTED.getCode(), null);
     }
 
@@ -59,7 +59,7 @@ public final class LhSpecifyMachineUtil {
     public static List<LhSpecifyMachine> listLimitSpecifyMachines(LhScheduleContext context,
                                                                   String machineCode,
                                                                   String materialCode) {
-        return filterSpecifyMachines(listSpecifyMachinesByMaterialCode(context, materialCode),
+        return filterSpecifyMachines(context, listSpecifyMachinesByMaterialCode(context, materialCode),
                 JobTypeEnum.RESTRICTED.getCode(), machineCode);
     }
 
@@ -72,7 +72,7 @@ public final class LhSpecifyMachineUtil {
      * @return true-不可作业，false-未配置不可作业
      */
     public static boolean isNotAllowedMachine(LhScheduleContext context, String machineCode, String materialCode) {
-        return !CollectionUtils.isEmpty(filterSpecifyMachines(listSpecifyMachinesByMaterialCode(context, materialCode),
+        return !CollectionUtils.isEmpty(filterSpecifyMachines(context, listSpecifyMachinesByMaterialCode(context, materialCode),
                 JobTypeEnum.NOT_ALLOWED.getCode(), machineCode));
     }
 
@@ -108,7 +108,7 @@ public final class LhSpecifyMachineUtil {
      */
     public static Set<String> resolveLimitSpecifyMachineCodes(LhScheduleContext context, String materialCode) {
         List<LhSpecifyMachine> specifyMachineList = listLimitSpecifyMachinesByMaterialCode(context, materialCode);
-        Set<String> machineCodeSet = new HashSet<>(specifyMachineList.size());
+        Set<String> machineCodeSet = new HashSet<>(specifyMachineList.size() * 2);
         for (LhSpecifyMachine specifyMachine : specifyMachineList) {
             if (StringUtils.isNotEmpty(specifyMachine.getMachineCode())) {
                 machineCodeSet.add(specifyMachine.getMachineCode());
@@ -126,8 +126,9 @@ public final class LhSpecifyMachineUtil {
      */
     public static Set<String> resolveNotAllowedMachineCodes(LhScheduleContext context, String materialCode) {
         List<LhSpecifyMachine> specifyMachineList = filterSpecifyMachines(
+                context,
                 listSpecifyMachinesByMaterialCode(context, materialCode), JobTypeEnum.NOT_ALLOWED.getCode(), null);
-        Set<String> machineCodeSet = new HashSet<>(specifyMachineList.size());
+        Set<String> machineCodeSet = new HashSet<>(specifyMachineList.size() * 2);
         for (LhSpecifyMachine specifyMachine : specifyMachineList) {
             if (StringUtils.isNotEmpty(specifyMachine.getMachineCode())) {
                 machineCodeSet.add(specifyMachine.getMachineCode());
@@ -170,7 +171,7 @@ public final class LhSpecifyMachineUtil {
         }
         List<LhSpecifyMachine> resultList = new ArrayList<>(8);
         for (Map.Entry<String, List<LhSpecifyMachine>> entry : context.getSpecifyMachineMap().entrySet()) {
-            resultList.addAll(filterSpecifyMachines(entry.getValue(), jobType, machineCode));
+            resultList.addAll(filterSpecifyMachines(context, entry.getValue(), jobType, machineCode));
         }
         return resultList;
     }
@@ -183,7 +184,8 @@ public final class LhSpecifyMachineUtil {
      * @param machineCode 机台编码
      * @return 定点机台配置列表
      */
-    private static List<LhSpecifyMachine> filterSpecifyMachines(List<LhSpecifyMachine> specifyMachineList,
+    private static List<LhSpecifyMachine> filterSpecifyMachines(LhScheduleContext context,
+                                                                List<LhSpecifyMachine> specifyMachineList,
                                                                 String jobType,
                                                                 String machineCode) {
         if (CollectionUtils.isEmpty(specifyMachineList)) {

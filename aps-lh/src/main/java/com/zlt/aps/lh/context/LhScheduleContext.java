@@ -11,6 +11,7 @@ import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -19,6 +20,7 @@ import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmMonthSurplus;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
@@ -115,6 +117,8 @@ public class LhScheduleContext {
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
     /** 月累计完成量Map（截至目标排产日期含当天）, key=materialCode */
     private Map<String, Integer> materialMonthFinishedQtyMap = new HashMap<>();
+    /** T日排程班次完成量Map, key=materialCode, value=T日class1FinishQty按物料汇总值 */
+    private Map<String, Integer> materialScheDayFinishQtyMap = new HashMap<>();
     /** 物料信息Map, key=materialCode */
     private Map<String, MdmMaterialInfo> materialInfoMap = new HashMap<>();
     /** 胶囊规格分组Map, key=规格, value=归一化后的分组编码 */
@@ -131,8 +135,14 @@ public class LhScheduleContext {
     private Map<String, LhRepairCapsule> capsuleUsageMap = new HashMap<>();
     /** 硫化精度保养计划Map, key=machineCode */
     private Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>();
-    /** 特殊材料胎胚编码集合 */
-    private Set<String> specialMaterialEmbryoCodeSet = new HashSet<>();
+    /** 特殊物料清单配置列表 */
+    private List<LhSpecialMaterialBom> specialMaterialBomList = new ArrayList<>();
+    /** 特殊物料分类Map, key=物料编码, value=分类集合 */
+    private Map<String, Set<String>> specialMaterialCategoryByMaterialCode = new HashMap<>();
+    /** 特殊物料分类Map, key=结构名称, value=分类集合 */
+    private Map<String, Set<String>> specialMaterialCategoryByStructureName = new HashMap<>();
+    /** SKU与示方书关系Map, key=materialCode */
+    private Map<String, MdmSkuConstructionRef> skuConstructionRefMap = new HashMap<>();
 
     // ========== 中间计算结果(S4.3) ==========
 
@@ -154,6 +164,12 @@ public class LhScheduleContext {
     private List<SkuScheduleDTO> newSpecSkuList = new ArrayList<>();
     /** 前一日欠产/超产向当日传导的净值，key=materialCode */
     private Map<String, Integer> carryForwardQtyMap = new HashMap<>();
+    /** 满班补齐超排量累加器，key=materialCode，供最终汇总日志使用（不受SKU从待排列表中移除影响） */
+    private Map<String, Integer> skuShiftFillOverQtyMap = new LinkedHashMap<>();
+    /** 续作结果日额度账本是否已完成最终同步，防止同一上下文重复扣账 */
+    private boolean continuousDailyQuotaSynced;
+    /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中 */
+    private Map<LhScheduleResult, SkuScheduleDTO> scheduleResultSourceSkuMap = new IdentityHashMap<>();
 
     // ========== 机台分配状态 ==========
 
@@ -175,7 +191,7 @@ public class LhScheduleContext {
     private Map<String, Date> specifyMachineReservedSwitchStartTimeMap = new LinkedHashMap<>();
     /** 定点机台挤量预留物料编码, key=machineCode */
     private Map<String, String> specifyMachineReservedMaterialMap = new LinkedHashMap<>();
-    /** 每日换模计数, key=dateString, value=[早班换模数, 中班换模数] */
+    /** 每日模具切换计数, key=dateString, value=[早班切换数, 中班切换数] */
     private Map<String, int[]> dailyMouldChangeCountMap = new LinkedHashMap<>();
     /** 每日首检计数, key=dateString, value=[早班首检数, 中班首检数] */
     private Map<String, int[]> dailyFirstInspectionCountMap = new LinkedHashMap<>();

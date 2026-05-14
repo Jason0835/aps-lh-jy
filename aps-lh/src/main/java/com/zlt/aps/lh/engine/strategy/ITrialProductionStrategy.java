@@ -15,7 +15,13 @@ public interface ITrialProductionStrategy {
 
     boolean canScheduleTrialOnDate(LhScheduleContext context, Date targetDate);
 
-    boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate);
+    boolean canScheduleTrialSkuOnDate(LhScheduleContext context, SkuScheduleDTO trialSku, Date targetDate);
+
+    default boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate) {
+        return isDailyTrialLimitReached(context, targetDate, null);
+    }
+
+    boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate, String materialCode);
 
     String matchTrialMachine(LhScheduleContext context, SkuScheduleDTO trialSku);
 }

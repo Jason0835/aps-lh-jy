@@ -3,6 +3,7 @@ package com.zlt.aps.lh.regression;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -221,6 +222,103 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
         assertNotNull(capturedEndingTime[0], "局部搜索应执行机台开工时间计算");
         assertEquals(expectedBaseTime, capturedEndingTime[0],
                 "局部搜索兜底时间应与主流程一致，使用排程窗口基准时间");
+    }
+
+    @Test
+    void selectBestMachine_shouldNotAllocateMouldChangeBeforeOpenProductionShift() {
+        LocalSearchMachineAllocatorStrategy strategy = new LocalSearchMachineAllocatorStrategy();
+        LhScheduleContext context = newContext();
+        context.setOpenProductionMode(true);
+        context.setOpenProductionShift(openProductionShift(dateTime(2026, 5, 8, 6, 0)));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("M1");
+        machine.setMachineName("M1");
+        machine.setMaxMoldNum(1);
+        machine.setEstimatedEndTime(dateTime(2026, 5, 7, 15, 0));
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-OPEN");
+        sku.setPendingQty(1);
+        sku.setWindowPlanQty(1);
+        sku.setShiftCapacity(8);
+        sku.setLhTimeSeconds(1800);
+
+        List<SkuScheduleDTO> windowSkuList = Collections.singletonList(sku);
+        List<MachineScheduleDTO> candidates = Collections.singletonList(machine);
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        final Date[] capturedEndingTime = new Date[1];
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                return candidates;
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx,
+                                                        SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidateMachines,
+                                                        Set<String> excludedMachineCodes) {
+                return machine;
+            }
+        };
+
+        IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                capturedEndingTime[0] = endingTime;
+                return dateTime(2026, 5, 8, 6, 0);
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                return 99;
+            }
+        };
+
+        IFirstInspectionBalanceStrategy inspectionBalanceStrategy =
+                (ctx, machineCode, mouldChangeTime) -> dateTime(2026, 5, 8, 14, 0);
+
+        ICapacityCalculateStrategy capacityCalculateStrategy = new ICapacityCalculateStrategy() {
+            @Override
+            public int calculateShiftCapacity(LhScheduleContext ctx, int lhTimeSeconds, int mouldQty) {
+                return 0;
+            }
+
+            @Override
+            public Date calculateStartTime(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                return endingTime;
+            }
+
+            @Override
+            public int calculateFirstShiftQty(Date startTime, Date shiftEndTime, int lhTimeSeconds, int mouldQty) {
+                return 0;
+            }
+
+            @Override
+            public int calculateDailyCapacity(int lhTimeSeconds, int mouldQty) {
+                return 0;
+            }
+        };
+
+        strategy.selectBestMachine(
+                context,
+                windowSkuList,
+                candidates,
+                shifts,
+                machineMatchStrategy,
+                mouldChangeBalanceStrategy,
+                inspectionBalanceStrategy,
+                capacityCalculateStrategy);
+
+        assertEquals(dateTime(2026, 5, 8, 6, 0), capturedEndingTime[0],
+                "开产模式下局部搜索申请换模窗口时，切换起点不能早于开产班次");
     }
 
     @Test
@@ -490,5 +588,16 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
         c.set(Calendar.HOUR_OF_DAY, hour);
         c.set(Calendar.MINUTE, minute);
         return c.getTime();
+    }
+
+    private ShiftProductionControlDTO openProductionShift(Date startTime) {
+        ShiftProductionControlDTO dto = new ShiftProductionControlDTO();
+        dto.setShiftCode("04");
+        dto.setShiftIndex(4);
+        dto.setShiftStartTime(startTime);
+        dto.setEffectiveStartTime(startTime);
+        dto.setEffectiveEndTime(dateTime(2026, 5, 8, 14, 0));
+        dto.setCanSchedule(true);
+        return dto;
     }
 }

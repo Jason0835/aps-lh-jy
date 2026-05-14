@@ -93,6 +93,44 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
+    void doHandle_shouldKeepDemandQtyAndLeaveWindowCapToDailyQuotaLedger() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleDate(date(2026, 5, 3));
+        context.setScheduleTargetDate(date(2026, 5, 5));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("3302001724");
+        plan.setMaterialDesc("3302001724-DESC");
+        plan.setStructureName("S-ROLLING-LOSS");
+        plan.setSpecifications("SPEC-ROLLING-LOSS");
+        plan.setTotalQty(1000);
+        plan.setDay3(96);
+        plan.setDay4(48);
+        plan.setDay5(14);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        LhScheduleResult previous = new LhScheduleResult();
+        previous.setLhMachineCode("K1105");
+        previous.setMaterialCode("3302001724");
+        previous.setClass1PlanQty(96);
+        context.setPreviousScheduleResultList(Collections.singletonList(previous));
+        context.getMaterialDayFinishedQtyMap().put("3302001724_2026-05-02", 32);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-ROLLING-LOSS").get(0);
+        assertEquals(64, context.getCarryForwardQtyMap().get("3302001724").intValue());
+        assertEquals(158, sku.getWindowPlanQty());
+        assertEquals(222, sku.getWindowRemainingPlanQty());
+        assertEquals(1032, sku.getPendingQty());
+        assertEquals(1032, sku.getTargetScheduleQty().intValue());
+    }
+
+    @Test
     void doHandle_shouldNotDoubleDeductWhenSameMaterialHasMultipleMachines() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
@@ -187,6 +225,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
         plan.setTotalQty(100);
         plan.setDay11(30);
         context.setMonthPlanList(Collections.singletonList(plan));
+        context.getSkuLhCapacityMap().put("MAT-STOCK-HIGH", buildCapacity("MAT-STOCK-HIGH", 100));
 
         ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
 
@@ -218,6 +257,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
         plan.setTotalQty(150);
         plan.setDay11(30);
         context.setMonthPlanList(Collections.singletonList(plan));
+        context.getSkuLhCapacityMap().put("MAT-STOCK-LOW", buildCapacity("MAT-STOCK-LOW", 100));
 
         ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
 
@@ -226,6 +266,111 @@ class ScheduleAdjustCarryForwardRegressionTest {
         assertEquals(80, sku.getEmbryoStock());
         assertEquals(120, sku.getPendingQty());
         assertEquals(120, sku.getTargetScheduleQty().intValue());
+    }
+
+    @Test
+    void resolveStopProductionDemandQty_shouldPreferEmbryoStockWhenEmbryoIsHigher() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setCuringStopPotTime(dateTime(2026, 4, 13, 22, 1));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-STOP-STOCK");
+        plan.setTotalQty(100);
+        plan.setFactProdReqQty(150);
+        plan.setDay13(40);
+
+        Integer demandQty = ReflectionTestUtils.invokeMethod(
+                handler, "resolveStopProductionDemandQty", context, plan, 80);
+
+        assertEquals(80, demandQty.intValue());
+    }
+
+    @Test
+    void resolveStopProductionDemandQty_shouldPreferLossIncludedStopDayPlanQtyWhenPlanIsHigher() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setCuringStopPotTime(dateTime(2026, 4, 13, 22, 1));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-STOP-PLAN");
+        plan.setTotalQty(100);
+        plan.setFactProdReqQty(150);
+        plan.setDay13(40);
+
+        Integer demandQty = ReflectionTestUtils.invokeMethod(
+                handler, "resolveStopProductionDemandQty", context, plan, 50);
+
+        assertEquals(60, demandQty.intValue());
+    }
+
+    @Test
+    void doHandle_shouldAllocateEmbryoStockBySameEmbryoStandardCapacity() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.getEmbryoRealtimeStockMap().put("EMB-SHARE", 200);
+        context.setMonthPlanList(Arrays.asList(
+                buildPlan("MAT-SHARE-A", "S-SHARE-A", 50, 20, "EMB-SHARE"),
+                buildPlan("MAT-SHARE-B", "S-SHARE-B", 50, 20, "EMB-SHARE")));
+        context.getSkuLhCapacityMap().put("MAT-SHARE-A", buildCapacity("MAT-SHARE-A", 100));
+        context.getSkuLhCapacityMap().put("MAT-SHARE-B", buildCapacity("MAT-SHARE-B", 300));
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO skuA = context.getStructureSkuMap().get("S-SHARE-A").get(0);
+        SkuScheduleDTO skuB = context.getStructureSkuMap().get("S-SHARE-B").get(0);
+        assertEquals(50, skuA.getEmbryoStock());
+        assertEquals(50, skuA.getPendingQty());
+        assertEquals(150, skuB.getEmbryoStock());
+        assertEquals(150, skuB.getPendingQty());
+    }
+
+    @Test
+    void doHandle_shouldUseAllMonthPlanSkusAsSameEmbryoDenominator() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.getEmbryoRealtimeStockMap().put("EMB-ALL-MONTH", 200);
+        FactoryMonthPlanProductionFinalResult schedulablePlan =
+                buildPlan("MAT-ALL-A", "S-ALL-A", 50, 20, "EMB-ALL-MONTH");
+        FactoryMonthPlanProductionFinalResult denominatorOnlyPlan =
+                buildPlan("MAT-ALL-B", "", 50, 20, "EMB-ALL-MONTH");
+        context.setMonthPlanList(Arrays.asList(schedulablePlan, denominatorOnlyPlan));
+        context.getSkuLhCapacityMap().put("MAT-ALL-A", buildCapacity("MAT-ALL-A", 100));
+        context.getSkuLhCapacityMap().put("MAT-ALL-B", buildCapacity("MAT-ALL-B", 300));
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-ALL-A").get(0);
+        assertEquals(50, sku.getEmbryoStock());
+        assertEquals(50, sku.getPendingQty());
+    }
+
+    @Test
+    void doHandle_shouldKeepUnknownEmbryoStockWhenRealtimeStockMissing() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setMonthPlanList(Collections.singletonList(
+                buildPlan("MAT-NO-STOCK", "S-NO-STOCK", 100, 30, "EMB-NO-STOCK")));
+        context.getSkuLhCapacityMap().put("MAT-NO-STOCK", buildCapacity("MAT-NO-STOCK", 100));
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-NO-STOCK").get(0);
+        assertEquals(-1, sku.getEmbryoStock());
+        assertEquals(100, sku.getPendingQty());
     }
 
     @Test
@@ -745,6 +890,20 @@ class ScheduleAdjustCarryForwardRegressionTest {
         plan.setTotalQty(totalQty);
         plan.setDay11(day11Qty);
         return plan;
+    }
+
+    private FactoryMonthPlanProductionFinalResult buildPlan(String materialCode, String structureName,
+                                                            int totalQty, int day11Qty, String embryoCode) {
+        FactoryMonthPlanProductionFinalResult plan = buildPlan(materialCode, structureName, totalQty, day11Qty);
+        plan.setEmbryoCode(embryoCode);
+        return plan;
+    }
+
+    private MdmSkuLhCapacity buildCapacity(String materialCode, int standardCapacity) {
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(materialCode);
+        capacity.setStandardCapacity(standardCapacity);
+        return capacity;
     }
 
     private Map<String, LhMachineOnlineInfo> buildMachineOnlineInfoMap(LhMachineOnlineInfo... onlineInfos) {

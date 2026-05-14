@@ -196,6 +196,9 @@ public final class LhScheduleConstant {
     /** 胶囊预热时间（小时） */
     public static final BigDecimal CAPSULE_PREHEAT_HOURS = new BigDecimal("2.5");
 
+    /** 维保重叠切换耗时（小时） */
+    public static final int MAINTENANCE_OVERLAP_SWITCH_HOURS = 4;
+
     // ======================== 停机超时阈值 ========================
 
     /** 停机超时阈值（小时） */
@@ -206,6 +209,9 @@ public final class LhScheduleConstant {
 
     /** 模具清洗提前天数 */
     public static final int MOULD_CLEANING_ADVANCE_DAYS = 2;
+
+    /** 清洗跳过近收尾天数阈值（机台当前物料剩余天数 <= 该值时跳过清洗） */
+    public static final int CLEANING_SKIP_ENDING_DAY_THRESHOLD = 2;
 
     // ======================== 胶囊相关 ========================
 
@@ -265,6 +271,13 @@ public final class LhScheduleConstant {
 
     /** 试制量试每日上限 */
     public static final int TRIAL_DAILY_LIMIT = 2;
+
+    /** @deprecated 单控基准机台已废弃：机台已在 T_LH_MACHINE_INFO 表中直接拆分为 L/R 后缀编码 */
+    @Deprecated
+    public static final String SINGLE_CONTROL_MACHINE_CODES = "";
+
+    /** 小批量验证SKU默认阈值 */
+    public static final int SMALL_BATCH_SKU_THRESHOLD = 100;
 
     // ======================== 模具交替计划天数 ========================
 

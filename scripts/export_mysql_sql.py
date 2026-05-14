@@ -2,30 +2,34 @@ import pymysql
 from pymysql.err import OperationalError, ProgrammingError
 
 # ====================== 【必须修改】数据库配置 ======================
+
 DB_CONFIG = {
-    "host": "192.168.2.124",       # 数据库地址
-    "port": 3306,              # 端口
-    "user": "root",            # 用户名
-    "password": "neW46Ik#Gq@",     # 密码
-    "database": "jy_aps",     # 数据库名
-    "charset": "utf8mb4"       # 字符集
+    "host": "172.21.7.130",       # 数据库地址 192.168.2.124
+    "port": 3306,              # 端口  3306
+    "user": "tbr_aps",            # 用户名  root
+    "password": "NahPDzeShSxA%",     # 密码 neW46Ik#Gq@
+    "database": "jy_aps",     # 数据库名 jy_aps
+    "charset": "utf8mb4"       # 字符集 utf8mb4
 }
+
+
 
 # ====================== 【必须修改】需要导出的表名列表 ======================
 TABLE_NAMES = [
     "T_LH_MOULD_CLEAN_PLAN",
     "T_LH_MACHINE_INFO",
+    "T_LH_SPECIAL_MATERIAL_BOM",
     "T_LH_MOULD_CHANGE_PLAN",
     "T_LH_PARAMS",
     "T_LH_SCHEDULE_PROCESS_LOG",
     "T_LH_SCHEDULE_RESULT",
     "T_LH_SHIFT_CONFIG",
     "T_LH_DAY_FINISH_QTY",
+    "T_LH_SCHE_FINISH_QTY",
     "T_LH_SPECIFY_MACHINE",
     "T_LH_UNSCHEDULED_RESULT",
     "T_MDM_DEV_MAINTENANCE_PLAN",
     "T_MDM_DEVICE_PLAN_SHUT",
-    "T_LH_MACHINE_ONLINE_INFO",
     "T_LH_REPAIR_CAPSULE",
     "T_MDM_MATERIAL_INFO",
     "T_MDM_MONTH_SURPLUS",
@@ -37,7 +41,12 @@ TABLE_NAMES = [
     "T_MDM_MOULD_INFO",
     "T_CX_STOCK",
     "T_MDM_MATERIAL_CONSUME_DETAIL",
-    "T_MDM_SPECIAL_MATERIAL_RECORD"
+    "T_MDM_SPECIAL_MATERIAL_RECORD",
+    "T_LH_PRECISION_PLAN",
+    "T_MP_ADJUST_RESULT",
+    "T_MDM_SKU_CONSTRUCTION_REF",
+    "T_MDM_CAPSULE_CHUCK",
+    "T_LH_MACHINE_ONLINE_INFO"
 ]
 
 # ====================== 导出文件配置 ======================

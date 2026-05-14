@@ -20,10 +20,13 @@ spring:
     # 需要密码时取消注释：password: yourPassword
   # 数据库：MySQL 5.7，库字符集 utf8mb4（JDBC 使用 characterEncoding=UTF-8）
   datasource:
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    url: 'jdbc:mysql://16.162.95.221:3306/apslh?rewriteBatchedStatements=true&useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull&useSSL=true&allowMultiQueries=true&serverTimezone=GMT%2B8'
-    username: apslh
-    password: '747452'
+#    driver-class-name: com.mysql.cj.jdbc.Driver
+#    url: 'jdbc:mysql://16.162.95.221:3306/apslh?rewriteBatchedStatements=true&useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull&useSSL=true&allowMultiQueries=true&serverTimezone=GMT%2B8'
+#    username: apslh
+#    password: '747452'
+    url: 'jdbc:mysql://127.0.0.1:3307/apslh?rewriteBatchedStatements=true&useUnicode=true&characterEncoding=UTF-8&zeroDateTimeBehavior=convertToNull&useSSL=true&allowMultiQueries=true&serverTimezone=GMT%2B8'
+    username: root
+    password: '123456'
     # Hikari 连接池配置（核心：启动时自动校验数据库连接）
     hikari:
       # 启动时连接失败则直接抛出异常，阻止项目启动（关键配置）

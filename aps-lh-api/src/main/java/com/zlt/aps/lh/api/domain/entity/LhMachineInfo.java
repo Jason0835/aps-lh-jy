@@ -73,10 +73,10 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     @TableField(value = "CLASS_SHIFT")
     private String classShift;
 
-    /** 最大使用模具数量，范围 0-255 */
+    /** 最大使用模具数量，范围 0-255 单双模*/
     @ImportExcelValidated(required = true, digits = true, min = 0, max = 255)
     @Excel(name = "ui.data.column.info.maxMoldNum", cellType = Excel.ColumnType.NUMERIC, sort = 80)
-    @ApiModelProperty(value = "模台数", name = "maxMoldNum")
+    @ApiModelProperty(value = "模台数 单双模", name = "maxMoldNum")
     @TableField(value = "MAX_MOLD_NUM")
     private Integer maxMoldNum;
 
@@ -123,6 +123,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 厂家
      */
+    @Excel(name = "ui.data.column.info.manufacturer", sort = 25)
     @ApiModelProperty(value = "厂家", name = "manufacturer")
     @TableField("MANUFACTURER")
     private String manufacturer;
@@ -130,6 +131,7 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 尺寸
      */
+    @Excel(name = "ui.data.column.info.dimensionSize", sort = 50)
     @ApiModelProperty(value = "尺寸", name = "dimensionSize")
     @TableField("DIMENSION_SIZE")
     private String dimensionSize;
@@ -137,15 +139,41 @@ public class LhMachineInfo extends BaseEntity implements Serializable {
     /**
      * 热板直径，单位：mm
      */
+    @Excel(name = "ui.data.column.info.hotPlateDiameter", sort = 51)
     @ApiModelProperty(value = "热板直径，单位：mm", name = "hotPlateDiameter")
     @TableField("HOT_PLATE_DIAMETER")
     private String hotPlateDiameter;
 
     /**
-     * 模套型号，默认值：通用
+     * 模套型号，空值表示适配所有
      */
-    @ApiModelProperty(value = "模套型号", name = "mouldSetCode")
-    @TableField("MOULD_SET_CODE")
-    private String mouldSetCode;
+    @Excel(name = "ui.data.column.info.shellStandard", sort = 52)
+    @ApiModelProperty(value = "模套型号", name = "shellStandard")
+    @TableField("SHELL_STANDARD")
+    private String shellStandard;
+
+    /**
+     * 支持19.5寸宽基 0-否，1-是
+     */
+    @Excel(name = "ui.data.column.info.support195WideBase", dictType = "biz_yes_no", sort = 75)
+    @ApiModelProperty(value = "支持19.5寸宽基 0-否，1-是，字典：biz_yes_no", name = "support195WideBase")
+    @TableField("SUPPORT195_WIDE_BASE")
+    private String support195WideBase;
+
+    /**
+     * 支持22.5寸宽基 0-否，1-是
+     */
+    @Excel(name = "ui.data.column.info.support225WideBase", dictType = "biz_yes_no", sort = 77)
+    @ApiModelProperty(value = "支持22.5寸宽基 0-否，1-是，字典：biz_yes_no", name = "support225WideBase")
+    @TableField("SUPPORT225_WIDE_BASE")
+    private String support225WideBase;
+
+    /**
+     * 支持芯片胎 0-否，1-是
+     */
+    @Excel(name = "ui.data.column.info.supportChipTire", dictType = "biz_yes_no", sort = 79)
+    @ApiModelProperty(value = "支持芯片胎 0-否，1-是，字典：biz_yes_no", name = "supportChipTire")
+    @TableField("SUPPORT_CHIP_TIRE")
+    private String supportChipTire;
 
 }

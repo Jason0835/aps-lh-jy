@@ -347,6 +347,11 @@ public class LhScheduleConfig {
                 LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue());
     }
 
+    public int getMaintenanceOverlapSwitchHours() {
+        return getParamIntValue(LhScheduleParamConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS,
+                LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS);
+    }
+
     public int getMachineStopTimeoutHours() {
         return getParamIntValue(LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
     }
@@ -364,6 +369,17 @@ public class LhScheduleConfig {
     public int getMouldCleaningAdvanceDays() {
         return Math.max(0, getParamIntValue(LhScheduleParamConstant.MOULD_CLEANING_ADVANCE_DAYS,
                 LhScheduleConstant.MOULD_CLEANING_ADVANCE_DAYS));
+    }
+
+    /**
+     * 获取清洗跳过近收尾天数阈值。
+     * <p>机台当前物料剩余排产天数 <= 该阈值时跳过干冰/喷砂清洗，设为 0 关闭此特性。</p>
+     *
+     * @return 阈值天数（最小 0）
+     */
+    public int getCleaningSkipEndingDayThreshold() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD,
+                LhScheduleConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD));
     }
 
     public int getShutdownDayMinus3Rate() {
@@ -407,6 +423,21 @@ public class LhScheduleConfig {
 
     public int getTrialDailyLimit() {
         return getParamIntValue(LhScheduleParamConstant.TRIAL_DAILY_LIMIT, LhScheduleConstant.TRIAL_DAILY_LIMIT);
+    }
+
+    /**
+     * @deprecated 单控基准机台已废弃，机台已在 T_LH_MACHINE_INFO 表中直接拆分为 L/R 后缀编码。
+     *             该方法不再被生产代码使用，仅保留以兼容旧参数配置。
+     */
+    @Deprecated
+    public String getSingleControlMachineCodes() {
+        return getParamValue(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES,
+                LhScheduleConstant.SINGLE_CONTROL_MACHINE_CODES);
+    }
+
+    public int getSmallBatchSkuThreshold() {
+        return Math.max(1, getParamIntValue(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
+                LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD));
     }
 
     public boolean isLocalSearchEnabled() {

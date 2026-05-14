@@ -3,9 +3,13 @@ package com.zlt.aps.lh.util;
 import cn.hutool.core.bean.BeanUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -215,6 +219,122 @@ public final class ShiftFieldUtil {
             return;
         }
         result.setDailyPlanQty(resolveScheduledQty(result));
+    }
+
+    /**
+     * 按比例缩放一组结果的班次计划量，并保证组内总量与结果内总量都不丢尾差。
+     *
+     * @param results 结果列表
+     * @param shifts 班次列表
+     * @param targetTotal 裁减后的目标总量
+     */
+    public static void scaleGroupedShiftPlanQty(List<LhScheduleResult> results,
+                                                List<LhShiftConfigVO> shifts,
+                                                int targetTotal) {
+        if (results == null || results.isEmpty() || shifts == null || shifts.isEmpty()) {
+            return;
+        }
+        List<LhScheduleResult> effectiveResults = new ArrayList<>(results.size());
+        List<Integer> resultWeights = new ArrayList<>(results.size());
+        int originalTotal = 0;
+        for (LhScheduleResult result : results) {
+            int scheduledQty = resolveScheduledQty(result);
+            if (scheduledQty <= 0) {
+                continue;
+            }
+            effectiveResults.add(result);
+            resultWeights.add(scheduledQty);
+            originalTotal += scheduledQty;
+        }
+        if (originalTotal <= 0 || targetTotal >= originalTotal) {
+            return;
+        }
+        List<Integer> resultTargets = distributeProportionally(resultWeights, Math.max(targetTotal, 0));
+        for (int i = 0; i < effectiveResults.size(); i++) {
+            scaleSingleResultShiftPlanQty(effectiveResults.get(i), shifts, resultTargets.get(i));
+        }
+    }
+
+    /**
+     * 按班次原始计划量占比缩放单条结果，并把尾差补回到余数最大的班次。
+     *
+     * @param result 单条结果
+     * @param shifts 班次列表
+     * @param targetTotal 该结果应保留的总量
+     */
+    public static void scaleSingleResultShiftPlanQty(LhScheduleResult result,
+                                                     List<LhShiftConfigVO> shifts,
+                                                     int targetTotal) {
+        if (result == null || shifts == null || shifts.isEmpty()) {
+            return;
+        }
+        List<Integer> shiftWeights = new ArrayList<>(shifts.size());
+        for (LhShiftConfigVO shift : shifts) {
+            Integer qty = getShiftPlanQty(result, shift.getShiftIndex());
+            shiftWeights.add(qty != null && qty > 0 ? qty : 0);
+        }
+        List<Integer> shiftTargets = distributeProportionally(shiftWeights, Math.max(targetTotal, 0));
+        for (int i = 0; i < shifts.size(); i++) {
+            LhShiftConfigVO shift = shifts.get(i);
+            int shiftIndex = shift.getShiftIndex();
+            setShiftPlanQty(result, shiftIndex, shiftTargets.get(i),
+                    getShiftStartTime(result, shiftIndex),
+                    getShiftEndTime(result, shiftIndex));
+        }
+    }
+
+    /**
+     * 按权重比例分配目标总量，先取整再按最大余数补尾差，保证合计严格等于目标值。
+     *
+     * @param weights 权重列表
+     * @param targetTotal 目标总量
+     * @return 分配结果
+     */
+    private static List<Integer> distributeProportionally(List<Integer> weights, int targetTotal) {
+        List<Integer> allocations = new ArrayList<>(weights == null ? 0 : weights.size());
+        if (weights == null || weights.isEmpty()) {
+            return allocations;
+        }
+        int weightSum = 0;
+        for (Integer weight : weights) {
+            int normalizedWeight = weight != null && weight > 0 ? weight : 0;
+            allocations.add(0);
+            weightSum += normalizedWeight;
+        }
+        if (weightSum <= 0 || targetTotal <= 0) {
+            return allocations;
+        }
+        if (targetTotal >= weightSum) {
+            for (int i = 0; i < weights.size(); i++) {
+                Integer weight = weights.get(i);
+                allocations.set(i, weight != null && weight > 0 ? weight : 0);
+            }
+            return allocations;
+        }
+        List<Integer> positiveIndexes = new ArrayList<>(weights.size());
+        double[] remainders = new double[weights.size()];
+        int allocatedTotal = 0;
+        for (int i = 0; i < weights.size(); i++) {
+            int weight = weights.get(i) != null && weights.get(i) > 0 ? weights.get(i) : 0;
+            if (weight <= 0) {
+                continue;
+            }
+            double scaledQty = (double) targetTotal * weight / weightSum;
+            int baseQty = (int) Math.floor(scaledQty);
+            allocations.set(i, baseQty);
+            remainders[i] = scaledQty - baseQty;
+            allocatedTotal += baseQty;
+            positiveIndexes.add(i);
+        }
+        int remainder = targetTotal - allocatedTotal;
+        positiveIndexes.sort(Comparator.comparingDouble((Integer index) -> remainders[index])
+                .reversed()
+                .thenComparingInt(Integer::intValue));
+        for (int i = 0; i < remainder && i < positiveIndexes.size(); i++) {
+            int index = positiveIndexes.get(i);
+            allocations.set(index, allocations.get(index) + 1);
+        }
+        return allocations;
     }
 
     private static boolean isValidIndex(int shiftIndex) {

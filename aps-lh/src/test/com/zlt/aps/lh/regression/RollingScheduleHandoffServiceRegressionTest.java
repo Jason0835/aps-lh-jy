@@ -230,6 +230,24 @@ class RollingScheduleHandoffServiceRegressionTest {
                 "应输出继承计划量汇总日志，便于核对 inheritedPlanQtyMap");
     }
 
+    @Test
+    void apply_shouldBackfillInheritedMouldChangePlanIntoDailyQuota() {
+        LhScheduleContext context = newRollingContext();
+        context.setMonthPlanList(Collections.singletonList(buildPlan("MAT-A")));
+        context.setPreviousScheduleResultList(Collections.singletonList(buildPreviousResult()));
+        context.setPreviousMouldChangePlanList(Arrays.asList(
+                buildPreviousTypeBlockPlan(),
+                buildPreviousNormalMouldChangePlan(dateTime(2026, 4, 24, 14, 0))));
+
+        service.apply(context);
+
+        assertEquals(2, context.getMouldChangePlanList().size());
+        assertEquals(1, context.getDailyMouldChangeCountMap().get("2026-04-24")[0],
+                "继承的早班换活字块计划应先占用早班换模配额");
+        assertEquals(1, context.getDailyMouldChangeCountMap().get("2026-04-24")[1],
+                "继承的中班正规换模计划应先占用中班换模配额");
+    }
+
     private ListAppender<ILoggingEvent> attachAppender() {
         Logger logger = (Logger) LoggerFactory.getLogger(RollingScheduleHandoffService.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
@@ -404,6 +422,26 @@ class RollingScheduleHandoffServiceRegressionTest {
         plan.setAfterMaterialCode("MAT-A");
         plan.setAfterMaterialDesc("物料A");
         plan.setChangeMouldType("02");
+        plan.setIsDelete(0);
+        return plan;
+    }
+
+    private LhMouldChangePlan buildPreviousNormalMouldChangePlan(java.util.Date planDate) {
+        LhMouldChangePlan plan = new LhMouldChangePlan();
+        plan.setFactoryCode("116");
+        plan.setLhResultBatchNo("LHPC20260425001");
+        plan.setOrderNo("CHG20260425002");
+        plan.setScheduleDate(date(2026, 4, 25));
+        plan.setPlanDate(planDate);
+        plan.setChangeTime(planDate);
+        plan.setPlanOrder(2);
+        plan.setLhMachineCode("M2");
+        plan.setLhMachineName("机台2");
+        plan.setBeforeMaterialCode("MAT-A");
+        plan.setBeforeMaterialDesc("物料A");
+        plan.setAfterMaterialCode("MAT-B");
+        plan.setAfterMaterialDesc("物料B");
+        plan.setChangeMouldType("01");
         plan.setIsDelete(0);
         return plan;
     }

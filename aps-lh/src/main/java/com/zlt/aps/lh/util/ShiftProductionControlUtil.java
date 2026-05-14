@@ -58,6 +58,27 @@ public final class ShiftProductionControlUtil {
     }
 
     /**
+     * 解析开产模式下允许发起切换（换模/换活字块）的最早时间。
+     * <p>业务口径：开产夜班顺延后，切换动作也不能早于开产班次开始时间，
+     * 否则会出现“早班直接有计划量，但换模提前落到开产前”的结果。</p>
+     *
+     * @param context 排程上下文
+     * @param requestedSwitchStartTime 请求切换开始时间
+     * @return 收口后的最早切换开始时间
+     */
+    public static Date resolveEarliestSwitchStartTime(LhScheduleContext context, Date requestedSwitchStartTime) {
+        if (Objects.isNull(context) || Objects.isNull(requestedSwitchStartTime) || !context.isOpenProductionMode()) {
+            return requestedSwitchStartTime;
+        }
+        ShiftProductionControlDTO openShift = context.getOpenProductionShift();
+        if (Objects.isNull(openShift) || Objects.isNull(openShift.getEffectiveStartTime())) {
+            return requestedSwitchStartTime;
+        }
+        return requestedSwitchStartTime.before(openShift.getEffectiveStartTime())
+                ? openShift.getEffectiveStartTime() : requestedSwitchStartTime;
+    }
+
+    /**
      * 按班次产能比例扣减产能。
      *
      * @param control 班次排产管控信息

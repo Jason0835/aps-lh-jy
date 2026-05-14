@@ -5,10 +5,12 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
@@ -16,6 +18,7 @@ import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
@@ -28,6 +31,8 @@ import org.springframework.util.CollectionUtils;
 import javax.annotation.Resource;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -156,11 +161,12 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // 按结构归集SKU（key=结构名称，value=该结构下的SKU排程DTO列表）
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        Map<String, Integer> embryoStandardCapacitySumMap = buildEmbryoStandardCapacitySumMap(context);
 
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
             // 计算硫化余量
             SurplusCalculation surplus = calculateSurplusQty(context, plan);
-            SkuScheduleDTO dto = buildSkuScheduleDTO(context, plan, surplus);
+            SkuScheduleDTO dto = buildSkuScheduleDTO(context, plan, surplus, embryoStandardCapacitySumMap);
 
             // 产品结构为空，跳过
             if (StringUtils.isEmpty(plan.getStructureName())) {
@@ -212,19 +218,19 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 计算指定SKU的已完成量（汇总各班次完成量）
+     * 计算指定SKU的已完成量（月累计完成量 + T日晚班完成量）
      *
      * @param context 排程上下文
      * @param plan    月生产计划记录
      * @return 已完成量
      */
     private int calculateFinishedQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
-        // 严格使用基础数据阶段按物料汇总好的月累计完成量（截至窗口T-1，含当天）。
+        // 已完成量 = 月累计完成量（截至T-1日）+ T日排程晚班完成量（class1FinishQty）
         String materialCode = plan.getMaterialCode();
         if (StringUtils.isNotEmpty(materialCode)) {
             Integer monthFinishedQty = context.getMaterialMonthFinishedQtyMap().get(materialCode);
             if (Objects.nonNull(monthFinishedQty)) {
-                return Math.max(monthFinishedQty, 0);
+                return Math.max(monthFinishedQty, 0) + resolveScheDayFinishQty(context, materialCode);
             }
             if (canFallbackToPreviousFinishedQty(context)) {
                 Integer dayFinishedQty = context.getMaterialDayFinishedQtyMap().get(
@@ -243,6 +249,21 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             }
         }
         return 0;
+    }
+
+    /**
+     * 获取指定物料的T日排程班次完成量（class1FinishQty汇总值）。
+     *
+     * @param context       排程上下文
+     * @param materialCode  物料编码
+     * @return T日班次完成量，无记录时返回0
+     */
+    private int resolveScheDayFinishQty(LhScheduleContext context, String materialCode) {
+        if (StringUtils.isEmpty(materialCode)) {
+            return 0;
+        }
+        Integer scheDayFinishQty = context.getMaterialScheDayFinishQtyMap().get(materialCode);
+        return Objects.nonNull(scheDayFinishQty) ? Math.max(scheDayFinishQty, 0) : 0;
     }
 
     /**
@@ -267,11 +288,13 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * @param context    排程上下文
      * @param plan       月生产计划记录
      * @param surplus 硫化余量
+     * @param embryoStandardCapacitySumMap 同胎胚标准产能汇总Map
      * @return SKU排程DTO
      */
     private SkuScheduleDTO buildSkuScheduleDTO(LhScheduleContext context,
                                                FactoryMonthPlanProductionFinalResult plan,
-                                               SurplusCalculation surplus) {
+                                               SurplusCalculation surplus,
+                                               Map<String, Integer> embryoStandardCapacitySumMap) {
         SkuScheduleDTO dto = new SkuScheduleDTO();
         dto.setMaterialCode(plan.getMaterialCode());
         dto.setMaterialDesc(plan.getMaterialDesc());
@@ -293,14 +316,35 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 继承量已由滚动衔接占用，需从窗口待排量中扣减，防止重复排产
         int inheritedPlanQty = Math.max(0, context.getInheritedPlanQtyMap().getOrDefault(plan.getMaterialCode(), 0));
         dto.setWindowPlanQty(windowPlanQty);
+
+        // 初始化日计划额度账本：按排程窗口日期读取月计划 dayN，扣减继承量
+        Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap = buildDailyPlanQuotaMap(
+                context, plan, dto.getMaterialCode());
+        deductInheritedFromDailyQuota(dailyPlanQuotaMap, inheritedPlanQty);
+
+        // 将欠产传导量叠加到首日额度，确保日计划账本反映补产需求。
+        // 欠产需尽早补回，因此叠加到窗口最早日期。
+        if (carryForwardQty > 0 && !dailyPlanQuotaMap.isEmpty()) {
+            SkuDailyPlanQuotaDTO firstDayQuota = dailyPlanQuotaMap.values().iterator().next();
+            firstDayQuota.setRemainingQty(firstDayQuota.getRemainingQty() + carryForwardQty);
+        }
+        dto.setDailyPlanQuotaMap(dailyPlanQuotaMap);
+
+        // 窗口内日计划剩余量汇总（已扣减继承量，已叠加欠产传导）
+        int windowRemainingPlanQty = SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap);
+        dto.setWindowRemainingPlanQty(windowRemainingPlanQty);
+
         dto.setSurplusQty(surplus.getSurplusQty());
-        dto.setEmbryoStock(context.getEmbryoRealtimeStockMap().getOrDefault(plan.getEmbryoCode(), -1));
-        // 待排量以“余量/库存取大”为基线，再叠加滚动继承扣减与欠产传导，避免重复排产。
-        int basePendingQty = Math.max(surplus.getSurplusQty(), Math.max(0, dto.getEmbryoStock()));
+        dto.setEmbryoStock(resolveAllocatedEmbryoStock(context, plan, embryoStandardCapacitySumMap));
+        // 待排量保持“需求口径”：月计划余量扣除已继承量，再叠加前一日欠产；
+        // 日计划账本仅用于结果消费约束，不在 DTO 初始化阶段压缩需求。
+        int basePendingQty = resolveBasePendingQty(surplus.getSurplusQty(), inheritedPlanQty,
+                carryForwardQty, dto.getEmbryoStock());
         if (context.isStopProductionMode()) {
+            // 停产收尾按"停产日含损耗计划量"和"胎胚库存"取大，优先把停锅前可收的量拉齐。
             basePendingQty = resolveStopProductionDemandQty(context, plan, dto.getEmbryoStock());
         }
-        dto.setPendingQty(Math.max(0, basePendingQty - inheritedPlanQty) + carryForwardQty);
+        dto.setPendingQty(Math.max(0, basePendingQty));
         dto.setDailyPlanQty(plan.getDayVulcanizationQty() != null ? plan.getDayVulcanizationQty() : 0);
 
         // 产能信息（从SKU日硫化产能Map获取）
@@ -321,10 +365,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         fillDailyCapacity(dto, capacity);
         dto.setTargetScheduleQty(getTargetScheduleQtyResolver().resolveInitialTargetQty(context, dto));
         appendOpenProductionShortageIfNecessary(context, dto);
-        log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 已完成: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
+        log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 窗口剩余: {}, 已完成: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
                 dto.getMaterialCode(), dto.getStructureName(), dto.getMonthPlanQty(), dto.getWindowPlanQty(),
-                dto.getFinishedQty(), dto.getSurplusQty(), dto.getPendingQty(), dto.getTargetScheduleQty(),
-                dto.getShiftCapacity());
+                dto.getWindowRemainingPlanQty(), dto.getFinishedQty(), dto.getSurplusQty(), dto.getPendingQty(),
+                dto.getTargetScheduleQty(), dto.getShiftCapacity());
         if (context.isRollingScheduleHandoff() || inheritedPlanQty > 0) {
             log.info("滚动待排量拆解, 物料: {}, 窗口计划量: {}, 已继承量: {}, 欠产传导量: {}, 待排量: {}, 余量: {}, 目标量: {}",
                     dto.getMaterialCode(), windowPlanQty, inheritedPlanQty, carryForwardQty,
@@ -342,6 +386,12 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // 施工阶段
         dto.setConstructionStage(plan.getConstructionStage());
+        dto.setTrialDemandQty(safeInt(plan.getTrialQty()));
+        dto.setBeginDay(plan.getBeginDay());
+        dto.setTrial(isTrialStage(plan.getConstructionStage()));
+        dto.setSmallBatchValidation(!dto.isTrial()
+                && dto.getTrialDemandQty() > 0
+                && dto.getTrialDemandQty() < resolveSmallBatchSkuThreshold(context));
 
         // 示方书信息
         dto.setEmbryoNo(plan.getEmbryoNo());
@@ -352,10 +402,209 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setMonthPlanVersion(plan.getMonthPlanVersion());
         dto.setProductionVersion(plan.getProductionVersion());
 
+        // 试制SKU严格限制目标量，不允许超出dayN补满班次
+        if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), dto.getConstructionStage())) {
+            dto.setStrictTargetQty(true);
+        }
+
         // 默认标记为常规
         dto.setSkuTag(SkuTagEnum.NORMAL.getCode());
 
         return dto;
+    }
+
+    /**
+     * 判断施工阶段是否为试制/量试。
+     *
+     * @param constructionStage 施工阶段
+     * @return true-试制/量试
+     */
+    private boolean isTrialStage(String constructionStage) {
+        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), constructionStage)
+                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), constructionStage);
+    }
+
+    /**
+     * 解析小批量验证SKU阈值。
+     *
+     * @param context 排程上下文
+     * @return 阈值
+     */
+    private int resolveSmallBatchSkuThreshold(LhScheduleContext context) {
+        if (Objects.nonNull(context.getScheduleConfig())) {
+            return context.getScheduleConfig().getSmallBatchSkuThreshold();
+        }
+        return context.getParamIntValue(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
+                LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD);
+    }
+
+    /**
+     * 构建同胎胚分摊权重汇总Map。
+     * <p>优先按 SKU 标准产能分摊；缺少标准产能时回退到日硫化量，兼容旧数据场景。</p>
+     *
+     * @param context 排程上下文
+     * @return 同胎胚日硫化量汇总Map，key=胎胚编号
+     */
+    private Map<String, Integer> buildEmbryoStandardCapacitySumMap(LhScheduleContext context) {
+        Map<String, Integer> embryoStandardCapacitySumMap = new LinkedHashMap<>();
+        for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
+            if (StringUtils.isEmpty(plan.getEmbryoCode())) {
+                continue;
+            }
+            int allocationWeight = resolveEmbryoAllocationWeight(context, plan);
+            if (allocationWeight > 0) {
+                embryoStandardCapacitySumMap.merge(plan.getEmbryoCode(), allocationWeight, Integer::sum);
+            }
+        }
+        return embryoStandardCapacitySumMap;
+    }
+
+    /**
+     * 解析SKU分摊后的胎胚库存。
+     *
+     * @param context 排程上下文
+     * @param plan 月计划
+     * @param embryoStandardCapacitySumMap 同胎胚日硫化量汇总Map
+     * @return SKU分摊胎胚库存，-1表示库存未知
+     */
+    private int resolveAllocatedEmbryoStock(LhScheduleContext context,
+                                            FactoryMonthPlanProductionFinalResult plan,
+                                            Map<String, Integer> embryoStandardCapacitySumMap) {
+        if (StringUtils.isEmpty(plan.getEmbryoCode())
+                || !context.getEmbryoRealtimeStockMap().containsKey(plan.getEmbryoCode())) {
+            return -1;
+        }
+        Integer embryoStock = context.getEmbryoRealtimeStockMap().get(plan.getEmbryoCode());
+        if (Objects.isNull(embryoStock)) {
+            return -1;
+        }
+        Integer embryoStandardCapacitySum = embryoStandardCapacitySumMap.get(plan.getEmbryoCode());
+        int allocationWeight = resolveEmbryoAllocationWeight(context, plan);
+        if (allocationWeight <= 0
+                || Objects.isNull(embryoStandardCapacitySum) || embryoStandardCapacitySum <= 0) {
+            return embryoStock;
+        }
+        int allocatedStock = (int) (embryoStock.longValue() * allocationWeight
+                / embryoStandardCapacitySum);
+        log.debug("同胎胚库存按分摊权重分摊, materialCode: {}, embryoCode: {}, allocationWeight: {}, "
+                        + "embryoWeightSum: {}, embryoStock: {}, allocatedStock: {}",
+                plan.getMaterialCode(), plan.getEmbryoCode(), allocationWeight,
+                embryoStandardCapacitySum, embryoStock, allocatedStock);
+        return allocatedStock;
+    }
+
+    /**
+     * 解析胎胚库存分摊权重。
+     * <p>优先使用 SKU 标准产能；老数据未维护标准产能时，回退到日硫化量。</p>
+     *
+     * @param context 排程上下文
+     * @param plan 月计划
+     * @return 分摊权重
+     */
+    private int resolveEmbryoAllocationWeight(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
+        if (context == null || plan == null || StringUtils.isEmpty(plan.getMaterialCode())) {
+            return 0;
+        }
+        MdmSkuLhCapacity capacity = context.getSkuLhCapacityMap().get(plan.getMaterialCode());
+        if (capacity != null && Objects.nonNull(capacity.getStandardCapacity())
+                && capacity.getStandardCapacity() > 0) {
+            return capacity.getStandardCapacity();
+        }
+        return safeInt(plan.getDayVulcanizationQty());
+    }
+
+    /**
+     * 构建SKU在排程窗口内的日计划额度账本。
+     * <p>按排程窗口覆盖的每个自然日，读取月计划对应 dayN 的日计划量，初始化每日额度。</p>
+     * <p>依赖 {@link MonthPlanDayQtyUtil#resolveDayQty} 按日序读取 DAY_n 字段。</p>
+     *
+     * @param context 排程上下文
+     * @param plan 月计划记录
+     * @param materialCode 物料编码
+     * @return 按日期排序的日计划额度Map，key=生产日期
+     */
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> buildDailyPlanQuotaMap(LhScheduleContext context,
+                                                                        FactoryMonthPlanProductionFinalResult plan,
+                                                                        String materialCode) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
+        if (Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getScheduleTargetDate())) {
+            return quotaMap;
+        }
+        if (MonthPlanDayQtyUtil.isCrossMonthWindow(context.getScheduleDate(), context.getScheduleTargetDate())) {
+            log.warn("排程窗口跨月，无法构建日计划额度账本, materialCode: {}, scheduleDate: {}, targetDate: {}",
+                    materialCode,
+                    LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                    LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()));
+            return quotaMap;
+        }
+        Date startDate = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
+        Date endDate = LhScheduleTimeUtil.clearTime(context.getScheduleTargetDate());
+        if (startDate.after(endDate)) {
+            return quotaMap;
+        }
+        // 按自然日顺序遍历窗口日期，读取月计划 DAY_n 初始化每日额度
+        Calendar cursor = Calendar.getInstance();
+        cursor.setTime(startDate);
+        Calendar endCalendar = Calendar.getInstance();
+        endCalendar.setTime(endDate);
+        while (!cursor.after(endCalendar)) {
+            LocalDate productionDate = cursor.getTime().toInstant()
+                    .atZone(ZoneId.systemDefault()).toLocalDate();
+            int dayOfMonth = cursor.get(Calendar.DAY_OF_MONTH);
+            int dayPlanQty = MonthPlanDayQtyUtil.resolveDayQty(plan, dayOfMonth);
+            SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+            quota.setMaterialCode(materialCode);
+            quota.setProductionDate(productionDate);
+            quota.setDayPlanQty(dayPlanQty);
+            quota.setScheduledQty(0);
+            quota.setRemainingQty(dayPlanQty);
+            quota.setShiftFillOverQty(0);
+            quota.setCarryLossQty(0);
+            quota.setFutureBorrowQty(0);
+            quota.setActualQty(0);
+            quota.setCumulativeQty(0);
+            quota.setFinalLossQty(0);
+            quota.setCompleted(false);
+            quotaMap.put(productionDate, quota);
+            cursor.add(Calendar.DAY_OF_MONTH, 1);
+        }
+        SkuDailyPlanQuotaUtil.refreshRollingFields(quotaMap);
+        log.debug("日计划额度账本初始化, materialCode: {}, 窗口日期数: {}, 总额度: {}",
+                materialCode, quotaMap.size(),
+                quotaMap.values().stream().mapToInt(SkuDailyPlanQuotaDTO::getDayPlanQty).sum());
+        return quotaMap;
+    }
+
+    /**
+     * 从日计划额度账本中按日期顺序扣减继承量。
+     * <p>滚动衔接中已继承的排产量需要从窗口计划额度中扣减，避免重复排产。
+     * 扣减策略：从最早日期开始依次扣减，直到继承量全部扣完。</p>
+     *
+     * @param dailyPlanQuotaMap 日计划额度账本
+     * @param inheritedPlanQty 待扣减的继承量
+     */
+    private void deductInheritedFromDailyQuota(Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap,
+                                               int inheritedPlanQty) {
+        if (inheritedPlanQty <= 0 || dailyPlanQuotaMap == null || dailyPlanQuotaMap.isEmpty()) {
+            return;
+        }
+        int remainingToDeduct = inheritedPlanQty;
+        for (SkuDailyPlanQuotaDTO quota : dailyPlanQuotaMap.values()) {
+            if (remainingToDeduct <= 0) {
+                break;
+            }
+            int deduction = Math.min(quota.getRemainingQty(), remainingToDeduct);
+            quota.setScheduledQty(quota.getScheduledQty() + deduction);
+            quota.setRemainingQty(Math.max(0, quota.getRemainingQty() - deduction));
+            remainingToDeduct -= deduction;
+        }
+        SkuDailyPlanQuotaUtil.refreshRollingFields(dailyPlanQuotaMap);
+        if (remainingToDeduct > 0) {
+            log.debug("继承量超出窗口日计划总额度, 继承量: {}, 窗口总额度: {}, 超出: {}",
+                    inheritedPlanQty,
+                    dailyPlanQuotaMap.values().stream().mapToInt(SkuDailyPlanQuotaDTO::getDayPlanQty).sum(),
+                    remainingToDeduct);
+        }
     }
 
     /**
@@ -375,6 +624,24 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         log.info("停产收尾需求量计算完成, materialCode={}, stopDayPlanQty={}, lossIncludedStopDayPlanQty={}, embryoStock={}, demandQty={}",
                 plan.getMaterialCode(), stopDayPlanQty, lossIncludedStopDayPlanQty, embryoStock, demandQty);
         return demandQty;
+    }
+
+    /**
+     * 解析常规待排需求量。
+     *
+     * @param surplusQty 月计划余量
+     * @param inheritedPlanQty 已继承量
+     * @param carryForwardQty 欠产传导量
+     * @param embryoStock 胎胚库存
+     * @return 待排需求量
+     */
+    private int resolveBasePendingQty(int surplusQty,
+                                      int inheritedPlanQty,
+                                      int carryForwardQty,
+                                      int embryoStock) {
+        int surplusDemandQty = Math.max(0, surplusQty - Math.max(0, inheritedPlanQty) + Math.max(0, carryForwardQty));
+        int effectiveEmbryoStock = Math.max(0, embryoStock);
+        return Math.max(surplusDemandQty, effectiveEmbryoStock);
     }
 
     /**
@@ -451,7 +718,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 追加“无计划量不排产”的未排结果。
+     * 追加"无计划量不排产"的未排结果。
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
@@ -543,7 +810,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 获取指定日期的物料日完成量（按“物料+日期”聚合）。
+     * 获取指定日期的物料日完成量（按"物料+日期"聚合）。
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
@@ -560,7 +827,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 构建“物料+日期”聚合Key。
+     * 构建"物料+日期"聚合Key。
      *
      * @param materialCode 物料编码
      * @param date 日期
@@ -706,6 +973,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         List<SkuScheduleDTO> continuousSkuList = new ArrayList<>();
         List<SkuScheduleDTO> newSpecSkuList = new ArrayList<>();
         Map<String, List<SkuScheduleDTO>> skuByMaterialMap = buildSkuByMaterialMap(context);
+        Map<String, Integer> materialSkuCountMap = buildMaterialSkuCountMap(skuByMaterialMap);
 
         // 保持MES最近快照顺序消费，同时优先承接滚动衔接后的机台当前物料。
         Map<String, MachineScheduleDTO> schedulableMachineMap = context.getMachineScheduleMap();
@@ -716,13 +984,15 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             }
             String materialCode = resolveContinuousMaterialCode(
                     context, entry.getKey(), schedulableMachineMap.get(entry.getKey()), entry.getValue());
-            assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap, continuousSkuList);
+            assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap,
+                    materialSkuCountMap, continuousSkuList);
         }
 
         if (context.isRollingScheduleHandoff() && !CollectionUtils.isEmpty(schedulableMachineMap)) {
             for (Map.Entry<String, MachineScheduleDTO> entry : schedulableMachineMap.entrySet()) {
                 String materialCode = resolveRollingContinuousMaterialCode(context, entry.getKey(), entry.getValue());
-                assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap, continuousSkuList);
+                assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap,
+                        materialSkuCountMap, continuousSkuList);
             }
         }
 
@@ -741,6 +1011,20 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         context.setContinuousSkuList(continuousSkuList);
         context.setNewSpecSkuList(newSpecSkuList);
         log.info("续作/新增SKU区分完成, 续作: {}个, 新增: {}个", continuousSkuList.size(), newSpecSkuList.size());
+    }
+
+    /**
+     * 统计每个物料在月计划归集后的原始SKU条数。
+     *
+     * @param skuByMaterialMap 物料编码 -> 待匹配SKU列表
+     * @return 物料原始SKU数量
+     */
+    private Map<String, Integer> buildMaterialSkuCountMap(Map<String, List<SkuScheduleDTO>> skuByMaterialMap) {
+        Map<String, Integer> materialSkuCountMap = new LinkedHashMap<>(skuByMaterialMap.size());
+        for (Map.Entry<String, List<SkuScheduleDTO>> entry : skuByMaterialMap.entrySet()) {
+            materialSkuCountMap.put(entry.getKey(), entry.getValue().size());
+        }
+        return materialSkuCountMap;
     }
 
     /**
@@ -775,6 +1059,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private void assignContinuousSku(String machineCode,
                                      String materialCode,
                                      Map<String, List<SkuScheduleDTO>> skuByMaterialMap,
+                                     Map<String, Integer> materialSkuCountMap,
                                      List<SkuScheduleDTO> continuousSkuList) {
         if (StringUtils.isEmpty(machineCode) || StringUtils.isEmpty(materialCode)) {
             return;
@@ -784,10 +1069,109 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             return;
         }
         // 同一物料存在多条SKU时，按归集顺序逐条消费，且仅允许有效机台占用。
-        SkuScheduleDTO matchedSku = matchedSkuList.remove(0);
+        // 仅有一条SKU但多台MES在机同物料时，不移除模板SKU，通过副本支持多机台续作。
+        // 副本共享原SKU的dailyPlanQuotaMap，确保多机台同物料排产时共用同一日计划额度账本。
+        SkuScheduleDTO matchedSku;
+        if (matchedSkuList.size() > 1) {
+            matchedSku = matchedSkuList.remove(0);
+        } else {
+            // 单SKU多机台：首台机台直接取原始SKU，后续机台创建副本
+            SkuScheduleDTO originalSku = matchedSkuList.get(0);
+            if (StringUtils.isEmpty(originalSku.getContinuousMachineCode())) {
+                // 首台机台：直接取原始SKU，不移出列表
+                matchedSku = originalSku;
+            } else if (StringUtils.equals(machineCode, originalSku.getContinuousMachineCode())) {
+                // 同一机台已在MES循环分配过（滚动衔接循环再次命中），跳过避免重复
+                return;
+            } else if (materialSkuCountMap.getOrDefault(materialCode, 0) > 1) {
+                // 同物料存在多条月计划SKU时，仅允许逐条消费真实SKU，不再为额外机台复制模板SKU。
+                return;
+            } else {
+                // 后续机台：创建副本，共享dailyPlanQuotaMap
+                matchedSku = copySkuForContinuousMachine(originalSku, machineCode);
+            }
+        }
         matchedSku.setScheduleType(ScheduleTypeEnum.CONTINUOUS.getCode());
         matchedSku.setContinuousMachineCode(machineCode);
         continuousSkuList.add(matchedSku);
+    }
+
+    /**
+     * 为同物料多机台续作场景创建SKU副本。
+     * <p>副本复制源SKU的核心计划量、产能、状态字段，并<b>共享</b> {@code dailyPlanQuotaMap}，
+     * 确保多台机台排产时共用同一个日计划额度账本。</p>
+     *
+     * @param source 源SKU（模板）
+     * @param machineCode 目标机台编码
+     * @return 副本SKU，sharedDailyPlanQuotaMap 指向源SKU的同一实例
+     */
+    private SkuScheduleDTO copySkuForContinuousMachine(SkuScheduleDTO source, String machineCode) {
+        SkuScheduleDTO copy = new SkuScheduleDTO();
+        // 基本信息
+        copy.setMaterialCode(source.getMaterialCode());
+        copy.setMaterialDesc(source.getMaterialDesc());
+        copy.setStructureName(source.getStructureName());
+        copy.setEmbryoCode(source.getEmbryoCode());
+        copy.setMainMaterialDesc(source.getMainMaterialDesc());
+        copy.setSpecCode(source.getSpecCode());
+        copy.setSpecDesc(source.getSpecDesc());
+        copy.setProSize(source.getProSize());
+        copy.setPattern(source.getPattern());
+        copy.setMainPattern(source.getMainPattern());
+        copy.setBrand(source.getBrand());
+        // 计划量信息
+        copy.setMonthPlanQty(source.getMonthPlanQty());
+        copy.setFinishedQty(source.getFinishedQty());
+        copy.setSurplusQty(source.getSurplusQty());
+        copy.setWindowPlanQty(source.getWindowPlanQty());
+        copy.setDailyPlanQty(source.getDailyPlanQty());
+        copy.setPendingQty(source.getPendingQty());
+        copy.setTargetScheduleQty(source.getTargetScheduleQty());
+        // 产能信息
+        copy.setLhTimeSeconds(source.getLhTimeSeconds());
+        copy.setShiftCapacity(source.getShiftCapacity());
+        copy.setDailyCapacity(source.getDailyCapacity());
+        copy.setMouldQty(source.getMouldQty());
+        // 状态标记
+        copy.setSkuTag(source.getSkuTag());
+        copy.setTrial(source.isTrial());
+        copy.setConstructionStage(source.getConstructionStage());
+        copy.setTrialDemandQty(source.getTrialDemandQty());
+        copy.setSmallBatchValidation(source.isSmallBatchValidation());
+        copy.setBeginDay(source.getBeginDay());
+        // 优先级信息
+        copy.setPriorityCode(source.getPriorityCode());
+        copy.setScheduleOrder(source.getScheduleOrder());
+        copy.setDeliveryLocked(source.isDeliveryLocked());
+        copy.setDelayDays(source.getDelayDays());
+        copy.setSupplyChainPriority(source.getSupplyChainPriority());
+        copy.setHighPriorityPendingQty(source.getHighPriorityPendingQty());
+        copy.setCycleProductionPendingQty(source.getCycleProductionPendingQty());
+        copy.setMidPriorityPendingQty(source.getMidPriorityPendingQty());
+        copy.setConventionProductionPendingQty(source.getConventionProductionPendingQty());
+        // 胎胚信息
+        copy.setEmbryoStock(source.getEmbryoStock());
+        copy.setEmbryoSupplyHours(source.getEmbryoSupplyHours());
+        // 目标量控制字段
+        copy.setStrictTargetQty(source.isStrictTargetQty());
+        // 多机台排产相关 —— 共享日计划额度账本
+        copy.setRemainingScheduleQty(source.getRemainingScheduleQty());
+        copy.setDailyPlanQuotaMap(source.getDailyPlanQuotaMap());
+        copy.setWindowRemainingPlanQty(source.getWindowRemainingPlanQty());
+        copy.setShiftFillOverQty(source.getShiftFillOverQty());
+        // 收尾信息
+        copy.setEndingDaysRemaining(source.getEndingDaysRemaining());
+        // 版本信息
+        copy.setMonthPlanVersion(source.getMonthPlanVersion());
+        copy.setProductionVersion(source.getProductionVersion());
+        copy.setEmbryoNo(source.getEmbryoNo());
+        copy.setTextNo(source.getTextNo());
+        copy.setLhNo(source.getLhNo());
+        // 机台信息 —— 指定目标机台
+        copy.setContinuousMachineCode(machineCode);
+        log.debug("同物料多机台续作副本已创建, materialCode: {}, targetMachine: {}",
+                source.getMaterialCode(), machineCode);
+        return copy;
     }
 
     /**

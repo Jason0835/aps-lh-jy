@@ -4,12 +4,11 @@
 package com.zlt.aps.lh.engine.strategy;
 
 import com.zlt.aps.lh.context.LhScheduleContext;
-
 import java.util.Date;
 
 /**
- * 换模均衡策略接口
- * <p>控制每日换模总数和早/中班换模均衡</p>
+ * 模具切换均衡策略接口
+ * <p>控制每日模具切换总数和早/中班切换均衡，覆盖正规换模与换活字块</p>
  *
  * @author APS
  */
@@ -26,14 +25,30 @@ public interface IMouldChangeBalanceStrategy {
     boolean hasCapacity(LhScheduleContext context, Date targetDate);
 
     /**
-     * 分配换模到均衡的班次
+     * 分配模具切换到均衡的班次。
      *
      * @param context    排程上下文
      * @param machineCode 机台编号
      * @param endingTime 前SKU收尾时间
-     * @return 换模分配的班次和时间, null表示无可用换模能力
+     * @return 换模分配的班次和时间
      */
     Date allocateMouldChange(LhScheduleContext context, String machineCode, Date endingTime);
+
+    /**
+     * 指定切换时长的分配入口。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编号
+     * @param endingTime 前SKU收尾时间
+     * @param switchDurationHours 切换时长（小时）
+     * @return 换模分配的班次和时间
+     */
+    default Date allocateMouldChange(LhScheduleContext context,
+                                     String machineCode,
+                                     Date endingTime,
+                                     int switchDurationHours) {
+        return allocateMouldChange(context, machineCode, endingTime);
+    }
 
     /**
      * 兼容旧调用方的默认入口。

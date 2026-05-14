@@ -2,8 +2,10 @@ package com.zlt.aps.lh.api.domain.dto;
 
 import lombok.Data;
 
+import java.time.LocalDate;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 /**
  * SKU排程数据传输对象
@@ -72,6 +74,12 @@ public class SkuScheduleDTO {
     private boolean trial;
     /** 施工阶段 */
     private String constructionStage;
+    /** 试制量试需求量 */
+    private int trialDemandQty;
+    /** 是否小批量验证SKU */
+    private boolean smallBatchValidation;
+    /** 月计划结构起产日 */
+    private Integer beginDay;
 
     // ========== 优先级信息 ==========
     /** 排产优先级代码 */
@@ -108,6 +116,23 @@ public class SkuScheduleDTO {
     private int embryoStock = -1;
     /** 胎胚可供硫化时长(小时) */
     private double embryoSupplyHours;
+
+    // ========== 多机台排产相关 ==========
+    /** 多机台拆量剩余排产量（收尾上调后由TargetScheduleQtyResolver写入，后续每台机台排产后递减） */
+    private int remainingScheduleQty;
+
+    /** 窗口内每日计划额度，key = productionDate */
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap;
+
+    /** 窗口内日计划剩余量汇总（已扣减继承量、锁定量的每日剩余计划量之和） */
+    private int windowRemainingPlanQty;
+
+    /** 满班补齐导致的窗口内超排量（因班次需排满而超出日计划的累计量） */
+    private int shiftFillOverQty;
+
+    // ========== 目标量控制字段 ==========
+    /** 是否严格限制目标量（试制/收尾=true，正式/量试=false）。为true时禁止超出dayN补满班次 */
+    private boolean strictTargetQty;
 
     // ========== 月计划版本信息 ==========
     /** 月计划需求版本 */

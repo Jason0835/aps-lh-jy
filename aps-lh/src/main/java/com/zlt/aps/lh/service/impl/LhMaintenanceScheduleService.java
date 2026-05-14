@@ -7,6 +7,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import lombok.extern.slf4j.Slf4j;
@@ -51,7 +52,14 @@ public class LhMaintenanceScheduleService {
                 || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
             return false;
         }
-        LhPrecisionPlan plan = context.getMaintenancePlanMap().get(machine.getMachineCode());
+        String lookupMachineCode = machine.getMachineCode();
+        if (!hasNoRecentOnlineRecord(context, lookupMachineCode)) {
+            return false;
+        }
+        LhPrecisionPlan plan = context.getMaintenancePlanMap().get(lookupMachineCode);
+        if (!isPlanUncompleted(plan)) {
+            return false;
+        }
         if (!isPlanDueSoon(context, plan)) {
             return false;
         }
@@ -70,24 +78,27 @@ public class LhMaintenanceScheduleService {
         if (!isBasicValid(context, machine) || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
             return false;
         }
-        LhPrecisionPlan plan = context.getMaintenancePlanMap().get(machine.getMachineCode());
-        if (Objects.isNull(plan) || Objects.isNull(plan.getDueDate()) || Objects.isNull(context.getScheduleDate())) {
+        String lookupMachineCode = machine.getMachineCode();
+        LhPrecisionPlan plan = context.getMaintenancePlanMap().get(lookupMachineCode);
+        Integer daysToDue = resolveDaysToDue(plan);
+        if (Objects.isNull(plan) || Objects.isNull(daysToDue) || Objects.isNull(context.getScheduleDate())) {
             return false;
         }
-        LhMachineOnlineInfo onlineInfo = context.getMachineOnlineInfoMap().get(machine.getMachineCode());
-        if (Objects.isNull(onlineInfo) || Objects.isNull(onlineInfo.getOnlineDate())) {
+        LhMachineOnlineInfo onlineInfo = context.getMachineOnlineInfoMap().get(lookupMachineCode);
+        if (Objects.isNull(onlineInfo)
+                || !LhSingleControlMachineUtil.isLeftRightCompatible(machine.getMachineCode(), onlineInfo.getLrMolds())
+                || Objects.isNull(onlineInfo.getOnlineDate())) {
             return false;
         }
         int onlineDays = diffDays(onlineInfo.getOnlineDate(), context.getScheduleDate());
-        int dueDays = diffDays(context.getScheduleDate(), plan.getDueDate());
         int forceCheckDays = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_FORCE_CHECK_DAYS,
                 LhScheduleConstant.MAINTENANCE_FORCE_CHECK_DAYS);
-        if (onlineDays <= LONG_ONLINE_DAYS || dueDays > forceCheckDays) {
+        if (onlineDays <= LONG_ONLINE_DAYS || daysToDue > forceCheckDays) {
             return false;
         }
-        log.info("硫化机长期在机触发保养检查, 机台: {}, 在机日期: {}, 在机天数: {}, 到期日: {}, 提前检查天数: {}",
+        log.info("硫化机长期在机触发保养检查, 机台: {}, 在机日期: {}, 在机天数: {}, 距到期天数: {}, 提前检查天数: {}",
                 machine.getMachineCode(), LhScheduleTimeUtil.formatDate(onlineInfo.getOnlineDate()), onlineDays,
-                LhScheduleTimeUtil.formatDate(plan.getDueDate()), forceCheckDays);
+                daysToDue, forceCheckDays);
         return attachMaintenanceWindow(context, machine, plan, LhScheduleTimeUtil.clearTime(context.getScheduleDate()),
                 true, TRIGGER_REASON_FORCE_DOWN);
     }
@@ -129,12 +140,64 @@ public class LhMaintenanceScheduleService {
         return adjustedStartTime;
     }
 
+    /**
+     * 解析维保恢复后的开产时间。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param defaultReadyTime 默认就绪时间
+     * @return 恢复后的开产时间
+     */
+    public Date resolveMaintenanceResumeProductionTime(LhScheduleContext context,
+                                                       MachineScheduleDTO machine,
+                                                       Date defaultReadyTime) {
+        Date maintenanceEndTime = resolveMaintenanceEndTime(context, machine, null);
+        if (Objects.isNull(maintenanceEndTime)) {
+            return defaultReadyTime;
+        }
+        Date resumeProductionTime = LhScheduleTimeUtil.addMinutes(
+                maintenanceEndTime, LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
+        if (Objects.isNull(defaultReadyTime) || resumeProductionTime.after(defaultReadyTime)) {
+            return resumeProductionTime;
+        }
+        return defaultReadyTime;
+    }
+
+    /**
+     * 判断当前切换是否应套用维保重叠专用时长。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param referenceTime 切换参考起点
+     * @return true-需要套用；false-不需要
+     */
+    public boolean shouldApplyMaintenanceOverlapSwitchRule(LhScheduleContext context,
+                                                           MachineScheduleDTO machine,
+                                                           Date referenceTime) {
+        Date maintenanceEndTime = resolveMaintenanceEndTime(context, machine, referenceTime);
+        return Objects.nonNull(referenceTime)
+                && Objects.nonNull(maintenanceEndTime)
+                && referenceTime.before(maintenanceEndTime);
+    }
+
+    /**
+     * 解析机台当前生效的维保结束时间。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @return 维保结束时间；未命中返回 null
+     */
+    public Date resolveMaintenanceEndTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        return resolveMaintenanceEndTime(context, machine, null);
+    }
+
     private boolean attachMaintenanceWindow(LhScheduleContext context,
                                             MachineScheduleDTO machine,
                                             LhPrecisionPlan plan,
                                             Date candidateDate,
                                             boolean forceDown,
                                             String triggerReason) {
+        Date initialCandidateDate = LhScheduleTimeUtil.clearTime(candidateDate);
         Date planDate = resolveAvailableMaintenanceDate(context, candidateDate);
         int startHour = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_START_HOUR,
                 LhScheduleConstant.MAINTENANCE_START_HOUR);
@@ -154,8 +217,16 @@ public class LhMaintenanceScheduleService {
         machine.setHasMaintenancePlan(true);
         machine.setMaintenancePlanTime(planDate);
         increaseDailyMaintenanceCount(context, planDate);
-        log.info("硫化机保养窗口已安排, 机台: {}, 到期日: {}, 保养开始: {}, 保养结束: {}, 强制下机: {}, 原因: {}",
-                machine.getMachineCode(), LhScheduleTimeUtil.formatDate(plan.getDueDate()),
+        if (!sameDay(initialCandidateDate, planDate)) {
+            log.info("硫化机保养日期发生顺延, 机台: {}, 原候选日期: {}, 最终日期: {}, 距到期天数: {}, 原因: {}",
+                    machine.getMachineCode(),
+                    LhScheduleTimeUtil.formatDate(initialCandidateDate),
+                    LhScheduleTimeUtil.formatDate(planDate),
+                    resolveDaysToDue(plan),
+                    triggerReason);
+        }
+        log.info("硫化机保养窗口已安排, 机台: {}, 距到期天数: {}, 保养开始: {}, 保养结束: {}, 强制下机: {}, 原因: {}",
+                machine.getMachineCode(), resolveDaysToDue(plan),
                 LhScheduleTimeUtil.formatDateTime(startTime), LhScheduleTimeUtil.formatDateTime(endTime),
                 forceDown, triggerReason);
         return true;
@@ -164,39 +235,92 @@ public class LhMaintenanceScheduleService {
     private Date resolveAvailableMaintenanceDate(LhScheduleContext context, Date candidateDate) {
         Date cursorDate = LhScheduleTimeUtil.clearTime(candidateDate);
         while (!isDateAvailable(context, cursorDate)) {
-            log.debug("保养日期不满足约束，顺延一天, 日期: {}", LhScheduleTimeUtil.formatDate(cursorDate));
+            log.info("保养日期不满足约束，顺延一天, 日期: {}, 原因: {}",
+                    LhScheduleTimeUtil.formatDate(cursorDate),
+                    resolveDateUnavailableReason(context, cursorDate));
             cursorDate = LhScheduleTimeUtil.addDays(cursorDate, 1);
         }
         return cursorDate;
     }
 
     private boolean isDateAvailable(LhScheduleContext context, Date targetDate) {
+        return StringUtils.isEmpty(resolveDateUnavailableReason(context, targetDate));
+    }
+
+    private String resolveDateUnavailableReason(LhScheduleContext context, Date targetDate) {
         String dateKey = LhScheduleTimeUtil.formatDate(targetDate);
         int usedCount = context.getDailyMaintenanceCountMap().getOrDefault(dateKey, 0);
         int dailyLimit = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_DAILY_LIMIT,
                 LhScheduleConstant.MAINTENANCE_DAILY_LIMIT);
         if (usedCount >= dailyLimit) {
-            return false;
+            return "当天保养台数已达上限(" + usedCount + "/" + dailyLimit + ")";
         }
         if (!isSundayAllowed(context) && isSunday(targetDate)) {
-            return false;
+            return "周日不安排保养";
         }
         if (!isInventoryDayAllowed(context) && isLastDayOfMonth(targetDate)) {
-            return false;
+            return "盘点日不安排保养";
         }
         if (isHolidayOrHolidayBeforeDay(context, targetDate)) {
-            return false;
+            return "节假日前限制天数内不安排保养";
         }
-        return true;
+        return null;
     }
 
     private boolean isPlanDueSoon(LhScheduleContext context, LhPrecisionPlan plan) {
-        if (Objects.isNull(plan) || Objects.isNull(plan.getDueDate()) || Objects.isNull(context.getScheduleDate())) {
+        Integer daysToDue = resolveDaysToDue(plan);
+        if (Objects.isNull(plan) || Objects.isNull(daysToDue) || Objects.isNull(context.getScheduleDate())) {
             return false;
         }
         int warningDays = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_WARNING_DAYS,
                 LhScheduleConstant.MAINTENANCE_WARNING_DAYS);
-        return diffDays(context.getScheduleDate(), plan.getDueDate()) <= warningDays;
+        return daysToDue <= warningDays;
+    }
+
+    /**
+     * 判断机台是否满足“首个规格收尾后”触发保养的基本前提。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param lookupMachineCode 查询机台编码
+     * @return true-满足触发前提；false-不满足
+     */
+    private boolean hasNoRecentOnlineRecord(LhScheduleContext context, String lookupMachineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(lookupMachineCode)
+                || Objects.isNull(context.getScheduleDate())) {
+            return false;
+        }
+        LhMachineOnlineInfo onlineInfo = context.getMachineOnlineInfoMap().get(lookupMachineCode);
+        if (Objects.isNull(onlineInfo)
+                || Objects.isNull(onlineInfo.getOnlineDate())
+                || (StringUtils.isEmpty(onlineInfo.getMaterialCode())
+                && StringUtils.isEmpty(onlineInfo.getMesMaterialCode()))) {
+            return true;
+        }
+        return diffDays(onlineInfo.getOnlineDate(), context.getScheduleDate()) > LONG_ONLINE_DAYS;
+    }
+
+    /**
+     * 解析距离到期天数。
+     *
+     * @param plan 精度保养计划
+     * @return 距离到期天数；缺失返回 null
+     */
+    private Integer resolveDaysToDue(LhPrecisionPlan plan) {
+        if (Objects.isNull(plan)) {
+            return null;
+        }
+        return plan.getDaysToDue();
+    }
+
+    /**
+     * 判断精度保养计划是否未完成。
+     *
+     * @param plan 精度保养计划
+     * @return true-未完成；false-已完成或计划缺失
+     */
+    private boolean isPlanUncompleted(LhPrecisionPlan plan) {
+        return Objects.nonNull(plan) && "0".equals(plan.getCompletionStatus());
     }
 
     private boolean isHolidayOrHolidayBeforeDay(LhScheduleContext context, Date targetDate) {
@@ -216,6 +340,46 @@ public class LhMaintenanceScheduleService {
             }
         }
         return false;
+    }
+
+    private Date resolveMaintenanceEndTime(LhScheduleContext context,
+                                           MachineScheduleDTO machine,
+                                           Date referenceTime) {
+        if (Objects.isNull(machine) || !machine.isHasMaintenancePlan()) {
+            return null;
+        }
+        Date matchedEndTime = null;
+        if (!CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            for (MachineMaintenanceWindowDTO maintenanceWindow : machine.getMaintenanceWindowList()) {
+                if (Objects.isNull(maintenanceWindow)
+                        || Objects.isNull(maintenanceWindow.getMaintenanceStartTime())
+                        || Objects.isNull(maintenanceWindow.getMaintenanceEndTime())
+                        || !maintenanceWindow.getMaintenanceStartTime().before(maintenanceWindow.getMaintenanceEndTime())) {
+                    continue;
+                }
+                if (Objects.nonNull(referenceTime) && !referenceTime.before(maintenanceWindow.getMaintenanceEndTime())) {
+                    continue;
+                }
+                matchedEndTime = later(matchedEndTime, maintenanceWindow.getMaintenanceEndTime());
+            }
+            if (Objects.nonNull(matchedEndTime)) {
+                return matchedEndTime;
+            }
+        }
+        if (Objects.isNull(machine.getMaintenancePlanTime())) {
+            return null;
+        }
+        int maintenanceStartHour = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_START_HOUR,
+                LhScheduleConstant.MAINTENANCE_START_HOUR);
+        int maintenanceDurationHours = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS,
+                LhScheduleConstant.MAINTENANCE_DURATION_HOURS);
+        Date maintenanceStartTime = LhScheduleTimeUtil.buildTime(
+                machine.getMaintenancePlanTime(), maintenanceStartHour, 0, 0);
+        Date maintenanceEndTime = LhScheduleTimeUtil.addHours(maintenanceStartTime, maintenanceDurationHours);
+        if (Objects.nonNull(referenceTime) && !referenceTime.before(maintenanceEndTime)) {
+            return null;
+        }
+        return maintenanceEndTime;
     }
 
     private void increaseDailyMaintenanceCount(LhScheduleContext context, Date planDate) {
@@ -279,5 +443,12 @@ public class LhMaintenanceScheduleService {
             return candidate;
         }
         return current;
+    }
+
+    private boolean sameDay(Date left, Date right) {
+        if (Objects.isNull(left) || Objects.isNull(right)) {
+            return false;
+        }
+        return LhScheduleTimeUtil.clearTime(left).equals(LhScheduleTimeUtil.clearTime(right));
     }
 }

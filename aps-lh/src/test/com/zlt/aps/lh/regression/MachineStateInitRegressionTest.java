@@ -6,6 +6,8 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.handler.DataInitHandler;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -96,7 +98,7 @@ class MachineStateInitRegressionTest {
         assertEquals("18", machine.getPreviousProSize());
         assertTrue(machine.isHasDryIceCleaning());
         assertTrue(machine.isHasSandBlastCleaning());
-        assertEquals(dateTime(2026, 4, 12, 7, 30), machine.getCleaningPlanTime());
+        assertEquals(dateTime(2026, 4, 11, 7, 30), machine.getCleaningPlanTime());
         assertEquals(2, machine.getCleaningWindowList().size());
         assertTrue(!machine.isHasMaintenancePlan());
         assertTrue(machine.isHasRepairPlan());
@@ -105,9 +107,9 @@ class MachineStateInitRegressionTest {
         MachineCleaningWindowDTO firstCleaningWindow = machine.getCleaningWindowList().get(0);
         assertEquals("02", firstCleaningWindow.getCleanType());
         assertEquals("R", firstCleaningWindow.getLeftRightMould());
-        assertEquals(dateTime(2026, 4, 12, 7, 30), firstCleaningWindow.getCleanStartTime());
-        assertEquals(dateTime(2026, 4, 12, 19, 30), firstCleaningWindow.getCleanEndTime());
-        assertEquals(dateTime(2026, 4, 12, 17, 30), firstCleaningWindow.getReadyTime());
+        assertEquals(dateTime(2026, 4, 11, 7, 30), firstCleaningWindow.getCleanStartTime());
+        assertEquals(dateTime(2026, 4, 11, 19, 30), firstCleaningWindow.getCleanEndTime());
+        assertEquals(dateTime(2026, 4, 11, 17, 30), firstCleaningWindow.getReadyTime());
 
         MachineCleaningWindowDTO secondCleaningWindow = machine.getCleaningWindowList().get(1);
         assertEquals("01", secondCleaningWindow.getCleanType());
@@ -120,6 +122,62 @@ class MachineStateInitRegressionTest {
         assertEquals(machine.getCurrentMaterialCode(), snapshot.getCurrentMaterialCode());
         assertEquals(machine.getPreviousSpecCode(), snapshot.getPreviousSpecCode());
         assertEquals(machine.getEstimatedEndTime(), snapshot.getEstimatedEndTime());
+    }
+
+    @Test
+    void buildStandardDataObjects_shouldSplitConfiguredSingleControlBaseMachine() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(date(2026, 5, 7));
+        context.setScheduleTargetDate(date(2026, 5, 9));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES, "K1501")));
+
+        LhMachineInfo machineInfo = new LhMachineInfo();
+        machineInfo.setMachineCode("K1501");
+        machineInfo.setMachineName("K1501");
+        machineInfo.setStatus("1");
+        machineInfo.setMaxMoldNum(2);
+        context.setMachineInfoMap(new LinkedHashMap<>());
+        context.getMachineInfoMap().put("K1501", machineInfo);
+
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1501");
+        onlineInfo.setMaterialCode("MAT-SINGLE");
+        onlineInfo.setSpecDesc("单控在机");
+        context.getMachineOnlineInfoMap().put("K1501", onlineInfo);
+
+        MdmMaterialInfo materialInfo = new MdmMaterialInfo();
+        materialInfo.setMaterialCode("MAT-SINGLE");
+        materialInfo.setMaterialDesc("单控主数据");
+        materialInfo.setSpecifications("SPEC-SINGLE");
+        materialInfo.setProSize("22.5");
+        context.getMaterialInfoMap().put("MAT-SINGLE", materialInfo);
+
+        LhMouldCleanPlan cleaningPlan = new LhMouldCleanPlan();
+        cleaningPlan.setLhCode("K1501");
+        cleaningPlan.setCleanType("01");
+        cleaningPlan.setLeftRightMould("L");
+        cleaningPlan.setCleanTime(dateTime(2026, 5, 8, 8, 0));
+        context.setCleaningPlanList(Collections.singletonList(cleaningPlan));
+
+        LhScheduleResult previous = new LhScheduleResult();
+        previous.setLhMachineCode("K1501");
+        previous.setSpecEndTime(dateTime(2026, 5, 8, 18, 0));
+        context.setPreviousScheduleResultList(Collections.singletonList(previous));
+
+        ReflectionTestUtils.invokeMethod(handler, "buildStandardDataObjects", context);
+
+        assertTrue(!context.getMachineScheduleMap().containsKey("K1501"));
+        assertTrue(context.getMachineScheduleMap().containsKey("K1501L"));
+        assertTrue(context.getMachineScheduleMap().containsKey("K1501R"));
+        assertEquals(1, context.getMachineScheduleMap().get("K1501L").getMaxMoldNum());
+        assertEquals(1, context.getMachineScheduleMap().get("K1501R").getMaxMoldNum());
+        assertEquals("MAT-SINGLE", context.getMachineScheduleMap().get("K1501L").getCurrentMaterialCode());
+        assertEquals("单控主数据", context.getMachineScheduleMap().get("K1501L").getCurrentMaterialDesc());
+        assertEquals(dateTime(2026, 5, 8, 18, 0), context.getMachineScheduleMap().get("K1501L").getEstimatedEndTime());
+        assertEquals(1, context.getMachineScheduleMap().get("K1501L").getCleaningWindowList().size());
+        assertEquals(0, context.getMachineScheduleMap().get("K1501R").getCleaningWindowList().size());
     }
 
     private static java.util.Date date(int y, int month, int day) {

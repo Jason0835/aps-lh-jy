@@ -171,6 +171,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.ALLOW_MAINTENANCE_ON_INVENTORY_DAY);
         putDoubleValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS,
                 LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue());
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS,
+                LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS);
 
         // 排程窗口与设备约束参数
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SCHEDULE_DAYS, LhScheduleConstant.SCHEDULE_DAYS, 1);
@@ -188,6 +190,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.ENABLE_SPECIFY_MACHINE_RULE);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MOULD_CLEANING_ADVANCE_DAYS,
                 LhScheduleConstant.MOULD_CLEANING_ADVANCE_DAYS, 0);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD,
+                LhScheduleConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD, 2);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_LOCAL_SEARCH,
                 LhScheduleConstant.ENABLE_LOCAL_SEARCH);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.LOCAL_SEARCH_MACHINE_THRESHOLD,
@@ -219,6 +223,11 @@ public class LhScheduleConfigResolver {
         putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS,
                 LhScheduleConstant.OPEN_PRODUCTION_WINTER_TIRE_KEYWORDS);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.TRIAL_DAILY_LIMIT, LhScheduleConstant.TRIAL_DAILY_LIMIT);
+        // @deprecated 单控基准机台已废弃，机台已在 T_LH_MACHINE_INFO 表中直接拆分为 L/R 后缀编码
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES,
+                LhScheduleConstant.SINGLE_CONTROL_MACHINE_CODES);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
+                LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD, 1);
 
         return new LhScheduleConfig(resolvedParamMap);
     }
