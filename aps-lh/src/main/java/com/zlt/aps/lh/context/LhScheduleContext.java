@@ -193,6 +193,8 @@ public class LhScheduleContext {
     private Map<String, String> specifyMachineReservedMaterialMap = new LinkedHashMap<>();
     /** 每日模具切换计数, key=dateString, value=[早班切换数, 中班切换数] */
     private Map<String, int[]> dailyMouldChangeCountMap = new LinkedHashMap<>();
+    /** 同胎胚换模班次占用, key=胎胚编码, value=已安排换模班次索引集合 */
+    private Map<String, Set<Integer>> greenTireChangeoverShiftMap = new LinkedHashMap<>();
     /** 每日首检计数, key=dateString, value=[早班首检数, 中班首检数] */
     private Map<String, int[]> dailyFirstInspectionCountMap = new LinkedHashMap<>();
     /** 每日精度保养计数, key=dateString, value=已安排保养机台数 */

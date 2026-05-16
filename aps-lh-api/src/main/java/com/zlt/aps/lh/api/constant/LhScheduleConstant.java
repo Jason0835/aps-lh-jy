@@ -316,6 +316,20 @@ public final class LhScheduleConstant {
     /** 优先级跟踪日志开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_PRIORITY_TRACE_LOG = 0;
 
+    // ======================== 排序跟踪日志输出控制 ========================
+
+    /** SKU排序汇总日志默认输出前N名 */
+    public static final int SKU_SORT_TRACE_TOP_N = 20;
+
+    /** 机台排序汇总日志默认输出前N名 */
+    public static final int MACHINE_SORT_TRACE_TOP_N = 10;
+
+    /** SKU选机台候选列表默认输出前N名 */
+    public static final int SKU_MACHINE_CANDIDATE_TOP_N = 5;
+
+    /** 换活字块反选SKU候选列表默认输出前N名 */
+    public static final int TYPE_BLOCK_SKU_CANDIDATE_TOP_N = 5;
+
     /** 排程结果实体班次槽位上限（class1～class8） */
     public static final int MAX_SHIFT_SLOT_COUNT = 8;
 

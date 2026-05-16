@@ -90,6 +90,31 @@ class TargetScheduleQtyResolverRegressionTest {
         assertEquals(20, sku.resolveTargetScheduleQty(), "收尾目标量回写后应保持放大后的目标值");
     }
 
+    @Test
+    void upsizeEndingTargetQty_shouldNotReduceTargetByWindowCapacity() {
+        TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver() {
+            @Override
+            public int calcSkuTotalAvailableCapacityInWindow(LhScheduleContext context, SkuScheduleDTO sku) {
+                return 40;
+            }
+        };
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("1"));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002217");
+        sku.setTargetScheduleQty(16);
+        sku.setPendingQty(16);
+        sku.setSurplusQty(46);
+        sku.setEmbryoStock(50);
+        sku.setWindowPlanQty(16);
+        sku.setWindowRemainingPlanQty(16);
+
+        int targetQty = resolver.upsizeEndingTargetQty(context, sku);
+
+        assertEquals(50, targetQty, "收尾目标量应严格取max(余量,胎胚库存)，产能不足只能形成未排，不能压低目标");
+        assertEquals(50, sku.resolveTargetScheduleQty(), "收尾目标量不应被窗口产能压低");
+    }
+
     private static LhScheduleConfig createConfig(String fullCapacityMode) {
         Map<String, String> paramMap = new HashMap<>(4);
         paramMap.put(LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, fullCapacityMode);

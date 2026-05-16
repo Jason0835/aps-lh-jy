@@ -4,9 +4,12 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
@@ -17,6 +20,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEvent;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
+import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
@@ -38,6 +42,7 @@ import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -148,7 +153,331 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             }
         }
 
+        validateGreenTireChangeoverShift(context);
+        validateProductionQuantityPolicy(context);
+
         log.info("排程后置校验完成");
+    }
+
+    /**
+     * 校验SKU计划量口径是否满足策略约束。
+     *
+     * @param context 排程上下文
+     */
+    private void validateProductionQuantityPolicy(LhScheduleContext context) {
+        if (CollectionUtils.isEmpty(context.getScheduleResultList())
+                || CollectionUtils.isEmpty(context.getScheduleResultSourceSkuMap())) {
+            return;
+        }
+        Map<SkuScheduleDTO, Integer> scheduledQtyMap = new IdentityHashMap<>();
+        Map<SkuScheduleDTO, Integer> shiftCapacityMap = new IdentityHashMap<>();
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
+            if (Objects.isNull(sourceSku)) {
+                continue;
+            }
+            SkuScheduleDTO validationSku = resolveValidationSourceSku(context, sourceSku);
+            if (Objects.isNull(validationSku)) {
+                continue;
+            }
+            int planQty = resolveResultPlanQty(result);
+            if (planQty <= 0) {
+                continue;
+            }
+            scheduledQtyMap.merge(validationSku, planQty, Integer::sum);
+            shiftCapacityMap.put(validationSku, resolveValidationShiftCapacity(validationSku, result));
+        }
+        for (Map.Entry<SkuScheduleDTO, Integer> entry : scheduledQtyMap.entrySet()) {
+            SkuScheduleDTO sku = entry.getKey();
+            int scheduledQty = entry.getValue();
+            int targetQty = resolveValidationTargetQty(sku);
+            if (targetQty <= 0) {
+                continue;
+            }
+            ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sku, sku.isStrictTargetQty());
+            if (policy.isStrictUpperLimit()) {
+                validateStrictUpperLimit(context, sku, scheduledQty, targetQty);
+                continue;
+            }
+            validateFormalQuantityPolicy(context, sku, scheduledQty, targetQty, shiftCapacityMap.get(sku));
+        }
+    }
+
+    /**
+     * 校验试制/收尾严格目标量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param scheduledQty 已排量
+     * @param targetQty 目标量
+     */
+    private void validateStrictUpperLimit(LhScheduleContext context,
+                                          SkuScheduleDTO sku,
+                                          int scheduledQty,
+                                          int targetQty) {
+        if (scheduledQty <= targetQty) {
+            return;
+        }
+        String message = String.format("严格目标量SKU超排：物料[%s] 目标量[%d] 实际排产[%d]",
+                sku.getMaterialCode(), targetQty, scheduledQty);
+        log.error("排程结果校验失败, {}", message);
+        throw new ScheduleException(ScheduleStepEnum.S4_6_RESULT_VALIDATION,
+                ScheduleErrorCode.RESULT_VALIDATION_FAILED,
+                context.getFactoryCode(), context.getBatchNo(), message);
+    }
+
+    /**
+     * 校验正式/量试非收尾目标量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param scheduledQty 已排量
+     * @param targetQty 目标量
+     * @param shiftCapacity 班产
+     */
+    private void validateFormalQuantityPolicy(LhScheduleContext context,
+                                              SkuScheduleDTO sku,
+                                              int scheduledQty,
+                                              int targetQty,
+                                              Integer shiftCapacity) {
+        int overQty = scheduledQty - targetQty;
+        int validationShiftCapacity = shiftCapacity != null ? shiftCapacity : 0;
+        if (overQty > 0 && validationShiftCapacity > 0 && overQty >= validationShiftCapacity) {
+            String message = String.format("正式/量试SKU超排超过最后已开班补满范围：物料[%s] 目标量[%d] 实际排产[%d] 超排[%d] 班产[%d]",
+                    sku.getMaterialCode(), targetQty, scheduledQty, overQty, validationShiftCapacity);
+            log.error("排程结果校验失败, {}", message);
+            throw new ScheduleException(ScheduleStepEnum.S4_6_RESULT_VALIDATION,
+                    ScheduleErrorCode.RESULT_VALIDATION_FAILED,
+                    context.getFactoryCode(), context.getBatchNo(), message);
+        }
+        if (scheduledQty < targetQty && !hasUnscheduledResult(context, sku)) {
+            String message = String.format("正式/量试SKU未满足窗口目标量且无未排记录：物料[%s] 目标量[%d] 实际排产[%d]",
+                    sku.getMaterialCode(), targetQty, scheduledQty);
+            log.error("排程结果校验失败, {}", message);
+            throw new ScheduleException(ScheduleStepEnum.S4_6_RESULT_VALIDATION,
+                    ScheduleErrorCode.RESULT_VALIDATION_FAILED,
+                    context.getFactoryCode(), context.getBatchNo(), message);
+        }
+    }
+
+    /**
+     * 解析排程结果计划量。
+     *
+     * @param result 排程结果
+     * @return 计划量
+     */
+    private int resolveResultPlanQty(LhScheduleResult result) {
+        int planQty = ShiftFieldUtil.sumPlanQty(result, LhScheduleConstant.MAX_SHIFT_SLOT_COUNT);
+        if (planQty <= 0 && Objects.nonNull(result.getDailyPlanQty())) {
+            return Math.max(0, result.getDailyPlanQty());
+        }
+        return Math.max(0, planQty);
+    }
+
+    /**
+     * 解析结果校验用班产。
+     *
+     * @param sku SKU
+     * @param result 排程结果
+     * @return 班产
+     */
+    private int resolveValidationShiftCapacity(SkuScheduleDTO sku, LhScheduleResult result) {
+        int maxShiftPlanQty = 0;
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer shiftPlanQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            if (Objects.nonNull(shiftPlanQty) && shiftPlanQty > maxShiftPlanQty) {
+                maxShiftPlanQty = shiftPlanQty;
+            }
+        }
+        if (maxShiftPlanQty > 0) {
+            return maxShiftPlanQty;
+        }
+        return sku.getShiftCapacity() > 0 ? sku.getShiftCapacity() : 0;
+    }
+
+    /**
+     * 解析结果校验目标量。
+     * <p>正式/量试非收尾优先按账本有效目标量校验，避免新增规格链路恢复原始需求量后，
+     * S4.6 仍按原始目标量误判“已满足账本目标”的结果。</p>
+     *
+     * @param sku SKU
+     * @return 校验目标量
+     */
+    private int resolveValidationTargetQty(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        int targetQty = Math.max(0, sku.resolveTargetScheduleQty());
+        if (sku.isStrictTargetQty()) {
+            return targetQty;
+        }
+        int ledgerTargetQty = resolveLedgerTargetQty(sku);
+        if (ledgerTargetQty > 0) {
+            return targetQty > 0 ? Math.min(targetQty, ledgerTargetQty) : ledgerTargetQty;
+        }
+        int windowPlanQty = Math.max(0, sku.getWindowPlanQty());
+        if (windowPlanQty > 0) {
+            return targetQty > 0 ? Math.min(targetQty, windowPlanQty) : windowPlanQty;
+        }
+        return targetQty;
+    }
+
+    /**
+     * 汇总账本有效目标量。
+     *
+     * @param sku SKU
+     * @return 账本有效目标量
+     */
+    private int resolveLedgerTargetQty(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return 0;
+        }
+        int ledgerTargetQty = 0;
+        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
+            if (Objects.isNull(quota)) {
+                continue;
+            }
+            ledgerTargetQty += Math.max(0, quota.getScheduledQty()) + Math.max(0, quota.getRemainingQty());
+        }
+        return Math.max(0, ledgerTargetQty);
+    }
+
+    /**
+     * 解析结果校验时的逻辑来源SKU。
+     * <p>续作补偿SKU与来源续作SKU共享同一份日计划账本时，应按同一个逻辑目标量聚合校验。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @return 逻辑来源SKU
+     */
+    private SkuScheduleDTO resolveValidationSourceSku(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        if (context == null || sourceSku == null || sourceSku.getDailyPlanQuotaMap() == null
+                || sourceSku.getDailyPlanQuotaMap().isEmpty()) {
+            return sourceSku;
+        }
+        SkuScheduleDTO continuousSku = findValidationSourceSku(
+                context.getContinuousSkuList(), sourceSku.getMaterialCode(), sourceSku.getDailyPlanQuotaMap());
+        if (continuousSku != null) {
+            return continuousSku;
+        }
+        SkuScheduleDTO newSpecSku = findValidationSourceSku(
+                context.getNewSpecSkuList(), sourceSku.getMaterialCode(), sourceSku.getDailyPlanQuotaMap());
+        return newSpecSku != null ? newSpecSku : sourceSku;
+    }
+
+    /**
+     * 按共享日计划账本锚点查找逻辑来源SKU。
+     *
+     * @param skuList SKU列表
+     * @param materialCode 物料编码
+     * @param quotaMap 共享日计划账本
+     * @return 逻辑来源SKU
+     */
+    private SkuScheduleDTO findValidationSourceSku(List<SkuScheduleDTO> skuList,
+                                                   String materialCode,
+                                                   Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
+        if (CollectionUtils.isEmpty(skuList) || StringUtils.isEmpty(materialCode) || quotaMap == null) {
+            return null;
+        }
+        for (SkuScheduleDTO sku : skuList) {
+            if (sku == null) {
+                continue;
+            }
+            if (StringUtils.equals(materialCode, sku.getMaterialCode())
+                    && sku.getDailyPlanQuotaMap() == quotaMap) {
+                return sku;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 判断SKU是否已有未排记录。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-已有未排记录；false-没有未排记录
+     */
+    private boolean hasUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (CollectionUtils.isEmpty(context.getUnscheduledResultList())) {
+            return false;
+        }
+        for (LhUnscheduledResult unscheduledResult : context.getUnscheduledResultList()) {
+            if (StringUtils.equals(sku.getMaterialCode(), unscheduledResult.getMaterialCode())
+                    && Objects.nonNull(unscheduledResult.getUnscheduledQty())
+                    && unscheduledResult.getUnscheduledQty() > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 校验同胎胚换模班次是否冲突。
+     *
+     * @param context 排程上下文
+     */
+    private void validateGreenTireChangeoverShift(LhScheduleContext context) {
+        if (CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        Date scheduleBaseDate = resolveScheduleBaseDate(context);
+        if (scheduleBaseDate == null) {
+            return;
+        }
+        Map<String, LhScheduleResult> occupiedMap = new LinkedHashMap<>();
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!shouldCheckGreenTireChangeover(result)) {
+                continue;
+            }
+            Date mouldChangeStartTime = resolvePlannedMouldChangeStartTime(result);
+            if (mouldChangeStartTime == null) {
+                continue;
+            }
+            int shiftIndex = LhScheduleTimeUtil.getShiftIndex(context, scheduleBaseDate, mouldChangeStartTime);
+            if (shiftIndex <= 0) {
+                continue;
+            }
+            String key = result.getEmbryoCode() + "#" + shiftIndex;
+            LhScheduleResult occupiedResult = occupiedMap.get(key);
+            if (Objects.isNull(occupiedResult)) {
+                occupiedMap.put(key, result);
+                continue;
+            }
+            String message = String.format("同胎胚换模班次冲突：胎胚[%s] 班次[%s] 机台[%s]与机台[%s]同时换模",
+                    result.getEmbryoCode(), shiftIndex,
+                    occupiedResult.getLhMachineCode(), result.getLhMachineCode());
+            log.error("排程结果校验失败, {}", message);
+            throw new ScheduleException(ScheduleStepEnum.S4_6_RESULT_VALIDATION,
+                    ScheduleErrorCode.RESULT_VALIDATION_FAILED,
+                    context.getFactoryCode(), context.getBatchNo(), message);
+        }
+    }
+
+    /**
+     * 判断是否需要参与同胎胚换模冲突校验。
+     *
+     * @param result 排程结果
+     * @return true-需要校验；false-跳过
+     */
+    private boolean shouldCheckGreenTireChangeover(LhScheduleResult result) {
+        return Objects.nonNull(result)
+                && "1".equals(result.getIsChangeMould())
+                && StringUtils.isNotEmpty(result.getEmbryoCode())
+                && resolveResultPlanQty(result) > 0;
+    }
+
+    /**
+     * 解析排程窗口基准日期。
+     *
+     * @param context 排程上下文
+     * @return 排程窗口基准日期
+     */
+    private Date resolveScheduleBaseDate(LhScheduleContext context) {
+        if (Objects.nonNull(context.getScheduleDate())) {
+            return context.getScheduleDate();
+        }
+        return context.getScheduleTargetDate();
     }
 
     /**
@@ -202,6 +531,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setIsRelease("0");
             plan.setMouldStatus("0");
             plan.setIsDelete(0);
+            plan.setEndType("1".equals(result.getIsEnd()) ? "1" : "0");
             plan.setChangeTime(resolvePlanChangeTime(result, state));
 
             // 判断交替类型
@@ -312,6 +642,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setMouldStatus("0");
             plan.setRemark(cleaningWindow.getRemark());
             plan.setIsDelete(0);
+            plan.setEndType(machine.isEnding() ? "1" : "0");
             plans.add(plan);
         }
         return planOrder;
@@ -624,6 +955,106 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                 totalOverPlanCount, totalShortageCount, skuShiftFillOverMap.size(), totalShiftFillOverQty));
         dailyPlanLog.setIsDelete(0);
         context.getScheduleLogList().add(dailyPlanLog);
+
+        addDailyQuotaLedgerLog(context);
+    }
+
+    /**
+     * 输出 SKU 日计划滚动账本明细，便于核对滚动补欠产、未来借用和最终欠产。
+     *
+     * @param context 排程上下文
+     */
+    private void addDailyQuotaLedgerLog(LhScheduleContext context) {
+        List<SkuScheduleDTO> ledgerSkuList = collectDailyQuotaLedgerSkuList(context);
+        if (CollectionUtils.isEmpty(ledgerSkuList)) {
+            return;
+        }
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        int lineCount = 0;
+        for (SkuScheduleDTO sku : ledgerSkuList) {
+            if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+                continue;
+            }
+            for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sku.getDailyPlanQuotaMap().entrySet()) {
+                SkuDailyPlanQuotaDTO quota = entry.getValue();
+                if (quota == null) {
+                    continue;
+                }
+                if (detailBuilder.length() > 0) {
+                    detailBuilder.append('\n');
+                }
+                detailBuilder.append(String.format(
+                        "物料=%s, 日期=%s, dayPlanQty=%d, scheduledQty=%d, remainingQty=%d, "
+                                + "carryLossQty=%d, futureBorrowQty=%d, actualQty=%d, cumulativeQty=%d, "
+                                + "shiftFillOverQty=%d, finalLossQty=%d, completed=%s",
+                        sku.getMaterialCode(),
+                        entry.getKey(),
+                        Math.max(0, quota.getDayPlanQty()),
+                        Math.max(0, quota.getScheduledQty()),
+                        Math.max(0, quota.getRemainingQty()),
+                        Math.max(0, quota.getCarryLossQty()),
+                        Math.max(0, quota.getFutureBorrowQty()),
+                        Math.max(0, quota.getActualQty()),
+                        Math.max(0, quota.getCumulativeQty()),
+                        Math.max(0, quota.getShiftFillOverQty()),
+                        Math.max(0, quota.getFinalLossQty()),
+                        quota.isCompleted() ? "Y" : "N"));
+                lineCount++;
+            }
+        }
+        if (detailBuilder.length() <= 0) {
+            return;
+        }
+        log.info("日计划滚动台账明细\n{}", detailBuilder);
+        LhScheduleProcessLog ledgerLog = new LhScheduleProcessLog();
+        ledgerLog.setBatchNo(context.getBatchNo());
+        ledgerLog.setTitle("日计划滚动台账");
+        ledgerLog.setBusiCode(context.getFactoryCode());
+        ledgerLog.setLogDetail(detailBuilder.toString());
+        ledgerLog.setIsDelete(0);
+        context.getScheduleLogList().add(ledgerLog);
+        log.info("日计划滚动台账输出完成, 明细条数: {}", lineCount);
+    }
+
+    /**
+     * 汇总需要输出日计划滚动账本的 SKU，按共享账本去重。
+     *
+     * @param context 排程上下文
+     * @return 账本归属 SKU 列表
+     */
+    private List<SkuScheduleDTO> collectDailyQuotaLedgerSkuList(LhScheduleContext context) {
+        LinkedHashMap<String, SkuScheduleDTO> ledgerSkuMap = new LinkedHashMap<>();
+        if (!CollectionUtils.isEmpty(context.getScheduleResultSourceSkuMap())) {
+            for (SkuScheduleDTO sku : context.getScheduleResultSourceSkuMap().values()) {
+                appendDailyQuotaLedgerSku(ledgerSkuMap, sku);
+            }
+        }
+        if (!CollectionUtils.isEmpty(context.getContinuousSkuList())) {
+            for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
+                appendDailyQuotaLedgerSku(ledgerSkuMap, sku);
+            }
+        }
+        if (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
+            for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
+                appendDailyQuotaLedgerSku(ledgerSkuMap, sku);
+            }
+        }
+        return new ArrayList<>(ledgerSkuMap.values());
+    }
+
+    /**
+     * 追加日计划滚动账本归属 SKU，按“物料编码 + 账本对象身份”去重，避免补偿 SKU 重复输出。
+     *
+     * @param ledgerSkuMap 去重后的账本归属 SKU Map
+     * @param sku 候选 SKU
+     */
+    private void appendDailyQuotaLedgerSku(Map<String, SkuScheduleDTO> ledgerSkuMap, SkuScheduleDTO sku) {
+        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())
+                || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return;
+        }
+        String key = sku.getMaterialCode() + "#" + System.identityHashCode(sku.getDailyPlanQuotaMap());
+        ledgerSkuMap.putIfAbsent(key, sku);
     }
 
     /**
@@ -741,6 +1172,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         }
         if (result.getMouldChangeStartTime() != null) {
             return result.getMouldChangeStartTime();
+        }
+        if (result.isRollingInherited()) {
+            return null;
         }
         return resolveProductionStartTime(result);
     }

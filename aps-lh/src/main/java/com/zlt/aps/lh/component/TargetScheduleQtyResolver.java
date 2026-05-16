@@ -422,8 +422,8 @@ public class TargetScheduleQtyResolver {
      * 收尾场景下调整目标排产量。
      * <p>仅在收尾判定完成后调用，非收尾SKU不应调用此方法。</p>
      * <p>公式：endingTargetQty = max(embryoStock, surplusQty)。</p>
-     * <p>收尾SKU的目标量不再受窗口 dayN 总量限制，需按硫化余量/胎胚库存较大值排满；
-     * 仅保留多机台合计产能封顶，避免超出当前窗口真实可排能力。</p>
+     * <p>收尾SKU的目标量不再受窗口 dayN 总量限制，也不被窗口产能压低；
+     * 产能不足时由排产结果和未排结果体现剩余缺口。</p>
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
@@ -442,18 +442,13 @@ public class TargetScheduleQtyResolver {
         int windowPlanQty = Math.max(0, sku.getWindowPlanQty());
         int endingBaseQty = Math.max(embryoStock, surplusQty);
         int endingTargetQty = endingBaseQty;
-        // 多机台合计产能封顶
-        int totalAvailableCapacity = calcSkuTotalAvailableCapacityInWindow(context, sku);
-        if (totalAvailableCapacity > 0) {
-            endingTargetQty = Math.min(endingTargetQty, totalAvailableCapacity);
-        }
         if (endingTargetQty != currentTargetQty) {
             String direction = endingTargetQty > currentTargetQty ? "上调" : "下调";
             int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
             log.info("收尾SKU目标量{}, materialCode: {}, 原目标量: {}, 调整后: {}, "
-                            + "窗口日计划总量: {}, 窗口日计划剩余: {}, 胎胚库存: {}, 月计划余量: {}, 多机台合计产能: {}",
+                            + "窗口日计划总量: {}, 窗口日计划剩余: {}, 胎胚库存: {}, 月计划余量: {}",
                     direction, sku.getMaterialCode(), currentTargetQty, endingTargetQty,
-                    windowPlanQty, windowRemainingPlanQty, embryoStock, surplusQty, totalAvailableCapacity);
+                    windowPlanQty, windowRemainingPlanQty, embryoStock, surplusQty);
             sku.setTargetScheduleQty(endingTargetQty);
             sku.setRemainingScheduleQty(endingTargetQty);
             return endingTargetQty;

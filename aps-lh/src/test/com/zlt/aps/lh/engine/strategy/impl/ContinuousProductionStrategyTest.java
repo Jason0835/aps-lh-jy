@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -262,7 +263,7 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void adjustEmbryoStock_shouldStillTrimEndingContinuousResultByEmbryoStock() {
+    public void adjustEmbryoStock_shouldKeepEndingContinuousTargetQty() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
 
         LhScheduleContext context = new LhScheduleContext();
@@ -285,8 +286,169 @@ public class ContinuousProductionStrategyTest {
 
         strategy.adjustEmbryoStock(context);
 
-        assertEquals(15, context.getScheduleResultList().get(0).getDailyPlanQty().intValue(),
-                "收尾续作仍应保留胎胚库存裁减约束");
+        assertEquals(128, context.getScheduleResultList().get(0).getDailyPlanQty().intValue(),
+                "收尾续作目标量已按max(余量,胎胚库存)计算，不应再被胎胚库存后置裁减");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldAppendCompensationWhenContinuousSkuHasNoResult() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302000001");
+        sku.setMaterialDesc("12R22.5 TEST");
+        sku.setStructureName("12R22.5-TEST");
+        sku.setSpecCode("12R22.5");
+        sku.setEmbryoCode("EMB-NO-RESULT");
+        sku.setTargetScheduleQty(80);
+        sku.setPendingQty(80);
+        sku.setSurplusQty(999);
+        sku.setWindowPlanQty(48);
+        sku.setShiftCapacity(16);
+        sku.setLhTimeSeconds(3600);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(firstShift), quota("3302000001", toLocalDate(firstShift), 48));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        sku.setContinuousMachineCode("K1107");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getNewSpecSkuList().size(),
+                "续作SKU完全没有结果时，也应转入新增规格链路继续补量");
+        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
+        Assertions.assertSame(sku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap(),
+                "零结果补偿SKU也必须共享原SKU日计划账本");
+        Assertions.assertEquals(48, compensationSku.resolveTargetScheduleQty());
+        Assertions.assertEquals(48, compensationSku.getRemainingScheduleQty());
+        Assertions.assertNull(compensationSku.getContinuousMachineCode(), "补偿SKU应交由新增换模链路重新选机");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldAppendNewSpecCompensationWhenContinuousTargetNotMet() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1105");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001724");
+        sku.setMaterialDesc("385/65R22.5 20PR JY588");
+        sku.setStructureName("385/65R22.5-JY588");
+        sku.setSpecCode("385/65R22.5");
+        sku.setEmbryoCode("EMB-COMP");
+        sku.setTargetScheduleQty(158);
+        sku.setPendingQty(158);
+        sku.setSurplusQty(999);
+        sku.setWindowPlanQty(158);
+        sku.setShiftCapacity(16);
+        sku.setLhTimeSeconds(3600);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(firstShift), quota("3302001724", toLocalDate(firstShift), 158));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        sku.setContinuousMachineCode("K1105");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setScheduleType("01");
+        result.setIsTypeBlock("0");
+        result.setMaterialCode("3302001724");
+        result.setLhMachineCode("K1105");
+        result.setEmbryoCode("EMB-COMP");
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        result.setSpecEndTime(firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 112,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getNewSpecSkuList().size(), "续作不足时应转入新增规格链路继续补量");
+        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
+        Assertions.assertNotSame(sku, compensationSku);
+        Assertions.assertSame(sku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap(),
+                "补偿SKU必须共享原SKU日计划账本，避免重复消费窗口额度");
+        Assertions.assertEquals(46, compensationSku.resolveTargetScheduleQty());
+        Assertions.assertEquals(46, compensationSku.getRemainingScheduleQty());
+        Assertions.assertNull(compensationSku.getContinuousMachineCode(), "补偿SKU应交由新增换模链路重新选机");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldNotAppendCompensationWhenSharedQuotaExhausted() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1106");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002654");
+        sku.setMaterialDesc("12R22.5 JY701");
+        sku.setStructureName("12R22.5-JY701");
+        sku.setSpecCode("12R22.5");
+        sku.setEmbryoCode("EMB-COMP-0");
+        sku.setTargetScheduleQty(158);
+        sku.setPendingQty(158);
+        sku.setSurplusQty(999);
+        sku.setWindowPlanQty(112);
+        sku.setShiftCapacity(16);
+        sku.setLhTimeSeconds(3600);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(firstShift), quota("3302002654", toLocalDate(firstShift), 112));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        sku.setContinuousMachineCode("K1106");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setScheduleType("01");
+        result.setIsTypeBlock("0");
+        result.setMaterialCode("3302002654");
+        result.setLhMachineCode("K1106");
+        result.setEmbryoCode("EMB-COMP-0");
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        result.setSpecEndTime(firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 112,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertTrue(context.getNewSpecSkuList().isEmpty(),
+                "共享日计划账本剩余为0时，续作不足也不应继续生成补偿SKU");
     }
 
     @Test
@@ -309,6 +471,9 @@ public class ContinuousProductionStrategyTest {
 
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("MAT-QUOTA");
+        sku.setTrial(true);
+        sku.setStrictTargetQty(true);
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
         sku.setDailyPlanQuotaMap(buildQuotaMap(firstShift, nextDayShift, 6, 4));
         context.setContinuousSkuList(Collections.singletonList(sku));
 
@@ -351,6 +516,9 @@ public class ContinuousProductionStrategyTest {
 
         SkuScheduleDTO firstSku = new SkuScheduleDTO();
         firstSku.setMaterialCode("MAT-DUP");
+        firstSku.setTrial(true);
+        firstSku.setStrictTargetQty(true);
+        firstSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
         Map<LocalDate, SkuDailyPlanQuotaDTO> firstQuotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
         firstQuotaMap.put(toLocalDate(firstShift), quota("MAT-DUP", toLocalDate(firstShift), 6));
         firstQuotaMap.put(toLocalDate(nextDayShift), quota("MAT-DUP", toLocalDate(nextDayShift), 0));
@@ -358,6 +526,9 @@ public class ContinuousProductionStrategyTest {
 
         SkuScheduleDTO secondSku = new SkuScheduleDTO();
         secondSku.setMaterialCode("MAT-DUP");
+        secondSku.setTrial(true);
+        secondSku.setStrictTargetQty(true);
+        secondSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
         Map<LocalDate, SkuDailyPlanQuotaDTO> secondQuotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
         secondQuotaMap.put(toLocalDate(firstShift), quota("MAT-DUP", toLocalDate(firstShift), 0));
         secondQuotaMap.put(toLocalDate(nextDayShift), quota("MAT-DUP", toLocalDate(nextDayShift), 4));
@@ -674,6 +845,9 @@ public class ContinuousProductionStrategyTest {
         SkuScheduleDTO sku = sku(materialCode);
         sku.setEmbryoCode(embryoCode);
         sku.setEmbryoStock(embryoStock);
+        sku.setTrial(true);
+        sku.setStrictTargetQty(true);
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
         return sku;
     }
 

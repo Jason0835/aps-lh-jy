@@ -203,7 +203,9 @@ public class RollingScheduleHandoffService {
         inheritedResult.setCreateTime(null);
         inheritedResult.setUpdateBy(null);
         inheritedResult.setUpdateTime(null);
-        inheritedResult.setMouldChangeStartTime(null);
+        if (!"1".equals(inheritedResult.getIsChangeMould())) {
+            inheritedResult.setMouldChangeStartTime(null);
+        }
         inheritedResult.setRollingInherited(true);
         log.info("滚动衔接结果明细, 机台: {}, 物料: {}, 班次映射: {}, 继承量: {}, 继承后结束: {}",
                 inheritedResult.getLhMachineCode(), inheritedResult.getMaterialCode(),

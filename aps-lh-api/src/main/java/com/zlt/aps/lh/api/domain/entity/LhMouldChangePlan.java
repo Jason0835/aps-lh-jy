@@ -178,6 +178,13 @@ public class LhMouldChangePlan extends BaseEntity implements Serializable {
     private String mouldStatus;
 
     /**
+     * 收尾类型（0-正常 1-收尾）
+     */
+    @ApiModelProperty(value = "收尾类型", name = "endType", notes = "0-正常 1-收尾")
+    @TableField(value = "END_TYPE")
+    private String endType;
+
+    /**
      * 删除标识（0未删除；1已删除）
      */
     @Excel(name = "ui.data.column.lhMouldChangePlan.isDelete")

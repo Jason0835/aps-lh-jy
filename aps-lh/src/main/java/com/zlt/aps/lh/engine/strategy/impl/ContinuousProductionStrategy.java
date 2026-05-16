@@ -3,6 +3,7 @@
  */
 package com.zlt.aps.lh.engine.strategy.impl;
 
+import cn.hutool.core.bean.BeanUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
@@ -24,6 +25,7 @@ import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -126,11 +128,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
 
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
-
-            // 收尾SKU严格限制目标量，不允许为了填满班次而超排
-            if (isEnding) {
-                sku.setStrictTargetQty(true);
-            }
+            sku.setStrictTargetQty(ProductionQuantityPolicy.from(sku, isEnding).isStrictUpperLimit());
 
             // 滚动衔接时沿用机台继承后的可用时间，避免从重叠窗口首班重复起排。
             Date startTime = resolveContinuousStartTime(context, machine, shifts);
@@ -386,7 +384,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (sku == null || CollectionUtils.isEmpty(skuResults)) {
             return false;
         }
-        if (sku.isTrial()) {
+        boolean endingResult = skuResults.stream().anyMatch(result -> result != null && "1".equals(result.getIsEnd()));
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sku, endingResult);
+        if (policy.isStrictUpperLimit() && !policy.isEnding()) {
             return false;
         }
         return true;
@@ -447,6 +447,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         // 日额度账本必须在最终结果收口后再同步，并以回裁后的结果驱动零计划与机台状态。
         syncContinuousDailyPlanQuota(context, shifts);
+        appendContinuousCompensationSkuList(context);
         // S4.4 收口：零计划续作结果语义统一，并按最终结果同步机台状态。
         finalizeZeroPlanContinuousResults(context);
         // 降模或额度回裁会再次改变最终计划量，收口后再统一复核一次收尾标记，确保落库口径一致。
@@ -468,6 +469,22 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     // ==================== 私有辅助方法 ====================
+
+    /**
+     * 从同优先级候选SKU中选择首个SKU。
+     * <p>续作候选顺序已在上游按月度计划和结构优先级排好，此处不因收尾状态插队。</p>
+     *
+     * @param context 排程上下文
+     * @param candidates 候选SKU
+     * @return 首选SKU；候选为空时返回 null
+     */
+    private SkuScheduleDTO selectPreferredSkuFromCandidates(LhScheduleContext context,
+                                                            List<SkuScheduleDTO> candidates) {
+        if (CollectionUtils.isEmpty(candidates)) {
+            return null;
+        }
+        return candidates.get(0);
+    }
 
     /**
      * 解析定点机台挤量的切换开始时间。
@@ -1197,15 +1214,17 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param targetQty 目标计划量
      */
     private void redistributeShiftQty(LhScheduleContext context, LhScheduleResult result, List<LhShiftConfigVO> shifts, int targetQty) {
-        if (CollectionUtils.isEmpty(shifts)
-                || result.getLhTime() == null
-                || result.getLhTime() <= 0) {
+        if (CollectionUtils.isEmpty(shifts)) {
             return;
         }
 
         if (targetQty <= 0) {
             clearShiftPlanQty(result, shifts);
             refreshResultSummary(context, result, shifts);
+            return;
+        }
+
+        if (result.getLhTime() == null || result.getLhTime() <= 0) {
             return;
         }
 
@@ -1542,6 +1561,124 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 续作机台无法满足窗口目标量时，生成新增规格补偿SKU交给S4.5继续换模补量。
+     *
+     * @param context 排程上下文
+     */
+    private void appendContinuousCompensationSkuList(LhScheduleContext context) {
+        if (context == null || CollectionUtils.isEmpty(context.getContinuousSkuList())) {
+            return;
+        }
+        Set<SkuScheduleDTO> processedSkuSet = java.util.Collections.newSetFromMap(
+                new IdentityHashMap<SkuScheduleDTO, Boolean>(8));
+        for (SkuScheduleDTO sourceSku : context.getContinuousSkuList()) {
+            if (sourceSku == null || !processedSkuSet.add(sourceSku)) {
+                continue;
+            }
+            int remainingQty = resolveContinuousCompensationQty(context, sourceSku);
+            if (remainingQty <= 0 || hasContinuousCompensationSku(context, sourceSku)) {
+                continue;
+            }
+            SkuScheduleDTO compensationSku = copyContinuousCompensationSku(sourceSku, remainingQty);
+            context.getNewSpecSkuList().add(compensationSku);
+            log.info("续作目标量未满足，转新增规格链路补量, materialCode: {}, 已排: {}, 补偿量: {}, "
+                            + "窗口日计划剩余: {}",
+                    sourceSku.getMaterialCode(), resolveScheduledQtyBySourceSku(context, sourceSku),
+                    remainingQty, SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
+        }
+    }
+
+    /**
+     * 计算续作转新增补偿量。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作SKU
+     * @return 补偿量
+     */
+    private int resolveContinuousCompensationQty(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        int scheduledQty = resolveScheduledQtyBySourceSku(context, sourceSku);
+        int targetRemainingQty = Math.max(0, sourceSku.resolveTargetScheduleQty() - scheduledQty);
+        if (targetRemainingQty <= 0) {
+            return 0;
+        }
+        if (!CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
+            int quotaRemainingQty = Math.max(0,
+                    SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
+            return Math.min(targetRemainingQty, quotaRemainingQty);
+        }
+        return targetRemainingQty;
+    }
+
+    /**
+     * 汇总指定来源SKU已生成的续作阶段排产量。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @return 已排量
+     */
+    private int resolveScheduledQtyBySourceSku(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        if (context == null || sourceSku == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return 0;
+        }
+        int scheduledQty = 0;
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!isContinuousPhaseResult(result)) {
+                continue;
+            }
+            if (resolveResultSourceSku(context, result) != sourceSku) {
+                continue;
+            }
+            scheduledQty += ShiftFieldUtil.resolveScheduledQty(result);
+        }
+        return Math.max(0, scheduledQty);
+    }
+
+    /**
+     * 判断是否已存在当前续作SKU的补偿SKU。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @return true-已存在，false-不存在
+     */
+    private boolean hasContinuousCompensationSku(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        if (CollectionUtils.isEmpty(context.getNewSpecSkuList()) || sourceSku == null) {
+            return false;
+        }
+        for (SkuScheduleDTO newSpecSku : context.getNewSpecSkuList()) {
+            if (newSpecSku == null) {
+                continue;
+            }
+            if (StringUtils.equals(newSpecSku.getMaterialCode(), sourceSku.getMaterialCode())
+                    && newSpecSku.getDailyPlanQuotaMap() == sourceSku.getDailyPlanQuotaMap()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 复制续作SKU为新增补偿SKU。
+     *
+     * @param sourceSku 来源续作SKU
+     * @param remainingQty 补偿量
+     * @return 新增补偿SKU
+     */
+    private SkuScheduleDTO copyContinuousCompensationSku(SkuScheduleDTO sourceSku, int remainingQty) {
+        SkuScheduleDTO compensationSku = new SkuScheduleDTO();
+        BeanUtil.copyProperties(sourceSku, compensationSku);
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty());
+        compensationSku.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
+        compensationSku.setContinuousMachineCode(null);
+        compensationSku.setTargetScheduleQty(remainingQty);
+        compensationSku.setPendingQty(remainingQty);
+        compensationSku.setRemainingScheduleQty(remainingQty);
+        compensationSku.setStrictTargetQty(policy.isStrictUpperLimit());
+        // 复用同一份日计划账本，作为续作补偿SKU与来源续作SKU的共享归属锚点。
+        compensationSku.setDailyPlanQuotaMap(sourceSku.getDailyPlanQuotaMap());
+        return compensationSku;
+    }
+
+    /**
      * 扣减单条续作结果占用的日计划额度。
      *
      * @param context 排程上下文
@@ -1576,15 +1713,19 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (overQty <= 0) {
                 continue;
             }
+            boolean endingResult = "1".equals(result.getIsEnd());
+            // 续作链路与新增链路保持一致：
+            // 收尾结果必须严格截断且不记超排；试制等严格目标量场景回裁后仍保留超排账本。
+            if (endingResult || (sku != null && sku.isStrictTargetQty())) {
+                trimShiftPlanQty(result, shift.getShiftIndex(), consumedQty);
+                if (endingResult) {
+                    continue;
+                }
+            }
             quota.setShiftFillOverQty(quota.getShiftFillOverQty() + overQty);
             totalShiftFillOverQty += overQty;
             log.debug("续作班次满班补齐超排, materialCode: {}, 日期: {}, 班次: {}, 排产量: {}, 超排: {}",
                     sku.getMaterialCode(), productionDate, shift.getShiftIndex(), planQty, overQty);
-            // 正式续作非试制、非收尾且满排模式下保留满班补齐产量，不做额度回裁
-            if (sku.isTrial() || sku.isStrictTargetQty()
-                    || !getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
-                trimShiftPlanQty(result, shift.getShiftIndex(), consumedQty);
-            }
         }
         if (totalShiftFillOverQty > 0) {
             sku.setShiftFillOverQty(sku.getShiftFillOverQty() + totalShiftFillOverQty);

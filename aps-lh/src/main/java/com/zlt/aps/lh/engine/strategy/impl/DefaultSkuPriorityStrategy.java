@@ -7,6 +7,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
@@ -24,6 +25,7 @@ import org.springframework.util.CollectionUtils;
 import javax.annotation.Resource;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -151,7 +153,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 构建“特殊材料且唯一候选机台”优先级快照。
+     * 构建"特殊材料且唯一候选机台"优先级快照。
      *
      * @param context 排程上下文
      * @return 物料编码 -> 是否命中唯一候选特殊材料优先
@@ -175,7 +177,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 判断 SKU 是否命中“特殊材料且唯一候选机台”优先级。
+     * 判断 SKU 是否命中"特殊材料且唯一候选机台"优先级。
      *
      * @param priorityMap 优先级快照
      * @param sku SKU
@@ -189,7 +191,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
     /**
      * 统计 SKU 当前可用的硬匹配候选机台数。
-     * <p>只用于“唯一候选特殊材料前置”轻量优先级快照，不改主匹配流程。</p>
+     * <p>只用于"唯一候选特殊材料前置"轻量优先级快照，不改主匹配流程。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -258,7 +260,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 判断SKU所属结构是否进入“未来结构全收尾”优先级。
+     * 判断SKU所属结构是否进入"未来结构全收尾"优先级。
      */
     private boolean isStructureAllEndingPriority(Map<String, StructurePriorityMeta> structurePriorityMap, SkuScheduleDTO sku) {
         if (sku == null || StringUtils.isEmpty(sku.getStructureName())) {
@@ -433,10 +435,11 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 输出排序后的SKU优先级跟踪日志。
+     * 输出排序后的SKU优先级跟踪日志（含汇总标题、TOP N、SortKey、HitLevel）。
      *
      * @param context 排程上下文
      * @param structurePriorityMap 结构收尾优先级快照
+     * @param singleCandidateSpecialPriorityMap 唯一候选特殊材料优先级快照
      */
     private void traceSortedSkuList(LhScheduleContext context,
                                     Map<String, StructurePriorityMeta> structurePriorityMap,
@@ -447,50 +450,178 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         String currentStep = context.getCurrentStep();
         String title;
         List<SkuScheduleDTO> traceSkuList;
+        boolean isNewSpec;
         if (StringUtils.equals(ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION.getCode(), currentStep)) {
-            title = "续作SKU排序明细";
+            title = "SKU排序优先级汇总【续作】";
             traceSkuList = context.getContinuousSkuList();
+            isNewSpec = false;
         } else if (StringUtils.equals(ScheduleStepEnum.S4_5_NEW_PRODUCTION.getCode(), currentStep)) {
-            title = "新增SKU排序明细";
+            title = "SKU排序优先级汇总【新增】";
             traceSkuList = context.getNewSpecSkuList();
+            isNewSpec = true;
         } else {
             return;
         }
-        StringBuilder detailBuilder = new StringBuilder(512);
+
+        int topN = LhScheduleConstant.SKU_SORT_TRACE_TOP_N;
+        int skuCount = PriorityTraceLogHelper.sizeOf(traceSkuList);
+        int outputCount = Math.min(topN, skuCount);
+
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "步骤=" + PriorityTraceLogHelper.safeText(currentStep)
-                        + ", SKU数=" + PriorityTraceLogHelper.sizeOf(traceSkuList));
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("步骤", currentStep)
+                        + ", " + PriorityTraceLogHelper.kv("排序场景", isNewSpec ? "新增SKU排序" : "续作SKU排序")
+                        + ", " + PriorityTraceLogHelper.kv("SKU数量", skuCount)
+                        + ", " + PriorityTraceLogHelper.kv("输出范围", "TOP" + outputCount));
+
         if (CollectionUtils.isEmpty(traceSkuList)) {
             PriorityTraceLogHelper.appendLine(detailBuilder, "无可输出的SKU排序结果");
         } else {
-            int index = 1;
-            for (SkuScheduleDTO sku : traceSkuList) {
+            // 层级名称，用于 HitLevel 推导
+            List<String> levelNames;
+            if (isNewSpec) {
+                levelNames = Arrays.asList(
+                        "L1_定点机台", "L2_唯一候选特殊材料", "L3_锁交期", "L4_延误天数",
+                        "L5_结构全收尾", "L6_最晚收尾日", "L7_试制", "L8_小批量",
+                        "L9_高优待排", "L10_周期待排", "L11_中优待排", "L12_常规待排",
+                        "L13_开产靠后分");
+            } else {
+                levelNames = Arrays.asList(
+                        "L1_锁交期", "L2_延误天数", "L3_结构全收尾", "L4_最晚收尾日",
+                        "L5_高优待排", "L6_周期待排", "L7_中优待排", "L8_常规待排",
+                        "L9_开产靠后分");
+            }
+
+            for (int i = 0; i < outputCount; i++) {
+                SkuScheduleDTO sku = traceSkuList.get(i);
                 boolean structureAllEndingPriority = isStructureAllEndingPriority(structurePriorityMap, sku);
                 boolean ending = endingJudgmentStrategy.isEnding(context, sku);
+                boolean isSpecifyMachine = LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode());
+                boolean isSingleCandidate = isSingleCandidateSpecialPriority(singleCandidateSpecialPriorityMap, sku);
+                boolean isSpecial = isSpecialMaterial(context, sku);
+                String constructionStageDesc = resolveConstructionStageDesc(sku);
+
+                // 计算各层级得分
+                List<String> sortKeyLevels;
+                List<Integer> scores;
+                List<Integer> defaultScores;
+                if (isNewSpec) {
+                    sortKeyLevels = Arrays.asList(
+                            "L1_定点机台=" + (isSpecifyMachine ? 0 : 1),
+                            "L2_唯一候选特殊材料=" + (isSingleCandidate ? 0 : 1),
+                            "L3_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
+                            "L4_延误天数=" + (sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0),
+                            "L5_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
+                            "L6_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0),
+                            "L7_试制=" + (sku.isTrial() ? 0 : 1),
+                            "L8_小批量=" + (sku.isSmallBatchValidation() ? 0 : 1),
+                            "L9_高优待排=" + (-sku.getHighPriorityPendingQty()),
+                            "L10_周期待排=" + (-sku.getCycleProductionPendingQty()),
+                            "L11_中优待排=" + (-sku.getMidPriorityPendingQty()),
+                            "L12_常规待排=" + (-sku.getConventionProductionPendingQty()),
+                            "L13_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
+                    scores = Arrays.asList(
+                            isSpecifyMachine ? 0 : 1,
+                            isSingleCandidate ? 0 : 1,
+                            sku.isDeliveryLocked() ? 0 : 1,
+                            sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0,
+                            structureAllEndingPriority ? 0 : 1,
+                            structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
+                            sku.isTrial() ? 0 : 1,
+                            sku.isSmallBatchValidation() ? 0 : 1,
+                            -sku.getHighPriorityPendingQty(),
+                            -sku.getCycleProductionPendingQty(),
+                            -sku.getMidPriorityPendingQty(),
+                            -sku.getConventionProductionPendingQty(),
+                            resolveOpenProductionLateScore(context, sku));
+                    defaultScores = Arrays.asList(1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0);
+                } else {
+                    sortKeyLevels = Arrays.asList(
+                            "L1_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
+                            "L2_延误天数=" + (sku.getDelayDays() >= 0 ? 0 : 1) + "/" + (sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0),
+                            "L3_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
+                            "L4_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0),
+                            "L5_高优待排=" + (-sku.getHighPriorityPendingQty()),
+                            "L6_周期待排=" + (-sku.getCycleProductionPendingQty()),
+                            "L7_中优待排=" + (-sku.getMidPriorityPendingQty()),
+                            "L8_常规待排=" + (-sku.getConventionProductionPendingQty()),
+                            "L9_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
+                    scores = Arrays.asList(
+                            sku.isDeliveryLocked() ? 0 : 1,
+                            sku.getDelayDays() >= 0 ? 0 : 1,
+                            structureAllEndingPriority ? 0 : 1,
+                            structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
+                            -sku.getHighPriorityPendingQty(),
+                            -sku.getCycleProductionPendingQty(),
+                            -sku.getMidPriorityPendingQty(),
+                            -sku.getConventionProductionPendingQty(),
+                            resolveOpenProductionLateScore(context, sku));
+                    defaultScores = Arrays.asList(1, 1, 1, 0, 0, 0, 0, 0, 0);
+                }
+                String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
+                String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
+
                 PriorityTraceLogHelper.appendLine(detailBuilder,
-                        index++
-                                + ". materialCode=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())
-                                + ", 排产类型=" + PriorityTraceLogHelper.safeText(sku.getScheduleType())
-                                + ", 结构=" + PriorityTraceLogHelper.safeText(sku.getStructureName())
-                                + ", 锁交期=" + PriorityTraceLogHelper.yesNo(sku.isDeliveryLocked())
-                                + ", delayDays=" + sku.getDelayDays()
-                                + ", 命中结构全收尾优先=" + PriorityTraceLogHelper.yesNo(structureAllEndingPriority)
-                                + ", 唯一候选特殊材料=" + PriorityTraceLogHelper.yesNo(
-                                isSingleCandidateSpecialPriority(singleCandidateSpecialPriorityMap, sku))
-                                + ", 试制SKU=" + PriorityTraceLogHelper.yesNo(sku.isTrial())
-                                + ", 小批量SKU=" + PriorityTraceLogHelper.yesNo(sku.isSmallBatchValidation())
-                                + ", 收尾SKU=" + PriorityTraceLogHelper.yesNo(ending)
-                                + ", endingDaysRemaining=" + sku.getEndingDaysRemaining()
-                                + ", 高优待排=" + sku.getHighPriorityPendingQty()
-                                + ", 周期待排=" + sku.getCycleProductionPendingQty()
-                                + ", 中优待排=" + sku.getMidPriorityPendingQty()
-                                + ", 常规待排=" + sku.getConventionProductionPendingQty()
-                                + ", scheduleOrder=" + sku.getScheduleOrder());
+                        (i + 1)
+                                + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode())
+                                + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
+                                + ", " + PriorityTraceLogHelper.kv("排产类型", sku.getScheduleType())
+                                + ", " + PriorityTraceLogHelper.kv("续作", yesNoFromScheduleType(sku.getScheduleType()))
+                                + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.yesNo(ending))
+                                + ", " + PriorityTraceLogHelper.kv("阶段", constructionStageDesc)
+                                + ", " + PriorityTraceLogHelper.kv("试制", PriorityTraceLogHelper.yesNo(sku.isTrial()))
+                                + ", " + PriorityTraceLogHelper.kv("特殊材料", PriorityTraceLogHelper.yesNo(isSpecial))
+                                + ", " + PriorityTraceLogHelper.kv("定点机台", PriorityTraceLogHelper.yesNo(isSpecifyMachine))
+                                + ", " + PriorityTraceLogHelper.kv("月计划量", sku.getMonthPlanQty())
+                                + ", " + PriorityTraceLogHelper.kv("余量", sku.getSurplusQty())
+                                + ", " + PriorityTraceLogHelper.kv("胎胚库存", sku.getEmbryoStock())
+                                + ", " + PriorityTraceLogHelper.kv("班产", sku.getShiftCapacity())
+                                + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
+                                + ", " + PriorityTraceLogHelper.kv("花纹", sku.getMainPattern())
+                                + ", " + PriorityTraceLogHelper.kv("胎胚描述", sku.getMainMaterialDesc())
+                                + ", " + PriorityTraceLogHelper.kv("SortKey", sortKey)
+                                + ", " + PriorityTraceLogHelper.kv("HitLevel", hitLevel));
+            }
+            if (skuCount > topN) {
+                PriorityTraceLogHelper.appendLine(detailBuilder,
+                        "... 共" + skuCount + "条，仅展示前" + topN + "条");
             }
         }
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
-        log.info("{}\n{}", title, detail);
-        PriorityTraceLogHelper.appendProcessLog(context, title, detail);
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 根据排产类型判断是否续作。
+     *
+     * @param scheduleType 排产类型编码
+     * @return 是/否
+     */
+    private static String yesNoFromScheduleType(String scheduleType) {
+        return "01".equals(scheduleType) ? "是" : "否";
+    }
+
+    /**
+     * 解析SKU施工阶段描述。
+     *
+     * @param sku SKU
+     * @return 阶段描述
+     */
+    private static String resolveConstructionStageDesc(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return "-";
+        }
+        if (sku.isTrial()) {
+            return "试制";
+        }
+        if (sku.isSmallBatchValidation()) {
+            return "小批量";
+        }
+        ConstructionStageEnum stage = ConstructionStageEnum.getByCode(sku.getConstructionStage());
+        return stage != null ? stage.getDescription() : "-";
     }
 
     /**

@@ -10,7 +10,7 @@
             CLASS_INDEX, SCHEDULE_DATE, LEFT_RIGHT_MOULD, LH_MACHINE_CODE, LH_MACHINE_NAME,
             BEFORE_MATERIAL_CODE, BEFORE_MATERIAL_DESC, CHANGE_MOULD_TYPE,
             AFTER_MATERIAL_CODE, AFTER_MATERIAL_DESC, CHANGE_TIME, MOULD_CODE,
-            IS_RELEASE, MOULD_STATUS,
+            IS_RELEASE, MOULD_STATUS, END_TYPE,
             CREATE_BY, CREATE_TIME, UPDATE_BY, UPDATE_TIME, REMARK, IS_DELETE
         ) VALUES
         <foreach collection="list" item="item" separator=",">
@@ -19,7 +19,7 @@
                 #{item.classIndex}, #{item.scheduleDate}, #{item.leftRightMould}, #{item.lhMachineCode}, #{item.lhMachineName},
                 #{item.beforeMaterialCode}, #{item.beforeMaterialDesc}, #{item.changeMouldType},
                 #{item.afterMaterialCode}, #{item.afterMaterialDesc}, #{item.changeTime}, #{item.mouldCode},
-                #{item.isRelease}, #{item.mouldStatus},
+                #{item.isRelease}, #{item.mouldStatus}, #{item.endType},
                 #{item.createBy}, #{item.createTime}, #{item.updateBy}, #{item.updateTime}, #{item.remark}, #{item.isDelete}
             )
         </foreach>

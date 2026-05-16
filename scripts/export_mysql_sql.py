@@ -4,11 +4,11 @@ from pymysql.err import OperationalError, ProgrammingError
 # ====================== 【必须修改】数据库配置 ======================
 
 DB_CONFIG = {
-    "host": "172.21.7.130",       # 数据库地址 192.168.2.124
+    "host": "192.168.2.124",       # 数据库地址 192.168.2.124  172.21.7.130
     "port": 3306,              # 端口  3306
-    "user": "tbr_aps",            # 用户名  root
-    "password": "NahPDzeShSxA%",     # 密码 neW46Ik#Gq@
-    "database": "jy_aps",     # 数据库名 jy_aps
+    "user": "root",            # 用户名  root  tbr_aps
+    "password": "neW46Ik#Gq@",     # 密码 neW46Ik#Gq@  NahPDzeShSxA%
+    "database": "jy_aps",     # 数据库名 jy_aps jy_aps
     "charset": "utf8mb4"       # 字符集 utf8mb4
 }
 
