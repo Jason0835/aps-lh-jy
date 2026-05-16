@@ -45,6 +45,7 @@ import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
@@ -124,7 +125,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             candidateMachines.add(fallbackMachine);
             machineTriggerSourceMap.put(machineCode, TYPE_BLOCK_TRIGGER_FALLBACK);
         }
-        traceEndingMachineOrder(context, candidateMachines);
+        traceEndingMachineOrder(context, candidateMachines, machineTriggerSourceMap);
         log.info("换活字块候选机台准备完成, 收尾机台: {}, 兜底机台: {}, 候选机台: {}, 待排新增SKU: {}",
                 endingMachines.size(), fallbackMachines.size(), candidateMachines.size(),
                 context.getNewSpecSkuList().size());
@@ -1149,37 +1150,119 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      * @param context 排程上下文
      * @param endingMachines 衔接机台列表
      */
-    private void traceEndingMachineOrder(LhScheduleContext context, List<MachineScheduleDTO> endingMachines) {
+    private void traceEndingMachineOrder(LhScheduleContext context,
+                                         List<MachineScheduleDTO> endingMachines,
+                                         Map<String, String> machineTriggerSourceMap) {
         if (!PriorityTraceLogHelper.isEnabled(context)) {
             return;
         }
-        String title = "衔接机台排序总览";
-        StringBuilder detailBuilder = new StringBuilder(512);
+        String title = "机台排序优先级汇总【换活字块衔接】";
+        int topN = LhScheduleConstant.MACHINE_SORT_TRACE_TOP_N;
+        int machineCount = PriorityTraceLogHelper.sizeOf(endingMachines);
+        int outputCount = Math.min(topN, machineCount);
+
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "候选机台数=" + PriorityTraceLogHelper.sizeOf(endingMachines));
-        int index = 1;
-        for (MachineScheduleDTO machine : endingMachines) {
-            Date estimatedEndTime = machine.getEstimatedEndTime();
-            PriorityTraceLogHelper.appendLine(detailBuilder,
-                    index++
-                            + ". 机台=" + PriorityTraceLogHelper.safeText(machine.getMachineCode())
-                            + ", 当前物料=" + PriorityTraceLogHelper.safeText(machine.getCurrentMaterialCode())
-                            + ", 基准时间=" + PriorityTraceLogHelper.formatDateTime(estimatedEndTime)
-                            + ", 实际切换起点=" + PriorityTraceLogHelper.formatDateTime(
-                            resolveTypeBlockSortReadyTime(context, machine)));
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("候选机台数量", machineCount)
+                        + ", " + PriorityTraceLogHelper.kv("输出范围", "TOP" + outputCount));
+
+        if (CollectionUtils.isEmpty(endingMachines)) {
+            PriorityTraceLogHelper.appendLine(detailBuilder, "无可输出的换活字块候选机台");
+        } else {
+            // 预建换活字块候选标记缓存，避免同机台重复遍历全体SKU
+            Map<String, Boolean> canChangeLetterCache = new HashMap<>(Math.min(outputCount, 16));
+            for (int i = 0; i < outputCount; i++) {
+                MachineScheduleDTO m = endingMachines.get(i);
+                canChangeLetterCache.put(m.getMachineCode(), resolveCanChangeLetterFlag(context, m));
+            }
+
+            List<String> levelNames = Arrays.asList(
+                    "L1_触发来源", "L2_切换就绪时间", "L3_收尾时间");
+            for (int i = 0; i < outputCount; i++) {
+                MachineScheduleDTO machine = endingMachines.get(i);
+                Date estimatedEndTime = machine.getEstimatedEndTime();
+                Date readyTime = resolveTypeBlockSortReadyTime(context, machine);
+                String triggerSource = machineTriggerSourceMap != null
+                        ? machineTriggerSourceMap.get(machine.getMachineCode()) : null;
+                int triggerOrder = StringUtils.equals(TYPE_BLOCK_TRIGGER_ENDING, triggerSource) ? 0
+                        : (StringUtils.equals(TYPE_BLOCK_TRIGGER_FALLBACK, triggerSource) ? 1 : 2);
+                String triggerDesc = triggerOrder == 0 ? "收尾触发" : (triggerOrder == 1 ? "兜底触发" : "其他");
+                boolean canChangeLetter = Boolean.TRUE.equals(canChangeLetterCache.get(machine.getMachineCode()));
+                String machineEmbryoDesc = resolveMachineEmbryoDesc(context, machine);
+                String machineMainPattern = resolveMachineMainPatternStrict(context, machine);
+                String machineSpecCode = resolveMachineSpecCode(context, machine);
+
+                List<String> sortKeyLevels = Arrays.asList(
+                        "L1_触发来源=" + triggerDesc,
+                        "L2_切换就绪=" + PriorityTraceLogHelper.formatDateTime(readyTime),
+                        "L3_收尾时间=" + PriorityTraceLogHelper.formatDateTime(estimatedEndTime));
+                String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
+                String hitLevel;
+                if (triggerOrder == 0) {
+                    hitLevel = "命中L1收尾触发优先";
+                } else if (triggerOrder == 1) {
+                    hitLevel = "命中L1兜底触发";
+                } else {
+                    hitLevel = "兜底排序";
+                }
+
+                PriorityTraceLogHelper.appendLine(detailBuilder,
+                        (i + 1)
+                                + ". " + PriorityTraceLogHelper.kv("机台", machine.getMachineCode())
+                                + ", " + PriorityTraceLogHelper.kv("当前物料", machine.getCurrentMaterialCode())
+                                + ", " + PriorityTraceLogHelper.kv("触发来源", triggerDesc)
+                                + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.yesNo(machine.isEnding()))
+                                + ", " + PriorityTraceLogHelper.kv("收尾时间", PriorityTraceLogHelper.formatDateTime(estimatedEndTime))
+                                + ", " + PriorityTraceLogHelper.kv("切换就绪时间", PriorityTraceLogHelper.formatDateTime(readyTime))
+                                + ", " + PriorityTraceLogHelper.kv("可换活字块", PriorityTraceLogHelper.yesNo(canChangeLetter))
+                                + ", " + PriorityTraceLogHelper.kv("胎胚描述", machineEmbryoDesc)
+                                + ", " + PriorityTraceLogHelper.kv("主花纹", machineMainPattern)
+                                + ", " + PriorityTraceLogHelper.kv("规格", machineSpecCode)
+                                + ", " + PriorityTraceLogHelper.kv("机台顺序", machine.getMachineOrder())
+                                + ", " + PriorityTraceLogHelper.kv("SortKey", sortKey)
+                                + ", " + PriorityTraceLogHelper.kv("HitLevel", hitLevel));
+            }
+            if (machineCount > topN) {
+                PriorityTraceLogHelper.appendLine(detailBuilder,
+                        "... 共" + machineCount + "台，仅展示前" + topN + "台");
+            }
         }
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
-        log.info("{}\n{}", title, detail);
-        PriorityTraceLogHelper.appendProcessLog(context, title, detail);
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
     }
 
     /**
-     * 输出单机台换活字块决策日志。
+     * 判断机台当前在机物料是否可做换活字块衔接。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @return true-可换活字块
+     */
+    private boolean resolveCanChangeLetterFlag(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (context == null || machine == null || StringUtils.isEmpty(machine.getCurrentMaterialCode())) {
+            return false;
+        }
+        for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
+            if (sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+                continue;
+            }
+            if (isTypeBlockCandidate(context, machine, sku)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 输出换活字块机台反选SKU决策日志（含TOP5候选SKU列表、过滤统计、SortKey、HitLevel）。
      *
      * @param context 排程上下文
      * @param machine 收尾机台
-     * @param priorityOneCandidates 第一层候选
-     * @param priorityTwoCandidates 第二层候选
+     * @param priorityOneCandidates 第一层候选(同胎胚描述+同主花纹)
+     * @param priorityTwoCandidates 第二层候选(同规格)
      * @param selectedSku 选中SKU
      * @param matchedLayer 命中层级
      * @param success 是否成功
@@ -1199,30 +1282,165 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (!PriorityTraceLogHelper.isEnabled(context)) {
             return;
         }
-        String title = "收尾机台衔接决策";
-        StringBuilder detailBuilder = new StringBuilder(512);
+        String title = "换活字块机台反选SKU TOP5列表";
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
+
+        String machineEmbryoDesc = resolveMachineEmbryoDesc(context, machine);
+        String machineMainPattern = resolveMachineMainPatternStrict(context, machine);
+        String machineSpecCode = resolveMachineSpecCode(context, machine);
+
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "机台=" + PriorityTraceLogHelper.safeText(machine.getMachineCode())
-                        + ", 当前物料=" + PriorityTraceLogHelper.safeText(machine.getCurrentMaterialCode())
-                        + ", 真实收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()));
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("当前机台", machine.getMachineCode())
+                        + ", " + PriorityTraceLogHelper.kv("当前在机SKU", machine.getCurrentMaterialCode())
+                        + ", " + PriorityTraceLogHelper.kv("当前胎胚描述", machineEmbryoDesc)
+                        + ", " + PriorityTraceLogHelper.kv("当前主花纹", machineMainPattern)
+                        + ", " + PriorityTraceLogHelper.kv("当前规格", machineSpecCode)
+                        + ", " + PriorityTraceLogHelper.kv("收尾时间", PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime())));
+
+        int firstLayerCount = PriorityTraceLogHelper.sizeOf(priorityOneCandidates);
+        int secondLayerCount = PriorityTraceLogHelper.sizeOf(priorityTwoCandidates);
+        int totalCandidates = firstLayerCount + secondLayerCount;
+        int newSpecTotal = PriorityTraceLogHelper.sizeOf(context.getNewSpecSkuList());
+        int filteredCount = newSpecTotal - totalCandidates;
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "第一层候选(同胎胚描述+同主花纹)=" + buildSkuCodeSummary(priorityOneCandidates));
+                PriorityTraceLogHelper.kv("候选SKU总数", totalCandidates)
+                        + ", " + PriorityTraceLogHelper.kv("第一层候选数", firstLayerCount)
+                        + ", " + PriorityTraceLogHelper.kv("第二层候选数", secondLayerCount)
+                        + ", " + PriorityTraceLogHelper.kv("过滤SKU数", filteredCount)
+                        + ", 过滤原因统计: 不满足换活字块条件=" + Math.max(0, filteredCount - secondLayerCount)
+                        + ", 同规格不符=" + Math.max(0, filteredCount));
+
+        // 输出第一层候选 TOP5（同胎胚描述+同主花纹）
+        int topN = LhScheduleConstant.TYPE_BLOCK_SKU_CANDIDATE_TOP_N;
+        if (!CollectionUtils.isEmpty(priorityOneCandidates)) {
+            int outputCount = Math.min(topN, firstLayerCount);
+            PriorityTraceLogHelper.appendLine(detailBuilder, "第一层候选(同胎胚描述+同主花纹) TOP" + outputCount + ":");
+            appendSkuCandidateLines(detailBuilder, context, machine, priorityOneCandidates,
+                    outputCount, true);
+        }
+        // 输出第二层候选 TOP5（同规格）
+        if (!CollectionUtils.isEmpty(priorityTwoCandidates)) {
+            int outputCount = Math.min(topN, secondLayerCount);
+            PriorityTraceLogHelper.appendLine(detailBuilder, "第二层候选(同规格) TOP" + outputCount + ":");
+            appendSkuCandidateLines(detailBuilder, context, machine, priorityTwoCandidates,
+                    outputCount, false);
+        }
+
+        // 最终选中
+        String selectReason = resolveTypeBlockSelectReason(context, machine, selectedSku,
+                priorityOneCandidates, priorityTwoCandidates);
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "第二层候选(同规格)=" + buildSkuCodeSummary(priorityTwoCandidates));
-        PriorityTraceLogHelper.appendLine(detailBuilder,
-                "命中层级=" + PriorityTraceLogHelper.safeText(matchedLayer)
-                        + ", 选中SKU=" + PriorityTraceLogHelper.safeText(
-                        selectedSku == null ? null : selectedSku.getMaterialCode())
-                        + ", 是否换活字块=" + PriorityTraceLogHelper.yesNo(selectedSku != null)
-                        + ", 触发来源=" + PriorityTraceLogHelper.safeText(triggerSource));
-        PriorityTraceLogHelper.appendLine(detailBuilder,
-                "衔接结果=" + (success ? "成功" : "未衔接")
-                        + ", 换活字块开始时间=" + PriorityTraceLogHelper.formatDateTime(
-                        switchStartTime)
-                        + ", 开产时间=" + PriorityTraceLogHelper.formatDateTime(startTime));
+                PriorityTraceLogHelper.kv("命中层级", matchedLayer)
+                        + ", " + PriorityTraceLogHelper.kv("选中SKU", selectedSku == null ? "-" : selectedSku.getMaterialCode())
+                        + ", " + PriorityTraceLogHelper.kv("选中原因", selectReason)
+                        + ", " + PriorityTraceLogHelper.kv("衔接结果", success ? "成功" : "未衔接")
+                        + ", " + PriorityTraceLogHelper.kv("换活字块开始时间", PriorityTraceLogHelper.formatDateTime(switchStartTime))
+                        + ", " + PriorityTraceLogHelper.kv("开产时间", PriorityTraceLogHelper.formatDateTime(startTime)));
+
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
-        log.info("{}\n{}", title, detail);
-        PriorityTraceLogHelper.appendProcessLog(context, title, detail);
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 逐行输出候选SKU明细。
+     *
+     * @param builder 日志构建器
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param candidates 候选SKU列表
+     * @param outputCount 输出数量
+     * @param isPriorityOne 是否为第一层候选
+     */
+    private void appendSkuCandidateLines(StringBuilder builder, LhScheduleContext context,
+                                         MachineScheduleDTO machine,
+                                         List<SkuScheduleDTO> candidates,
+                                         int outputCount, boolean isPriorityOne) {
+        for (int i = 0; i < outputCount; i++) {
+            SkuScheduleDTO sku = candidates.get(i);
+            boolean sameEmbryoDesc = isSameEmbryoDesc(context, machine, sku);
+            boolean sameMainPattern = isSameMainPatternStrict(context, machine, sku);
+            boolean sameSpec = isSameSpec(context, machine, sku);
+            boolean canChange = isTypeBlockCandidate(context, machine, sku);
+            String skuEmbryoDesc = resolveSkuEmbryoDesc(context, sku);
+            String skuMainPattern = resolveSkuMainPatternStrict(context, sku);
+
+            String sortKey;
+            String hitLevel;
+            if (isPriorityOne) {
+                sortKey = PriorityTraceLogHelper.formatSortKey(Arrays.asList(
+                        "L1_同胎胚同花纹=" + (sameEmbryoDesc && sameMainPattern ? 0 : 1),
+                        "L2_物料编码兜底=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())));
+                hitLevel = sameEmbryoDesc && sameMainPattern ? "命中L1同胎胚描述+同主花纹" : "-";
+            } else {
+                sortKey = PriorityTraceLogHelper.formatSortKey(Arrays.asList(
+                        "L1_同规格=" + (sameSpec ? 0 : 1),
+                        "L2_物料编码兜底=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())));
+                hitLevel = sameSpec ? "命中L1同规格" : "-";
+            }
+
+            PriorityTraceLogHelper.appendLine(builder,
+                    (i + 1)
+                            + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode())
+                            + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
+                            + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.yesNo(endingJudgmentStrategy.isEnding(context, sku)))
+                            + ", " + PriorityTraceLogHelper.kv("待排产量", sku.resolveTargetScheduleQty())
+                            + ", " + PriorityTraceLogHelper.kv("月计划余量", sku.getSurplusQty())
+                            + ", " + PriorityTraceLogHelper.kv("胎胚库存", sku.getEmbryoStock())
+                            + ", " + PriorityTraceLogHelper.kv("胎胚描述", skuEmbryoDesc)
+                            + ", " + PriorityTraceLogHelper.kv("主花纹", skuMainPattern)
+                            + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
+                            + ", " + PriorityTraceLogHelper.kv("同胎胚描述", PriorityTraceLogHelper.yesNo(sameEmbryoDesc))
+                            + ", " + PriorityTraceLogHelper.kv("同主花纹", PriorityTraceLogHelper.yesNo(sameMainPattern))
+                            + ", " + PriorityTraceLogHelper.kv("同规格", PriorityTraceLogHelper.yesNo(sameSpec))
+                            + ", " + PriorityTraceLogHelper.kv("满足换活字块", PriorityTraceLogHelper.yesNo(canChange))
+                            + ", " + PriorityTraceLogHelper.kv("SortKey", sortKey)
+                            + ", " + PriorityTraceLogHelper.kv("HitLevel", hitLevel));
+        }
+    }
+
+    /**
+     * 解析换活字块选中SKU原因。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param selectedSku 选中SKU
+     * @param priorityOneCandidates 第一层候选
+     * @param priorityTwoCandidates 第二层候选
+     * @return 选中原因
+     */
+    private String resolveTypeBlockSelectReason(LhScheduleContext context, MachineScheduleDTO machine,
+                                                 SkuScheduleDTO selectedSku,
+                                                 List<SkuScheduleDTO> priorityOneCandidates,
+                                                 List<SkuScheduleDTO> priorityTwoCandidates) {
+        if (selectedSku == null) {
+            return "无候选SKU";
+        }
+        List<String> reasons = new ArrayList<>(4);
+        if (!CollectionUtils.isEmpty(priorityOneCandidates) && priorityOneCandidates.contains(selectedSku)) {
+            reasons.add("同胎胚描述+同主花纹");
+        }
+        if (!CollectionUtils.isEmpty(priorityTwoCandidates) && priorityTwoCandidates.contains(selectedSku)) {
+            reasons.add("同规格");
+        }
+        if (isSameEmbryoDesc(context, machine, selectedSku)) {
+            reasons.add("胎胚描述一致");
+        }
+        if (isSameMainPatternStrict(context, machine, selectedSku)) {
+            reasons.add("主花纹一致");
+        }
+        if (isSameSpec(context, machine, selectedSku)) {
+            reasons.add("规格一致");
+        }
+        if (isTypeBlockCandidate(context, machine, selectedSku)) {
+            reasons.add("满足换活字块条件");
+        }
+        if (reasons.isEmpty()) {
+            reasons.add("排序首位默认");
+        }
+        return String.join("，", reasons);
     }
 
     /**
@@ -1777,7 +1995,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
-     * 命中“模具清洗+换活字块”组合场景时，写入班次原因分析。
+     * 命中"模具清洗+换活字块"组合场景时，写入班次原因分析。
      *
      * @param context 排程上下文
      * @param result 排程结果

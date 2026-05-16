@@ -423,7 +423,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (skuMouldCodes.isEmpty()) {
             return true;
         }
-        // 当前 mouldQty 的业务语义是“选机后的机台模台数”，此处不再拿 SKU 预置模数拦截候选机台。
+        // 当前 mouldQty 的业务语义是"选机后的机台模台数"，此处不再拿 SKU 预置模数拦截候选机台。
         for (String mouldCode : skuMouldCodes) {
             if (occupiedMouldCodes.contains(mouldCode)) {
                 return false;
@@ -838,10 +838,31 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 输出候选机台排序跟踪日志。
+     * 格式化英寸差值，MAX_VALUE 时输出 "-" 避免刷屏。
+     */
+    private static String formatInchDistance(double inchDistance) {
+        if (inchDistance >= Double.MAX_VALUE) {
+            return "-";
+        }
+        return String.format("%.1f", inchDistance);
+    }
+
+    /**
+     * 将英寸差值转为安全的整数得分（用于 HitLevel 比较），MAX_VALUE 时使用 0。
+     */
+    private static int safeInchDistanceScore(double inchDistance) {
+        if (inchDistance >= Double.MAX_VALUE || inchDistance >= Integer.MAX_VALUE / 10.0) {
+            return 0;
+        }
+        return (int) (inchDistance * 10);
+    }
+
+    /**
+     * 输出候选机台排序跟踪日志（含SortKey、HitLevel、最终选中机台及原因）。
      *
      * @param context 排程上下文
      * @param sku 待排SKU
+     * @param matchResult 特殊物料命中结果
      * @param candidates 候选机台
      * @param trace 过滤统计
      */
@@ -852,51 +873,174 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (!PriorityTraceLogHelper.isEnabled(context)) {
             return;
         }
-        String title = "新增排产候选机台排序明细";
+        String title = "机台排序优先级汇总【新增排产选机台】";
         StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "SKU=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())
-                        + ", 规格=" + PriorityTraceLogHelper.safeText(sku.getSpecCode())
-                        + ", 寸口=" + PriorityTraceLogHelper.safeText(sku.getProSize())
-                        + ", 特殊物料=" + PriorityTraceLogHelper.yesNo(matchResult.isSpecial())
-                        + ", 命中方式=" + PriorityTraceLogHelper.safeText(matchResult.getMatchSource())
-                        + ", 特殊分类=" + PriorityTraceLogHelper.safeText(matchResult.getCategoryDisplayText()));
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("SKU", sku.getMaterialCode())
+                        + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
+                        + ", " + PriorityTraceLogHelper.kv("寸口", sku.getProSize())
+                        + ", " + PriorityTraceLogHelper.kv("特殊物料", PriorityTraceLogHelper.yesNo(matchResult.isSpecial()))
+                        + ", " + PriorityTraceLogHelper.kv("特殊分类", matchResult.getCategoryDisplayText()));
+        // 过滤统计
+        int filteredCount = trace.notAllowedMachineFilteredCount + trace.disabledCount
+                + trace.stopTimeoutCount + trace.inchMismatchCount + trace.mouldSetMismatchCount
+                + trace.resolveSpecialSupportFilteredCount() + trace.mouldConflictCount;
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "候选过滤概况: 机台总数=" + trace.totalMachineCount
-                        + ", 不可作业过滤=" + trace.notAllowedMachineFilteredCount
-                        + ", 机台禁用过滤=" + trace.disabledCount
-                        + ", 超时停机过滤=" + trace.stopTimeoutCount
-                        + ", 寸口不符过滤=" + trace.inchMismatchCount
-                        + ", 模套不符过滤=" + trace.mouldSetMismatchCount
-                        + ", 特殊支持过滤=" + trace.resolveSpecialSupportFilteredCount()
-                        + ", 模具占用过滤=" + trace.mouldConflictCount
-                        + ", 候选数=" + PriorityTraceLogHelper.sizeOf(candidates));
+                PriorityTraceLogHelper.kv("候选机台总数", trace.totalMachineCount)
+                        + ", " + PriorityTraceLogHelper.kv("有效候选数", PriorityTraceLogHelper.sizeOf(candidates))
+                        + ", " + PriorityTraceLogHelper.kv("过滤机台数", filteredCount)
+                        + ", 过滤原因统计: 不可作业=" + trace.notAllowedMachineFilteredCount
+                        + ", 禁用=" + trace.disabledCount
+                        + ", 超时停机=" + trace.stopTimeoutCount
+                        + ", 寸口不符=" + trace.inchMismatchCount
+                        + ", 模套不符=" + trace.mouldSetMismatchCount
+                        + ", 特殊不支持=" + trace.resolveSpecialSupportFilteredCount()
+                        + ", 模具占用=" + trace.mouldConflictCount);
         if (!CollectionUtils.isEmpty(trace.filteredMachineMessages)) {
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     "过滤明细: " + String.join("; ", trace.filteredMachineMessages));
         }
-        PriorityTraceLogHelper.appendLine(detailBuilder, "TOP5候选排序:");
-        int topCount = Math.min(PriorityTraceLogHelper.MACHINE_TRACE_TOP_N, PriorityTraceLogHelper.sizeOf(candidates));
+
+        // TOP N 候选机台
+        int topN = LhScheduleConstant.MACHINE_SORT_TRACE_TOP_N;
+        int topCount = Math.min(topN, PriorityTraceLogHelper.sizeOf(candidates));
+        PriorityTraceLogHelper.appendLine(detailBuilder, "TOP" + topCount + "候选排序:");
+        List<String> levelNames = java.util.Arrays.asList(
+                "L1_定点机台", "L2_单控拆分", "L3_普通机台优先", "L4_收尾时间",
+                "L5_同规格", "L6_同英寸", "L7_英寸接近度", "L8_胶囊共用", "L9_胎胚共用");
         for (int i = 0; i < topCount; i++) {
             MachineScheduleDTO machine = candidates.get(i);
+            int specifyScore = resolveLimitSpecifyScore(context, sku, machine);
+            int singleCtrlScore = resolveSingleControlScore(context, sku, machine);
+            int normalMachineScore = resolveNormalMachinePriorityValue(matchResult, machine);
+            int specMatchScore = resolveSpecMatchScore(sku, machine);
+            int proSizeMatchScore = resolveProSizeMatchScore(sku, machine);
+            double inchDistance = resolveInchDistance(sku, machine);
+            int capsuleScore = resolveCapsuleAffinityScore(context, sku, machine);
+            int embryoShareCount = resolveEmbryoShareCount(context, machine);
+
+            List<String> sortKeyLevels = java.util.Arrays.asList(
+                    "L1_定点机台=" + specifyScore,
+                    "L2_单控拆分=" + singleCtrlScore,
+                    "L3_普通机台优先=" + normalMachineScore,
+                    "L4_收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()),
+                    "L5_同规格=" + specMatchScore,
+                    "L6_同英寸=" + proSizeMatchScore,
+                    "L7_英寸接近度=" + formatInchDistance(inchDistance),
+                    "L8_胶囊共用=" + capsuleScore,
+                    "L9_胎胚共用=" + embryoShareCount);
+            List<Integer> scores = java.util.Arrays.asList(
+                    specifyScore,
+                    singleCtrlScore,
+                    normalMachineScore,
+                    resolveEndingTimeScore(machine),
+                    specMatchScore,
+                    proSizeMatchScore,
+                    safeInchDistanceScore(inchDistance),
+                    capsuleScore,
+                    embryoShareCount);
+            List<Integer> defaultScores = java.util.Arrays.asList(1, 1, 0, 0, 1, 1, 0, 1, 0);
+            String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
+            String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
+
+            boolean isSingleCtrl = LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode());
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     (i + 1)
-                            + ". 机台=" + PriorityTraceLogHelper.safeText(machine.getMachineCode())
-                            + ", 名称=" + PriorityTraceLogHelper.safeText(machine.getMachineName())
-                            + ", 收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime())
-                            + ", 普通机台=" + PriorityTraceLogHelper.yesNo(
-                            LhMachineHardMatchUtil.isNormalMachine(machine))
-                            + ", 定点机台=" + PriorityTraceLogHelper.yesNo(resolveLimitSpecifyScore(context, sku, machine) == 0)
-                            + ", 同规格=" + PriorityTraceLogHelper.yesNo(resolveSpecMatchScore(sku, machine) == 0)
-                            + ", 同英寸=" + PriorityTraceLogHelper.yesNo(resolveProSizeMatchScore(sku, machine) == 0)
-                            + ", 英寸差=" + resolveInchDistance(sku, machine)
-                            + ", 胶囊共用=" + PriorityTraceLogHelper.yesNo(resolveCapsuleAffinityScore(context, sku, machine) == 0)
-                            + ", 胎胚共用数=" + resolveEmbryoShareCount(context, machine)
-                            + ", 机台顺序号=" + machine.getMachineOrder());
+                            + ". " + PriorityTraceLogHelper.kv("机台", machine.getMachineCode())
+                            + ", " + PriorityTraceLogHelper.kv("名称", machine.getMachineName())
+                            + ", " + PriorityTraceLogHelper.kv("状态", machine.getStatus())
+                            + ", " + PriorityTraceLogHelper.kv("可用", PriorityTraceLogHelper.yesNo(MachineStatusUtil.isEnabled(machine.getStatus())))
+                            + ", " + PriorityTraceLogHelper.kv("单控", PriorityTraceLogHelper.yesNo(isSingleCtrl))
+                            + ", " + PriorityTraceLogHelper.kv("定点", PriorityTraceLogHelper.yesNo(specifyScore == 0))
+                            + ", " + PriorityTraceLogHelper.kv("支持SKU", PriorityTraceLogHelper.yesNo(true))
+                            + ", " + PriorityTraceLogHelper.kv("当前在机", machine.getPreviousMaterialCode())
+                            + ", " + PriorityTraceLogHelper.kv("收尾时间", PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()))
+                            + ", " + PriorityTraceLogHelper.kv("同规格", PriorityTraceLogHelper.yesNo(specMatchScore == 0))
+                            + ", " + PriorityTraceLogHelper.kv("同英寸", PriorityTraceLogHelper.yesNo(proSizeMatchScore == 0))
+                            + ", " + PriorityTraceLogHelper.kv("英寸差", formatInchDistance(inchDistance))
+                            + ", " + PriorityTraceLogHelper.kv("胶囊共用", PriorityTraceLogHelper.yesNo(capsuleScore == 0))
+                            + ", " + PriorityTraceLogHelper.kv("胎胚共用数", embryoShareCount)
+                            + ", " + PriorityTraceLogHelper.kv("机台顺序", machine.getMachineOrder())
+                            + ", " + PriorityTraceLogHelper.kv("SortKey", sortKey)
+                            + ", " + PriorityTraceLogHelper.kv("HitLevel", hitLevel));
         }
+        if (PriorityTraceLogHelper.sizeOf(candidates) > topN) {
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "... 共" + PriorityTraceLogHelper.sizeOf(candidates) + "台，仅展示前" + topN + "台");
+        }
+        // 最终选中机台
+        if (!CollectionUtils.isEmpty(candidates)) {
+            MachineScheduleDTO best = candidates.get(0);
+            String selectReason = resolveMachineSelectReason(context, sku, matchResult, best);
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "最终选中机台: " + best.getMachineCode()
+                            + ", 选中原因: " + selectReason);
+        }
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
-        log.info("{}\n{}", title, detail);
-        PriorityTraceLogHelper.appendProcessLog(context, title, detail);
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 解析机台选中原因。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param matchResult 特殊物料命中结果
+     * @param machine 选中机台
+     * @return 选中原因
+     */
+    private String resolveMachineSelectReason(LhScheduleContext context, SkuScheduleDTO sku,
+                                              SpecialMaterialMatchResult matchResult,
+                                              MachineScheduleDTO machine) {
+        List<String> reasons = new ArrayList<>(4);
+        if (resolveLimitSpecifyScore(context, sku, machine) == 0) {
+            reasons.add("定点机台优先");
+        }
+        if (LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode())
+                && shouldReserveSingleControlForTrialSku(sku)) {
+            reasons.add("单控机台优先");
+        }
+        if (resolveSpecMatchScore(sku, machine) == 0) {
+            reasons.add("规格匹配");
+        }
+        if (resolveProSizeMatchScore(sku, machine) == 0) {
+            reasons.add("英寸匹配");
+        }
+        if (resolveCapsuleAffinityScore(context, sku, machine) == 0) {
+            reasons.add("胶囊共用");
+        }
+        if (machine.getEstimatedEndTime() != null) {
+            reasons.add("收尾时间最近");
+        }
+        if (reasons.isEmpty()) {
+            reasons.add("排序首位默认");
+        }
+        return String.join("，", reasons);
+    }
+
+    /**
+     * 解析普通机台优先级数值（仅用于日志输出）。
+     *
+     * @param matchResult 特殊物料命中结果
+     * @param machine 机台
+     * @return 优先级数值
+     */
+    private int resolveNormalMachinePriorityValue(SpecialMaterialMatchResult matchResult,
+                                                   MachineScheduleDTO machine) {
+        if (Objects.nonNull(matchResult) && matchResult.isSpecial()) {
+            return 0;
+        }
+        return LhMachineHardMatchUtil.resolveNormalMachinePriority(machine);
+    }
+
+    /**
+     * 解析收尾时间得分，用于 HitLevel 比较（0=无收尾时间靠后，1=有收尾时间优先）。
+     */
+    private static int resolveEndingTimeScore(MachineScheduleDTO machine) {
+        return machine != null && machine.getEstimatedEndTime() != null ? 1 : 0;
     }
 
     /**

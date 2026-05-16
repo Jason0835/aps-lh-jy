@@ -56,6 +56,7 @@ import javax.annotation.Resource;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
@@ -832,7 +833,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 当所有候选机台都无法单机收完时，优先选择“先吃小块、把尾量集中留给另一台机台”的候选。
+     * 当所有候选机台都无法单机收完时，优先选择"先吃小块、把尾量集中留给另一台机台"的候选。
      * <p>仅在剩余尾量能够被其他候选机台单机承接时生效，避免把尾量拆得更碎。</p>
      *
      * @param context 排程上下文
@@ -956,6 +957,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @param success 是否成功
      * @param startTimeText 开产时间文本或附加说明
      */
+    /**
+     * 输出新增排产机台决策日志（含SKU基本信息和最终选中原因）。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param candidates 候选机台列表
+     * @param localSearchSuggestedMachine 局部搜索评估机台
+     * @param finalMachine 最终选中机台
+     * @param excludedMachineCodes 已排除机台编码
+     * @param failReason 失败原因
+     * @param success 是否成功
+     * @param startTimeText 开产时间文本或附加说明
+     */
     private void traceNewSpecMachineDecision(LhScheduleContext context, SkuScheduleDTO sku,
                                              List<MachineScheduleDTO> candidates,
                                              MachineScheduleDTO localSearchSuggestedMachine,
@@ -967,35 +981,155 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (!PriorityTraceLogHelper.isEnabled(context)) {
             return;
         }
-        String title = "新增排产机台决策";
-        StringBuilder detailBuilder = new StringBuilder(512);
-        MachineScheduleDTO baseFirstMachine = CollectionUtils.isEmpty(candidates) ? null : candidates.get(0);
+        String title = "SKU选机台TOP5候选列表";
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
+
+        // SKU基本信息
+        String skuType = resolveNewSpecSkuType(sku);
+        boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                "SKU=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())
-                        + ", 候选数=" + PriorityTraceLogHelper.sizeOf(candidates)
-                        + ", 启用局部搜索评估=" + PriorityTraceLogHelper.yesNo(localSearchSuggestedMachine != null));
-        PriorityTraceLogHelper.appendLine(detailBuilder,
-                "基础候选首位机台=" + PriorityTraceLogHelper.safeText(
-                        baseFirstMachine == null ? null : baseFirstMachine.getMachineCode())
-                        + ", 局部搜索评估机台=" + PriorityTraceLogHelper.safeText(
-                        localSearchSuggestedMachine == null ? null : localSearchSuggestedMachine.getMachineCode())
-                        + ", 最终选中机台=" + PriorityTraceLogHelper.safeText(
-                        finalMachine == null ? null : finalMachine.getMachineCode()));
-        PriorityTraceLogHelper.appendLine(detailBuilder,
-                "已排除机台=" + (CollectionUtils.isEmpty(excludedMachineCodes)
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("SKU", sku.getMaterialCode())
+                        + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
+                        + ", " + PriorityTraceLogHelper.kv("待排产量", sku.resolveTargetScheduleQty())
+                        + ", " + PriorityTraceLogHelper.kv("SKU类型", skuType)
+                        + ", " + PriorityTraceLogHelper.kv("是否收尾", PriorityTraceLogHelper.yesNo(isEnding))
+                        + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
+                        + ", " + PriorityTraceLogHelper.kv("候选机台总数", PriorityTraceLogHelper.sizeOf(candidates))
+                        + ", " + PriorityTraceLogHelper.kv("有效候选数", PriorityTraceLogHelper.sizeOf(candidates))
+                        + ", " + PriorityTraceLogHelper.kv("已排除机台", CollectionUtils.isEmpty(excludedMachineCodes)
                         ? "-" : String.join(",", excludedMachineCodes)));
+
+        // TOP5 候选机台
+        int topN = LhScheduleConstant.SKU_MACHINE_CANDIDATE_TOP_N;
+        int outputCount = Math.min(topN, PriorityTraceLogHelper.sizeOf(candidates));
+        if (outputCount > 0) {
+            PriorityTraceLogHelper.appendLine(detailBuilder, "TOP" + outputCount + "候选排序:");
+            for (int i = 0; i < outputCount; i++) {
+                MachineScheduleDTO machine = candidates.get(i);
+                boolean isSingleCtrl = LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode());
+                String reasonSuffix = (i == 0 && success && finalMachine != null
+                        && StringUtils.equals(machine.getMachineCode(), finalMachine.getMachineCode()))
+                        ? "最优候选" : ("候选" + (i + 1));
+                PriorityTraceLogHelper.appendLine(detailBuilder,
+                        (i + 1)
+                                + ". " + PriorityTraceLogHelper.kv("机台", machine.getMachineCode())
+                                + ", " + PriorityTraceLogHelper.kv("名称", machine.getMachineName())
+                                + ", " + PriorityTraceLogHelper.kv("单控", PriorityTraceLogHelper.yesNo(isSingleCtrl))
+                                + ", " + PriorityTraceLogHelper.kv("收尾时间", PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()))
+                                + ", " + PriorityTraceLogHelper.kv("当前在机", machine.getPreviousMaterialCode())
+                                + ", " + PriorityTraceLogHelper.kv("前规格", machine.getPreviousSpecCode())
+                                + ", " + PriorityTraceLogHelper.kv("机台顺序", machine.getMachineOrder())
+                                + ", " + PriorityTraceLogHelper.kv("原因", reasonSuffix));
+            }
+            if (PriorityTraceLogHelper.sizeOf(candidates) > topN) {
+                PriorityTraceLogHelper.appendLine(detailBuilder,
+                        "... 共" + PriorityTraceLogHelper.sizeOf(candidates) + "台，仅展示前" + topN + "台");
+            }
+        }
+
+        // 局部搜索评估
+        if (localSearchSuggestedMachine != null) {
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "局部搜索评估机台: " + localSearchSuggestedMachine.getMachineCode());
+        }
+
+        // 最终选中
+        String selectReason = resolveNewSpecMachineSelectReason(context, sku, candidates, finalMachine,
+                localSearchSuggestedMachine, excludedMachineCodes);
+        PriorityTraceLogHelper.appendLine(detailBuilder,
+                PriorityTraceLogHelper.kv("最终选中机台", finalMachine == null ? "-" : finalMachine.getMachineCode())
+                        + ", " + PriorityTraceLogHelper.kv("选中原因", selectReason));
         if (success) {
             PriorityTraceLogHelper.appendLine(detailBuilder,
-                    "决策结果=成功, 开产时间=" + PriorityTraceLogHelper.safeText(startTimeText));
+                    "决策结果: 成功, 开产时间=" + PriorityTraceLogHelper.safeText(startTimeText));
         } else {
             PriorityTraceLogHelper.appendLine(detailBuilder,
-                    "决策结果=失败, 原因=" + PriorityTraceLogHelper.safeText(
+                    "决策结果: 失败, 原因=" + PriorityTraceLogHelper.safeText(
                             failReason == null ? null : failReason.getDescription())
                             + ", 备注=" + PriorityTraceLogHelper.safeText(startTimeText));
         }
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
-        log.info("{}\n{}", title, detail);
-        PriorityTraceLogHelper.appendProcessLog(context, title, detail);
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 解析新增排产SKU类型描述。
+     *
+     * @param sku SKU
+     * @return 类型描述
+     */
+    private static String resolveNewSpecSkuType(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return "-";
+        }
+        if (ConstructionStageEnum.TRIAL.getCode().equals(sku.getConstructionStage())) {
+            return "试制";
+        }
+        if (sku.isSmallBatchValidation()) {
+            return "小批量";
+        }
+        if (ConstructionStageEnum.MASS_TRIAL.getCode().equals(sku.getConstructionStage())) {
+            return "量试";
+        }
+        if (ConstructionStageEnum.FORMAL.getCode().equals(sku.getConstructionStage())) {
+            return "正式";
+        }
+        return sku.getConstructionStage() != null ? sku.getConstructionStage() : "-";
+    }
+
+    /**
+     * 解析新增排产选机台最终选中原因。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param candidates 候选机台列表
+     * @param finalMachine 最终选中机台
+     * @param localSearchSuggestedMachine 局部搜索评估机台
+     * @param excludedMachineCodes 已排除机台编码
+     * @return 选中原因
+     */
+    private static String resolveNewSpecMachineSelectReason(LhScheduleContext context, SkuScheduleDTO sku,
+                                                             List<MachineScheduleDTO> candidates,
+                                                             MachineScheduleDTO finalMachine,
+                                                             MachineScheduleDTO localSearchSuggestedMachine,
+                                                             Set<String> excludedMachineCodes) {
+        if (finalMachine == null) {
+            if (!CollectionUtils.isEmpty(candidates) && !CollectionUtils.isEmpty(excludedMachineCodes)) {
+                return "候选机台全部被排除: " + String.join(",", excludedMachineCodes);
+            }
+            if (CollectionUtils.isEmpty(candidates)) {
+                return "无可用候选机台";
+            }
+            return "机台选择失败";
+        }
+        List<String> reasons = new ArrayList<>(4);
+        // 局部搜索评估命中
+        if (localSearchSuggestedMachine != null
+                && StringUtils.equals(finalMachine.getMachineCode(), localSearchSuggestedMachine.getMachineCode())) {
+            reasons.add("局部搜索评估优");
+        }
+        // 候选排序首位
+        if (!CollectionUtils.isEmpty(candidates)) {
+            MachineScheduleDTO first = candidates.get(0);
+            if (StringUtils.equals(finalMachine.getMachineCode(), first.getMachineCode())) {
+                reasons.add("候选排序首位");
+            }
+        }
+        // 收尾时间最接近
+        if (finalMachine.getEstimatedEndTime() != null) {
+            reasons.add("收尾时间最近");
+        }
+        // 排除后候选
+        if (!CollectionUtils.isEmpty(excludedMachineCodes)) {
+            reasons.add("排除" + excludedMachineCodes.size() + "台后选取");
+        }
+        if (reasons.isEmpty()) {
+            reasons.add("排序兜底");
+        }
+        return String.join("，", reasons);
     }
 
     /**
@@ -1428,7 +1562,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         List<LhScheduleResult> zeroPlanResults = new ArrayList<>(8);
         for (LhScheduleResult result : context.getScheduleResultList()) {
             // 排除换活字块（换活字块不需要零计划量裁剪）
-            if (!NEW_SPEC_SCHEDULE_TYPE.equals(result.getScheduleType()) 
+            if (!NEW_SPEC_SCHEDULE_TYPE.equals(result.getScheduleType())
                     || "1".equals(result.getIsTypeBlock())) {
                 continue;
             }
