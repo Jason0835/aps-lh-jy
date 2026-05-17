@@ -499,7 +499,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     log.warn("新增SKU多机台排产未全部完成, materialCode: {}, 已排: {}, 剩余: {}, 满班超排: {}, 候选机台已耗尽",
                             sku.getMaterialCode(), totalScheduledQty, remainingQty, sku.getShiftFillOverQty());
                     // 剩余未排量计入未排结果
-                    addUnscheduledResult(context, sku, "多机台产能不足，剩余" + remainingQty + "未排", unscheduledReasonCountMap);
+                    addUnscheduledResult(context, sku, remainingQty,
+                            "多机台产能不足，剩余" + remainingQty + "未排", unscheduledReasonCountMap);
                     iterator.remove();
                 } else if (remainingQty > 0) {
                     // 总量上仍有剩余（可能来自欠产传导），但日计划额度已满足，移出待排队列
@@ -2183,6 +2184,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * 添加未排产记录
      */
     private void addUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku, String reason) {
+        addUnscheduledResult(context, sku, sku.resolveTargetScheduleQty(), reason);
+    }
+
+    /**
+     * 添加未排产记录
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param unscheduledQty 未排数量
+     * @param reason 未排原因
+     */
+    private void addUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku,
+                                      int unscheduledQty, String reason) {
         LhUnscheduledResult unscheduled = new LhUnscheduledResult();
         unscheduled.setFactoryCode(context.getFactoryCode());
         unscheduled.setBatchNo(context.getBatchNo());
@@ -2190,7 +2204,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         unscheduled.setMaterialDesc(sku.getMaterialDesc());
         unscheduled.setScheduleDate(context.getScheduleTargetDate());
         unscheduled.setUnscheduledReason(reason);
-        unscheduled.setUnscheduledQty(sku.resolveTargetScheduleQty());
+        unscheduled.setUnscheduledQty(Math.max(0, unscheduledQty));
         unscheduled.setStructureName(sku.getStructureName());
         unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
         unscheduled.setSpecCode(sku.getSpecCode());
@@ -2199,7 +2213,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         unscheduled.setDataSource(AUTO_DATA_SOURCE);
         unscheduled.setIsDelete(0);
         context.getUnscheduledResultList().add(unscheduled);
-        log.debug("新增SKU未排产, SKU: {}, 原因: {}", sku.getMaterialCode(), reason);
+        log.debug("新增SKU未排产, SKU: {}, 未排数量: {}, 原因: {}",
+                sku.getMaterialCode(), Math.max(0, unscheduledQty), reason);
     }
 
     /**
@@ -2208,6 +2223,22 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private void addUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku, String reason,
                                       Map<String, Integer> reasonCountMap) {
         addUnscheduledResult(context, sku, reason);
+        reasonCountMap.merge(reason, 1, Integer::sum);
+    }
+
+    /**
+     * 添加指定数量的未排产记录并累计原因分布。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param unscheduledQty 未排数量
+     * @param reason 未排原因
+     * @param reasonCountMap 原因分布
+     */
+    private void addUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku,
+                                      int unscheduledQty, String reason,
+                                      Map<String, Integer> reasonCountMap) {
+        addUnscheduledResult(context, sku, unscheduledQty, reason);
         reasonCountMap.merge(reason, 1, Integer::sum);
     }
 
