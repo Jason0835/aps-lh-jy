@@ -577,6 +577,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     sku.getMaterialCode(), preferredTrialMachine.getMachineCode());
             return preferredTrialMachine;
         }
+        if (isTrialConstructionStage(sku) && hasSingleControlCandidate(candidates)) {
+            MachineScheduleDTO singleControlMachine = selectAvailableSingleControlMachine(candidates, excludedMachineCodes);
+            if (singleControlMachine != null) {
+                log.info("新增排产试制SKU仅尝试单控机台, materialCode: {}, machineCode: {}",
+                        sku.getMaterialCode(), singleControlMachine.getMachineCode());
+                return singleControlMachine;
+            }
+            log.info("新增排产试制SKU单控候选均已排除，不回落普通机台, materialCode: {}",
+                    sku.getMaterialCode());
+            return null;
+        }
         if (quantityPolicy != null && quantityPolicy.isFullRunForNonTailMachine()) {
             return machineMatch.selectBestMachine(context, sku, candidates, excludedMachineCodes);
         }
@@ -597,6 +608,59 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return tailConcentratedMachine;
         }
         return machineMatch.selectBestMachine(context, sku, candidates, excludedMachineCodes);
+    }
+
+    /**
+     * 判断是否为试制施工阶段。
+     *
+     * @param sku 待排SKU
+     * @return true-试制阶段
+     */
+    private boolean isTrialConstructionStage(SkuScheduleDTO sku) {
+        return sku != null && StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage());
+    }
+
+    /**
+     * 判断候选机台中是否存在单控机台。
+     *
+     * @param candidates 候选机台
+     * @return true-存在单控机台
+     */
+    private boolean hasSingleControlCandidate(List<MachineScheduleDTO> candidates) {
+        if (CollectionUtils.isEmpty(candidates)) {
+            return false;
+        }
+        for (MachineScheduleDTO candidate : candidates) {
+            if (candidate != null && LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 选择尚未排除的单控机台。
+     *
+     * @param candidates 候选机台
+     * @param excludedMachineCodes 已排除机台
+     * @return 可尝试的单控机台
+     */
+    private MachineScheduleDTO selectAvailableSingleControlMachine(List<MachineScheduleDTO> candidates,
+                                                                   Set<String> excludedMachineCodes) {
+        if (CollectionUtils.isEmpty(candidates)) {
+            return null;
+        }
+        for (MachineScheduleDTO candidate : candidates) {
+            if (candidate == null || !LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
+                continue;
+            }
+            if (!CollectionUtils.isEmpty(excludedMachineCodes)
+                    && excludedMachineCodes.contains(candidate.getMachineCode())) {
+                continue;
+            }
+            return candidate;
+        }
+        return null;
     }
 
     /**
@@ -924,6 +988,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
                 || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage());
+    }
+
+    /**
+     * 判断 SKU 是否属于试制/量试。
+     *
+     * @param sku SKU
+     * @return true-试制或量试
+     */
+    private boolean isTrialOrMassTrialSku(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return false;
+        }
+        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isTrial();
     }
 
     /**
@@ -1707,7 +1786,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return true-跳过排产
      */
     private boolean shouldSkipTrialSku(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (sku == null || !sku.isTrial()) {
+        if (sku == null || !isTrialOrMassTrialSku(sku)) {
             return false;
         }
         ITrialProductionStrategy strategy = getTrialProductionStrategy();

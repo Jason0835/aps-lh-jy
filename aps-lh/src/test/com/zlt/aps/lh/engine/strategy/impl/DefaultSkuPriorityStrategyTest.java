@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.JobTypeEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
@@ -353,6 +354,23 @@ class DefaultSkuPriorityStrategyTest {
         assertEquals("MAT-T", context.getNewSpecSkuList().get(1).getMaterialCode());
         assertEquals("MAT-S", context.getNewSpecSkuList().get(2).getMaterialCode());
         assertEquals("MAT-N", context.getNewSpecSkuList().get(3).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldPreferTrialConstructionStageBeforeMassTrial() {
+        SkuScheduleDTO massTrial = sku("3302002637");
+        massTrial.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrial.setHighPriorityPendingQty(999);
+        SkuScheduleDTO trial = sku("3302002216");
+        trial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+
+        LhScheduleContext context = contextWithNewSpec(massTrial, trial);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("3302002216", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "新增规格排序应按施工阶段区分试制和量试，试制阶段优先于量试阶段");
+        assertEquals("3302002637", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     @Test

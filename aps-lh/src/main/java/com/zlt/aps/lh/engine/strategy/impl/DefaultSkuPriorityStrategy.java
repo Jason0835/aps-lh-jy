@@ -131,7 +131,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 构建新增SKU比较器，定点物料、试制量试、小批量验证SKU优先进入新增排产。
+     * 构建新增SKU比较器，定点物料、试制、量试、小批量验证SKU优先进入新增排产。
      *
      * @param context 排程上下文
      * @param priorityComparator 锁交期/延期/结构优先比较器
@@ -146,10 +146,73 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 .comparingInt((SkuScheduleDTO sku) -> LhSpecifyMachineUtil.hasLimitSpecifyMachine(
                         context, sku.getMaterialCode()) ? 0 : 1)
                 .thenComparingInt(sku -> isSingleCandidateSpecialPriority(singleCandidateSpecialPriorityMap, sku) ? 0 : 1)
+                .thenComparing(this::compareTrialMassConstructionStage)
                 .thenComparing(priorityComparator)
-                .thenComparingInt(sku -> sku.isTrial() ? 0 : 1)
+                .thenComparingInt(this::resolveConstructionStagePriority)
                 .thenComparingInt(sku -> sku.isSmallBatchValidation() ? 0 : 1)
                 .thenComparing(tailComparator);
+    }
+
+    /**
+     * 仅在明确的试制与量试之间提前比较施工阶段，避免影响正式SKU的结构收尾优先级。
+     *
+     * @param left 左侧SKU
+     * @param right 右侧SKU
+     * @return 试制在量试前；其他组合不改变既有顺序
+     */
+    private int compareTrialMassConstructionStage(SkuScheduleDTO left, SkuScheduleDTO right) {
+        boolean leftTrial = isConstructionStage(left, ConstructionStageEnum.TRIAL.getCode());
+        boolean rightTrial = isConstructionStage(right, ConstructionStageEnum.TRIAL.getCode());
+        boolean leftMassTrial = isConstructionStage(left, ConstructionStageEnum.MASS_TRIAL.getCode());
+        boolean rightMassTrial = isConstructionStage(right, ConstructionStageEnum.MASS_TRIAL.getCode());
+        if (leftTrial && rightMassTrial) {
+            return -1;
+        }
+        if (leftMassTrial && rightTrial) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * 判断施工阶段是否匹配。
+     *
+     * @param sku 待排SKU
+     * @param constructionStage 施工阶段
+     * @return true-匹配
+     */
+    private boolean isConstructionStage(SkuScheduleDTO sku, String constructionStage) {
+        return Objects.nonNull(sku) && StringUtils.equals(constructionStage, sku.getConstructionStage());
+    }
+
+    /**
+     * 解析施工阶段优先级，试制优先于量试，isTrial 仅作为试制/量试总标识的兼容兜底。
+     *
+     * @param sku 待排SKU
+     * @return 排序优先级，数值越小越靠前
+     */
+    private int resolveConstructionStagePriority(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 3;
+        }
+        if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
+            return 0;
+        }
+        if (StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isTrial()) {
+            return 1;
+        }
+        return 2;
+    }
+
+    /**
+     * 判断 SKU 是否属于试制/量试。
+     *
+     * @param sku SKU
+     * @return true-试制或量试
+     */
+    private boolean isTrialOrMassTrialSku(SkuScheduleDTO sku) {
+        return resolveConstructionStagePriority(sku) <= 1;
     }
 
     /**
@@ -515,7 +578,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             "L4_延误天数=" + (sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0),
                             "L5_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
                             "L6_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0),
-                            "L7_试制=" + (sku.isTrial() ? 0 : 1),
+                            "L7_施工阶段优先=" + resolveConstructionStagePriority(sku),
                             "L8_小批量=" + (sku.isSmallBatchValidation() ? 0 : 1),
                             "L9_高优待排=" + (-sku.getHighPriorityPendingQty()),
                             "L10_周期待排=" + (-sku.getCycleProductionPendingQty()),
@@ -529,14 +592,14 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0,
                             structureAllEndingPriority ? 0 : 1,
                             structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
-                            sku.isTrial() ? 0 : 1,
+                            resolveConstructionStagePriority(sku),
                             sku.isSmallBatchValidation() ? 0 : 1,
                             -sku.getHighPriorityPendingQty(),
                             -sku.getCycleProductionPendingQty(),
                             -sku.getMidPriorityPendingQty(),
                             -sku.getConventionProductionPendingQty(),
                             resolveOpenProductionLateScore(context, sku));
-                    defaultScores = Arrays.asList(1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0);
+                    defaultScores = Arrays.asList(1, 1, 1, 0, 1, 0, 2, 1, 0, 0, 0, 0, 0);
                 } else {
                     sortKeyLevels = Arrays.asList(
                             "L1_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
@@ -571,7 +634,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                                 + ", " + PriorityTraceLogHelper.kv("续作", yesNoFromScheduleType(sku.getScheduleType()))
                                 + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.yesNo(ending))
                                 + ", " + PriorityTraceLogHelper.kv("阶段", constructionStageDesc)
-                                + ", " + PriorityTraceLogHelper.kv("试制", PriorityTraceLogHelper.yesNo(sku.isTrial()))
+                                + ", " + PriorityTraceLogHelper.kv("试制量试", PriorityTraceLogHelper.yesNo(isTrialOrMassTrialSku(sku)))
                                 + ", " + PriorityTraceLogHelper.kv("特殊材料", PriorityTraceLogHelper.yesNo(isSpecial))
                                 + ", " + PriorityTraceLogHelper.kv("定点机台", PriorityTraceLogHelper.yesNo(isSpecifyMachine))
                                 + ", " + PriorityTraceLogHelper.kv("月计划量", sku.getMonthPlanQty())
@@ -613,9 +676,6 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     private static String resolveConstructionStageDesc(SkuScheduleDTO sku) {
         if (sku == null) {
             return "-";
-        }
-        if (sku.isTrial()) {
-            return "试制";
         }
         if (sku.isSmallBatchValidation()) {
             return "小批量";

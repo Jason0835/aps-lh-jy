@@ -510,6 +510,116 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldNotFallbackToNormalMachineWhenTrialSingleControlFailed() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001575");
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO singleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO normalMachine = buildMachine("K1111", dateTime(2026, 4, 17, 6, 0));
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                return Arrays.asList(singleControlMachine, normalMachine);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (!excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+        IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                if ("K1501R".equals(machineCode)) {
+                    return null;
+                }
+                return endingTime;
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                return 99;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(), "试制单控候选失败后不应回落普通机台排产");
+        assertEquals(1, context.getUnscheduledResultList().size(), "试制单控候选失败后应保留未排记录");
+        assertEquals("3302001575", context.getUnscheduledResultList().get(0).getMaterialCode());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldSkipTrialConstructionStageWithoutTrialFlagWhenNoSchedulableDay() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, new ITrialProductionStrategy() {
+            @Override
+            public List<SkuScheduleDTO> filterTrialSkus(LhScheduleContext context, List<SkuScheduleDTO> allSkus) {
+                return allSkus;
+            }
+
+            @Override
+            public boolean canScheduleTrialOnDate(LhScheduleContext context, Date targetDate) {
+                return false;
+            }
+
+            @Override
+            public boolean canScheduleTrialSkuOnDate(LhScheduleContext context, SkuScheduleDTO trialSku, Date targetDate) {
+                return false;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate) {
+                return false;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate, String materialCode) {
+                return false;
+            }
+
+            @Override
+            public String matchTrialMachine(LhScheduleContext context, SkuScheduleDTO trialSku) {
+                return "K1501R";
+            }
+        });
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002216");
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        context.getNewSpecSkuList().add(sku);
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0))),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(), "试制施工阶段即使未显式打 isTrial，也应走试制禁排判断");
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals("试制量试当日不可排产", context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    @Test
     void scheduleNewSpecs_shouldNotSkipTrialSkuWhenTargetSundayButWindowStartsOnWorkday() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

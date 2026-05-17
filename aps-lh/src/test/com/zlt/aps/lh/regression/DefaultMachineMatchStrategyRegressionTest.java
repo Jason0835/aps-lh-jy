@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.JobTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -188,6 +189,29 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertEquals(2, candidates.size(), "有单控且有普通机台时，试制量试应保留单控候选");
         assertEquals("K1501L", candidates.get(0).getMachineCode(),
                 "单控机台未收尾但可用时，试制量试仍应优先占用单控机台");
+    }
+
+    @Test
+    void matchMachines_shouldKeepOnlySingleControlCandidatesForTrialConstructionStage() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+
+        MachineScheduleDTO normalMachine = machine("K1111", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 12, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+
+        SkuScheduleDTO sku = sku("3302001575", "SPEC-A", "19.5");
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(1, candidates.size(), "试制施工阶段命中单控机台时，只能保留单控候选");
+        assertEquals("K1501R", candidates.get(0).getMachineCode(),
+                "试制施工阶段不应回落普通机台 K1111");
     }
 
     @Test

@@ -162,6 +162,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (CollectionUtils.isEmpty(singleControlCandidates)) {
             return candidates;
         }
+        if (isTrialConstructionStage(sku)) {
+            return singleControlCandidates;
+        }
         if (shouldReserveSingleControlForTrialSku(sku)) {
             return candidates;
         }
@@ -187,6 +190,16 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
                 || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage());
+    }
+
+    /**
+     * 判断是否为试制施工阶段。
+     *
+     * @param sku 待排SKU
+     * @return true-试制阶段
+     */
+    private boolean isTrialConstructionStage(SkuScheduleDTO sku) {
+        return sku != null && StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage());
     }
 
     @Override
