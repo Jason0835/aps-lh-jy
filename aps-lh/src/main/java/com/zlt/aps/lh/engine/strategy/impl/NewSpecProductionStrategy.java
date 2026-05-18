@@ -241,7 +241,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         sku.getMaterialCode(), sku.getStructureName(), sku.getSpecCode(),
                         sku.getProSize(), sku.resolveTargetScheduleQty());
                 traceNewSpecMachineDecision(context, sku, candidates, null, null,
-                        new HashSet<String>(0), NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED,
+                        new HashSet<String>(0), new LinkedHashMap<String, String>(0),
+                        NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED,
                         false, "无可用硫化机台");
                 addUnscheduledResult(context, sku, "无可用硫化机台", unscheduledReasonCountMap);
                 iterator.remove();
@@ -258,6 +259,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             boolean scheduled = false;
             NewSpecFailReasonEnum failReason = NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED;
             Set<String> excludedMachineCodes = new HashSet<>(candidates.size());
+            Map<String, String> excludedMachineReasonMap = new LinkedHashMap<>(candidates.size());
             Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
             // 初始化多机台拆量剩余量：需求目标保留月计划口径，实际拆机按日计划账本剩余额度收敛。
             int remainingQty = resolveSchedulableRemainingQty(sku);
@@ -338,6 +340,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
                 if (mouldChangeStartTime == null) {
                     excludedMachineCodes.add(machineCode);
+                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                            switchAllocateFailReason == NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED
+                                    ? "首检分配失败" : "换模窗口分配失败",
+                            machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                            inspectionTime, productionStartTime, null, null, null);
                     failReason = selectHigherPriorityFailReason(
                             failReason, switchAllocateFailReason == null
                                     ? NewSpecFailReasonEnum.MOULD_CHANGE_SHIFT_ALLOCATE_FAILED
@@ -367,6 +374,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     inspectionBalance.rollbackInspection(context, inspectionTime);
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     excludedMachineCodes.add(machineCode);
+                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                            "排程窗口内无可开产时间",
+                            machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                            inspectionTime, productionStartTime, null, null, null);
                     failReason = selectHigherPriorityFailReason(
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
                     continue;
@@ -395,6 +406,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     inspectionBalance.rollbackInspection(context, inspectionTime);
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     excludedMachineCodes.add(machineCode);
+                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                            "动态分配后本机台计划量为0",
+                            machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                            inspectionTime, firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty, null);
                     failReason = selectHigherPriorityFailReason(
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
                     continue;
@@ -413,6 +428,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     // 候选机台失败时恢复原目标量，避免把本次失败收敛值泄漏到后续候选机台。
                     sku.setTargetScheduleQty(originalTargetScheduleQty);
                     excludedMachineCodes.add(machineCode);
+                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                            "结果无有效班次计划量",
+                            machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                            inspectionTime, firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty, null);
                     failReason = selectHigherPriorityFailReason(
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
                     continue;
@@ -431,6 +450,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         break;
                     }
                     excludedMachineCodes.add(machineCode);
+                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                            "日计划额度回裁后为0",
+                            machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                            inspectionTime, firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty,
+                            machineScheduledQty);
                     failReason = selectHigherPriorityFailReason(
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
                     continue;
@@ -473,6 +497,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 // 一台排不完，保留原业务目标量，下一台机台按剩余缺口动态计算本机台计划量
                 sku.setTargetScheduleQty(originalTargetScheduleQty);
                 excludedMachineCodes.add(machineCode);
+                recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                        "本机台已排产但仍有剩余，继续尝试下一台",
+                        machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                        inspectionTime, firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty,
+                        machineScheduledQty);
                 log.info("新增SKU一台机台未排完，继续尝试下一台, materialCode: {}, 本机台: {}, 已排: {}, 剩余: {}",
                         sku.getMaterialCode(), machineCode, totalScheduledQty, remainingQty);
             }
@@ -485,7 +514,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         sku.resolveTargetScheduleQty(), candidates.size(), excludedMachineCodes,
                         failReason.getDescription());
                 traceNewSpecMachineDecision(context, sku, candidates, localSearchSuggestedMachine, null,
-                        excludedMachineCodes, failReason, false, null);
+                        excludedMachineCodes, excludedMachineReasonMap, failReason, false, null);
                 addUnscheduledResult(context, sku, failReason.getDescription(), unscheduledReasonCountMap);
                 iterator.remove();
                 // 多机台尝试但未排部分也记录未排
@@ -509,7 +538,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     iterator.remove();
                 }
                 traceNewSpecMachineDecision(context, sku, candidates, localSearchSuggestedMachine, finalMachine,
-                        excludedMachineCodes, null, true,
+                        excludedMachineCodes, excludedMachineReasonMap, null, true,
                         PriorityTraceLogHelper.formatDateTime(finalProductionStartTime));
             }
         }
@@ -1034,6 +1063,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @param localSearchSuggestedMachine 局部搜索评估机台
      * @param finalMachine 最终选中机台
      * @param excludedMachineCodes 已排除机台编码
+     * @param excludedMachineReasonMap 已排除机台原因明细
      * @param failReason 失败原因
      * @param success 是否成功
      * @param startTimeText 开产时间文本或附加说明
@@ -1043,6 +1073,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                              MachineScheduleDTO localSearchSuggestedMachine,
                                              MachineScheduleDTO finalMachine,
                                              Set<String> excludedMachineCodes,
+                                             Map<String, String> excludedMachineReasonMap,
                                              NewSpecFailReasonEnum failReason,
                                              boolean success,
                                              String startTimeText) {
@@ -1097,6 +1128,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
         }
 
+        appendExcludedMachineReasonTrace(detailBuilder, excludedMachineReasonMap);
+
         // 局部搜索评估
         if (localSearchSuggestedMachine != null) {
             PriorityTraceLogHelper.appendLine(detailBuilder,
@@ -1121,6 +1154,76 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
         PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 记录候选机台排除原因明细。
+     *
+     * @param excludedMachineReasonMap 排除原因明细
+     * @param machineCode 机台编码
+     * @param reason 排除原因
+     * @param machineReadyTime 机台就绪时间
+     * @param switchReadyTime 切换就绪时间
+     * @param mouldChangeStartTime 换模开始时间
+     * @param mouldChangeCompleteTime 换模完成时间
+     * @param inspectionTime 首检时间
+     * @param productionStartTime 开产时间
+     * @param maxQtyToWindowEnd 窗口最大可排量
+     * @param machinePlanQty 本机台计划量
+     * @param machineScheduledQty 日计划回裁后排产量
+     */
+    private void recordExcludedMachineReason(Map<String, String> excludedMachineReasonMap,
+                                             String machineCode,
+                                             String reason,
+                                             Date machineReadyTime,
+                                             Date switchReadyTime,
+                                             Date mouldChangeStartTime,
+                                             Date mouldChangeCompleteTime,
+                                             Date inspectionTime,
+                                             Date productionStartTime,
+                                             Integer maxQtyToWindowEnd,
+                                             Integer machinePlanQty,
+                                             Integer machineScheduledQty) {
+        if (excludedMachineReasonMap == null || StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        StringBuilder reasonBuilder = new StringBuilder(256);
+        reasonBuilder.append(PriorityTraceLogHelper.kv("排除原因", reason));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("机台就绪",
+                LhScheduleTimeUtil.formatDateTime(machineReadyTime)));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("切换就绪",
+                LhScheduleTimeUtil.formatDateTime(switchReadyTime)));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("换模开始",
+                LhScheduleTimeUtil.formatDateTime(mouldChangeStartTime)));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("换模完成",
+                LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime)));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("首检",
+                LhScheduleTimeUtil.formatDateTime(inspectionTime)));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("开产",
+                LhScheduleTimeUtil.formatDateTime(productionStartTime)));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("最大可排量", maxQtyToWindowEnd));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("本机台计划量", machinePlanQty));
+        reasonBuilder.append(", ").append(PriorityTraceLogHelper.kv("日计划回裁量", machineScheduledQty));
+        excludedMachineReasonMap.put(machineCode, reasonBuilder.toString());
+    }
+
+    /**
+     * 输出候选机台排除原因明细。
+     *
+     * @param detailBuilder 日志明细
+     * @param excludedMachineReasonMap 排除原因明细
+     */
+    private void appendExcludedMachineReasonTrace(StringBuilder detailBuilder,
+                                                  Map<String, String> excludedMachineReasonMap) {
+        if (detailBuilder == null || CollectionUtils.isEmpty(excludedMachineReasonMap)) {
+            return;
+        }
+        PriorityTraceLogHelper.appendLine(detailBuilder, "排除明细:");
+        for (Map.Entry<String, String> entry : excludedMachineReasonMap.entrySet()) {
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "- " + PriorityTraceLogHelper.kv("机台", entry.getKey())
+                            + ", " + PriorityTraceLogHelper.safeText(entry.getValue()));
+        }
     }
 
     /**

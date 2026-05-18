@@ -1098,6 +1098,39 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldWriteExcludedMachineReasonTraceLogWhenCandidateFails() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Map<String, String> scheduleParamMap = new HashMap<>(4);
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1");
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_LOCAL_SEARCH, "0");
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001885");
+        sku.setTargetScheduleQty(1);
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2027");
+        machine.setMachineName("K2027");
+        machine.setEstimatedEndTime(dateTime(2026, 4, 19, 23, 0));
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals(1, context.getScheduleLogList().size());
+        LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
+        assertTrue(processLog.getLogDetail().contains("排除明细"));
+        assertTrue(processLog.getLogDetail().contains("K2027"));
+        assertTrue(processLog.getLogDetail().contains("排程窗口内无可开产时间"));
+        assertTrue(processLog.getLogDetail().contains("机台就绪"));
+    }
+
+    @Test
     void scheduleNewSpecs_shouldControlTraceLogVolumeWhenLocalSearchAndTraceEnabled() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
