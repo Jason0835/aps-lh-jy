@@ -19,7 +19,7 @@
 - `07_restore_source_data.sql`
   - 恢复本次案例修改前的源数据
 - `08_restore_all_template.sh`
-  - 按备份目录恢复源数据和结果表模板
+  - 按备份目录恢复源数据和结果表模板，兼容 `restore_source_data.sql` / `restore_source.sql`
 
 ## 推荐执行顺序
 
@@ -49,4 +49,12 @@ mysql -h127.0.0.1 -P3307 -uroot -p123456 apslh < 07_restore_source_data.sql
 
 ```bash
 ./restore_all.sh
+```
+
+或者直接用模板脚本指定备份目录恢复：
+
+```bash
+bash /Users/Jason/IdeaProjects/test/aps-lh-parent/scripts/case-data/3302001513-multi-machine/08_restore_all_template.sh \
+  /tmp/aps-lh-case-3302001513-20260520-134829 \
+  2026-05-03
 ```
