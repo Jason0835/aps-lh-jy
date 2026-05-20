@@ -3,6 +3,8 @@ package com.zlt.aps.lh.engine.strategy.support;
 import lombok.Data;
 
 import java.io.Serializable;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * 单台机台在当前SKU窗口内的可生产段。
@@ -28,6 +30,8 @@ public class MachineProductionSegment implements Serializable {
     private int maxQtyToWindowEnd;
     /** 运行态单班产能 */
     private int shiftCapacity;
+    /** 各班次最大可排产能 */
+    private Map<Integer, Integer> shiftCapacityMap = new LinkedHashMap<Integer, Integer>(8);
     /** 是否需要换模 */
     private boolean needChangeover;
     /** 机台排产角色 */

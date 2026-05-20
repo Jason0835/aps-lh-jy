@@ -463,4 +463,9 @@ public class LhScheduleConfig {
         return getParamIntValue(LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG,
                 LhScheduleConstant.ENABLE_PRIORITY_TRACE_LOG) == 1;
     }
+
+    public int getNewSpecShortageLookAheadDays() {
+        return Math.max(1, getParamIntValue(LhScheduleParamConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS,
+                LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS));
+    }
 }

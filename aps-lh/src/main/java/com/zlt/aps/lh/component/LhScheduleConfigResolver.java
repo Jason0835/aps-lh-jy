@@ -202,6 +202,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.LOCAL_SEARCH_TIME_BUDGET_MS, 1);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG,
                 LhScheduleConstant.ENABLE_PRIORITY_TRACE_LOG);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS,
+                LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS, 1);
 
         // 开停产与试制策略参数
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SHUTDOWN_DAY_MINUS_3_RATE,

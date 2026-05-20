@@ -316,6 +316,9 @@ public final class LhScheduleConstant {
     /** 优先级跟踪日志开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_PRIORITY_TRACE_LOG = 0;
 
+    /** 新增排产欠产追补判断天数默认值（当前天发生欠产后，额外向后观察2天） */
+    public static final int NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = 2;
+
     // ======================== 排序跟踪日志输出控制 ========================
 
     /** SKU排序汇总日志默认输出前N名 */

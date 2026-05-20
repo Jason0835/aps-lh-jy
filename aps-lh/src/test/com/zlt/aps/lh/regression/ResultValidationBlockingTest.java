@@ -141,6 +141,26 @@ class ResultValidationBlockingTest {
     }
 
     @Test
+    void handle_allowsSameSkuEmbryoChangeoverInSameShift() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setBatchNo("LHPC20260413004S");
+        context.setScheduleDate(date(2026, 4, 13));
+        context.setScheduleTargetDate(date(2026, 4, 15));
+
+        LhScheduleResult first = buildChangeResult("K1105", "MAT-A", "EMB-A",
+                dateTime(2026, 4, 13, 6, 0));
+        LhScheduleResult second = buildChangeResult("K1110", "MAT-A", "EMB-A",
+                dateTime(2026, 4, 13, 7, 0));
+        context.setScheduleResultList(Arrays.asList(first, second));
+
+        assertDoesNotThrow(() -> handler.handle(context));
+
+        verify(schedulePersistenceService, times(1)).replaceScheduleAtomically(context);
+        verify(scheduleEventPublisher, times(1)).publish(any());
+    }
+
+    @Test
     void handle_throwsWhenRollingInheritedChangeoverConflictsWithNewResult() {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("FC01");

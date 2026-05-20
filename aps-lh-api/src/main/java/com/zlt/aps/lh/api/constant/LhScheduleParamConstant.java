@@ -188,4 +188,6 @@ public final class LhScheduleParamConstant {
     public static final String LOCAL_SEARCH_TIME_BUDGET_MS = "SYS0304013";
     /** 优先级跟踪日志开关（0-关闭，1-开启） */
     public static final String ENABLE_PRIORITY_TRACE_LOG = "SYS0304014";
+    /** 新增排产欠产追补判断天数 */
+    public static final String NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = "SYS0304015";
 }

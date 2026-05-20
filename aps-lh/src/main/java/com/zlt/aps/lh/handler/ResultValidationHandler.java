@@ -444,6 +444,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                 occupiedMap.put(key, result);
                 continue;
             }
+            if (isSameMaterialGreenTireChangeover(occupiedResult, result)) {
+                continue;
+            }
             String message = String.format("同胎胚换模班次冲突：胎胚[%s] 班次[%s] 机台[%s]与机台[%s]同时换模",
                     result.getEmbryoCode(), shiftIndex,
                     occupiedResult.getLhMachineCode(), result.getLhMachineCode());
@@ -465,6 +468,19 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                 && "1".equals(result.getIsChangeMould())
                 && StringUtils.isNotEmpty(result.getEmbryoCode())
                 && resolveResultPlanQty(result) > 0;
+    }
+
+    /**
+     * 判断同胎胚同班次换模是否属于同SKU并行场景。
+     *
+     * @param occupiedResult 已占用结果
+     * @param currentResult 当前结果
+     * @return true-同SKU并行；false-不是
+     */
+    private boolean isSameMaterialGreenTireChangeover(LhScheduleResult occupiedResult, LhScheduleResult currentResult) {
+        return Objects.nonNull(occupiedResult)
+                && Objects.nonNull(currentResult)
+                && StringUtils.equals(occupiedResult.getMaterialCode(), currentResult.getMaterialCode());
     }
 
     /**

@@ -72,4 +72,20 @@ public class LhScheduleConfigTest {
         Assertions.assertEquals("K1501,K1502", config.getSingleControlMachineCodes());
         Assertions.assertEquals(80, config.getSmallBatchSkuThreshold());
     }
+
+    /**
+     * 用例说明：新增排产欠产追补判断天数默认值为2，配置后按配置值读取。
+     */
+    @Test
+    public void shouldReadNewSpecShortageLookAheadDaysConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals(2, defaultConfig.getNewSpecShortageLookAheadDays());
+
+        Map<String, String> paramMap = new HashMap<>(1);
+        paramMap.put(LhScheduleParamConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS, "3");
+
+        LhScheduleConfig config = new LhScheduleConfig(paramMap);
+
+        Assertions.assertEquals(3, config.getNewSpecShortageLookAheadDays());
+    }
 }
