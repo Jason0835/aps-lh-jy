@@ -1,0 +1,93 @@
+#!/bin/zsh
+set -euo pipefail
+
+DB_HOST=${DB_HOST:-127.0.0.1}
+DB_PORT=${DB_PORT:-3307}
+DB_USER=${DB_USER:-root}
+DB_PASSWORD=${DB_PASSWORD:-123456}
+DB_NAME=${DB_NAME:-apslh}
+BACKUP_DIR=${1:-/tmp/aps-lh-case-3302001513-$(date +%Y%m%d%H%M%S)}
+
+mkdir -p "$BACKUP_DIR"
+
+mysql_base=(mysql -h"${DB_HOST}" -P"${DB_PORT}" -u"${DB_USER}" -p"${DB_PASSWORD}" --default-character-set=utf8mb4 "${DB_NAME}")
+
+"${mysql_base[@]}" --batch --skip-column-names -e "
+SELECT CONCAT('DELETE FROM t_lh_machine_online_info WHERE id=32129411;')
+UNION ALL
+SELECT CONCAT(
+  'UPDATE t_lh_machine_info SET STATUS=', QUOTE(STATUS),
+  ', UPDATE_BY=', QUOTE(UPDATE_BY),
+  ', UPDATE_TIME=', QUOTE(DATE_FORMAT(UPDATE_TIME, '%Y-%m-%d %H:%i:%s')),
+  ' WHERE ID=', ID, ';'
+)
+FROM t_lh_machine_info
+WHERE ID=17188
+UNION ALL
+SELECT CONCAT(
+  'UPDATE t_lh_machine_online_info SET ONLINE_DATE=', QUOTE(DATE_FORMAT(ONLINE_DATE, '%Y-%m-%d')),
+  ', LH_CODE=', QUOTE(LH_CODE),
+  ', MATERIAL_CODE=', QUOTE(MATERIAL_CODE),
+  ', MES_MATERIAL_CODE=', QUOTE(MES_MATERIAL_CODE),
+  ', SPEC_DESC=', QUOTE(SPEC_DESC),
+  ', LR_MOLDS=', QUOTE(LR_MOLDS),
+  ', DATA_VERSION=', QUOTE(DATA_VERSION),
+  ', COMPANY_CODE=', QUOTE(COMPANY_CODE),
+  ', FACTORY_CODE=', QUOTE(FACTORY_CODE),
+  ', IS_DELETE=', IFNULL(CAST(IS_DELETE AS CHAR), 'NULL'),
+  ', CREATE_BY=', QUOTE(CREATE_BY),
+  ', CREATE_TIME=', QUOTE(DATE_FORMAT(CREATE_TIME, '%Y-%m-%d %H:%i:%s')),
+  ', UPDATE_BY=', QUOTE(UPDATE_BY),
+  ', UPDATE_TIME=', QUOTE(DATE_FORMAT(UPDATE_TIME, '%Y-%m-%d %H:%i:%s')),
+  ', REMARK=', QUOTE(REMARK),
+  ', IN_MACHINE_MOULD_CODE=', QUOTE(IN_MACHINE_MOULD_CODE),
+  ' WHERE ID=', ID, ';'
+)
+FROM t_lh_machine_online_info
+WHERE ID=32129410
+UNION ALL
+SELECT CONCAT(
+  'UPDATE t_mp_month_plan_prod_final SET DAY_1=', IFNULL(CAST(DAY_1 AS CHAR), 'NULL'),
+  ', DAY_2=', IFNULL(CAST(DAY_2 AS CHAR), 'NULL'),
+  ', DAY_3=', IFNULL(CAST(DAY_3 AS CHAR), 'NULL'),
+  ', TOTAL_QTY=', IFNULL(CAST(TOTAL_QTY AS CHAR), 'NULL'),
+  ', DIFFERENCE_QTY=', IFNULL(CAST(DIFFERENCE_QTY AS CHAR), 'NULL'),
+  ' WHERE ID=', ID, ';'
+)
+FROM t_mp_month_plan_prod_final
+WHERE ID=703943
+UNION ALL
+SELECT CONCAT(
+  'UPDATE t_mdm_sku_lh_capacity SET CLASS_CAPACITY=', IFNULL(CAST(CLASS_CAPACITY AS CHAR), 'NULL'),
+  ', STANDARD_CAPACITY=', IFNULL(CAST(STANDARD_CAPACITY AS CHAR), 'NULL'),
+  ', APS_CAPACITY=', IFNULL(CAST(APS_CAPACITY AS CHAR), 'NULL'),
+  ', UPDATE_BY=', QUOTE(UPDATE_BY),
+  ', UPDATE_TIME=', QUOTE(DATE_FORMAT(UPDATE_TIME, '%Y-%m-%d %H:%i:%s')),
+  ' WHERE ID=', ID, ' AND IS_DELETE=0;'
+)
+FROM t_mdm_sku_lh_capacity
+WHERE ID=4802;
+" > "${BACKUP_DIR}/restore_source_data.sql"
+
+"${mysql_base[@]}" --batch -e "
+SELECT '=== t_lh_machine_online_info ===';
+SELECT ID, ONLINE_DATE, LH_CODE, MATERIAL_CODE, MES_MATERIAL_CODE, REMARK
+FROM t_lh_machine_online_info
+WHERE ID IN (32129410,32129411)
+ORDER BY ID;
+SELECT '=== t_lh_machine_info ===';
+SELECT ID, MACHINE_CODE, STATUS, IS_DELETE, UPDATE_BY, UPDATE_TIME
+FROM t_lh_machine_info
+WHERE ID=17188;
+SELECT '=== t_mp_month_plan_prod_final ===';
+SELECT ID, MATERIAL_CODE, DAY_1, DAY_2, DAY_3, TOTAL_QTY, DIFFERENCE_QTY
+FROM t_mp_month_plan_prod_final
+WHERE ID=703943;
+SELECT '=== t_mdm_sku_lh_capacity ===';
+SELECT ID, MATERIAL_CODE, CLASS_CAPACITY, STANDARD_CAPACITY, APS_CAPACITY, IS_DELETE
+FROM t_mdm_sku_lh_capacity
+WHERE MATERIAL_CODE='3302001513'
+ORDER BY ID;
+" > "${BACKUP_DIR}/precheck.txt"
+
+echo "备份完成: ${BACKUP_DIR}"

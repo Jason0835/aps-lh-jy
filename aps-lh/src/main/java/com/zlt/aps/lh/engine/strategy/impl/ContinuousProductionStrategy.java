@@ -19,6 +19,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
@@ -54,11 +55,13 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -398,57 +401,77 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
 
         // 按来源SKU分组找出同SKU多机台情况，避免同物料多条SKU共享目标量。
-        Map<SkuScheduleDTO, List<LhScheduleResult>> skuResultMap = new IdentityHashMap<SkuScheduleDTO, List<LhScheduleResult>>();
-        List<SkuScheduleDTO> skuOrder = new ArrayList<>();
+        Map<String, List<LhScheduleResult>> skuResultMap = new LinkedHashMap<String, List<LhScheduleResult>>(16);
+        Map<String, SkuScheduleDTO> sourceSkuMap = new LinkedHashMap<String, SkuScheduleDTO>(16);
+        List<String> skuOrder = new ArrayList<>(16);
         for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (isContinuousPhaseResult(result)) {
-                SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
-                if (sourceSku == null) {
-                    continue;
-                }
-                if (!skuResultMap.containsKey(sourceSku)) {
-                    skuResultMap.put(sourceSku, new ArrayList<LhScheduleResult>());
-                    skuOrder.add(sourceSku);
-                }
-                skuResultMap.get(sourceSku).add(result);
+            if (!isPureContinuousResult(result)) {
+                continue;
             }
+            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+            if (sourceSku == null) {
+                continue;
+            }
+            String groupKey = buildContinuationGroupKey(sourceSku);
+            if (!skuResultMap.containsKey(groupKey)) {
+                skuResultMap.put(groupKey, new ArrayList<LhScheduleResult>());
+                sourceSkuMap.put(groupKey, sourceSku);
+                skuOrder.add(groupKey);
+            }
+            skuResultMap.get(groupKey).add(result);
         }
 
-        for (SkuScheduleDTO sourceSku : skuOrder) {
-            List<LhScheduleResult> skuResults = skuResultMap.get(sourceSku);
+        for (String groupKey : skuOrder) {
+            SkuScheduleDTO sourceSku = sourceSkuMap.get(groupKey);
+            List<LhScheduleResult> skuResults = skuResultMap.get(groupKey);
             if (skuResults.size() <= 1) {
                 continue;
             }
 
-            int targetQty = sourceSku.resolveTargetScheduleQty();
+            log.info("续作同SKU多机台识别, materialCode: {}, 机台列表: {}, 是否多机台: {}",
+                    sourceSku.getMaterialCode(), joinMachineCodes(skuResults), true);
 
-            // 总计划量超过当前排产目标量时才降模
-            int totalPlanQty = skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum();
-            if (targetQty <= 0 || totalPlanQty <= targetQty) {
+            if (shouldReduceContinuationByWorkDate(sourceSku, skuResults)) {
+                reduceContinuationMachinesByWorkDate(context, sourceSku, skuResults, shifts);
                 continue;
             }
 
-            // 按胶囊使用次数升序，减少胶囊使用次数少的机台的计划（胶囊已使用次数少的优先下机）
-            skuResults.sort(Comparator.comparingInt(r -> {
-                MachineScheduleDTO m = context.getMachineScheduleMap().get(r.getLhMachineCode());
-                return m != null ? m.getCapsuleUsageCount() : 0;
-            }));
-
-            int remaining = targetQty;
-            for (LhScheduleResult result : skuResults) {
-                int allocation = Math.min(remaining, ShiftFieldUtil.resolveScheduledQty(result));
-                redistributeShiftQty(context, result, shifts, allocation);
-                remaining -= allocation;
-                if (allocation <= 0) {
-                    // 当前结果已被完全降为0，保留收尾标记，避免后续继续参与续作产量判断。
-                    result.setIsEnd("1");
-                }
+            int targetQty = resolveContinuationDailyDemand(context, sourceSku, skuResults, shifts);
+            int totalPlanQty = skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum();
+            Map<LhScheduleResult, Integer> machineDailyCapacityMap =
+                    calculateMachineDailyCapacityMap(context, skuResults, shifts);
+            int currentMaxDailyCapacity = machineDailyCapacityMap.values().stream().mapToInt(Integer::intValue).sum();
+            log.info("续作多机台降模判断, materialCode: {}, dayN保障量: {}, 当前在机最大日产能: {}, 当前排产量: {}",
+                    sourceSku.getMaterialCode(), targetQty, currentMaxDailyCapacity, totalPlanQty);
+            if (targetQty <= 0) {
+                allocateContinuationQtyForKeptMachines(context, sourceSku, skuResults,
+                        new ArrayList<LhScheduleResult>(0), machineDailyCapacityMap, targetQty, shifts);
+                continue;
             }
+            if (hasEndingResult(skuResults) && totalPlanQty <= targetQty) {
+                log.info("续作多机台收尾无需降模, materialCode: {}, 原因: 当前尾量未超过收尾目标，交由同SKU收尾错峰判断",
+                        sourceSku.getMaterialCode());
+                continue;
+            }
+
+            List<LhScheduleResult> keptResults = selectMachinesToKeepForContinuation(
+                    context, skuResults, machineDailyCapacityMap, targetQty);
+            boolean needReduceMachine = keptResults.size() < skuResults.size()
+                    && currentMaxDailyCapacity > targetQty;
+            if (!needReduceMachine && totalPlanQty <= targetQty) {
+                log.info("续作多机台无需降模, materialCode: {}, 原因: 当前产能或排产量未超过dayN保障量",
+                        sourceSku.getMaterialCode());
+                continue;
+            }
+            allocateContinuationQtyForKeptMachines(context, sourceSku, skuResults,
+                    keptResults, machineDailyCapacityMap, targetQty, shifts);
         }
         // 日额度账本必须在最终结果收口后再同步，并以回裁后的结果驱动零计划与机台状态。
         syncContinuousDailyPlanQuota(context, shifts);
         appendContinuousCompensationSkuList(context);
         // S4.4 收口：零计划续作结果语义统一，并按最终结果同步机台状态。
+        finalizeZeroPlanContinuousResults(context);
+        adjustContinuousSameSkuMultiMachineEndingStagger(context, shifts);
         finalizeZeroPlanContinuousResults(context);
         // 降模或额度回裁会再次改变最终计划量，收口后再统一复核一次收尾标记，确保落库口径一致。
         refreshContinuousEndingFlagByResult(context);
@@ -468,7 +491,903 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         // 续作策略不处理新增规格排产，空实现
     }
 
+    /**
+     * 判断当前续作多机台组是否应按业务日逐日执行降模。
+     *
+     * @param sourceSku 来源SKU
+     * @param skuResults 同SKU续作结果
+     * @return true-按业务日降模
+     */
+    private boolean shouldReduceContinuationByWorkDate(SkuScheduleDTO sourceSku,
+                                                       List<LhScheduleResult> skuResults) {
+        return sourceSku != null
+                && !hasEndingResult(skuResults)
+                && !CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())
+                && sourceSku.getDailyPlanQuotaMap().size() > 1;
+    }
+
+    /**
+     * 按业务日逐日执行续作多机台降模。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param skuResults 同SKU续作结果
+     * @param shifts 全窗口班次
+     */
+    private void reduceContinuationMachinesByWorkDate(LhScheduleContext context,
+                                                      SkuScheduleDTO sourceSku,
+                                                      List<LhScheduleResult> skuResults,
+                                                      List<LhShiftConfigVO> shifts) {
+        Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate = groupShiftsByWorkDate(shifts);
+        List<LhScheduleResult> activeResults = new ArrayList<LhScheduleResult>(skuResults);
+        int remainingTargetQty = Math.max(0, sourceSku.resolveTargetScheduleQty());
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, false);
+        for (Map.Entry<LocalDate, List<LhShiftConfigVO>> entry : shiftMapByDate.entrySet()) {
+            if (CollectionUtils.isEmpty(activeResults)) {
+                break;
+            }
+            LocalDate productionDate = entry.getKey();
+            List<LhShiftConfigVO> dayShifts = entry.getValue();
+            int demandQty = resolveContinuationDailyDemandByDate(sourceSku, productionDate);
+            int effectiveDemandQty = policy.isStrictUpperLimit()
+                    ? Math.min(Math.max(0, demandQty), remainingTargetQty)
+                    : Math.max(0, demandQty);
+            Map<LhScheduleResult, Integer> capacityMap =
+                    calculateMachineDailyCapacityMapByDate(context, activeResults, dayShifts);
+            int totalCapacity = capacityMap.values().stream().mapToInt(Integer::intValue).sum();
+            int totalPlanQty = sumScheduledQtyByShifts(activeResults, dayShifts);
+            log.info("续作多机台按天降模判断, materialCode: {}, 日期: {}, dayN保障量: {}, 剩余窗口目标量: {}, 当日生效目标量: {}, 当前在机最大日产能: {}, 当前排产量: {}",
+                    sourceSku.getMaterialCode(), productionDate, demandQty, remainingTargetQty,
+                    effectiveDemandQty, totalCapacity, totalPlanQty);
+            List<LhScheduleResult> keptResults = selectMachinesToKeepForContinuation(
+                    context, activeResults, capacityMap, effectiveDemandQty);
+            applyContinuationDayAllocation(context, sourceSku, activeResults, keptResults, capacityMap,
+                    demandQty, effectiveDemandQty, remainingTargetQty, productionDate, dayShifts, shifts);
+            remainingTargetQty = Math.max(0, remainingTargetQty - sumScheduledQtyByShifts(activeResults, dayShifts));
+            activeResults = new ArrayList<LhScheduleResult>(keptResults);
+        }
+    }
+
     // ==================== 私有辅助方法 ====================
+
+    /**
+     * 构建续作多机台分组键。
+     * <p>同物料且共享同一份日计划账本的续作副本，才视为同一个业务SKU多机台集合。</p>
+     *
+     * @param sourceSku 来源SKU
+     * @return 分组键
+     */
+    private String buildContinuationGroupKey(SkuScheduleDTO sourceSku) {
+        if (sourceSku == null) {
+            return "";
+        }
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sourceSku.getDailyPlanQuotaMap();
+        String quotaIdentity = quotaMap != null
+                ? String.valueOf(System.identityHashCode(quotaMap))
+                : "SKU-" + System.identityHashCode(sourceSku);
+        return sourceSku.getMaterialCode() + "#" + quotaIdentity;
+    }
+
+    /**
+     * 解析续作阶段结果所属的业务分组键。
+     * <p>续作共享账本分组必须依赖来源SKU映射，缺失时直接报错，避免静默按物料编码串组。</p>
+     *
+     * @param context 排程上下文
+     * @param result 续作阶段结果
+     * @return 业务分组键
+     */
+    private String resolveContinuationGroupKey(LhScheduleContext context, LhScheduleResult result) {
+        if (result == null) {
+            return "";
+        }
+        return buildContinuationGroupKey(requireContinuousPhaseSourceSku(context, result));
+    }
+
+    /**
+     * 拼接续作结果机台编码。
+     *
+     * @param results 续作结果
+     * @return 机台编码列表
+     */
+    private String joinMachineCodes(List<LhScheduleResult> results) {
+        if (CollectionUtils.isEmpty(results)) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(results.size() * 8);
+        for (LhScheduleResult result : results) {
+            if (result == null) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append(",");
+            }
+            builder.append(result.getLhMachineCode());
+        }
+        return builder.toString();
+    }
+
+    /**
+     * 格式化续作多机台明细，便于定位保留/下机原因。
+     *
+     * @param context 排程上下文
+     * @param results 续作结果
+     * @param capacityMap 机台日产能
+     * @return 机台明细字符串
+     */
+    private String formatContinuationMachineDetails(LhScheduleContext context,
+                                                    List<LhScheduleResult> results,
+                                                    Map<LhScheduleResult, Integer> capacityMap) {
+        if (CollectionUtils.isEmpty(results)) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(results.size() * 32);
+        for (LhScheduleResult result : results) {
+            if (result == null) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append(";");
+            }
+            builder.append(StringUtils.defaultString(result.getLhMachineCode()))
+                    .append("(胶囊次数=")
+                    .append(resolveCapsuleUsageCount(context, result))
+                    .append(",日产能=")
+                    .append(Math.max(0, capacityMap.getOrDefault(result, 0)))
+                    .append(")");
+        }
+        return builder.toString();
+    }
+
+    /**
+     * 按业务日聚合排程窗口班次。
+     *
+     * @param shifts 全窗口班次
+     * @return 业务日到班次的映射
+     */
+    private Map<LocalDate, List<LhShiftConfigVO>> groupShiftsByWorkDate(List<LhShiftConfigVO> shifts) {
+        Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate = new LinkedHashMap<LocalDate, List<LhShiftConfigVO>>(4);
+        if (CollectionUtils.isEmpty(shifts)) {
+            return shiftMapByDate;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift == null || shift.getWorkDate() == null) {
+                continue;
+            }
+            LocalDate workDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            shiftMapByDate.computeIfAbsent(workDate, key -> new ArrayList<LhShiftConfigVO>(4)).add(shift);
+        }
+        return shiftMapByDate;
+    }
+
+    /**
+     * 解析指定业务日的续作 dayN 保障量。
+     *
+     * @param sourceSku 来源SKU
+     * @param productionDate 业务日
+     * @return 当日保障量
+     */
+    private int resolveContinuationDailyDemandByDate(SkuScheduleDTO sourceSku, LocalDate productionDate) {
+        if (sourceSku == null || productionDate == null || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
+            return 0;
+        }
+        SkuDailyPlanQuotaDTO quota = sourceSku.getDailyPlanQuotaMap().get(productionDate);
+        if (quota == null) {
+            return 0;
+        }
+        int demandQty = quota.getRemainingQty() > 0 ? quota.getRemainingQty() : quota.getDayPlanQty();
+        log.info("续作多机台dayN保障量解析, materialCode: {}, 日期: {}, dayN: {}, 剩余额度: {}, 保障量: {}",
+                sourceSku.getMaterialCode(), productionDate, quota.getDayPlanQty(),
+                quota.getRemainingQty(), demandQty);
+        return Math.max(0, demandQty);
+    }
+
+    /**
+     * 解析续作多机台当日需保障量。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param skuResults 同SKU续作结果
+     * @param shifts 班次列表
+     * @return 当日需保障量
+     */
+    private int resolveContinuationDailyDemand(LhScheduleContext context,
+                                               SkuScheduleDTO sourceSku,
+                                               List<LhScheduleResult> skuResults,
+                                               List<LhShiftConfigVO> shifts) {
+        if (sourceSku == null) {
+            return 0;
+        }
+        if (hasEndingResult(skuResults)) {
+            int targetQty = sourceSku.resolveTargetScheduleQty();
+            if (targetQty > 0) {
+                log.info("续作多机台收尾严格目标, materialCode: {}, 目标量: {}, 是否补满: false, 是否超排: false",
+                        sourceSku.getMaterialCode(), targetQty);
+                return targetQty;
+            }
+            return !CollectionUtils.isEmpty(skuResults)
+                    ? resolveEndingDemandQty(context, skuResults.get(0)) : 0;
+        }
+        LocalDate productionDate = resolveFirstProductionDate(skuResults, shifts);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sourceSku.getDailyPlanQuotaMap();
+        if (!CollectionUtils.isEmpty(quotaMap) && productionDate != null) {
+            SkuDailyPlanQuotaDTO quota = quotaMap.get(productionDate);
+            if (quota != null) {
+                int demandQty = quota.getRemainingQty() > 0 ? quota.getRemainingQty() : quota.getDayPlanQty();
+                log.info("续作多机台dayN保障量解析, materialCode: {}, 日期: {}, dayN: {}, 剩余额度: {}, 保障量: {}",
+                        sourceSku.getMaterialCode(), productionDate, quota.getDayPlanQty(),
+                        quota.getRemainingQty(), demandQty);
+                return Math.max(0, demandQty);
+            }
+        }
+        return Math.max(0, sourceSku.resolveTargetScheduleQty());
+    }
+
+    /**
+     * 判断续作结果组是否存在收尾结果。
+     *
+     * @param skuResults 同SKU续作结果
+     * @return true-存在收尾结果
+     */
+    private boolean hasEndingResult(List<LhScheduleResult> skuResults) {
+        if (CollectionUtils.isEmpty(skuResults)) {
+            return false;
+        }
+        for (LhScheduleResult result : skuResults) {
+            if (result != null && "1".equals(result.getIsEnd())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析续作结果组的首个生产日期。
+     *
+     * @param skuResults 同SKU续作结果
+     * @param shifts 班次列表
+     * @return 首个生产日期
+     */
+    private LocalDate resolveFirstProductionDate(List<LhScheduleResult> skuResults, List<LhShiftConfigVO> shifts) {
+        if (CollectionUtils.isEmpty(skuResults) || CollectionUtils.isEmpty(shifts)) {
+            return null;
+        }
+        Date firstStartTime = null;
+        LhShiftConfigVO firstShift = null;
+        for (LhScheduleResult result : skuResults) {
+            for (LhShiftConfigVO shift : shifts) {
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shift.getShiftIndex());
+                if (planQty == null || planQty <= 0 || shiftStartTime == null || shift.getWorkDate() == null) {
+                    continue;
+                }
+                if (firstStartTime == null || shiftStartTime.before(firstStartTime)) {
+                    firstStartTime = shiftStartTime;
+                    firstShift = shift;
+                }
+            }
+        }
+        if (firstShift == null || firstShift.getWorkDate() == null) {
+            firstShift = shifts.get(0);
+        }
+        return firstShift.getWorkDate() == null ? null
+                : firstShift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+    }
+
+    /**
+     * 计算续作多机台组内每台机当天可用产能。
+     *
+     * @param context 排程上下文
+     * @param skuResults 同SKU续作结果
+     * @param shifts 班次列表
+     * @return 结果到日产能的映射
+     */
+    private Map<LhScheduleResult, Integer> calculateMachineDailyCapacityMap(LhScheduleContext context,
+                                                                            List<LhScheduleResult> skuResults,
+                                                                            List<LhShiftConfigVO> shifts) {
+        Map<LhScheduleResult, Integer> capacityMap = new IdentityHashMap<LhScheduleResult, Integer>(16);
+        for (LhScheduleResult result : skuResults) {
+            int capacity = calculateMachineDailyCapacity(context, result, shifts);
+            capacityMap.put(result, capacity);
+            MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
+            int capsuleUsageCount = machine != null ? machine.getCapsuleUsageCount() : 0;
+            log.info("续作多机台机台产能排序基础, machineCode: {}, capsuleUsedCount: {}, dailyCapacity: {}",
+                    result.getLhMachineCode(), capsuleUsageCount, capacity);
+        }
+        return capacityMap;
+    }
+
+    /**
+     * 计算续作多机台组在指定业务日内每台机台的可用产能。
+     *
+     * @param context 排程上下文
+     * @param skuResults 同SKU续作结果
+     * @param dayShifts 当日班次
+     * @return 结果到日产能的映射
+     */
+    private Map<LhScheduleResult, Integer> calculateMachineDailyCapacityMapByDate(LhScheduleContext context,
+                                                                                  List<LhScheduleResult> skuResults,
+                                                                                  List<LhShiftConfigVO> dayShifts) {
+        Map<LhScheduleResult, Integer> capacityMap = new IdentityHashMap<LhScheduleResult, Integer>(16);
+        for (LhScheduleResult result : skuResults) {
+            int capacity = calculateMachineDailyCapacityByDate(context, result, dayShifts);
+            capacityMap.put(result, capacity);
+            MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
+            int capsuleUsageCount = machine != null ? machine.getCapsuleUsageCount() : 0;
+            log.info("续作多机台机台产能排序基础, machineCode: {}, capsuleUsedCount: {}, dailyCapacity: {}",
+                    result.getLhMachineCode(), capsuleUsageCount, capacity);
+        }
+        return capacityMap;
+    }
+
+    /**
+     * 计算单台续作机台当天可用产能。
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param shifts 班次列表
+     * @return 当天可用产能
+     */
+    private int calculateMachineDailyCapacity(LhScheduleContext context,
+                                              LhScheduleResult result,
+                                              List<LhShiftConfigVO> shifts) {
+        if (result == null || CollectionUtils.isEmpty(shifts)) {
+            return result != null ? ShiftFieldUtil.resolveScheduledQty(result) : 0;
+        }
+        Date firstPlannedStartTime = resolveFirstPlannedShiftStartTime(result);
+        if (firstPlannedStartTime == null) {
+            return ShiftFieldUtil.resolveScheduledQty(result);
+        }
+        LocalDate productionDate = firstPlannedStartTime.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        int totalCapacity = 0;
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift == null || shift.getShiftStartDateTime() == null || shift.getShiftEndDateTime() == null) {
+                continue;
+            }
+            LocalDate shiftStartDate = shift.getShiftStartDateTime().toInstant()
+                    .atZone(ZoneId.systemDefault()).toLocalDate();
+            if (!productionDate.equals(shiftStartDate) || !shift.getShiftEndDateTime().after(firstPlannedStartTime)) {
+                continue;
+            }
+            totalCapacity += calculateResultShiftCapacity(context, result, shift);
+        }
+        return totalCapacity > 0 ? totalCapacity : ShiftFieldUtil.resolveScheduledQty(result);
+    }
+
+    /**
+     * 计算单台续作机台在指定业务日的可用产能。
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param dayShifts 当日班次
+     * @return 当日可用产能
+     */
+    private int calculateMachineDailyCapacityByDate(LhScheduleContext context,
+                                                    LhScheduleResult result,
+                                                    List<LhShiftConfigVO> dayShifts) {
+        if (result == null || CollectionUtils.isEmpty(dayShifts)) {
+            return result != null ? ShiftFieldUtil.resolveScheduledQty(result) : 0;
+        }
+        Date firstPlannedStartTime = resolveRedistributeStartTime(result, dayShifts);
+        if (firstPlannedStartTime == null) {
+            firstPlannedStartTime = dayShifts.get(0).getShiftStartDateTime();
+        }
+        int totalCapacity = 0;
+        for (LhShiftConfigVO shift : dayShifts) {
+            if (shift == null || shift.getShiftEndDateTime() == null) {
+                continue;
+            }
+            if (!shift.getShiftEndDateTime().after(firstPlannedStartTime)) {
+                continue;
+            }
+            totalCapacity += calculateResultShiftCapacity(context, result, shift);
+        }
+        return totalCapacity > 0 ? totalCapacity : sumScheduledQtyByShifts(Collections.singletonList(result), dayShifts);
+    }
+
+    /**
+     * 计算结果在指定班次的可排产能。
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param shift 班次
+     * @return 班次可排产能
+     */
+    private int calculateResultShiftCapacity(LhScheduleContext context,
+                                             LhScheduleResult result,
+                                             LhShiftConfigVO shift) {
+        if (context == null || result == null || shift == null
+                || result.getLhTime() == null || result.getLhTime() <= 0) {
+            return 0;
+        }
+        int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(
+                result.getMouldQty() != null ? result.getMouldQty() : 0);
+        int shiftCapacity = result.getSingleMouldShiftQty() != null ? result.getSingleMouldShiftQty() : 0;
+        if (mouldQty <= 0 || shiftCapacity <= 0) {
+            return 0;
+        }
+        ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(
+                context, shift, shift.getShiftStartDateTime());
+        if (control == null || !control.isCanSchedule()) {
+            return 0;
+        }
+        List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
+                context, result, resolveFirstPlannedShiftStartTime(result));
+        List<MachineMaintenanceWindowDTO> maintenanceWindowList = resolveMachineMaintenanceWindowList(
+                context, result.getLhMachineCode());
+        int dryIceLossQty = context.getParamIntValue(
+                LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
+        int dryIceDurationHours = context.getParamIntValue(
+                LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                context.getDevicePlanShutList(),
+                cleaningWindowList,
+                maintenanceWindowList,
+                result.getLhMachineCode(),
+                control.getEffectiveStartTime(),
+                control.getEffectiveEndTime(),
+                shiftCapacity,
+                result.getLhTime(),
+                mouldQty,
+                ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
+                dryIceLossQty,
+                dryIceDurationHours);
+        return ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+    }
+
+    /**
+     * 选择续作降模后需要保留的机台。
+     *
+     * @param context 排程上下文
+     * @param skuResults 同SKU续作结果
+     * @param capacityMap 机台日产能
+     * @param demandQty 当日需保障量
+     * @return 保留结果列表
+     */
+    private List<LhScheduleResult> selectMachinesToKeepForContinuation(LhScheduleContext context,
+                                                                       List<LhScheduleResult> skuResults,
+                                                                       Map<LhScheduleResult, Integer> capacityMap,
+                                                                       int demandQty) {
+        List<LhScheduleResult> sortedResults = new ArrayList<LhScheduleResult>(skuResults);
+        sortedResults.sort(buildContinuationKeepComparator(context));
+        List<LhScheduleResult> keptResults = new ArrayList<LhScheduleResult>(sortedResults.size());
+        int accumulatedCapacity = 0;
+        for (LhScheduleResult result : sortedResults) {
+            if (accumulatedCapacity >= demandQty) {
+                break;
+            }
+            keptResults.add(result);
+            accumulatedCapacity += Math.max(0, capacityMap.getOrDefault(result, 0));
+        }
+        List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, skuResults, keptResults);
+        log.info("续作多机台降模排序, 保留排序: {}, 下机排序: {}, 保留排序明细: {}, 下机排序明细: {}",
+                joinMachineCodes(sortedResults), joinMachineCodes(removedResults),
+                formatContinuationMachineDetails(context, sortedResults, capacityMap),
+                formatContinuationMachineDetails(context, removedResults, capacityMap));
+        return keptResults;
+    }
+
+    /**
+     * 选择续作降模下机机台。
+     *
+     * @param skuResults 同SKU续作结果
+     * @param keptResults 保留结果
+     * @return 下机结果
+     */
+    private List<LhScheduleResult> selectMachinesToRemoveForContinuation(LhScheduleContext context,
+                                                                         List<LhScheduleResult> skuResults,
+                                                                         List<LhScheduleResult> keptResults) {
+        List<LhScheduleResult> removedResults = new ArrayList<LhScheduleResult>(skuResults.size());
+        for (LhScheduleResult result : skuResults) {
+            if (!keptResults.contains(result)) {
+                removedResults.add(result);
+            }
+        }
+        removedResults.sort(Comparator
+                .comparingInt((LhScheduleResult result) -> resolveCapsuleUsageCount(context, result))
+                .thenComparing(Comparator.comparing(
+                        (LhScheduleResult result) -> StringUtils.defaultString(result.getLhMachineCode())).reversed()));
+        return removedResults;
+    }
+
+    /**
+     * 构建续作降模保留排序。
+     *
+     * @param context 排程上下文
+     * @return 保留排序比较器
+     */
+    private Comparator<LhScheduleResult> buildContinuationKeepComparator(LhScheduleContext context) {
+        return Comparator
+                .comparingInt((LhScheduleResult result) -> -resolveCapsuleUsageCount(context, result))
+                .thenComparing(result -> StringUtils.defaultString(result.getLhMachineCode()));
+    }
+
+    /**
+     * 解析结果机台胶囊使用次数。
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @return 胶囊使用次数
+     */
+    private int resolveCapsuleUsageCount(LhScheduleContext context, LhScheduleResult result) {
+        if (context == null || result == null || StringUtils.isEmpty(result.getLhMachineCode())) {
+            return 0;
+        }
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
+        return machine != null ? machine.getCapsuleUsageCount() : 0;
+    }
+
+    /**
+     * 按保留机台和目标规则重分配续作计划量。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param skuResults 同SKU续作结果
+     * @param keptResults 保留结果
+     * @param capacityMap 机台日产能
+     * @param demandQty 当日需保障量
+     * @param shifts 班次列表
+     */
+    private void allocateContinuationQtyForKeptMachines(LhScheduleContext context,
+                                                        SkuScheduleDTO sourceSku,
+                                                        List<LhScheduleResult> skuResults,
+                                                        List<LhScheduleResult> keptResults,
+                                                        Map<LhScheduleResult, Integer> capacityMap,
+                                                        int demandQty,
+                                                        List<LhShiftConfigVO> shifts) {
+        boolean ending = hasEndingResult(skuResults);
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, ending);
+        boolean fillKeptMachineCapacity = !ending
+                && !policy.isStrictUpperLimit()
+                && !CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap());
+        int remainingDemandQty = Math.max(0, demandQty);
+        for (LhScheduleResult result : keptResults) {
+            int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, ShiftFieldUtil.resolveScheduledQty(result)));
+            int allocation = fillKeptMachineCapacity ? machineCapacity : Math.min(remainingDemandQty, machineCapacity);
+            redistributeShiftQty(context, result, shifts, allocation);
+            remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
+            log.info("续作多机台保留机台排量, materialCode: {}, machineCode: {}, allocation: {}, "
+                            + "machineCapacity: {}, 是否补满班产: {}, 是否收尾: {}",
+                    sourceSku.getMaterialCode(), result.getLhMachineCode(), allocation,
+                    machineCapacity, fillKeptMachineCapacity, ending);
+        }
+        List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, skuResults, keptResults);
+        for (LhScheduleResult result : removedResults) {
+            redistributeShiftQty(context, result, shifts, 0);
+        }
+        log.info("续作多机台降模结果, materialCode: {}, 原始机台: {}, 保留机台: {}, 下机机台: {}, 原始机台明细: {}, "
+                        + "保留机台明细: {}, 下机机台明细: {}, 原因: dayN保障量={}，按胶囊使用次数和机台编码排序",
+                sourceSku.getMaterialCode(), joinMachineCodes(skuResults), joinMachineCodes(keptResults),
+                joinMachineCodes(removedResults), formatContinuationMachineDetails(context, skuResults, capacityMap),
+                formatContinuationMachineDetails(context, keptResults, capacityMap),
+                formatContinuationMachineDetails(context, removedResults, capacityMap), demandQty);
+    }
+
+    /**
+     * 应用指定业务日的续作多机台降模结果。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param activeResults 当前仍在机结果
+     * @param keptResults 当日保留结果
+     * @param capacityMap 当日产能
+     * @param demandQty 当日保障量
+     * @param productionDate 业务日
+     * @param dayShifts 当日班次
+     * @param allShifts 全窗口班次
+     */
+    private void applyContinuationDayAllocation(LhScheduleContext context,
+                                                SkuScheduleDTO sourceSku,
+                                                List<LhScheduleResult> activeResults,
+                                                List<LhScheduleResult> keptResults,
+                                                Map<LhScheduleResult, Integer> capacityMap,
+                                                int demandQty,
+                                                int effectiveDemandQty,
+                                                int remainingTargetQty,
+                                                LocalDate productionDate,
+                                                List<LhShiftConfigVO> dayShifts,
+                                                List<LhShiftConfigVO> allShifts) {
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, false);
+        boolean fillKeptMachineCapacity = !policy.isStrictUpperLimit()
+                && !CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap());
+        int remainingDemandQty = Math.max(0, effectiveDemandQty);
+        for (LhScheduleResult result : keptResults) {
+            int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
+            int allocation = fillKeptMachineCapacity ? machineCapacity : Math.min(remainingDemandQty, machineCapacity);
+            redistributeShiftQty(context, result, dayShifts, allocation);
+            remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
+            log.info("续作多机台保留机台排量, materialCode: {}, 日期: {}, machineCode: {}, allocation: {}, "
+                            + "machineCapacity: {}, 是否补满班产: {}, 当日生效目标量: {}, 剩余窗口目标量: {}, 是否收尾: {}",
+                    sourceSku.getMaterialCode(), productionDate, result.getLhMachineCode(), allocation,
+                    machineCapacity, fillKeptMachineCapacity, effectiveDemandQty, remainingTargetQty, false);
+        }
+        List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, activeResults, keptResults);
+        for (LhScheduleResult result : removedResults) {
+            clearContinuationShiftsFromDate(context, result, allShifts, productionDate);
+        }
+        log.info("续作多机台降模结果, materialCode: {}, 日期: {}, 原始机台: {}, 保留机台: {}, 下机机台: {}, 原始机台明细: {}, "
+                        + "保留机台明细: {}, 下机机台明细: {}, 原因: dayN保障量={}，当日生效目标量={}，剩余窗口目标量={}，按胶囊使用次数和机台编码排序",
+                sourceSku.getMaterialCode(), productionDate, joinMachineCodes(activeResults), joinMachineCodes(keptResults),
+                joinMachineCodes(removedResults), formatContinuationMachineDetails(context, activeResults, capacityMap),
+                formatContinuationMachineDetails(context, keptResults, capacityMap),
+                formatContinuationMachineDetails(context, removedResults, capacityMap),
+                demandQty, effectiveDemandQty, remainingTargetQty);
+    }
+
+    /**
+     * 清空结果从指定业务日起后的全部班次计划量。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param shifts 全窗口班次
+     * @param productionDate 起始业务日
+     */
+    private void clearContinuationShiftsFromDate(LhScheduleContext context,
+                                                 LhScheduleResult result,
+                                                 List<LhShiftConfigVO> shifts,
+                                                 LocalDate productionDate) {
+        List<LhShiftConfigVO> shiftsToClear = new ArrayList<LhShiftConfigVO>(4);
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift == null || shift.getWorkDate() == null) {
+                continue;
+            }
+            LocalDate shiftDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            if (!shiftDate.isBefore(productionDate)) {
+                shiftsToClear.add(shift);
+            }
+        }
+        clearShiftPlanQty(result, shiftsToClear);
+        refreshResultSummary(context, result, shifts);
+    }
+
+    /**
+     * 汇总指定班次集合内的计划量。
+     *
+     * @param results 结果列表
+     * @param shifts 班次列表
+     * @return 班次计划量合计
+     */
+    private int sumScheduledQtyByShifts(List<LhScheduleResult> results, List<LhShiftConfigVO> shifts) {
+        if (CollectionUtils.isEmpty(results) || CollectionUtils.isEmpty(shifts)) {
+            return 0;
+        }
+        int totalQty = 0;
+        for (LhScheduleResult result : results) {
+            for (LhShiftConfigVO shift : shifts) {
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                if (planQty != null && planQty > 0) {
+                    totalQty += planQty;
+                }
+            }
+        }
+        return totalQty;
+    }
+
+    /**
+     * 续作同SKU多机台收尾错峰。
+     *
+     * @param context 排程上下文
+     * @param shifts 班次列表
+     */
+    private void adjustContinuousSameSkuMultiMachineEndingStagger(LhScheduleContext context,
+                                                                  List<LhShiftConfigVO> shifts) {
+        if (context == null || CollectionUtils.isEmpty(context.getScheduleResultList())
+                || CollectionUtils.isEmpty(shifts)) {
+            return;
+        }
+        Map<String, List<LhScheduleResult>> groupResultMap = new LinkedHashMap<String, List<LhScheduleResult>>(8);
+        Map<String, SkuScheduleDTO> sourceSkuMap = new LinkedHashMap<String, SkuScheduleDTO>(8);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!isPureContinuousResult(result)
+                    || !"1".equals(result.getIsEnd())
+                    || ShiftFieldUtil.resolveScheduledQty(result) <= 0) {
+                continue;
+            }
+            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+            if (sourceSku == null) {
+                continue;
+            }
+            String groupKey = buildContinuationGroupKey(sourceSku);
+            groupResultMap.computeIfAbsent(groupKey, key -> new ArrayList<LhScheduleResult>(2)).add(result);
+            sourceSkuMap.putIfAbsent(groupKey, sourceSku);
+        }
+        for (Map.Entry<String, List<LhScheduleResult>> entry : groupResultMap.entrySet()) {
+            List<LhScheduleResult> results = entry.getValue();
+            if (results.size() < 2) {
+                continue;
+            }
+            SkuScheduleDTO sourceSku = sourceSkuMap.get(entry.getKey());
+            Map<Integer, List<LhScheduleResult>> shiftResultMap = new LinkedHashMap<Integer, List<LhScheduleResult>>(4);
+            for (LhScheduleResult result : results) {
+                int lastShiftIndex = resolveLastPlannedShiftIndex(result);
+                if (lastShiftIndex <= 0) {
+                    continue;
+                }
+                shiftResultMap.computeIfAbsent(lastShiftIndex, key -> new ArrayList<LhScheduleResult>(2)).add(result);
+            }
+            for (Map.Entry<Integer, List<LhScheduleResult>> shiftEntry : shiftResultMap.entrySet()) {
+                if (shiftEntry.getValue().size() < 2) {
+                    continue;
+                }
+                tryStaggerContinuousSameShiftEnding(context, sourceSku, shifts,
+                        shiftEntry.getKey(), shiftEntry.getValue());
+            }
+        }
+    }
+
+    /**
+     * 尝试错开续作同SKU同班次收尾。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param shifts 班次列表
+     * @param endingShiftIndex 收尾班次索引
+     * @param results 同班次收尾结果
+     * @return true-已错开
+     */
+    private boolean tryStaggerContinuousSameShiftEnding(LhScheduleContext context,
+                                                       SkuScheduleDTO sourceSku,
+                                                       List<LhShiftConfigVO> shifts,
+                                                       int endingShiftIndex,
+                                                       List<LhScheduleResult> results) {
+        LhShiftConfigVO endingShift = findShiftByIndex(shifts, endingShiftIndex);
+        LhShiftConfigVO nextShift = findShiftByIndex(shifts, endingShiftIndex + 1);
+        if (endingShift == null || nextShift == null) {
+            return false;
+        }
+        boolean nightShift = StringUtils.equals(ShiftEnum.NIGHT_SHIFT.getCode(), endingShift.getShiftType());
+        log.info("续作同SKU多机台收尾错峰判断, materialCode: {}, 收尾班次: {}, 是否晚班: {}, 是否同SKU多机台收尾: true",
+                sourceSku != null ? sourceSku.getMaterialCode() : null, endingShiftIndex, nightShift);
+        if (nightShift) {
+            return false;
+        }
+        if (!isSameWorkDate(endingShift.getWorkDate(), nextShift.getWorkDate())) {
+            return false;
+        }
+        LhScheduleResult donor = resolveTailDonorResult(results, endingShiftIndex);
+        LhScheduleResult receiver = resolveTailReceiverResult(context, results, donor, nextShift);
+        if (donor == null || receiver == null) {
+            return false;
+        }
+        Integer donorQty = ShiftFieldUtil.getShiftPlanQty(donor, endingShiftIndex);
+        if (donorQty == null || donorQty <= 0) {
+            return false;
+        }
+        int availableQty = resolveAvailableShiftQtyForEndingStagger(context, receiver, nextShift);
+        if (donorQty > availableQty) {
+            log.info("续作同SKU多机台收尾错峰跳过, materialCode: {}, 承接机台: {}, 需转移: {}, 可用: {}",
+                    sourceSku != null ? sourceSku.getMaterialCode() : null,
+                    receiver.getLhMachineCode(), donorQty, availableQty);
+            return false;
+        }
+        setShiftPlanQty(donor, endingShiftIndex, 0, null, null);
+        Integer receiverExistingQty = ShiftFieldUtil.getShiftPlanQty(receiver, nextShift.getShiftIndex());
+        int receiverNextQty = (receiverExistingQty != null ? receiverExistingQty : 0) + donorQty;
+        setShiftPlanQty(receiver, nextShift.getShiftIndex(), receiverNextQty,
+                nextShift.getShiftStartDateTime(), null);
+        refreshResultSummary(context, donor, shifts);
+        refreshResultSummary(context, receiver, shifts);
+        log.info("续作同SKU多机台收尾尾量错开完成, materialCode: {}, 释放机台: {}, 承接机台: {}, "
+                        + "原收尾班次: {}, 承接班次: {}, 转移数量: {}, 换模均衡检查: 交由现有换模均衡与S4.6校验",
+                sourceSku != null ? sourceSku.getMaterialCode() : null,
+                donor.getLhMachineCode(), receiver.getLhMachineCode(),
+                endingShiftIndex, nextShift.getShiftIndex(), donorQty);
+        return true;
+    }
+
+    /**
+     * 按班次序号查找排程窗口班次。
+     *
+     * @param shifts 班次列表
+     * @param shiftIndex 班次序号
+     * @return 班次配置，未找到返回null
+     */
+    private LhShiftConfigVO findShiftByIndex(List<LhShiftConfigVO> shifts, int shiftIndex) {
+        if (CollectionUtils.isEmpty(shifts)) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift != null && shift.getShiftIndex() == shiftIndex) {
+                return shift;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 解析结果行最后一个有计划量的班次序号。
+     *
+     * @param result 排程结果
+     * @return 最后有量班次序号，未找到返回-1
+     */
+    private int resolveLastPlannedShiftIndex(LhScheduleResult result) {
+        if (result == null) {
+            return -1;
+        }
+        for (int shiftIndex = LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex >= 1; shiftIndex--) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            if (planQty != null && planQty > 0) {
+                return shiftIndex;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 判断两个日期是否属于同一业务日。
+     *
+     * @param firstDate 第一个日期
+     * @param secondDate 第二个日期
+     * @return true-同一业务日
+     */
+    private boolean isSameWorkDate(Date firstDate, Date secondDate) {
+        if (firstDate == null || secondDate == null) {
+            return false;
+        }
+        return LhScheduleTimeUtil.clearTime(firstDate).equals(LhScheduleTimeUtil.clearTime(secondDate));
+    }
+
+    /**
+     * 选择需要释放尾量的续作结果。
+     *
+     * @param results 同班次收尾结果
+     * @param endingShiftIndex 收尾班次序号
+     * @return 尾量转出结果
+     */
+    private LhScheduleResult resolveTailDonorResult(List<LhScheduleResult> results, int endingShiftIndex) {
+        LhScheduleResult donor = null;
+        int minEndingQty = Integer.MAX_VALUE;
+        for (LhScheduleResult result : results) {
+            Integer qty = ShiftFieldUtil.getShiftPlanQty(result, endingShiftIndex);
+            if (qty == null || qty <= 0) {
+                continue;
+            }
+            if (qty < minEndingQty) {
+                donor = result;
+                minEndingQty = qty;
+            }
+        }
+        return donor;
+    }
+
+    /**
+     * 选择承接尾量的续作结果。
+     *
+     * @param context 排程上下文
+     * @param results 同班次收尾结果
+     * @param donor 转出结果
+     * @param nextShift 承接班次
+     * @return 尾量承接结果
+     */
+    private LhScheduleResult resolveTailReceiverResult(LhScheduleContext context,
+                                                       List<LhScheduleResult> results,
+                                                       LhScheduleResult donor,
+                                                       LhShiftConfigVO nextShift) {
+        for (LhScheduleResult result : results) {
+            if (result == null || result == donor) {
+                continue;
+            }
+            if (resolveAvailableShiftQtyForEndingStagger(context, result, nextShift) > 0) {
+                return result;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 解析收尾错峰承接班次的剩余可用量。
+     *
+     * @param context 排程上下文
+     * @param result 承接结果
+     * @param nextShift 承接班次
+     * @return 剩余可用量
+     */
+    private int resolveAvailableShiftQtyForEndingStagger(LhScheduleContext context,
+                                                         LhScheduleResult result,
+                                                         LhShiftConfigVO nextShift) {
+        int shiftCapacity = calculateResultShiftCapacity(context, result, nextShift);
+        Integer existingQty = ShiftFieldUtil.getShiftPlanQty(result, nextShift.getShiftIndex());
+        return Math.max(0, shiftCapacity - (existingQty != null ? existingQty : 0));
+    }
 
     /**
      * 从同优先级候选SKU中选择首个SKU。
@@ -1332,26 +2251,28 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (context == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
             return;
         }
-        // 按物料编码汇总续作结果的总计划量
-        Map<String, Integer> materialTotalPlanQtyMap = new LinkedHashMap<>(16);
-        Map<String, Integer> materialEndingDemandQtyMap = new LinkedHashMap<>(16);
+        // 按续作业务分组统一复核，避免同物料但不同共享账本组互相串量。
+        Map<String, Integer> groupTotalPlanQtyMap = new LinkedHashMap<>(16);
+        Map<String, Integer> groupEndingDemandQtyMap = new LinkedHashMap<>(16);
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (!isContinuousPhaseResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
                 continue;
             }
+            String groupKey = resolveContinuationGroupKey(context, result);
             int planQty = ShiftFieldUtil.resolveScheduledQty(result);
-            materialTotalPlanQtyMap.merge(result.getMaterialCode(), planQty, Integer::sum);
-            if (!materialEndingDemandQtyMap.containsKey(result.getMaterialCode())) {
-                materialEndingDemandQtyMap.put(result.getMaterialCode(), resolveEndingDemandQty(context, result));
+            groupTotalPlanQtyMap.merge(groupKey, planQty, Integer::sum);
+            if (!groupEndingDemandQtyMap.containsKey(groupKey)) {
+                groupEndingDemandQtyMap.put(groupKey, resolveEndingDemandQty(context, result));
             }
         }
-        // 基于汇总计划量统一设置同物料所有结果的收尾标记
+        // 基于分组汇总计划量统一设置同组结果的收尾标记。
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (!isContinuousPhaseResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
                 continue;
             }
-            int totalPlanQty = materialTotalPlanQtyMap.getOrDefault(result.getMaterialCode(), 0);
-            int endingDemandQty = materialEndingDemandQtyMap.getOrDefault(result.getMaterialCode(), 0);
+            String groupKey = resolveContinuationGroupKey(context, result);
+            int totalPlanQty = groupTotalPlanQtyMap.getOrDefault(groupKey, 0);
+            int endingDemandQty = groupEndingDemandQtyMap.getOrDefault(groupKey, 0);
             result.setIsEnd(totalPlanQty >= endingDemandQty && endingDemandQty > 0 ? "1" : "0");
         }
     }
@@ -1424,8 +2345,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         Map<String, Integer> zeroPlanQtyMap = new LinkedHashMap<>(8);
         List<LhScheduleResult> zeroPlanResults = new ArrayList<>(8);
-        Set<SkuScheduleDTO> processedSkuSet = java.util.Collections.newSetFromMap(
-                new IdentityHashMap<SkuScheduleDTO, Boolean>(8));
+        Set<String> processedGroupKeySet = new LinkedHashSet<String>(8);
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (!isContinuousPhaseResult(result)) {
                 continue;
@@ -1436,11 +2356,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             result.setSpecEndTime(null);
             result.setTdaySpecEndTime(null);
             zeroPlanResults.add(result);
-            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
-            if (sourceSku == null || !processedSkuSet.add(sourceSku)) {
+            SkuScheduleDTO sourceSku = requireContinuousPhaseSourceSku(context, result);
+            String groupKey = resolveContinuationGroupKey(context, result);
+            if (sourceSku == null || StringUtils.isEmpty(groupKey) || !processedGroupKeySet.add(groupKey)) {
                 continue;
             }
-            int unscheduledQty = resolveRemainingUnscheduledQty(context, sourceSku);
+            int unscheduledQty = resolveRemainingUnscheduledQty(context, groupKey, sourceSku);
             if (unscheduledQty > 0) {
                 zeroPlanQtyMap.merge(sourceSku.getMaterialCode(), unscheduledQty, Integer::sum);
             }
@@ -1466,10 +2387,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (context == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
             return;
         }
-        // 按来源SKU汇总续作结果，避免同物料多条SKU共用同一份胎胚库存。
-        Map<SkuScheduleDTO, List<LhScheduleResult>> skuResultsMap =
-                new IdentityHashMap<SkuScheduleDTO, List<LhScheduleResult>>(16);
-        List<SkuScheduleDTO> skuOrder = new ArrayList<>(16);
+        // 按续作业务分组汇总结果，避免共享账本副本各自保留一份完整库存。
+        Map<String, List<LhScheduleResult>> groupResultsMap = new LinkedHashMap<String, List<LhScheduleResult>>(16);
+        Map<String, SkuScheduleDTO> groupSourceSkuMap = new LinkedHashMap<String, SkuScheduleDTO>(16);
+        List<String> groupOrder = new ArrayList<>(16);
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (!isContinuousPhaseResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
                 continue;
@@ -1477,19 +2398,22 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
                 continue;
             }
-            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+            SkuScheduleDTO sourceSku = requireContinuousPhaseSourceSku(context, result);
             if (sourceSku == null) {
                 continue;
             }
-            if (!skuResultsMap.containsKey(sourceSku)) {
-                skuResultsMap.put(sourceSku, new ArrayList<LhScheduleResult>());
-                skuOrder.add(sourceSku);
+            String groupKey = resolveContinuationGroupKey(context, result);
+            if (!groupResultsMap.containsKey(groupKey)) {
+                groupResultsMap.put(groupKey, new ArrayList<LhScheduleResult>());
+                groupSourceSkuMap.put(groupKey, sourceSku);
+                groupOrder.add(groupKey);
             }
-            skuResultsMap.get(sourceSku).add(result);
+            groupResultsMap.get(groupKey).add(result);
         }
         // 委托工具类按机台条数均分
-        for (SkuScheduleDTO sourceSku : skuOrder) {
-            List<LhScheduleResult> materialResults = skuResultsMap.get(sourceSku);
+        for (String groupKey : groupOrder) {
+            SkuScheduleDTO sourceSku = groupSourceSkuMap.get(groupKey);
+            List<LhScheduleResult> materialResults = groupResultsMap.get(groupKey);
             if (materialResults.size() <= 1) {
                 continue;
             }
@@ -1818,6 +2742,19 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 判断结果是否为纯续作结果。
+     * <p>续作多机台降模只处理原在机SKU，不能把换活字块结果混入同SKU多机台降模。</p>
+     *
+     * @param result 排程结果
+     * @return true-纯续作结果
+     */
+    private boolean isPureContinuousResult(LhScheduleResult result) {
+        return result != null
+                && CONTINUOUS_SCHEDULE_TYPE.equals(result.getScheduleType())
+                && !"1".equals(result.getIsTypeBlock());
+    }
+
+    /**
      * 根据最终有效结果回写机台状态。
      *
      * @param context 排程上下文
@@ -1901,24 +2838,27 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param sku 来源SKU
      * @return 剩余待排数量
      */
-    private int resolveRemainingUnscheduledQty(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (sku == null) {
+    private int resolveRemainingUnscheduledQty(LhScheduleContext context,
+                                               String continuationGroupKey,
+                                               SkuScheduleDTO sku) {
+        if (sku == null || StringUtils.isEmpty(continuationGroupKey)) {
             return 0;
         }
         int targetScheduleQty = sku.resolveTargetScheduleQty();
-        int retainedQty = resolveEffectiveContinuousPhaseScheduledQty(context, sku);
+        int retainedQty = resolveEffectiveContinuousPhaseScheduledQty(context, continuationGroupKey);
         return Math.max(targetScheduleQty - retainedQty, 0);
     }
 
     /**
-     * 统计同来源SKU在续作阶段最终保留的有效计划量（含换活字块）。
+     * 统计同续作业务分组在续作阶段最终保留的有效计划量（含换活字块）。
      *
      * @param context 排程上下文
-     * @param sourceSku 来源SKU
+     * @param continuationGroupKey 续作业务分组键
      * @return 有效计划量
      */
-    private int resolveEffectiveContinuousPhaseScheduledQty(LhScheduleContext context, SkuScheduleDTO sourceSku) {
-        if (context == null || sourceSku == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+    private int resolveEffectiveContinuousPhaseScheduledQty(LhScheduleContext context, String continuationGroupKey) {
+        if (context == null || StringUtils.isEmpty(continuationGroupKey)
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
             return 0;
         }
         int totalQty = 0;
@@ -1929,7 +2869,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     || result.getDailyPlanQty() <= 0) {
                 continue;
             }
-            if (resolveResultSourceSku(context, result) != sourceSku) {
+            if (!StringUtils.equals(resolveContinuationGroupKey(context, result), continuationGroupKey)) {
                 continue;
             }
             totalQty += result.getDailyPlanQty();
@@ -2309,6 +3249,27 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return sourceSku;
         }
         return findSkuDto(context, result.getMaterialCode());
+    }
+
+    /**
+     * 解析续作阶段结果对应的来源SKU映射。
+     * <p>共享账本分组链路必须依赖运行态映射，缺失时直接报错，避免静默按物料编码串组。</p>
+     *
+     * @param context 排程上下文
+     * @param result 续作阶段结果
+     * @return 来源SKU
+     */
+    private SkuScheduleDTO requireContinuousPhaseSourceSku(LhScheduleContext context, LhScheduleResult result) {
+        if (context == null || result == null) {
+            throw new IllegalStateException("续作阶段结果缺少sourceSku映射: context或result为空");
+        }
+        SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
+        if (sourceSku != null) {
+            return sourceSku;
+        }
+        throw new IllegalStateException(String.format(
+                "续作阶段结果缺少sourceSku映射: scheduleType=%s, machineCode=%s, materialCode=%s",
+                result.getScheduleType(), result.getLhMachineCode(), result.getMaterialCode()));
     }
 
     /**

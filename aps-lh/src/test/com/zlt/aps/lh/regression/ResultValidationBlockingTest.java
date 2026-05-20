@@ -336,6 +336,49 @@ class ResultValidationBlockingTest {
     }
 
     @Test
+    void handle_allowsFormalContinuousMultiMachineReduceMouldResultWhenLedgerTargetExceedsRuntimeTarget() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setBatchNo("LHPC20260413007A");
+        context.setScheduleDate(date(2026, 5, 1));
+        context.setScheduleTargetDate(date(2026, 5, 3));
+
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(LocalDate.of(2026, 5, 1), buildQuota("MAT-FORMAL", LocalDate.of(2026, 5, 1), 64));
+        quotaMap.put(LocalDate.of(2026, 5, 2), buildQuota("MAT-FORMAL", LocalDate.of(2026, 5, 2), 48));
+        quotaMap.put(LocalDate.of(2026, 5, 3), buildQuota("MAT-FORMAL", LocalDate.of(2026, 5, 3), 48));
+
+        SkuScheduleDTO firstContinuousSku = buildSku("MAT-FORMAL", ConstructionStageEnum.FORMAL.getCode(), 128, 16, false);
+        firstContinuousSku.setDailyPlanQuotaMap(quotaMap);
+        SkuScheduleDTO secondContinuousSku = buildSku("MAT-FORMAL", ConstructionStageEnum.FORMAL.getCode(), 128, 16, false);
+        secondContinuousSku.setDailyPlanQuotaMap(quotaMap);
+        context.setContinuousSkuList(Arrays.asList(firstContinuousSku, secondContinuousSku));
+
+        LhScheduleResult retainedResult = buildPlanResult("K1405", "MAT-FORMAL", 16, 16, 16, 16);
+        retainedResult.setClass5PlanQty(16);
+        retainedResult.setClass6PlanQty(16);
+        retainedResult.setClass7PlanQty(16);
+        retainedResult.setClass8PlanQty(16);
+        retainedResult.setDailyPlanQty(128);
+        retainedResult.setScheduleType("01");
+        retainedResult.setSpecEndTime(dateTime(2026, 5, 3, 22, 0));
+
+        LhScheduleResult removedResult = buildPlanResult("K1702", "MAT-FORMAL", 16, 16, 0, 0);
+        removedResult.setDailyPlanQty(32);
+        removedResult.setScheduleType("01");
+        removedResult.setSpecEndTime(dateTime(2026, 5, 1, 14, 0));
+
+        context.setScheduleResultList(Arrays.asList(retainedResult, removedResult));
+        context.getScheduleResultSourceSkuMap().put(retainedResult, firstContinuousSku);
+        context.getScheduleResultSourceSkuMap().put(removedResult, secondContinuousSku);
+
+        assertDoesNotThrow(() -> handler.handle(context));
+
+        verify(schedulePersistenceService, times(1)).replaceScheduleAtomically(context);
+        verify(scheduleEventPublisher, times(1)).publish(any());
+    }
+
+    @Test
     void handle_shouldWriteRollingQuotaLedgerDetailLog() {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("FC01");

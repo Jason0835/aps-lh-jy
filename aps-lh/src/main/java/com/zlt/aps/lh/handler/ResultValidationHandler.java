@@ -190,7 +190,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         for (Map.Entry<SkuScheduleDTO, Integer> entry : scheduledQtyMap.entrySet()) {
             SkuScheduleDTO sku = entry.getKey();
             int scheduledQty = entry.getValue();
-            int targetQty = resolveValidationTargetQty(sku);
+            int targetQty = resolveValidationTargetQty(context, sku);
             if (targetQty <= 0) {
                 continue;
             }
@@ -303,7 +303,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
      * @param sku SKU
      * @return 校验目标量
      */
-    private int resolveValidationTargetQty(SkuScheduleDTO sku) {
+    private int resolveValidationTargetQty(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(sku)) {
             return 0;
         }
@@ -312,6 +312,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             return targetQty;
         }
         int ledgerTargetQty = resolveLedgerTargetQty(sku);
+        if (shouldUseLedgerTargetQtyForContinuousMultiMachine(context, sku, ledgerTargetQty)) {
+            return ledgerTargetQty;
+        }
         if (ledgerTargetQty > 0) {
             return targetQty > 0 ? Math.min(targetQty, ledgerTargetQty) : ledgerTargetQty;
         }
@@ -340,6 +343,44 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             ledgerTargetQty += Math.max(0, quota.getScheduledQty()) + Math.max(0, quota.getRemainingQty());
         }
         return Math.max(0, ledgerTargetQty);
+    }
+
+    /**
+     * 判断续作同SKU多机台降模结果是否应按共享账本有效目标量校验。
+     * <p>正规/量试非收尾续作在文档案例下允许保留机台按剩余班次补满班产，
+     * 运行时 targetQty 可能小于共享账本覆盖的窗口总量，此时应以账本有效目标量校验。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param ledgerTargetQty 账本有效目标量
+     * @return true-按账本有效目标量校验
+     */
+    private boolean shouldUseLedgerTargetQtyForContinuousMultiMachine(LhScheduleContext context,
+                                                                      SkuScheduleDTO sku,
+                                                                      int ledgerTargetQty) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || ledgerTargetQty <= 0
+                || CollectionUtils.isEmpty(context.getContinuousSkuList())
+                || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sku, sku.isStrictTargetQty());
+        if (policy.isStrictUpperLimit()) {
+            return false;
+        }
+        int sameQuotaContinuousCount = 0;
+        for (SkuScheduleDTO continuousSku : context.getContinuousSkuList()) {
+            if (continuousSku == null) {
+                continue;
+            }
+            if (StringUtils.equals(sku.getMaterialCode(), continuousSku.getMaterialCode())
+                    && continuousSku.getDailyPlanQuotaMap() == sku.getDailyPlanQuotaMap()) {
+                sameQuotaContinuousCount++;
+                if (sameQuotaContinuousCount > 1) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
