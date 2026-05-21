@@ -12,6 +12,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.ResultDowntimeSummaryUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
@@ -203,6 +204,8 @@ public class RollingScheduleHandoffService {
         inheritedResult.setCreateTime(null);
         inheritedResult.setUpdateBy(null);
         inheritedResult.setUpdateTime(null);
+        // 继承结果可能只带入上一批次的部分班次，旧批次摘要不可直接沿用。
+        ResultDowntimeSummaryUtil.clearDowntimeSummary(inheritedResult);
         if (!"1".equals(inheritedResult.getIsChangeMould())) {
             inheritedResult.setMouldChangeStartTime(null);
         }

@@ -173,6 +173,54 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Date specEndTime;
 
     /**
+     * 保养开始时间
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.maintenanceStartTime")
+    @ApiModelProperty(value = "保养开始时间", name = "maintenanceStartTime")
+    @TableField(value = "MAINTENANCE_START_TIME")
+    private Date maintenanceStartTime;
+
+    /**
+     * 保养结束时间
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.maintenanceEndTime")
+    @ApiModelProperty(value = "保养结束时间", name = "maintenanceEndTime")
+    @TableField(value = "MAINTENANCE_END_TIME")
+    private Date maintenanceEndTime;
+
+    /**
+     * 设备停机开始时间
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.shutdownStartTime")
+    @ApiModelProperty(value = "设备停机开始时间", name = "shutdownStartTime")
+    @TableField(value = "SHUTDOWN_START_TIME")
+    private Date shutdownStartTime;
+
+    /**
+     * 设备停机结束时间
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.shutdownEndTime")
+    @ApiModelProperty(value = "设备停机结束时间", name = "shutdownEndTime")
+    @TableField(value = "SHUTDOWN_END_TIME")
+    private Date shutdownEndTime;
+
+    /**
+     * 清洗开始时间
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.cleaningStartTime")
+    @ApiModelProperty(value = "清洗开始时间", name = "cleaningStartTime")
+    @TableField(value = "CLEANING_START_TIME")
+    private Date cleaningStartTime;
+
+    /**
+     * 清洗结束时间
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.cleaningEndTime")
+    @ApiModelProperty(value = "清洗结束时间", name = "cleaningEndTime")
+    @TableField(value = "CLEANING_END_TIME")
+    private Date cleaningEndTime;
+
+    /**
      * 生产状态:0-未生产；1-生产中；2-生产完成
      */
     @Excel(name = "ui.data.column.lhScheduleResult.productionStatus")

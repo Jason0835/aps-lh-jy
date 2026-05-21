@@ -143,6 +143,30 @@ class RollingScheduleHandoffServiceRegressionTest {
     }
 
     @Test
+    void apply_shouldClearDowntimeSummaryFieldsOnInheritedResult() {
+        LhScheduleContext context = newRollingContext();
+        context.setMonthPlanList(Collections.singletonList(buildPlan("MAT-A")));
+        LhScheduleResult previousResult = buildPreviousResult();
+        previousResult.setMaintenanceStartTime(dateTime(2026, 4, 25, 8, 0));
+        previousResult.setMaintenanceEndTime(dateTime(2026, 4, 25, 15, 0));
+        previousResult.setCleaningStartTime(dateTime(2026, 4, 25, 10, 0));
+        previousResult.setCleaningEndTime(dateTime(2026, 4, 25, 11, 0));
+        previousResult.setShutdownStartTime(dateTime(2026, 4, 25, 12, 0));
+        previousResult.setShutdownEndTime(dateTime(2026, 4, 25, 13, 0));
+        context.setPreviousScheduleResultList(Collections.singletonList(previousResult));
+
+        service.apply(context);
+
+        LhScheduleResult inherited = context.getRollingInheritedScheduleResultList().get(0);
+        assertNull(inherited.getMaintenanceStartTime());
+        assertNull(inherited.getMaintenanceEndTime());
+        assertNull(inherited.getCleaningStartTime());
+        assertNull(inherited.getCleaningEndTime());
+        assertNull(inherited.getShutdownStartTime());
+        assertNull(inherited.getShutdownEndTime());
+    }
+
+    @Test
     void apply_shouldResolveAppendStartFromConfiguredTargetWorkDateShift() {
         LhScheduleContext context = newRollingContext();
         context.setScheduleWindowShifts(buildConfiguredScheduleShifts(context.getScheduleDate(), 7, 15, 23));
