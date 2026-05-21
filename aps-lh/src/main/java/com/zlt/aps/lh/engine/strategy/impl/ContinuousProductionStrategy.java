@@ -1936,6 +1936,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         // 设置产品状态（取自SKU与示方书关系的硫化示方书类型）
         MdmSkuConstructionRef constructionRef = context.getSkuConstructionRefMap().get(sku.getMaterialCode());
         result.setTrialStatus(constructionRef != null ? constructionRef.getLhType() : null);
+        result.setChangedTrialStatus(constructionRef != null ? constructionRef.getLhType() : null);
         result.setEmbryoNo(sku.getEmbryoNo());
         result.setTextNo(sku.getTextNo());
         result.setLhNo(sku.getLhNo());
