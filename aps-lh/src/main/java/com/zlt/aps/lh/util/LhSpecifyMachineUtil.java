@@ -197,12 +197,35 @@ public final class LhSpecifyMachineUtil {
                 continue;
             }
             if (StringUtils.isNotEmpty(machineCode)
-                    && !StringUtils.equals(machineCode, specifyMachine.getMachineCode())) {
+                    && !isMatchedSpecifyMachineCode(context, machineCode, specifyMachine.getMachineCode())) {
                 continue;
             }
             resultList.add(specifyMachine);
         }
         return resultList;
+    }
+
+    /**
+     * 判断定点配置机台编码是否命中当前运行态机台。
+     *
+     * @param context 排程上下文
+     * @param runtimeMachineCode 运行态机台编码
+     * @param specifyMachineCode 定点配置机台编码
+     * @return true-命中
+     */
+    private static boolean isMatchedSpecifyMachineCode(LhScheduleContext context,
+                                                       String runtimeMachineCode,
+                                                       String specifyMachineCode) {
+        if (StringUtils.equals(runtimeMachineCode, specifyMachineCode)) {
+            return true;
+        }
+        if (!LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, runtimeMachineCode)
+                || StringUtils.isEmpty(specifyMachineCode)
+                || runtimeMachineCode.length() <= 1) {
+            return false;
+        }
+        String baseMachineCode = runtimeMachineCode.substring(0, runtimeMachineCode.length() - 1);
+        return StringUtils.equals(baseMachineCode, specifyMachineCode);
     }
 
     /**

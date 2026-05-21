@@ -52,6 +52,16 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
     /** 每小时毫秒数 */
     private static final long MILLIS_PER_HOUR = 60L * 60L * 1000L;
+    /** 试制SKU单控机台优先得分 */
+    private static final int SINGLE_CONTROL_TRIAL_SCORE = 0;
+    /** 量试SKU单控机台优先得分 */
+    private static final int SINGLE_CONTROL_MASS_TRIAL_SCORE = 1;
+    /** 小批量SKU单控机台优先得分 */
+    private static final int SINGLE_CONTROL_SMALL_BATCH_SCORE = 2;
+    /** 普通机台默认得分 */
+    private static final int SINGLE_CONTROL_NORMAL_MACHINE_SCORE = 3;
+    /** 正规SKU单控机台靠后得分 */
+    private static final int SINGLE_CONTROL_FORMAL_SCORE = 4;
 
     @Override
     public List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku) {
@@ -108,20 +118,20 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
 
-        candidates = applySingleControlReservationRule(context, sku, candidates);
+        candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
         // 5. 按多维度排序
         sortCandidates(context, candidates, sku, specialMaterialMatchResult);
         traceMachineCandidates(context, sku, specialMaterialMatchResult, candidates, trace);
 
         if (CollectionUtils.isEmpty(candidates)) {
-            log.warn("SKU候选机台为空, materialCode: {}, 规格: {}, 寸口: {}, 特殊分类: {}, 机台总数: {}, 不可作业过滤: {}, 禁用过滤: {}, 超时停机过滤: {}, 寸口过滤: {}, 模套过滤: {}, 特殊支持过滤: {}, 模具过滤: {}, 限制作业优先机台: {}",
-                    sku.getMaterialCode(), sku.getSpecCode(), sku.getProSize(),
+            log.warn("SKU候选机台为空, materialCode: {}, SKU类型: {}, 规格: {}, 寸口: {}, 特殊分类: {}, 机台总数: {}, 不可作业过滤: {}, 禁用过滤: {}, 超时停机过滤: {}, 寸口过滤: {}, 模套过滤: {}, 特殊支持过滤: {}, 模具过滤: {}, 单控规则过滤: {}, 限制作业优先机台: {}",
+                    sku.getMaterialCode(), resolveSkuTypeDesc(sku), sku.getSpecCode(), sku.getProSize(),
                     specialMaterialMatchResult.getCategoryDisplayText(), trace.totalMachineCount,
                     trace.notAllowedMachineFilteredCount,
                     trace.disabledCount, trace.stopTimeoutCount, trace.inchMismatchCount,
                     trace.mouldSetMismatchCount, trace.resolveSpecialSupportFilteredCount(),
-                    trace.mouldConflictCount, limitSpecifyMachineCodes);
+                    trace.mouldConflictCount, trace.singleControlRuleFilteredCount, limitSpecifyMachineCodes);
         }
         log.info("SKU可用机台匹配完成, materialCode: {}, special: {}, category: {}, 候选机台数: {}",
                 sku.getMaterialCode(), specialMaterialMatchResult.isSpecial(),
@@ -130,20 +140,20 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 对单控拆分机台执行试制保留规则。
-     * <p>试制/量试、小批量 SKU 只要命中单控候选，就应继续保留单控机台，
-     * 由后续排序优先选择单控；这样在单控空闲时可直接占用，在单控被占用时也会优先等待单控收尾。
-     * 普通 SKU 默认剔除单控候选，避免在普通机台失败后回落占用试制保留机台。
-     * 若普通 SKU 存在限制作业定点配置，则仍保留原候选。</p>
+     * 对单控拆分机台执行SKU类型约束。
+     * <p>该规则只约束单控机台内部资源竞争，按试制、量试、小批量、正规顺序保留单控候选；
+     * 普通机台不参与该优先级，不因正规SKU待排而清空量试/小批量普通候选。</p>
      *
      * @param context 排程上下文
      * @param sku 待排SKU
      * @param candidates 原候选机台
+     * @param trace 过滤跟踪
      * @return 处理后的候选机台
      */
     private List<MachineScheduleDTO> applySingleControlReservationRule(LhScheduleContext context,
                                                                        SkuScheduleDTO sku,
-                                                                       List<MachineScheduleDTO> candidates) {
+                                                                       List<MachineScheduleDTO> candidates,
+                                                                       MachineFilterTrace trace) {
         if (CollectionUtils.isEmpty(candidates) || sku == null) {
             return candidates;
         }
@@ -153,26 +163,152 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             if (candidate == null) {
                 continue;
             }
-            if (LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
+            if (isSingleControlMachine(context, candidate.getMachineCode())) {
                 singleControlCandidates.add(candidate);
                 continue;
             }
             normalCandidates.add(candidate);
         }
-        if (CollectionUtils.isEmpty(singleControlCandidates)) {
-            return candidates;
+        List<MachineScheduleDTO> filteredCandidates = resolveCandidatesBySkuType(
+                context, sku, singleControlCandidates, normalCandidates);
+        markTypeRuleBlocked(context, sku, candidates, filteredCandidates, trace);
+        recordSingleControlRuleTrace(trace, candidates, filteredCandidates, sku);
+        if (filteredCandidates.size() != candidates.size()) {
+            log.info("SKU选机台单控约束过滤, materialCode: {}, SKU类型: {}, 初始候选: {}, 过滤后候选: {}, "
+                            + "待排试制SKU: {}, 待排量试SKU: {}, 待排小批量SKU: {}, 待排正规SKU: {}",
+                    sku.getMaterialCode(), resolveSkuTypeDesc(sku),
+                    candidates.size(), filteredCandidates.size(),
+                    context.getPendingTrialNewSpecSkuCount(),
+                    context.getPendingMassTrialNewSpecSkuCount(),
+                    context.getPendingSmallBatchNewSpecSkuCount(),
+                    context.getPendingFormalNewSpecSkuCount());
         }
+        return filteredCandidates;
+    }
+
+    /**
+     * 记录本次无候选是否由单控/普通机台让位规则触发，供新增主流程判断是否需要延后重试。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param originalCandidates 原始候选
+     * @param filteredCandidates 过滤后候选
+     * @param trace 过滤跟踪
+     */
+    private void markTypeRuleBlocked(LhScheduleContext context,
+                                     SkuScheduleDTO sku,
+                                     List<MachineScheduleDTO> originalCandidates,
+                                     List<MachineScheduleDTO> filteredCandidates,
+                                     MachineFilterTrace trace) {
+        if (context == null || sku == null) {
+            return;
+        }
+        boolean blocked = !CollectionUtils.isEmpty(originalCandidates)
+                && CollectionUtils.isEmpty(filteredCandidates);
+        context.getNewSpecTypeRuleBlockedMap().put(sku, blocked);
+    }
+
+    /**
+     * 根据SKU类型和当前待排队列状态过滤候选机台。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param singleControlCandidates 单控候选
+     * @param normalCandidates 普通候选
+     * @return 过滤后的候选
+     */
+    private List<MachineScheduleDTO> resolveCandidatesBySkuType(LhScheduleContext context,
+                                                                SkuScheduleDTO sku,
+                                                                List<MachineScheduleDTO> singleControlCandidates,
+                                                                List<MachineScheduleDTO> normalCandidates) {
         if (isTrialConstructionStage(sku)) {
             return singleControlCandidates;
         }
-        if (shouldReserveSingleControlForTrialSku(sku)) {
-            return candidates;
+        if (isMassTrialSku(sku)) {
+            if (!CollectionUtils.isEmpty(singleControlCandidates)
+                    && context.getPendingTrialNewSpecSkuCount() > 0) {
+                return new ArrayList<MachineScheduleDTO>(0);
+            }
+            if (!CollectionUtils.isEmpty(singleControlCandidates)) {
+                return singleControlCandidates;
+            }
+            return normalCandidates;
         }
-        if (LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode())
-                || CollectionUtils.isEmpty(normalCandidates)) {
-            return candidates;
+        if (isSmallBatchSku(sku)) {
+            if (!CollectionUtils.isEmpty(singleControlCandidates)
+                    && (context.getPendingTrialNewSpecSkuCount() > 0
+                    || context.getPendingMassTrialNewSpecSkuCount() > 0)) {
+                return new ArrayList<MachineScheduleDTO>(0);
+            }
+            if (!CollectionUtils.isEmpty(singleControlCandidates)) {
+                return singleControlCandidates;
+            }
+            return normalCandidates;
         }
-        return normalCandidates;
+        if (!CollectionUtils.isEmpty(normalCandidates)) {
+            if (LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode())
+                    && !CollectionUtils.isEmpty(singleControlCandidates)) {
+                List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
+                        singleControlCandidates.size() + normalCandidates.size());
+                retainedCandidates.addAll(singleControlCandidates);
+                retainedCandidates.addAll(normalCandidates);
+                return retainedCandidates;
+            }
+            return normalCandidates;
+        }
+        return hasPendingTrialMassTrialOrSmallBatchSku(context)
+                ? new ArrayList<MachineScheduleDTO>(0)
+                : singleControlCandidates;
+    }
+
+    /**
+     * 记录单控/普通机台类型约束过滤明细。
+     *
+     * @param trace 过滤跟踪
+     * @param originalCandidates 原候选
+     * @param filteredCandidates 过滤后候选
+     * @param sku 待排SKU
+     */
+    private void recordSingleControlRuleTrace(MachineFilterTrace trace,
+                                              List<MachineScheduleDTO> originalCandidates,
+                                              List<MachineScheduleDTO> filteredCandidates,
+                                              SkuScheduleDTO sku) {
+        if (trace == null || CollectionUtils.isEmpty(originalCandidates)) {
+            return;
+        }
+        Set<String> retainedMachineCodes = filteredCandidates.stream()
+                .filter(Objects::nonNull)
+                .map(MachineScheduleDTO::getMachineCode)
+                .collect(Collectors.toSet());
+        for (MachineScheduleDTO candidate : originalCandidates) {
+            if (candidate == null || retainedMachineCodes.contains(candidate.getMachineCode())) {
+                continue;
+            }
+            trace.singleControlRuleFilteredCount++;
+            trace.recordFilteredMachine(candidate, resolveSingleControlFilteredReason(sku, candidate));
+        }
+    }
+
+    /**
+     * 解析单控约束过滤原因。
+     *
+     * @param sku SKU
+     * @param machine 机台
+     * @return 过滤原因
+     */
+    private String resolveSingleControlFilteredReason(SkuScheduleDTO sku, MachineScheduleDTO machine) {
+        boolean singleControlMachine = machine != null
+                && LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode());
+        if (isTrialConstructionStage(sku) && !singleControlMachine) {
+            return "试制SKU禁止使用普通机台";
+        }
+        if (isMassTrialOrSmallBatchSku(sku) && !singleControlMachine) {
+            return "量试/小批量SKU未命中单控优先候选";
+        }
+        if (isFormalSku(sku) && singleControlMachine) {
+            return "单控机台需优先保障试制/量试/小批量SKU";
+        }
+        return "SKU类型机台约束";
     }
 
     /**
@@ -200,6 +336,96 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      */
     private boolean isTrialConstructionStage(SkuScheduleDTO sku) {
         return sku != null && StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage());
+    }
+
+    /**
+     * 判断是否为量试或小批量SKU。
+     * <p>isTrial 仅作为试制/量试总标识兼容，不作为试制强约束。</p>
+     *
+     * @param sku 待排SKU
+     * @return true-量试或小批量
+     */
+    private boolean isMassTrialOrSmallBatchSku(SkuScheduleDTO sku) {
+        return isMassTrialSku(sku) || isSmallBatchSku(sku);
+    }
+
+    /**
+     * 判断是否为量试SKU。
+     * <p>isTrial 仅作为试制/量试总标识兼容，不作为试制强约束。</p>
+     *
+     * @param sku 待排SKU
+     * @return true-量试
+     */
+    private boolean isMassTrialSku(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return false;
+        }
+        return StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isTrial();
+    }
+
+    /**
+     * 判断是否为小批量SKU。
+     *
+     * @param sku 待排SKU
+     * @return true-小批量
+     */
+    private boolean isSmallBatchSku(SkuScheduleDTO sku) {
+        return sku != null && sku.isSmallBatchValidation();
+    }
+
+    /**
+     * 判断是否为正规SKU。
+     *
+     * @param sku 待排SKU
+     * @return true-正规SKU
+     */
+    private boolean isFormalSku(SkuScheduleDTO sku) {
+        return sku != null && !isTrialConstructionStage(sku) && !isMassTrialOrSmallBatchSku(sku);
+    }
+
+    /**
+     * 判断是否仍有待排试制、量试或小批量SKU。
+     *
+     * @param context 排程上下文
+     * @return true-存在单控优先保留SKU
+     */
+    private boolean hasPendingTrialMassTrialOrSmallBatchSku(LhScheduleContext context) {
+        return context != null
+                && (context.getPendingTrialNewSpecSkuCount() > 0
+                || context.getPendingMassTrialNewSpecSkuCount() > 0
+                || context.getPendingSmallBatchNewSpecSkuCount() > 0);
+    }
+
+    /**
+     * 判断是否为当前工厂配置出的单控拆分运行态机台。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return true-单控机台
+     */
+    private boolean isSingleControlMachine(LhScheduleContext context, String machineCode) {
+        return LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, machineCode);
+    }
+
+    /**
+     * 解析SKU类型描述。
+     *
+     * @param sku 待排SKU
+     * @return 类型描述
+     */
+    private String resolveSkuTypeDesc(SkuScheduleDTO sku) {
+        if (isTrialConstructionStage(sku)) {
+            return "试制";
+        }
+        if (sku != null && sku.isSmallBatchValidation()) {
+            return "小批量";
+        }
+        if (sku != null && (StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isTrial())) {
+            return "量试";
+        }
+        return "正规";
     }
 
     @Override
@@ -609,17 +835,23 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param context 排程上下文
      * @param sku 待排SKU
      * @param machine 候选机台
-     * @return 试制/小批量单控优先，普通SKU单控靠后
+     * @return 单控机台按试制、量试、小批量、正规排序，普通机台不参与该层级
      */
     private int resolveSingleControlScore(LhScheduleContext context, SkuScheduleDTO sku, MachineScheduleDTO machine) {
         if (Objects.isNull(machine)
-                || !LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode())) {
-            return 1;
+                || !isSingleControlMachine(context, machine.getMachineCode())) {
+            return SINGLE_CONTROL_NORMAL_MACHINE_SCORE;
         }
-        if (shouldReserveSingleControlForTrialSku(sku)) {
-            return 0;
+        if (isTrialConstructionStage(sku)) {
+            return SINGLE_CONTROL_TRIAL_SCORE;
         }
-        return 2;
+        if (isMassTrialSku(sku)) {
+            return SINGLE_CONTROL_MASS_TRIAL_SCORE;
+        }
+        if (isSmallBatchSku(sku)) {
+            return SINGLE_CONTROL_SMALL_BATCH_SCORE;
+        }
+        return SINGLE_CONTROL_FORMAL_SCORE;
     }
 
     /**
@@ -892,6 +1124,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
                         + ", " + PriorityTraceLogHelper.kv("SKU", sku.getMaterialCode())
+                        + ", " + PriorityTraceLogHelper.kv("SKU类型", resolveSkuTypeDesc(sku))
                         + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
                         + ", " + PriorityTraceLogHelper.kv("寸口", sku.getProSize())
                         + ", " + PriorityTraceLogHelper.kv("特殊物料", PriorityTraceLogHelper.yesNo(matchResult.isSpecial()))
@@ -899,7 +1132,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 过滤统计
         int filteredCount = trace.notAllowedMachineFilteredCount + trace.disabledCount
                 + trace.stopTimeoutCount + trace.inchMismatchCount + trace.mouldSetMismatchCount
-                + trace.resolveSpecialSupportFilteredCount() + trace.mouldConflictCount;
+                + trace.resolveSpecialSupportFilteredCount() + trace.mouldConflictCount
+                + trace.singleControlRuleFilteredCount;
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 PriorityTraceLogHelper.kv("候选机台总数", trace.totalMachineCount)
                         + ", " + PriorityTraceLogHelper.kv("有效候选数", PriorityTraceLogHelper.sizeOf(candidates))
@@ -910,7 +1144,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                         + ", 寸口不符=" + trace.inchMismatchCount
                         + ", 模套不符=" + trace.mouldSetMismatchCount
                         + ", 特殊不支持=" + trace.resolveSpecialSupportFilteredCount()
-                        + ", 模具占用=" + trace.mouldConflictCount);
+                        + ", 模具占用=" + trace.mouldConflictCount
+                        + ", 单控规则=" + trace.singleControlRuleFilteredCount);
         if (!CollectionUtils.isEmpty(trace.filteredMachineMessages)) {
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     "过滤明细: " + String.join("; ", trace.filteredMachineMessages));
@@ -958,7 +1193,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
             String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
 
-            boolean isSingleCtrl = LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode());
+            boolean isSingleCtrl = isSingleControlMachine(context, machine.getMachineCode());
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     (i + 1)
                             + ". " + PriorityTraceLogHelper.kv("机台", machine.getMachineCode())
@@ -1012,7 +1247,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (resolveLimitSpecifyScore(context, sku, machine) == 0) {
             reasons.add("定点机台优先");
         }
-        if (LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode())
+        if (isSingleControlMachine(context, machine.getMachineCode())
                 && shouldReserveSingleControlForTrialSku(sku)) {
             reasons.add("单控机台优先");
         }
@@ -1098,6 +1333,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         private int specialCategoryUnsupportedCount;
         /** 模具冲突过滤数 */
         private int mouldConflictCount;
+        /** 单控/普通机台类型约束过滤数 */
+        private int singleControlRuleFilteredCount;
         /** 过滤明细 */
         private final List<String> filteredMachineMessages = new ArrayList<>(8);
 

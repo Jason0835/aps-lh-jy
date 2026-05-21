@@ -291,11 +291,11 @@ class DefaultSkuPriorityStrategyTest {
         assertEquals("MAT-L", context.getContinuousSkuList().get(0).getMaterialCode());
         assertEquals(1, context.getScheduleLogList().size());
         LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
-        assertEquals("续作SKU排序明细", processLog.getTitle());
+        assertEquals("SKU排序优先级汇总【续作】", processLog.getTitle());
         assertTrue(processLog.getLogDetail().contains("MAT-L"));
         assertTrue(processLog.getLogDetail().contains("MAT-N"));
         assertTrue(processLog.getLogDetail().contains("锁交期"));
-        assertTrue(processLog.getLogDetail().contains("命中结构全收尾优先"));
+        assertTrue(processLog.getLogDetail().contains("结构全收尾"));
         assertTrue(processLog.getLogDetail().indexOf("MAT-L") < processLog.getLogDetail().indexOf("MAT-N"));
     }
 
@@ -331,7 +331,7 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldPreferTrialThenSmallBatchAfterSpecifyMachine() {
+    void sortByPriority_shouldNotPreferTrialOrSmallBatchBeforeFormalSku() {
         SkuScheduleDTO normal = sku("MAT-N");
         normal.setHighPriorityPendingQty(999);
         SkuScheduleDTO smallBatch = sku("MAT-S");
@@ -351,13 +351,14 @@ class DefaultSkuPriorityStrategyTest {
         strategy.sortByPriority(context);
 
         assertEquals("MAT-P", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("MAT-T", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-N", context.getNewSpecSkuList().get(1).getMaterialCode(),
+                "正规SKU高优待排量更高时，不应被试制或小批量提前");
         assertEquals("MAT-S", context.getNewSpecSkuList().get(2).getMaterialCode());
-        assertEquals("MAT-N", context.getNewSpecSkuList().get(3).getMaterialCode());
+        assertEquals("MAT-T", context.getNewSpecSkuList().get(3).getMaterialCode());
     }
 
     @Test
-    void sortByPriority_shouldPreferTrialConstructionStageBeforeMassTrial() {
+    void sortByPriority_shouldNotPreferTrialConstructionStageBeforeMassTrial() {
         SkuScheduleDTO massTrial = sku("3302002637");
         massTrial.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
         massTrial.setHighPriorityPendingQty(999);
@@ -368,9 +369,9 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("3302002216", context.getNewSpecSkuList().get(0).getMaterialCode(),
-                "新增规格排序应按施工阶段区分试制和量试，试制阶段优先于量试阶段");
-        assertEquals("3302002637", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("3302002637", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "试制和量试不再作为排序优先层级，应继续按既有待排量等规则排序");
+        assertEquals("3302002216", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     @Test

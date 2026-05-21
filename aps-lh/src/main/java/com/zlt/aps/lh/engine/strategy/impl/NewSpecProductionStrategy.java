@@ -208,7 +208,66 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
         int scheduledCount = 0;
         Map<String, Integer> unscheduledReasonCountMap = new LinkedHashMap<>(8);
+        int retryRound = 0;
+        while (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
+            retryRound++;
+            initializePendingNewSpecSkuTypeCounts(context);
+            int pendingCountBeforePass = context.getNewSpecSkuList().size();
+            List<SkuScheduleDTO> deferredSkuList = new ArrayList<>(pendingCountBeforePass);
+            scheduledCount += schedulePendingNewSpecs(context, machineMatch, mouldChangeBalance,
+                    inspectionBalance, capacityCalculate, shifts, unscheduledReasonCountMap, deferredSkuList,
+                    retryRound, true);
+            if (CollectionUtils.isEmpty(deferredSkuList)) {
+                break;
+            }
+            if (deferredSkuList.size() == pendingCountBeforePass) {
+                log.info("新增SKU类型让位重试未产生进展，按最终未排收口, 轮次: {}, SKU数: {}",
+                        retryRound, deferredSkuList.size());
+                context.getNewSpecSkuList().addAll(deferredSkuList);
+                initializePendingNewSpecSkuTypeCounts(context);
+                scheduledCount += schedulePendingNewSpecs(context, machineMatch, mouldChangeBalance,
+                        inspectionBalance, capacityCalculate, shifts, unscheduledReasonCountMap,
+                        new ArrayList<SkuScheduleDTO>(0), retryRound + 1, false);
+                break;
+            }
+            log.info("新增SKU因机台类型让位进入下一轮重试, 当前轮次: {}, 延后SKU数: {}",
+                    retryRound, deferredSkuList.size());
+            context.getNewSpecSkuList().addAll(deferredSkuList);
+        }
+        log.info("新增排产完成, 成功: {}, 未排: {}, 原因分布: {}",
+                scheduledCount,
+                unscheduledReasonCountMap.values().stream().mapToInt(Integer::intValue).sum(),
+                unscheduledReasonCountMap);
+    }
 
+    /**
+     * 执行一轮新增SKU排产。
+     * <p>当SKU仅因单控/普通机台让位规则暂时无候选时，可延后到下一轮重试；
+     * 其余失败仍按原逻辑直接记未排。</p>
+     *
+     * @param context 排程上下文
+     * @param machineMatch 机台匹配策略
+     * @param mouldChangeBalance 换模均衡策略
+     * @param inspectionBalance 首检均衡策略
+     * @param capacityCalculate 产能策略
+     * @param shifts 排程班次
+     * @param unscheduledReasonCountMap 未排原因统计
+     * @param deferredSkuList 延后重试SKU
+     * @param retryRound 当前轮次
+     * @param allowTypeRuleRetry 是否允许因机台类型让位而延后重试
+     * @return 本轮新增的成功结果数
+     */
+    private int schedulePendingNewSpecs(LhScheduleContext context,
+                                        IMachineMatchStrategy machineMatch,
+                                        IMouldChangeBalanceStrategy mouldChangeBalance,
+                                        IFirstInspectionBalanceStrategy inspectionBalance,
+                                        ICapacityCalculateStrategy capacityCalculate,
+                                        List<LhShiftConfigVO> shifts,
+                                        Map<String, Integer> unscheduledReasonCountMap,
+                                        List<SkuScheduleDTO> deferredSkuList,
+                                        int retryRound,
+                                        boolean allowTypeRuleRetry) {
+        int scheduledCount = 0;
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
         while (iterator.hasNext()) {
             SkuScheduleDTO sku = iterator.next();
@@ -231,22 +290,30 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
             if (shouldSkipTrialSku(context, sku)) {
                 addUnscheduledResult(context, sku, "试制量试当日不可排产", unscheduledReasonCountMap);
-                iterator.remove();
+                removeCurrentNewSpecSku(context, iterator, sku);
                 continue;
             }
 
             // 1. 匹配候选机台
+            context.getNewSpecTypeRuleBlockedMap().remove(sku);
             List<MachineScheduleDTO> candidates = machineMatch.matchMachines(context, sku);
             if (candidates.isEmpty()) {
-                log.warn("新增SKU无候选机台, materialCode: {}, 结构: {}, 规格: {}, 寸口: {}, 目标量: {}",
+                String noCandidateReason = resolveNoCandidateMachineReason(context, sku);
+                if (allowTypeRuleRetry && shouldRetryByTypeRule(context, sku)) {
+                    log.info("新增SKU本轮因机台类型让位暂缓排产, materialCode: {}, 轮次: {}, 原因: {}",
+                            sku.getMaterialCode(), retryRound, noCandidateReason);
+                    deferCurrentNewSpecSku(context, iterator, sku, deferredSkuList);
+                    continue;
+                }
+                log.warn("新增SKU无候选机台, materialCode: {}, 结构: {}, 规格: {}, 寸口: {}, 目标量: {}, 原因: {}",
                         sku.getMaterialCode(), sku.getStructureName(), sku.getSpecCode(),
-                        sku.getProSize(), sku.resolveTargetScheduleQty());
+                        sku.getProSize(), sku.resolveTargetScheduleQty(), noCandidateReason);
                 traceNewSpecMachineDecision(context, sku, candidates, null, null,
                         new HashSet<String>(0), new LinkedHashMap<String, String>(0),
                         NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED,
-                        false, "无可用硫化机台");
-                addUnscheduledResult(context, sku, "无可用硫化机台", unscheduledReasonCountMap);
-                iterator.remove();
+                        false, noCandidateReason);
+                addUnscheduledResult(context, sku, noCandidateReason, unscheduledReasonCountMap);
+                removeCurrentNewSpecSku(context, iterator, sku);
                 continue;
             }
 
@@ -494,7 +561,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         LhScheduleTimeUtil.formatDateTime(productionStartTime));
                 if (remainingQty <= 0 || !needMoreMachine(sku)) {
                     // 全部排完（总量满足 且 每日额度满足），移出待排队列
-                    iterator.remove();
+                    removeCurrentNewSpecSku(context, iterator, sku);
                     if (remainingQty <= 0) {
                         log.info("新增SKU多机台排产全部完成, materialCode: {}, 使用机台数: {}, 总排产量: {}",
                                 sku.getMaterialCode(), excludedMachineCodes.size() + 1, totalScheduledQty);
@@ -531,7 +598,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 traceNewSpecMachineDecision(context, sku, candidates, localSearchSuggestedMachine, null,
                         excludedMachineCodes, excludedMachineReasonMap, failReason, false, null);
                 addUnscheduledResult(context, sku, failReason.getDescription(), unscheduledReasonCountMap);
-                iterator.remove();
+                removeCurrentNewSpecSku(context, iterator, sku);
                 // 多机台尝试但未排部分也记录未排
                 if (totalScheduledQty > 0) {
                     log.warn("新增SKU部分成功部分失败, materialCode: {}, 已排: {}, 未排: {}",
@@ -545,22 +612,163 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     // 剩余未排量计入未排结果
                     addUnscheduledResult(context, sku, remainingQty,
                             "多机台产能不足，剩余" + remainingQty + "未排", unscheduledReasonCountMap);
-                    iterator.remove();
+                    removeCurrentNewSpecSku(context, iterator, sku);
                 } else if (remainingQty > 0) {
                     // 总量上仍有剩余（可能来自欠产传导），但日计划额度已满足，移出待排队列
                     log.info("新增SKU日计划额度已满足但总量仍有剩余, materialCode: {}, 已排: {}, 总量剩余: {}, 满班超排: {}",
                             sku.getMaterialCode(), totalScheduledQty, remainingQty, sku.getShiftFillOverQty());
-                    iterator.remove();
+                    removeCurrentNewSpecSku(context, iterator, sku);
                 }
                 traceNewSpecMachineDecision(context, sku, candidates, localSearchSuggestedMachine, finalMachine,
                         excludedMachineCodes, excludedMachineReasonMap, null, true,
                         PriorityTraceLogHelper.formatDateTime(finalProductionStartTime));
             }
         }
-        log.info("新增排产完成, 成功: {}, 未排: {}, 原因分布: {}",
-                scheduledCount,
-                unscheduledReasonCountMap.values().stream().mapToInt(Integer::intValue).sum(),
-                unscheduledReasonCountMap);
+        return scheduledCount;
+    }
+
+    /**
+     * 初始化新增待排SKU类型计数，供选机阶段执行单控/普通机台让位规则。
+     *
+     * @param context 排程上下文
+     */
+    private void initializePendingNewSpecSkuTypeCounts(LhScheduleContext context) {
+        int formalCount = 0;
+        int trialCount = 0;
+        int massTrialCount = 0;
+        int smallBatchCount = 0;
+        for (SkuScheduleDTO pendingSku : context.getNewSpecSkuList()) {
+            if (isTrialConstructionStage(pendingSku)) {
+                trialCount++;
+                continue;
+            }
+            if (isMassTrialSku(pendingSku)) {
+                massTrialCount++;
+                continue;
+            }
+            if (isSmallBatchSku(pendingSku)) {
+                smallBatchCount++;
+                continue;
+            }
+            formalCount++;
+        }
+        context.setPendingFormalNewSpecSkuCount(formalCount);
+        context.setPendingTrialNewSpecSkuCount(trialCount);
+        context.setPendingMassTrialNewSpecSkuCount(massTrialCount);
+        context.setPendingSmallBatchNewSpecSkuCount(smallBatchCount);
+        log.info("新增待排SKU类型计数初始化, 试制SKU: {}, 量试SKU: {}, 小批量SKU: {}, 正规SKU: {}",
+                trialCount, massTrialCount, smallBatchCount, formalCount);
+    }
+
+    /**
+     * 将当前新增SKU延后到下一轮重试。
+     *
+     * @param context 排程上下文
+     * @param iterator 新增SKU迭代器
+     * @param sku 当前SKU
+     * @param deferredSkuList 延后重试列表
+     */
+    private void deferCurrentNewSpecSku(LhScheduleContext context,
+                                        Iterator<SkuScheduleDTO> iterator,
+                                        SkuScheduleDTO sku,
+                                        List<SkuScheduleDTO> deferredSkuList) {
+        removeCurrentNewSpecSku(context, iterator, sku);
+        if (deferredSkuList != null) {
+            deferredSkuList.add(sku);
+        }
+    }
+
+    /**
+     * 判断当前SKU是否仅因单控/普通机台让位规则而需要延后重试。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-延后重试，false-直接按未排处理
+     */
+    private boolean shouldRetryByTypeRule(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (!isTypeRuleBlocked(context, sku)) {
+            return false;
+        }
+        if (isMassTrialSku(sku)) {
+            return context.getPendingTrialNewSpecSkuCount() > 0;
+        }
+        if (isSmallBatchSku(sku)) {
+            return context.getPendingTrialNewSpecSkuCount() > 0
+                    || context.getPendingMassTrialNewSpecSkuCount() > 0;
+        }
+        return isFormalSku(sku) && hasPendingTrialMassTrialOrSmallBatchSku(context);
+    }
+
+    /**
+     * 判断最近一次选机是否被机台类型让位规则清空候选。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-被类型规则清空
+     */
+    private boolean isTypeRuleBlocked(LhScheduleContext context, SkuScheduleDTO sku) {
+        return context != null
+                && sku != null
+                && Boolean.TRUE.equals(context.getNewSpecTypeRuleBlockedMap().get(sku));
+    }
+
+    /**
+     * 移除当前新增待排SKU，并同步更新类型计数。
+     *
+     * @param context 排程上下文
+     * @param iterator 新增SKU迭代器
+     * @param sku 当前SKU
+     */
+    private void removeCurrentNewSpecSku(LhScheduleContext context,
+                                         Iterator<SkuScheduleDTO> iterator,
+                                         SkuScheduleDTO sku) {
+        iterator.remove();
+        context.getNewSpecTypeRuleBlockedMap().remove(sku);
+        if (isTrialConstructionStage(sku)) {
+            context.setPendingTrialNewSpecSkuCount(Math.max(0, context.getPendingTrialNewSpecSkuCount() - 1));
+            return;
+        }
+        if (isMassTrialSku(sku)) {
+            context.setPendingMassTrialNewSpecSkuCount(
+                    Math.max(0, context.getPendingMassTrialNewSpecSkuCount() - 1));
+            return;
+        }
+        if (isSmallBatchSku(sku)) {
+            context.setPendingSmallBatchNewSpecSkuCount(
+                    Math.max(0, context.getPendingSmallBatchNewSpecSkuCount() - 1));
+            return;
+        }
+        context.setPendingFormalNewSpecSkuCount(Math.max(0, context.getPendingFormalNewSpecSkuCount() - 1));
+    }
+
+    /**
+     * 解析无候选机台时的业务原因。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 未排原因
+     */
+    private String resolveNoCandidateMachineReason(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (isTypeRuleBlocked(context, sku) && isTrialConstructionStage(sku)) {
+            return "试制SKU无可用单控机台，禁止使用普通机台";
+        }
+        if (isTypeRuleBlocked(context, sku)
+                && isMassTrialSku(sku)
+                && context.getPendingTrialNewSpecSkuCount() > 0) {
+            return "量试SKU单控机台需优先保障试制SKU";
+        }
+        if (isTypeRuleBlocked(context, sku)
+                && isSmallBatchSku(sku)
+                && (context.getPendingTrialNewSpecSkuCount() > 0
+                || context.getPendingMassTrialNewSpecSkuCount() > 0)) {
+            return "小批量SKU单控机台需优先保障试制/量试SKU";
+        }
+        if (isTypeRuleBlocked(context, sku)
+                && isFormalSku(sku)
+                && hasPendingTrialMassTrialOrSmallBatchSku(context)) {
+            return "正规SKU无可用普通机台，单控机台需优先保障试制/量试/小批量SKU";
+        }
+        return "无可用硫化机台";
     }
 
     /**
@@ -622,15 +830,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     sku.getMaterialCode(), preferredTrialMachine.getMachineCode());
             return preferredTrialMachine;
         }
-        if (isTrialConstructionStage(sku) && hasSingleControlCandidate(candidates)) {
-            MachineScheduleDTO singleControlMachine = selectAvailableSingleControlMachine(candidates, excludedMachineCodes);
+        if (shouldOnlyUseSingleControlCandidate(context, sku, candidates)) {
+            MachineScheduleDTO singleControlMachine = selectAvailableSingleControlMachine(
+                    context, candidates, excludedMachineCodes);
             if (singleControlMachine != null) {
-                log.info("新增排产试制SKU仅尝试单控机台, materialCode: {}, machineCode: {}",
-                        sku.getMaterialCode(), singleControlMachine.getMachineCode());
+                log.info("新增排产{}SKU仅尝试单控机台, materialCode: {}, machineCode: {}",
+                        resolveNewSpecSkuType(sku), sku.getMaterialCode(), singleControlMachine.getMachineCode());
                 return singleControlMachine;
             }
-            log.info("新增排产试制SKU单控候选均已排除，不回落普通机台, materialCode: {}",
-                    sku.getMaterialCode());
+            log.info("新增排产{}SKU单控候选均已排除，不回落普通机台, materialCode: {}",
+                    resolveNewSpecSkuType(sku), sku.getMaterialCode());
             return null;
         }
         if (quantityPolicy != null && quantityPolicy.isFullRunForNonTailMachine()) {
@@ -666,21 +875,52 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 判断是否为当前配置生效的单控机台。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return true-单控机台
+     */
+    private boolean isSingleControlMachine(LhScheduleContext context, String machineCode) {
+        return LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, machineCode);
+    }
+
+    /**
      * 判断候选机台中是否存在单控机台。
      *
+     * @param context 排程上下文
      * @param candidates 候选机台
      * @return true-存在单控机台
      */
-    private boolean hasSingleControlCandidate(List<MachineScheduleDTO> candidates) {
+    private boolean hasSingleControlCandidate(LhScheduleContext context, List<MachineScheduleDTO> candidates) {
         if (CollectionUtils.isEmpty(candidates)) {
             return false;
         }
         for (MachineScheduleDTO candidate : candidates) {
-            if (candidate != null && LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
+            if (candidate != null && isSingleControlMachine(context, candidate.getMachineCode())) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * 判断当前SKU是否应仅尝试单控候选机台。
+     *
+     * @param sku SKU
+     * @param candidates 候选机台
+     * @return true-仅尝试单控候选
+     */
+    private boolean shouldOnlyUseSingleControlCandidate(LhScheduleContext context,
+                                                        SkuScheduleDTO sku,
+                                                        List<MachineScheduleDTO> candidates) {
+        if (sku == null) {
+            return false;
+        }
+        if (isTrialConstructionStage(sku)) {
+            return true;
+        }
+        return isMassTrialOrSmallBatchSku(sku) && hasSingleControlCandidate(context, candidates);
     }
 
     /**
@@ -690,13 +930,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @param excludedMachineCodes 已排除机台
      * @return 可尝试的单控机台
      */
-    private MachineScheduleDTO selectAvailableSingleControlMachine(List<MachineScheduleDTO> candidates,
+    private MachineScheduleDTO selectAvailableSingleControlMachine(LhScheduleContext context,
+                                                                   List<MachineScheduleDTO> candidates,
                                                                    Set<String> excludedMachineCodes) {
         if (CollectionUtils.isEmpty(candidates)) {
             return null;
         }
         for (MachineScheduleDTO candidate : candidates) {
-            if (candidate == null || !LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
+            if (candidate == null || !isSingleControlMachine(context, candidate.getMachineCode())) {
                 continue;
             }
             if (!CollectionUtils.isEmpty(excludedMachineCodes)
@@ -1222,7 +1463,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         && excludedMachineCodes.contains(candidate.getMachineCode())) {
                     continue;
                 }
-                if (LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
+                if (isSingleControlMachine(context, candidate.getMachineCode())) {
                     trialStickToSingleControl = true;
                     break;
                 }
@@ -1236,7 +1477,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             if (trialStickToSingleControl
-                    && !LhSingleControlMachineUtil.isSingleMouldMachine(candidate.getMachineCode())) {
+                    && !isSingleControlMachine(context, candidate.getMachineCode())) {
                 continue;
             }
             int machineCapacity = getTargetScheduleQtyResolver()
@@ -1358,6 +1599,75 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 判断是否为量试或小批量SKU。
+     * <p>isTrial 仅作为试制/量试总标识兼容，不按试制强约束处理。</p>
+     *
+     * @param sku SKU
+     * @return true-量试或小批量
+     */
+    private boolean isMassTrialOrSmallBatchSku(SkuScheduleDTO sku) {
+        return isMassTrialSku(sku) || isSmallBatchSku(sku);
+    }
+
+    /**
+     * 判断是否为量试SKU。
+     * <p>isTrial 仅作为试制/量试总标识兼容，不按试制强约束处理。</p>
+     *
+     * @param sku SKU
+     * @return true-量试
+     */
+    private boolean isMassTrialSku(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return false;
+        }
+        return StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isTrial();
+    }
+
+    /**
+     * 判断是否为小批量SKU。
+     *
+     * @param sku SKU
+     * @return true-小批量
+     */
+    private boolean isSmallBatchSku(SkuScheduleDTO sku) {
+        return sku != null && sku.isSmallBatchValidation();
+    }
+
+    /**
+     * 判断是否为试制、量试或小批量SKU。
+     *
+     * @param sku SKU
+     * @return true-试制、量试或小批量
+     */
+    private boolean isTrialOrMassTrialOrSmallBatchSku(SkuScheduleDTO sku) {
+        return isTrialConstructionStage(sku) || isMassTrialOrSmallBatchSku(sku);
+    }
+
+    /**
+     * 判断是否为正规SKU。
+     *
+     * @param sku SKU
+     * @return true-正规SKU
+     */
+    private boolean isFormalSku(SkuScheduleDTO sku) {
+        return sku != null && !isTrialOrMassTrialOrSmallBatchSku(sku);
+    }
+
+    /**
+     * 判断是否仍有待排试制、量试或小批量SKU。
+     *
+     * @param context 排程上下文
+     * @return true-存在单控优先保留SKU
+     */
+    private boolean hasPendingTrialMassTrialOrSmallBatchSku(LhScheduleContext context) {
+        return context != null
+                && (context.getPendingTrialNewSpecSkuCount() > 0
+                || context.getPendingMassTrialNewSpecSkuCount() > 0
+                || context.getPendingSmallBatchNewSpecSkuCount() > 0);
+    }
+
+    /**
      * 判断是否启用局部搜索。
      *
      * @param context 排程上下文
@@ -1429,7 +1739,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             PriorityTraceLogHelper.appendLine(detailBuilder, "TOP" + outputCount + "候选排序:");
             for (int i = 0; i < outputCount; i++) {
                 MachineScheduleDTO machine = candidates.get(i);
-                boolean isSingleCtrl = LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode());
+                boolean isSingleCtrl = isSingleControlMachine(context, machine.getMachineCode());
                 String reasonSuffix = (i == 0 && success && finalMachine != null
                         && StringUtils.equals(machine.getMachineCode(), finalMachine.getMachineCode()))
                         ? "最优候选" : ("候选" + (i + 1));

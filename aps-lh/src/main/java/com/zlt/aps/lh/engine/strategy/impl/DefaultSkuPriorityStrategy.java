@@ -131,7 +131,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 构建新增SKU比较器，定点物料、试制、量试、小批量验证SKU优先进入新增排产。
+     * 构建新增SKU比较器。
+     * <p>试制、量试、小批量不再作为排序优先层级，类型差异仅在选机台阶段处理。</p>
      *
      * @param context 排程上下文
      * @param priorityComparator 锁交期/延期/结构优先比较器
@@ -146,63 +147,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 .comparingInt((SkuScheduleDTO sku) -> LhSpecifyMachineUtil.hasLimitSpecifyMachine(
                         context, sku.getMaterialCode()) ? 0 : 1)
                 .thenComparingInt(sku -> isSingleCandidateSpecialPriority(singleCandidateSpecialPriorityMap, sku) ? 0 : 1)
-                .thenComparing(this::compareTrialMassConstructionStage)
                 .thenComparing(priorityComparator)
-                .thenComparingInt(this::resolveConstructionStagePriority)
-                .thenComparingInt(sku -> sku.isSmallBatchValidation() ? 0 : 1)
                 .thenComparing(tailComparator);
-    }
-
-    /**
-     * 仅在明确的试制与量试之间提前比较施工阶段，避免影响正式SKU的结构收尾优先级。
-     *
-     * @param left 左侧SKU
-     * @param right 右侧SKU
-     * @return 试制在量试前；其他组合不改变既有顺序
-     */
-    private int compareTrialMassConstructionStage(SkuScheduleDTO left, SkuScheduleDTO right) {
-        boolean leftTrial = isConstructionStage(left, ConstructionStageEnum.TRIAL.getCode());
-        boolean rightTrial = isConstructionStage(right, ConstructionStageEnum.TRIAL.getCode());
-        boolean leftMassTrial = isConstructionStage(left, ConstructionStageEnum.MASS_TRIAL.getCode());
-        boolean rightMassTrial = isConstructionStage(right, ConstructionStageEnum.MASS_TRIAL.getCode());
-        if (leftTrial && rightMassTrial) {
-            return -1;
-        }
-        if (leftMassTrial && rightTrial) {
-            return 1;
-        }
-        return 0;
-    }
-
-    /**
-     * 判断施工阶段是否匹配。
-     *
-     * @param sku 待排SKU
-     * @param constructionStage 施工阶段
-     * @return true-匹配
-     */
-    private boolean isConstructionStage(SkuScheduleDTO sku, String constructionStage) {
-        return Objects.nonNull(sku) && StringUtils.equals(constructionStage, sku.getConstructionStage());
-    }
-
-    /**
-     * 解析施工阶段优先级，试制优先于量试，isTrial 仅作为试制/量试总标识的兼容兜底。
-     *
-     * @param sku 待排SKU
-     * @return 排序优先级，数值越小越靠前
-     */
-    private int resolveConstructionStagePriority(SkuScheduleDTO sku) {
-        if (Objects.isNull(sku)) {
-            return 3;
-        }
-        if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
-            return 0;
-        }
-        if (StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
-                || sku.isTrial()) {
-            return 1;
-        }
-        return 2;
     }
 
     /**
@@ -212,7 +158,12 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
      * @return true-试制或量试
      */
     private boolean isTrialOrMassTrialSku(SkuScheduleDTO sku) {
-        return resolveConstructionStagePriority(sku) <= 1;
+        if (sku == null) {
+            return false;
+        }
+        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isTrial();
     }
 
     /**
@@ -547,9 +498,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
             if (isNewSpec) {
                 levelNames = Arrays.asList(
                         "L1_定点机台", "L2_唯一候选特殊材料", "L3_锁交期", "L4_延误天数",
-                        "L5_结构全收尾", "L6_最晚收尾日", "L7_试制", "L8_小批量",
-                        "L9_高优待排", "L10_周期待排", "L11_中优待排", "L12_常规待排",
-                        "L13_开产靠后分");
+                        "L5_结构全收尾", "L6_最晚收尾日", "L7_高优待排", "L8_周期待排",
+                        "L9_中优待排", "L10_常规待排", "L11_开产靠后分");
             } else {
                 levelNames = Arrays.asList(
                         "L1_锁交期", "L2_延误天数", "L3_结构全收尾", "L4_最晚收尾日",
@@ -578,13 +528,11 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             "L4_延误天数=" + (sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0),
                             "L5_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
                             "L6_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0),
-                            "L7_施工阶段优先=" + resolveConstructionStagePriority(sku),
-                            "L8_小批量=" + (sku.isSmallBatchValidation() ? 0 : 1),
-                            "L9_高优待排=" + (-sku.getHighPriorityPendingQty()),
-                            "L10_周期待排=" + (-sku.getCycleProductionPendingQty()),
-                            "L11_中优待排=" + (-sku.getMidPriorityPendingQty()),
-                            "L12_常规待排=" + (-sku.getConventionProductionPendingQty()),
-                            "L13_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
+                            "L7_高优待排=" + (-sku.getHighPriorityPendingQty()),
+                            "L8_周期待排=" + (-sku.getCycleProductionPendingQty()),
+                            "L9_中优待排=" + (-sku.getMidPriorityPendingQty()),
+                            "L10_常规待排=" + (-sku.getConventionProductionPendingQty()),
+                            "L11_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
                     scores = Arrays.asList(
                             isSpecifyMachine ? 0 : 1,
                             isSingleCandidate ? 0 : 1,
@@ -592,14 +540,12 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0,
                             structureAllEndingPriority ? 0 : 1,
                             structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
-                            resolveConstructionStagePriority(sku),
-                            sku.isSmallBatchValidation() ? 0 : 1,
                             -sku.getHighPriorityPendingQty(),
                             -sku.getCycleProductionPendingQty(),
                             -sku.getMidPriorityPendingQty(),
                             -sku.getConventionProductionPendingQty(),
                             resolveOpenProductionLateScore(context, sku));
-                    defaultScores = Arrays.asList(1, 1, 1, 0, 1, 0, 2, 1, 0, 0, 0, 0, 0);
+                    defaultScores = Arrays.asList(1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0);
                 } else {
                     sortKeyLevels = Arrays.asList(
                             "L1_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
