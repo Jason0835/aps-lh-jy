@@ -392,9 +392,16 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setTrialDemandQty(safeInt(plan.getTrialQty()));
         dto.setBeginDay(plan.getBeginDay());
         dto.setTrial(isTrialStage(plan.getConstructionStage()));
-        dto.setSmallBatchValidation(!dto.isTrial()
-                && dto.getTrialDemandQty() > 0
-                && dto.getTrialDemandQty() < resolveSmallBatchSkuThreshold(context));
+        // 正规SKU余量小于阈值时标记为小批量，保留单控机台优先权（试制 > 量试 > 小批量 > 正规）
+        int smallBatchThreshold = resolveSmallBatchSkuThreshold(context);
+        boolean isSmallBatch = !dto.isTrial()
+                && dto.getSurplusQty() < smallBatchThreshold;
+        dto.setSmallBatchValidation(isSmallBatch);
+        if (isSmallBatch) {
+            log.info("小批量SKU判定命中, 物料编码: {}, 施工阶段: {}, 余量: {}, 阈值: {}",
+                    dto.getMaterialCode(), dto.getConstructionStage(),
+                    dto.getSurplusQty(), smallBatchThreshold);
+        }
 
         // 示方书信息
         dto.setEmbryoNo(plan.getEmbryoNo());
