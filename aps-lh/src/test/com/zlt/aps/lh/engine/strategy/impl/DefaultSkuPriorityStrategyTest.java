@@ -353,8 +353,9 @@ class DefaultSkuPriorityStrategyTest {
         assertEquals("MAT-P", context.getNewSpecSkuList().get(0).getMaterialCode());
         assertEquals("MAT-N", context.getNewSpecSkuList().get(1).getMaterialCode(),
                 "正规SKU高优待排量更高时，不应被试制或小批量提前");
-        assertEquals("MAT-S", context.getNewSpecSkuList().get(2).getMaterialCode());
-        assertEquals("MAT-T", context.getNewSpecSkuList().get(3).getMaterialCode());
+        assertEquals("MAT-T", context.getNewSpecSkuList().get(2).getMaterialCode(),
+                "前置排序条件相同时，应按试制 > 量试 > 小批量 > 正规补充排序");
+        assertEquals("MAT-S", context.getNewSpecSkuList().get(3).getMaterialCode());
     }
 
     @Test
@@ -372,6 +373,43 @@ class DefaultSkuPriorityStrategyTest {
         assertEquals("3302002637", context.getNewSpecSkuList().get(0).getMaterialCode(),
                 "试制和量试不再作为排序优先层级，应继续按既有待排量等规则排序");
         assertEquals("3302002216", context.getNewSpecSkuList().get(1).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldUseSkuTypeAsTieBreakerWhenAllPrimaryKeysEqual() {
+        SkuScheduleDTO formal = sku("MAT-F");
+        SkuScheduleDTO smallBatch = sku("MAT-S");
+        smallBatch.setSmallBatchValidation(true);
+        SkuScheduleDTO massTrial = sku("MAT-M");
+        massTrial.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        SkuScheduleDTO trial = sku("MAT-T");
+        trial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+
+        LhScheduleContext context = contextWithNewSpec(formal, smallBatch, massTrial, trial);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-T", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("MAT-M", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-S", context.getNewSpecSkuList().get(2).getMaterialCode());
+        assertEquals("MAT-F", context.getNewSpecSkuList().get(3).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldKeepPrimarySortBeforeSkuTypeTieBreaker() {
+        SkuScheduleDTO trial = sku("MAT-T");
+        trial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trial.setDelayDays(3);
+        SkuScheduleDTO formal = sku("MAT-F");
+        formal.setDelayDays(5);
+
+        LhScheduleContext context = contextWithNewSpec(trial, formal);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-F", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "SKU类型只能作为同层级补充排序，不能覆盖更高优先级主排序条件");
+        assertEquals("MAT-T", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     @Test

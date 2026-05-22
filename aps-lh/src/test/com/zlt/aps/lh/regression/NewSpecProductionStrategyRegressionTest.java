@@ -1167,7 +1167,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldRetryMassTrialOnNormalMachineAfterFormalQueueConsumed() throws Exception {
+    void scheduleNewSpecs_shouldScheduleMassTrialOnNormalMachineWithoutTypeRetry() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -1193,14 +1193,14 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "量试SKU应在正规SKU排完后重试并占用普通机台");
-        assertEquals(0, context.getUnscheduledResultList().size(), "量试SKU仅因正规SKU待排被让位时，不应直接落未排");
+        assertEquals(2, context.getScheduleResultList().size(), "量试SKU应可直接使用普通机台，不再依赖类型重试");
+        assertEquals(0, context.getUnscheduledResultList().size(), "量试SKU不再因正规SKU待排被类型规则延后");
         assertEquals("K1111", findResultByMaterialCode(context.getScheduleResultList(), "3302002637").getLhMachineCode());
         assertEquals("K1111", findResultByMaterialCode(context.getScheduleResultList(), "3302001513").getLhMachineCode());
     }
 
     @Test
-    void scheduleNewSpecs_shouldRetryFormalOnSingleControlMachineAfterTrialQueueConsumed() throws Exception {
+    void scheduleNewSpecs_shouldScheduleFormalOnSingleControlMachineWithoutTypeRetry() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -1226,14 +1226,14 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "正规SKU应在试制/量试SKU处理完后重试并占用单控机台");
-        assertEquals(0, context.getUnscheduledResultList().size(), "正规SKU仅因单控机台让位时，不应直接落未排");
+        assertEquals(2, context.getScheduleResultList().size(), "正规SKU无普通机台时，应可直接使用单控机台");
+        assertEquals(0, context.getUnscheduledResultList().size(), "正规SKU不再因试制/量试待排被类型规则延后");
         assertEquals("K1501R", findResultByMaterialCode(context.getScheduleResultList(), "3302001513").getLhMachineCode());
         assertEquals("K1501R", findResultByMaterialCode(context.getScheduleResultList(), "3302002637").getLhMachineCode());
     }
 
     @Test
-    void scheduleNewSpecs_shouldRetryBySingleControlPriorityUntilHigherTypeConsumed() throws Exception {
+    void scheduleNewSpecs_shouldUseSortedQueueInsteadOfTypeRetryForSingleControlCompetition() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -1251,8 +1251,8 @@ class NewSpecProductionStrategyRegressionTest {
         trialSku.setMaterialDesc("试制物料");
         trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
 
-        context.getNewSpecSkuList().add(massTrialSku);
         context.getNewSpecSkuList().add(trialSku);
+        context.getNewSpecSkuList().add(massTrialSku);
 
         MachineScheduleDTO singleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
@@ -1260,12 +1260,12 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "量试SKU应在试制SKU排完后重试并占用单控机台");
-        assertEquals(0, context.getUnscheduledResultList().size(), "量试SKU仅因试制SKU占用单控优先级时，不应直接落未排");
+        assertEquals(2, context.getScheduleResultList().size(), "同一单控机台竞争应由当前排序后的队列顺序直接决定");
+        assertEquals(0, context.getUnscheduledResultList().size(), "试制与量试的单控竞争不再通过类型重试兜转");
         assertEquals("3302001575", context.getScheduleResultList().get(0).getMaterialCode(),
                 "试制SKU应先占用单控机台");
         assertEquals("3302002637", context.getScheduleResultList().get(1).getMaterialCode(),
-                "量试SKU应延后到下一轮再占用单控机台");
+                "量试SKU应在试制之后继续按当前队列顺序占用单控机台");
     }
 
     @Test
@@ -1357,6 +1357,31 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals("无可用硫化机台",
                 findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001575").getUnscheduledReason(),
                 "试制SKU若本来就无候选机台，不应误报为单控约束导致未排");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldUseTrialSingleControlReasonWhenOnlyNormalMachineCandidatesRemain() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO trialSku = buildSku();
+        trialSku.setMaterialCode("3302001575");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        context.getNewSpecSkuList().add(trialSku);
+
+        MachineScheduleDTO normalMachine = buildMachine("K1111", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+
+        strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals("试制SKU无可用单控机台，禁止使用普通机台",
+                findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001575").getUnscheduledReason(),
+                "试制SKU仅剩普通机台候选时，应返回单控专属未排原因");
     }
 
     @Test

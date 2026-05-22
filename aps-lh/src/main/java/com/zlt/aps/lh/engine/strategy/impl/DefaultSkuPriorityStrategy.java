@@ -56,7 +56,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         Map<String, StructurePriorityMeta> structurePriorityMap = buildStructurePriorityMap(context);
         Comparator<SkuScheduleDTO> priorityComparator = buildPriorityComparator(structurePriorityMap);
         Comparator<SkuScheduleDTO> tailComparator = buildTailComparator(context);
-        Comparator<SkuScheduleDTO> comparator = priorityComparator.thenComparing(tailComparator);
+        Comparator<SkuScheduleDTO> comparator = priorityComparator.thenComparing(tailComparator)
+                .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
         Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(
                 context, priorityComparator, tailComparator);
         sortSkuList(context.getContinuousSkuList(), comparator);
@@ -123,13 +124,12 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getMidPriorityPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getConventionProductionPendingQty())
                 // 顺序5：开产模式下雪地胎、不同英寸、特殊材料仅在同等条件下靠后。
-                .thenComparingInt((SkuScheduleDTO s) -> resolveOpenProductionLateScore(context, s))
-                .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
+                .thenComparingInt((SkuScheduleDTO s) -> resolveOpenProductionLateScore(context, s));
     }
 
     /**
      * 构建新增SKU比较器。
-     * <p>试制、量试、小批量不再作为排序优先层级，类型差异仅在选机台阶段处理。</p>
+     * <p>试制、量试、小批量不参与主排序越级，仅在新增SKU前置排序键完全一致时作为补充排序。</p>
      *
      * @param context 排程上下文
      * @param priorityComparator 锁交期/延期/结构优先比较器
@@ -143,7 +143,10 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 .comparingInt((SkuScheduleDTO sku) -> LhSpecifyMachineUtil.hasLimitSpecifyMachine(
                         context, sku.getMaterialCode()) ? 0 : 1)
                 .thenComparing(priorityComparator)
-                .thenComparing(tailComparator);
+                .thenComparing(tailComparator)
+                // 仅在前置排序键完全相同时，才按SKU类型补充排序。
+                .thenComparingInt(this::resolveNewSpecSkuTypeScore)
+                .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
     }
 
     /**
@@ -159,6 +162,31 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
                 || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
                 || sku.isTrial();
+    }
+
+    /**
+     * 解析新增SKU类型补充排序分。
+     * <p>仅在新增SKU前置排序条件完全一致时参与比较：
+     * 试制 -> 量试 -> 小批量 -> 正规。</p>
+     *
+     * @param sku SKU
+     * @return 排序分，值越小越优先
+     */
+    private int resolveNewSpecSkuTypeScore(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return 3;
+        }
+        if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
+            return 0;
+        }
+        if (StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isTrial()) {
+            return 1;
+        }
+        if (sku.isSmallBatchValidation()) {
+            return 2;
+        }
+        return 3;
     }
 
     /**
@@ -316,6 +344,26 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
+     * 解析SKU类型描述，用于新增SKU补充排序日志。
+     *
+     * @param sku SKU
+     * @return 类型描述
+     */
+    private String resolveNewSpecSkuTypeDesc(SkuScheduleDTO sku) {
+        int typeScore = resolveNewSpecSkuTypeScore(sku);
+        if (typeScore == 0) {
+            return "试制";
+        }
+        if (typeScore == 1) {
+            return "量试";
+        }
+        if (typeScore == 2) {
+            return "小批量";
+        }
+        return "正规";
+    }
+
+    /**
      * 判断是否为特殊材料。
      *
      * @param context 排程上下文
@@ -426,7 +474,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 levelNames = Arrays.asList(
                         "L1_定点机台", "L2_锁交期", "L3_延误天数",
                         "L4_结构全收尾", "L5_最晚收尾日", "L6_高优待排", "L7_周期待排",
-                        "L8_中优待排", "L9_常规待排", "L10_开产靠后分");
+                        "L8_中优待排", "L9_常规待排", "L10_开产靠后分", "L11_SKU类型");
             } else {
                 levelNames = Arrays.asList(
                         "L1_锁交期", "L2_延误天数", "L3_结构全收尾", "L4_最晚收尾日",
@@ -457,7 +505,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             "L7_周期待排=" + sku.getCycleProductionPendingQty(),
                             "L8_中优待排=" + sku.getMidPriorityPendingQty(),
                             "L9_常规待排=" + sku.getConventionProductionPendingQty(),
-                            "L10_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
+                            "L10_开产靠后分=" + resolveOpenProductionLateScore(context, sku),
+                            "L11_SKU类型=" + resolveNewSpecSkuTypeDesc(sku));
                     scores = Arrays.asList(
                             isSpecifyMachine ? 0 : 1,
                             sku.isDeliveryLocked() ? 0 : 1,
@@ -468,8 +517,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             -sku.getCycleProductionPendingQty(),
                             -sku.getMidPriorityPendingQty(),
                             -sku.getConventionProductionPendingQty(),
-                            resolveOpenProductionLateScore(context, sku));
-                    defaultScores = Arrays.asList(1, 1, 0, 1, 0, 0, 0, 0, 0, 0);
+                            resolveOpenProductionLateScore(context, sku),
+                            resolveNewSpecSkuTypeScore(sku));
+                    defaultScores = Arrays.asList(1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 3);
                 } else {
                     sortKeyLevels = Arrays.asList(
                             "L1_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),

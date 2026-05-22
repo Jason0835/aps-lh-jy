@@ -392,7 +392,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setTrialDemandQty(safeInt(plan.getTrialQty()));
         dto.setBeginDay(plan.getBeginDay());
         dto.setTrial(isTrialStage(plan.getConstructionStage()));
-        // 正规SKU余量小于阈值时标记为小批量，保留单控机台优先权（试制 > 量试 > 小批量 > 正规）
+        // 正规SKU余量小于阈值时标记为小批量，供选机阶段在单控/普通机台之间应用类型约束
         int smallBatchThreshold = resolveSmallBatchSkuThreshold(context);
         boolean isSmallBatch = !dto.isTrial()
                 && dto.getSurplusQty() < smallBatchThreshold;

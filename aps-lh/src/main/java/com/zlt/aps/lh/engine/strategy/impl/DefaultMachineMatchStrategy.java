@@ -142,8 +142,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
     /**
      * 对单控拆分机台执行SKU类型约束。
-     * <p>该规则只约束单控机台内部资源竞争，按试制、量试、小批量、正规顺序保留单控候选；
-     * 普通机台不参与该优先级，不因正规SKU待排而清空量试/小批量普通候选。</p>
+     * <p>试制只保留单控候选；量试/小批量优先单控、无单控时回落普通；
+     * 正规优先普通、仅无普通时允许使用单控。</p>
      *
      * @param context 排程上下文
      * @param sku 待排SKU
@@ -188,7 +188,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 记录本次无候选是否由单控/普通机台让位规则触发，供新增主流程判断是否需要延后重试。
+     * 记录本次无候选是否由SKU类型机台约束触发。
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -210,7 +210,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 根据SKU类型和当前待排队列状态过滤候选机台。
+     * 根据SKU类型过滤候选机台。
      *
      * @param context 排程上下文
      * @param sku 待排SKU
@@ -226,21 +226,12 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return singleControlCandidates;
         }
         if (isMassTrialSku(sku)) {
-            if (!CollectionUtils.isEmpty(singleControlCandidates)
-                    && context.getPendingTrialNewSpecSkuCount() > 0) {
-                return new ArrayList<MachineScheduleDTO>(0);
-            }
             if (!CollectionUtils.isEmpty(singleControlCandidates)) {
                 return singleControlCandidates;
             }
             return normalCandidates;
         }
         if (isSmallBatchSku(sku)) {
-            if (!CollectionUtils.isEmpty(singleControlCandidates)
-                    && (context.getPendingTrialNewSpecSkuCount() > 0
-                    || context.getPendingMassTrialNewSpecSkuCount() > 0)) {
-                return new ArrayList<MachineScheduleDTO>(0);
-            }
             if (!CollectionUtils.isEmpty(singleControlCandidates)) {
                 return singleControlCandidates;
             }
@@ -257,9 +248,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
             return normalCandidates;
         }
-        return hasPendingTrialMassTrialOrSmallBatchSku(context)
-                ? new ArrayList<MachineScheduleDTO>(0)
-                : singleControlCandidates;
+        return singleControlCandidates;
     }
 
     /**
@@ -304,10 +293,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return "试制SKU禁止使用普通机台";
         }
         if (isMassTrialOrSmallBatchSku(sku) && !singleControlMachine) {
-            return "量试/小批量SKU未命中单控优先候选";
+            return "量试/小批量SKU优先使用单控机台";
         }
         if (isFormalSku(sku) && singleControlMachine) {
-            return "单控机台需优先保障试制/量试/小批量SKU";
+            return "正规SKU优先使用普通机台";
         }
         return "SKU类型机台约束";
     }
@@ -448,19 +437,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      */
     private boolean isFormalSku(SkuScheduleDTO sku) {
         return sku != null && !isTrialConstructionStage(sku) && !isMassTrialOrSmallBatchSku(sku);
-    }
-
-    /**
-     * 判断是否仍有待排试制、量试或小批量SKU。
-     *
-     * @param context 排程上下文
-     * @return true-存在单控优先保留SKU
-     */
-    private boolean hasPendingTrialMassTrialOrSmallBatchSku(LhScheduleContext context) {
-        return context != null
-                && (context.getPendingTrialNewSpecSkuCount() > 0
-                || context.getPendingMassTrialNewSpecSkuCount() > 0
-                || context.getPendingSmallBatchNewSpecSkuCount() > 0);
     }
 
     /**
@@ -901,7 +877,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param context 排程上下文
      * @param sku 待排SKU
      * @param machine 候选机台
-     * @return 单控机台按试制、量试、小批量、正规排序，普通机台不参与该层级
+     * @return 当前SKU对单控/普通机台的偏好分，分值越小越优先
      */
     private int resolveSingleControlScore(LhScheduleContext context, SkuScheduleDTO sku, MachineScheduleDTO machine) {
         if (Objects.isNull(machine)
