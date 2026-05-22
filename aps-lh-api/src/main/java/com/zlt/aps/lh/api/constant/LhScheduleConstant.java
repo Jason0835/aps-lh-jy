@@ -264,7 +264,12 @@ public final class LhScheduleConstant {
     /** 开产不同英寸靠后分 */
     public static final int OPEN_PRODUCTION_DIFFERENT_INCH_PENALTY = 1;
 
-    /** 开产特殊材料靠后分 */
+    /**
+     * 开产特殊材料靠后分
+     *
+     * @deprecated 特殊材料开产靠后分已移除，排序不再因特殊材料属性惩罚
+     */
+    @Deprecated
     public static final int OPEN_PRODUCTION_SPECIAL_MATERIAL_PENALTY = 1;
 
     // ======================== 试制量试 ========================
