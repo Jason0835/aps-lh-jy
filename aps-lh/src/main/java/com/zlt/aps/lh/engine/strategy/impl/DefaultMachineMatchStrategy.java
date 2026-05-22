@@ -1170,14 +1170,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             int embryoShareCount = resolveEmbryoShareCount(context, machine);
 
             List<String> sortKeyLevels = java.util.Arrays.asList(
-                    "L1_定点机台=" + specifyScore,
-                    "L2_单控拆分=" + singleCtrlScore,
-                    "L3_普通机台优先=" + normalMachineScore,
+                    "L1_定点机台=" + (specifyScore == 0 ? 1 : 0),
+                    "L2_单控拆分=" + (singleCtrlScore == 0 ? 1 : 0),
+                    "L3_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
                     "L4_收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()),
-                    "L5_同规格=" + specMatchScore,
-                    "L6_同英寸=" + proSizeMatchScore,
+                    "L5_同规格=" + (specMatchScore == 0 ? 1 : 0),
+                    "L6_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
                     "L7_英寸接近度=" + formatInchDistance(inchDistance),
-                    "L8_胶囊共用=" + capsuleScore,
+                    "L8_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
                     "L9_胎胚共用=" + embryoShareCount);
             List<Integer> scores = java.util.Arrays.asList(
                     specifyScore,

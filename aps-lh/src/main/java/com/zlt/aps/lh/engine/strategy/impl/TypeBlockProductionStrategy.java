@@ -1256,6 +1256,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 String triggerDesc = triggerOrder == 0 ? "收尾触发" : (triggerOrder == 1 ? "兜底触发" : "其他");
                 boolean canChangeLetter = Boolean.TRUE.equals(canChangeLetterCache.get(machine.getMachineCode()));
                 String machineEmbryoDesc = resolveMachineEmbryoDesc(context, machine);
+                String machineEmbryoCode = resolveMachineEmbryoCode(context, machine);
                 String machineMainPattern = resolveMachineMainPatternStrict(context, machine);
                 String machineSpecCode = resolveMachineSpecCode(context, machine);
 
@@ -1282,6 +1283,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                 + ", " + PriorityTraceLogHelper.kv("收尾时间", PriorityTraceLogHelper.formatDateTime(estimatedEndTime))
                                 + ", " + PriorityTraceLogHelper.kv("切换就绪时间", PriorityTraceLogHelper.formatDateTime(readyTime))
                                 + ", " + PriorityTraceLogHelper.kv("可换活字块", PriorityTraceLogHelper.oneZero(canChangeLetter))
+                                + ", " + PriorityTraceLogHelper.kv("胎胚代码", PriorityTraceLogHelper.safeText(machineEmbryoCode))
                                 + ", " + PriorityTraceLogHelper.kv("胎胚描述", machineEmbryoDesc)
                                 + ", " + PriorityTraceLogHelper.kv("主花纹", machineMainPattern)
                                 + ", " + PriorityTraceLogHelper.kv("规格", machineSpecCode)
@@ -1350,6 +1352,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
 
         String machineEmbryoDesc = resolveMachineEmbryoDesc(context, machine);
+        String machineEmbryoCode = resolveMachineEmbryoCode(context, machine);
         String machineMainPattern = resolveMachineMainPatternStrict(context, machine);
         String machineSpecCode = resolveMachineSpecCode(context, machine);
 
@@ -1357,6 +1360,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
                         + ", " + PriorityTraceLogHelper.kv("当前机台", machine.getMachineCode())
                         + ", " + PriorityTraceLogHelper.kv("当前在机SKU", machine.getCurrentMaterialCode())
+                        + ", " + PriorityTraceLogHelper.kv("当前胎胚代码", PriorityTraceLogHelper.safeText(machineEmbryoCode))
                         + ", " + PriorityTraceLogHelper.kv("当前胎胚描述", machineEmbryoDesc)
                         + ", " + PriorityTraceLogHelper.kv("当前主花纹", machineMainPattern)
                         + ", " + PriorityTraceLogHelper.kv("当前规格", machineSpecCode)
@@ -1407,6 +1411,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                          MachineScheduleDTO machine,
                                          List<SkuScheduleDTO> candidates,
                                          int outputCount) {
+        // 机台当前在机模具号集合，仅计算一次
+        Set<String> machineMouldCodeSet = resolveMouldCodeSet(context, machine.getCurrentMaterialCode());
+        String machineMouldCodes = CollectionUtils.isEmpty(machineMouldCodeSet)
+                ? "-" : String.join(",", machineMouldCodeSet);
+
         for (int i = 0; i < outputCount; i++) {
             SkuScheduleDTO sku = candidates.get(i);
             boolean sameCarcass = isSameCarcass(context, machine, sku);
@@ -1414,8 +1423,19 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             boolean canChange = isTypeBlockCandidate(context, machine, sku, false);
             String skuEmbryoDesc = resolveSkuEmbryoDesc(context, sku);
 
+            // SKU所有模具号 及 与机台当前模具的交集
+            Set<String> skuMouldCodeSet = resolveMouldCodeSet(context, sku.getMaterialCode());
+            String skuMouldCodes = CollectionUtils.isEmpty(skuMouldCodeSet)
+                    ? "-" : String.join(",", skuMouldCodeSet);
+            String intersectMouldCodes = "-";
+            if (!CollectionUtils.isEmpty(machineMouldCodeSet) && !CollectionUtils.isEmpty(skuMouldCodeSet)) {
+                List<String> intersectList = new ArrayList<>(machineMouldCodeSet);
+                intersectList.retainAll(skuMouldCodeSet);
+                intersectMouldCodes = intersectList.isEmpty() ? "-" : String.join(",", intersectList);
+            }
+
             String sortKey = PriorityTraceLogHelper.formatSortKey(Arrays.asList(
-                    "L1_同胎胚同模具=" + (sameCarcass && sameMold ? 0 : 1),
+                    "L1_同胎胚同模具=" + (sameCarcass && sameMold ? 1 : 0),
                     "L2_物料编码兜底=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())));
             String hitLevel = sameCarcass && sameMold ? "命中L1同胎胚+同模具" : "-";
 
@@ -1427,8 +1447,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                             + ", " + PriorityTraceLogHelper.kv("待排产量", sku.resolveTargetScheduleQty())
                             + ", " + PriorityTraceLogHelper.kv("月计划余量", sku.getSurplusQty())
                             + ", " + PriorityTraceLogHelper.kv("胎胚库存", sku.getEmbryoStock())
+                            + ", " + PriorityTraceLogHelper.kv("胎胚代码", PriorityTraceLogHelper.safeText(sku.getEmbryoCode()))
                             + ", " + PriorityTraceLogHelper.kv("胎胚描述", skuEmbryoDesc)
                             + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
+                            + ", " + PriorityTraceLogHelper.kv("SKU模具号", skuMouldCodes)
+                            + ", " + PriorityTraceLogHelper.kv("交集模具号", intersectMouldCodes)
                             + ", " + PriorityTraceLogHelper.kv("同胎胚", PriorityTraceLogHelper.oneZero(sameCarcass))
                             + ", " + PriorityTraceLogHelper.kv("同模具", PriorityTraceLogHelper.oneZero(sameMold))
                             + ", " + PriorityTraceLogHelper.kv("满足换活字块", PriorityTraceLogHelper.oneZero(canChange))

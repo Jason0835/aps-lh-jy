@@ -638,10 +638,12 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
     /**
      * 解析常规待排需求量。
+     * <p>欠产传导量(carryForwardQty)暂不计入待排需求，避免余量为0的SKU因前次排程未完成而持续被排产。
+     * 该逻辑已在调整前序排程时通过 adjustPreviousSchedule 做了传导记录，但不应影响本次待排量的计算。</p>
      *
      * @param surplusQty 月计划余量
      * @param inheritedPlanQty 已继承量
-     * @param carryForwardQty 欠产传导量
+     * @param carryForwardQty 欠产传导量（当前暂不使用）
      * @param embryoStock 胎胚库存
      * @return 待排需求量
      */
@@ -649,7 +651,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                                       int inheritedPlanQty,
                                       int carryForwardQty,
                                       int embryoStock) {
-        int surplusDemandQty = Math.max(0, surplusQty - Math.max(0, inheritedPlanQty) + Math.max(0, carryForwardQty));
+        int surplusDemandQty = Math.max(0, surplusQty - Math.max(0, inheritedPlanQty));
         int effectiveEmbryoStock = Math.max(0, embryoStock);
         return Math.max(surplusDemandQty, effectiveEmbryoStock);
     }

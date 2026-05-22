@@ -522,11 +522,11 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 List<Integer> defaultScores;
                 if (isNewSpec) {
                     sortKeyLevels = Arrays.asList(
-                            "L1_定点机台=" + (isSpecifyMachine ? 0 : 1),
-                            "L2_唯一候选特殊材料=" + (isSingleCandidate ? 0 : 1),
-                            "L3_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
+                            "L1_定点机台=" + (isSpecifyMachine ? 1 : 0),
+                            "L2_唯一候选特殊材料=" + (isSingleCandidate ? 1 : 0),
+                            "L3_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
                             "L4_延误天数=" + (sku.getDelayDays() > 0 ? sku.getDelayDays() : 0),
-                            "L5_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
+                            "L5_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
                             "L6_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
                             "L7_高优待排=" + sku.getHighPriorityPendingQty(),
                             "L8_周期待排=" + sku.getCycleProductionPendingQty(),
@@ -548,9 +548,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                     defaultScores = Arrays.asList(1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0);
                 } else {
                     sortKeyLevels = Arrays.asList(
-                            "L1_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
+                            "L1_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
                             "L2_延误天数=" + (sku.getDelayDays() > 0 ? sku.getDelayDays() : 0),
-                            "L3_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
+                            "L3_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
                             "L4_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
                             "L5_高优待排=" + sku.getHighPriorityPendingQty(),
                             "L6_周期待排=" + sku.getCycleProductionPendingQty(),
