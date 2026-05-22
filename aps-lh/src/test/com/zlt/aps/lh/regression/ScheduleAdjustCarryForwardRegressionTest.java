@@ -452,7 +452,34 @@ class ScheduleAdjustCarryForwardRegressionTest {
 
         assertEquals(0, context.getStructureSkuMap().size());
         assertEquals(1, context.getUnscheduledResultList().size());
-        assertEquals("物料：MAT-2 没有排产目标量，不进行排产",
+        assertEquals("物料：MAT-2 余量为0且胎胚库存为0，不需要排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    @Test
+    void doHandle_shouldKeepLegacyReasonWhenTargetQtyIsZeroButSurplusWasConsumedByInheritedQty() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.getInheritedPlanQtyMap().put("MAT-INHERITED", 100);
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-INHERITED");
+        plan.setMaterialDesc("MAT-INHERITED-DESC");
+        plan.setStructureName("S-INHERITED");
+        plan.setSpecifications("SPEC-INHERITED");
+        plan.setTotalQty(100);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        assertEquals(0, context.getStructureSkuMap().size());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals("物料：MAT-INHERITED 没有排产目标量，不进行排产",
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
