@@ -487,7 +487,12 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
-     * 判断SKU是否满足换活字块条件：同胎胚且同模具。
+     * 判断SKU是否满足换活字块条件。
+     * <p>优先级策略：</p>
+     * <ul>
+     *   <li>第一层（高优先级）：同胎胚且同模具，则允许换活字块</li>
+     *   <li>第二层（次优先级）：不同时满足同胎胚且同模具时，判断是否同规格，同规格则允许换活字块</li>
+     * </ul>
      *
      * @param context 排程上下文
      * @param machine 机台
@@ -587,6 +592,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
 
     /**
      * 判断当前在机SKU与候选SKU是否允许换活字块。
+     * <p>优先级策略：</p>
+     * <ul>
+     *   <li>第一层（高优先级）：同胎胚且同模具，则允许换活字块</li>
+     *   <li>第二层（次优先级）：不同时满足同胎胚且同模具时，判断是否同规格，同规格则允许换活字块</li>
+     * </ul>
      *
      * @param context 排程上下文
      * @param machine 机台
@@ -619,19 +629,36 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 }
             }
         }
-        boolean canChangeLetterBlock = sameCarcass && sameMold;
+        // 第一层（高优先级）：同胎胚且同模具
+        boolean sameCarcassAndMold = sameCarcass && sameMold;
+        if (sameCarcassAndMold) {
+            if (writeDecisionLog) {
+                log.info("[换活字块匹配判断] 机台编码: {}, 在机SKU: {}, 候选SKU: {}, 在机胎胚代码: {}, 候选胎胚代码: {}, "
+                                + "在机胎胚描述: {}, 候选胎胚描述: {}, 同胎胚: {}, 在机模具号集合: {}, 候选模具号集合: {}, "
+                                + "同模具: {}, 匹配策略: 第一层(同胎胚+同模具), 是否可换活字块: true",
+                        machine == null ? null : machine.getMachineCode(),
+                        machine == null ? null : machine.getCurrentMaterialCode(),
+                        sku == null ? null : sku.getMaterialCode(),
+                        machineEmbryoCode, skuEmbryoCode, machineEmbryoDesc, skuEmbryoDesc,
+                        sameCarcass, machineMouldCodeSet, skuMouldCodeSet, sameMold);
+            }
+            return true;
+        }
+        // 第二层（次优先级）：不同时满足同胎胚且同模具时，判断是否同规格
+        boolean sameSpec = isSameSpec(context, machine, sku);
         if (writeDecisionLog) {
             log.info("[换活字块匹配判断] 机台编码: {}, 在机SKU: {}, 候选SKU: {}, 在机胎胚代码: {}, 候选胎胚代码: {}, "
                             + "在机胎胚描述: {}, 候选胎胚描述: {}, 同胎胚: {}, 在机模具号集合: {}, 候选模具号集合: {}, "
-                            + "同模具: {}, 是否可换活字块: {}{}",
+                            + "同模具: {}, 同规格: {}, 匹配策略: 第二层(同规格), 是否可换活字块: {}{}",
                     machine == null ? null : machine.getMachineCode(),
                     machine == null ? null : machine.getCurrentMaterialCode(),
                     sku == null ? null : sku.getMaterialCode(),
                     machineEmbryoCode, skuEmbryoCode, machineEmbryoDesc, skuEmbryoDesc,
-                    sameCarcass, machineMouldCodeSet, skuMouldCodeSet, sameMold, canChangeLetterBlock,
-                    canChangeLetterBlock ? "" : "，不满足换活字块：同胎胚=" + sameCarcass + "，同模具=" + sameMold);
+                    sameCarcass, machineMouldCodeSet, skuMouldCodeSet, sameMold, sameSpec,
+                    sameSpec,
+                    sameSpec ? "" : "，不满足换活字块：同胎胚=" + sameCarcass + "，同模具=" + sameMold + "，同规格=" + sameSpec);
         }
-        return canChangeLetterBlock;
+        return sameSpec;
     }
 
     /**
