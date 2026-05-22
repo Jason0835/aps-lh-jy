@@ -701,7 +701,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (hasEndingResult(skuResults)) {
             int targetQty = sourceSku.resolveTargetScheduleQty();
             if (targetQty > 0) {
-                log.info("续作多机台收尾严格目标, materialCode: {}, 目标量: {}, 是否补满: false, 是否超排: false",
+                log.info("续作多机台收尾严格目标, materialCode: {}, 目标量: {}, 是否补满: 0, 是否超排: 0",
                         sourceSku.getMaterialCode(), targetQty);
                 return targetQty;
             }
@@ -1236,7 +1236,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return false;
         }
         boolean nightShift = StringUtils.equals(ShiftEnum.NIGHT_SHIFT.getCode(), endingShift.getShiftType());
-        log.info("续作同SKU多机台收尾错峰判断, materialCode: {}, 收尾班次: {}, 是否晚班: {}, 是否同SKU多机台收尾: true",
+        log.info("续作同SKU多机台收尾错峰判断, materialCode: {}, 收尾班次: {}, 是否晚班: {}, 是否同SKU多机台收尾: 1",
                 sourceSku != null ? sourceSku.getMaterialCode() : null, endingShiftIndex, nightShift);
         if (nightShift) {
             return false;
@@ -1881,7 +1881,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 "机台=" + PriorityTraceLogHelper.safeText(machine.getMachineCode())
                         + ", SKU=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())
-                        + ", 是否收尾=" + PriorityTraceLogHelper.yesNo(machine.isEnding()));
+                        + ", 是否收尾=" + PriorityTraceLogHelper.oneZero(machine.isEnding()));
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 "结果specEndTime=" + PriorityTraceLogHelper.formatDateTime(result.getSpecEndTime())
                         + ", 回写estimatedEndTime=" + PriorityTraceLogHelper.formatDateTime(actualCompletionTime));

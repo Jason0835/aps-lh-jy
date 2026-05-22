@@ -52,11 +52,23 @@ public final class PriorityTraceLogHelper {
     }
 
     /**
-     * 布尔值转展示文本。
+     * 布尔值转命中标识，1-命中，0-未命中。
+     *
+     * @param flag 布尔值
+     * @return 1/0
+     */
+    public static String oneZero(boolean flag) {
+        return flag ? "1" : "0";
+    }
+
+    /**
+     * 布尔值转展示文本（是/否）。
      *
      * @param flag 布尔值
      * @return 是/否
+     * @deprecated 排序跟踪日志中请使用 {@link #oneZero(boolean)} 统一输出 1/0 格式
      */
+    @Deprecated
     public static String yesNo(boolean flag) {
         return flag ? "是" : "否";
     }

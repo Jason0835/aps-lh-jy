@@ -525,19 +525,19 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             "L1_定点机台=" + (isSpecifyMachine ? 0 : 1),
                             "L2_唯一候选特殊材料=" + (isSingleCandidate ? 0 : 1),
                             "L3_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
-                            "L4_延误天数=" + (sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0),
+                            "L4_延误天数=" + (sku.getDelayDays() > 0 ? sku.getDelayDays() : 0),
                             "L5_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
-                            "L6_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0),
-                            "L7_高优待排=" + (-sku.getHighPriorityPendingQty()),
-                            "L8_周期待排=" + (-sku.getCycleProductionPendingQty()),
-                            "L9_中优待排=" + (-sku.getMidPriorityPendingQty()),
-                            "L10_常规待排=" + (-sku.getConventionProductionPendingQty()),
+                            "L6_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
+                            "L7_高优待排=" + sku.getHighPriorityPendingQty(),
+                            "L8_周期待排=" + sku.getCycleProductionPendingQty(),
+                            "L9_中优待排=" + sku.getMidPriorityPendingQty(),
+                            "L10_常规待排=" + sku.getConventionProductionPendingQty(),
                             "L11_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
                     scores = Arrays.asList(
                             isSpecifyMachine ? 0 : 1,
                             isSingleCandidate ? 0 : 1,
                             sku.isDeliveryLocked() ? 0 : 1,
-                            sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0,
+                            sku.getDelayDays() > 0 ? -sku.getDelayDays() : 0,
                             structureAllEndingPriority ? 0 : 1,
                             structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
                             -sku.getHighPriorityPendingQty(),
@@ -549,13 +549,13 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 } else {
                     sortKeyLevels = Arrays.asList(
                             "L1_锁交期=" + (sku.isDeliveryLocked() ? 0 : 1),
-                            "L2_延误天数=" + (sku.getDelayDays() >= 0 ? 0 : 1) + "/" + (sku.getDelayDays() >= 0 ? -sku.getDelayDays() : 0),
+                            "L2_延误天数=" + (sku.getDelayDays() > 0 ? sku.getDelayDays() : 0),
                             "L3_结构全收尾=" + (structureAllEndingPriority ? 0 : 1),
-                            "L4_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0),
-                            "L5_高优待排=" + (-sku.getHighPriorityPendingQty()),
-                            "L6_周期待排=" + (-sku.getCycleProductionPendingQty()),
-                            "L7_中优待排=" + (-sku.getMidPriorityPendingQty()),
-                            "L8_常规待排=" + (-sku.getConventionProductionPendingQty()),
+                            "L4_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
+                            "L5_高优待排=" + sku.getHighPriorityPendingQty(),
+                            "L6_周期待排=" + sku.getCycleProductionPendingQty(),
+                            "L7_中优待排=" + sku.getMidPriorityPendingQty(),
+                            "L8_常规待排=" + sku.getConventionProductionPendingQty(),
                             "L9_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
                     scores = Arrays.asList(
                             sku.isDeliveryLocked() ? 0 : 1,
@@ -577,12 +577,12 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                                 + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode())
                                 + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
                                 + ", " + PriorityTraceLogHelper.kv("排产类型", sku.getScheduleType())
-                                + ", " + PriorityTraceLogHelper.kv("续作", yesNoFromScheduleType(sku.getScheduleType()))
-                                + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.yesNo(ending))
+                                + ", " + PriorityTraceLogHelper.kv("续作", oneZeroFromScheduleType(sku.getScheduleType()))
+                                + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.oneZero(ending))
                                 + ", " + PriorityTraceLogHelper.kv("阶段", constructionStageDesc)
-                                + ", " + PriorityTraceLogHelper.kv("试制量试", PriorityTraceLogHelper.yesNo(isTrialOrMassTrialSku(sku)))
-                                + ", " + PriorityTraceLogHelper.kv("特殊材料", PriorityTraceLogHelper.yesNo(isSpecial))
-                                + ", " + PriorityTraceLogHelper.kv("定点机台", PriorityTraceLogHelper.yesNo(isSpecifyMachine))
+                                + ", " + PriorityTraceLogHelper.kv("试制量试", PriorityTraceLogHelper.oneZero(isTrialOrMassTrialSku(sku)))
+                                + ", " + PriorityTraceLogHelper.kv("特殊材料", PriorityTraceLogHelper.oneZero(isSpecial))
+                                + ", " + PriorityTraceLogHelper.kv("定点机台", PriorityTraceLogHelper.oneZero(isSpecifyMachine))
                                 + ", " + PriorityTraceLogHelper.kv("月计划量", sku.getMonthPlanQty())
                                 + ", " + PriorityTraceLogHelper.kv("余量", sku.getSurplusQty())
                                 + ", " + PriorityTraceLogHelper.kv("胎胚库存", sku.getEmbryoStock())
@@ -604,13 +604,13 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     }
 
     /**
-     * 根据排产类型判断是否续作。
+     * 根据排产类型判断是否续作，输出 1/0 标识。
      *
      * @param scheduleType 排产类型编码
-     * @return 是/否
+     * @return 1/0
      */
-    private static String yesNoFromScheduleType(String scheduleType) {
-        return "01".equals(scheduleType) ? "是" : "否";
+    private static String oneZeroFromScheduleType(String scheduleType) {
+        return "01".equals(scheduleType) ? "1" : "0";
     }
 
     /**
