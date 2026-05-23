@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -1012,7 +1013,25 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         registerMachineAssignment(context, machine.getMachineCode(), result);
         updateMachineState(context, machine, sku, result);
         context.getNewSpecSkuList().remove(sku);
-        log.debug("换活字块排产完成, 机台: {}, SKU: {}", machine.getMachineCode(), sku.getMaterialCode());
+        // 换活字块产能不足以覆盖全目标量时，添加未排记录
+        int scheduledQty = result.getDailyPlanQty() == null ? 0 : result.getDailyPlanQty();
+        int originalTarget = originalTargetScheduleQty != null ? originalTargetScheduleQty : sku.resolveTargetScheduleQty();
+        int remainingQty = Math.max(0, originalTarget - scheduledQty);
+        if (remainingQty > 0) {
+            LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+            unscheduled.setFactoryCode(context.getFactoryCode());
+            unscheduled.setBatchNo(context.getBatchNo());
+            unscheduled.setScheduleDate(context.getScheduleTargetDate());
+            unscheduled.setMaterialCode(sku.getMaterialCode());
+            unscheduled.setMaterialDesc(sku.getMaterialDesc());
+            unscheduled.setSpecCode(sku.getSpecCode());
+            unscheduled.setStructureName(sku.getStructureName());
+            unscheduled.setUnscheduledQty(remainingQty);
+            unscheduled.setUnscheduledReason("换活字块后机台产能不足，剩余" + remainingQty + "未排");
+            context.getUnscheduledResultList().add(unscheduled);
+        }
+        log.debug("换活字块排产完成, 机台: {}, SKU: {}, 已排: {}, 剩余: {}",
+                machine.getMachineCode(), sku.getMaterialCode(), scheduledQty, remainingQty);
         return true;
     }
 
@@ -1107,10 +1126,16 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      * @return true-应走新增换模主链
      */
     private boolean shouldPreferNewSpecPath(LhScheduleContext context,
-                                            MachineScheduleDTO machine,
-                                            SkuScheduleDTO sku) {
-        return !isTypeBlockCandidate(context, machine, sku)
-                || requiresMouldChangeBalance(context, machine, sku);
+                                             MachineScheduleDTO machine,
+                                             SkuScheduleDTO sku) {
+        if (!isTypeBlockCandidate(context, machine, sku)) {
+            return true;
+        }
+        // 同规格时，即使模具不同也走换活字块，不应改为换模
+        if (isSameSpec(context, machine, sku)) {
+            return false;
+        }
+        return requiresMouldChangeBalance(context, machine, sku);
     }
 
     /**
