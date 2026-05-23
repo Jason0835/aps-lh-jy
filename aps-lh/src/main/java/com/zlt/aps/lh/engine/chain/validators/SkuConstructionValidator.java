@@ -5,18 +5,20 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.ValidationPolicyEnum;
 import com.zlt.aps.lh.engine.chain.IDataValidator;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 /**
  * SKU与示方书关系校验器
- * <p>校验 SKU 与示方书关系数据中的硫化示方书号(lhNo)和硫化示方书类型(lhType)是否为空。</p>
+ * <p>校验月生产计划中物料的硫化示方书号(lhNo)和硫化示方书类型(lhType)是否为空。</p>
  *
  * @author APS
  */
@@ -28,6 +30,11 @@ public class SkuConstructionValidator implements IDataValidator {
 
     @Override
     public boolean validate(LhScheduleContext context) {
+        // 只校验月生产计划列表中的物料
+        List<FactoryMonthPlanProductionFinalResult> monthPlanList = context.getMonthPlanList();
+        if (CollectionUtils.isEmpty(monthPlanList)) {
+            return true;
+        }
         Map<String, MdmSkuConstructionRef> refMap = context.getSkuConstructionRefMap();
         if (CollectionUtils.isEmpty(refMap)) {
             log.warn("SKU与示方书关系数据为空, 工厂: {}", context.getFactoryCode());
@@ -35,12 +42,16 @@ public class SkuConstructionValidator implements IDataValidator {
                     + context.getFactoryDisplayName());
             return false;
         }
-        // 收集 lhNo 或 lhType 为空的物料编码
+        // 遍历月计划物料，校验 lhNo 或 lhType 是否为空
         Map<String, String> missingFieldMap = new LinkedHashMap<>();
-        for (Map.Entry<String, MdmSkuConstructionRef> entry : refMap.entrySet()) {
-            String materialCode = entry.getKey();
-            MdmSkuConstructionRef ref = entry.getValue();
+        for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
+            String materialCode = plan.getMaterialCode();
+            if (StringUtils.isEmpty(materialCode)) {
+                continue;
+            }
+            MdmSkuConstructionRef ref = refMap.get(materialCode);
             if (Objects.isNull(ref)) {
+                missingFieldMap.put(materialCode, "未找到SKU与示方书关系数据");
                 continue;
             }
             if (StringUtils.isEmpty(ref.getLhNo()) && StringUtils.isEmpty(ref.getLhType())) {
@@ -64,7 +75,7 @@ public class SkuConstructionValidator implements IDataValidator {
             context.addValidationError(errorText);
             return false;
         }
-        log.info("SKU与示方书关系校验通过, 数据条数: {}", refMap.size());
+        log.info("SKU与示方书关系校验通过, 数据条数: {}", monthPlanList.size());
         return true;
     }
 
