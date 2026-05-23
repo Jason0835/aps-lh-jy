@@ -88,8 +88,8 @@ public class SkuScheduleDTO {
     private int scheduleOrder;
     /** 是否有发货要求(锁定交期) */
     private boolean deliveryLocked;
-    /** 延误天数 */
-    private int delayDays = -1;
+    /** 延误天数，月计划开始日距T日的天数差（beginDate - scheduleDate），负数=延误，null=未知 */
+    private Integer delayDays;
     /** 供应链优先级 */
     private String supplyChainPriority;
     /** 高优先级待排量 */

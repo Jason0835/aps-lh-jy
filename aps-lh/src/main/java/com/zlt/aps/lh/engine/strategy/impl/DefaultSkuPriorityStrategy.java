@@ -87,7 +87,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
      * 排序规则（优先级从高到低）：
      * <ol>
      *   <li>有发货要求优先（deliveryLocked=true 排前）</li>
-     *   <li>延误天数越多越优先（delayDays 降序）</li>
+     *   <li>延误天数负值越小越优先（delayDays 升序，负数<0<正数）</li>
      *   <li>未来结构全收尾优先：未来N天内（N可配置）结构下全部SKU均收尾时，该结构内收尾日越晚（endingDaysRemaining 越大）的越优先上机</li>
      *   <li>供应链优先级：高优先级(04) → 周期排产(05) → 中优先级(06) → 搭配排产(07)</li>
      * </ol>
@@ -99,9 +99,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         return Comparator
                 // 顺序1：锁定上机日期的优先。
                 .comparingInt((SkuScheduleDTO s) -> s.isDeliveryLocked() ? 0 : 1)
-                // 顺序2：延迟上机越久越优先，未知值排后。
-                .thenComparingInt((SkuScheduleDTO s) -> s.getDelayDays() >= 0 ? 0 : 1)
-                .thenComparingInt((SkuScheduleDTO s) -> s.getDelayDays() >= 0 ? -s.getDelayDays() : 0)
+                // 顺序2：延迟上机越久越优先（负数越小越优先），未知值排后。
+                .thenComparing(SkuScheduleDTO::getDelayDays, Comparator.nullsLast(Comparator.naturalOrder()))
                 // 顺序3：未来结构全收尾优先，命中结构内按最晚收尾优先。
                 .thenComparingInt((SkuScheduleDTO s) -> isStructureAllEndingPriority(structurePriorityMap, s) ? 0 : 1)
                 .thenComparingInt((SkuScheduleDTO s) -> isStructureAllEndingPriority(structurePriorityMap, s)
@@ -490,7 +489,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 boolean isSpecial = isSpecialMaterial(context, sku);
                 String constructionStageDesc = resolveConstructionStageDesc(sku);
 
-                // 计算各层级得分
+                // 提取延误天数，避免三元表达式中Integer/int类型推断问题
+                Integer delayDays = sku.getDelayDays();
+                boolean delayKnown = delayDays != null;
                 List<String> sortKeyLevels;
                 List<Integer> scores;
                 List<Integer> defaultScores;
@@ -498,7 +499,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                     sortKeyLevels = Arrays.asList(
                             "L1_定点机台=" + (isSpecifyMachine ? 1 : 0),
                             "L2_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
-                            "L3_延误天数=" + (sku.getDelayDays() > 0 ? sku.getDelayDays() : 0),
+                            "L3_延误天数=" + (delayKnown ? delayDays : 0),
                             "L4_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
                             "L5_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
                             "L6_高优待排=" + sku.getHighPriorityPendingQty(),
@@ -510,7 +511,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                     scores = Arrays.asList(
                             isSpecifyMachine ? 0 : 1,
                             sku.isDeliveryLocked() ? 0 : 1,
-                            sku.getDelayDays() > 0 ? -sku.getDelayDays() : 0,
+                            delayKnown ? delayDays : 0,
                             structureAllEndingPriority ? 0 : 1,
                             structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
                             -sku.getHighPriorityPendingQty(),
@@ -523,7 +524,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 } else {
                     sortKeyLevels = Arrays.asList(
                             "L1_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
-                            "L2_延误天数=" + (sku.getDelayDays() > 0 ? sku.getDelayDays() : 0),
+                            "L2_延误天数=" + (delayKnown ? delayDays : 0),
                             "L3_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
                             "L4_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
                             "L5_高优待排=" + sku.getHighPriorityPendingQty(),
@@ -533,7 +534,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             "L9_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
                     scores = Arrays.asList(
                             sku.isDeliveryLocked() ? 0 : 1,
-                            sku.getDelayDays() >= 0 ? 0 : 1,
+                            delayKnown ? 0 : 1,
                             structureAllEndingPriority ? 0 : 1,
                             structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
                             -sku.getHighPriorityPendingQty(),

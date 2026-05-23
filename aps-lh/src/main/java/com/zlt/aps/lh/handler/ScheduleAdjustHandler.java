@@ -953,23 +953,42 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
     /**
      * 基于月计划开始日期（BEGIN_DAY）计算延迟上机天数。
+     * <p>
+     * 计算公式：月计划开始日期（year+month+beginDay构建完整日期）- T日（scheduleDate），
+     * 负数表示已过开始日（延误），正数表示尚未到开始日（富余），null表示无法计算。
+     * </p>
      *
      * @param context 排程上下文
-     * @param plan 月生产计划
-     * @return 延迟天数；BEGIN_DAY 为空或非法时返回 -1
+     * @param plan    月生产计划
+     * @return 延迟天数=月计划开始日距T日的天数差（beginDate - scheduleDate），无法计算时返回null
      */
-    private int resolveDelayDays(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
+    private Integer resolveDelayDays(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
         if (context.getScheduleDate() == null) {
-            return -1;
+            return null;
         }
         Integer beginDay = plan != null ? plan.getBeginDay() : null;
         if (beginDay == null || beginDay < MIN_DAY_OF_MONTH || beginDay > MAX_DAY_OF_MONTH) {
-            return -1;
+            return null;
         }
-        Calendar calendar = Calendar.getInstance();
-        calendar.setTime(context.getScheduleDate());
-        int scheduleDayOfMonth = calendar.get(Calendar.DAY_OF_MONTH);
-        return Math.max(scheduleDayOfMonth - beginDay, 0);
+        Integer year = plan.getYear();
+        Integer month = plan.getMonth();
+        if (year == null || month == null) {
+            return null;
+        }
+        // 构建月计划开始日期（清零时分秒毫秒）
+        Calendar beginCal = Calendar.getInstance();
+        beginCal.set(year, month - 1, beginDay, 0, 0, 0);
+        beginCal.set(Calendar.MILLISECOND, 0);
+        // 构建T日日期（清零时分秒毫秒）
+        Calendar scheduleCal = Calendar.getInstance();
+        scheduleCal.setTime(context.getScheduleDate());
+        scheduleCal.set(Calendar.HOUR_OF_DAY, 0);
+        scheduleCal.set(Calendar.MINUTE, 0);
+        scheduleCal.set(Calendar.SECOND, 0);
+        scheduleCal.set(Calendar.MILLISECOND, 0);
+        // 计算天数差：beginDate - scheduleDate
+        long diffMillis = beginCal.getTimeInMillis() - scheduleCal.getTimeInMillis();
+        return (int) (diffMillis / (24 * 60 * 60 * 1000));
     }
 
     /**

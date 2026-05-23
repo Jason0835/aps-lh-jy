@@ -56,18 +56,18 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldPreferLargerDelayDays() {
-        SkuScheduleDTO delayOne = sku("MAT-A");
-        delayOne.setDelayDays(1);
-        SkuScheduleDTO delayThree = sku("MAT-B");
-        delayThree.setDelayDays(3);
+    void sortByPriority_shouldPreferSmallerDelayDays() {
+        SkuScheduleDTO delayMore = sku("MAT-A");
+        delayMore.setDelayDays(-15);
+        SkuScheduleDTO delayLess = sku("MAT-B");
+        delayLess.setDelayDays(-3);
 
-        LhScheduleContext context = contextWithNewSpec(delayOne, delayThree);
+        LhScheduleContext context = contextWithNewSpec(delayMore, delayLess);
 
         strategy.sortByPriority(context);
 
-        assertEquals("MAT-B", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("MAT-A", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-A", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("MAT-B", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     @Test
@@ -267,8 +267,8 @@ class DefaultSkuPriorityStrategyTest {
         strategy.sortByPriority(context);
 
         assertEquals("MAT-L", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("MAT-D", context.getNewSpecSkuList().get(1).getMaterialCode());
-        assertEquals("MAT-P", context.getNewSpecSkuList().get(2).getMaterialCode());
+        assertEquals("MAT-P", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-D", context.getNewSpecSkuList().get(2).getMaterialCode());
     }
 
     @Test
@@ -407,9 +407,9 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("MAT-F", context.getNewSpecSkuList().get(0).getMaterialCode(),
+        assertEquals("MAT-T", context.getNewSpecSkuList().get(0).getMaterialCode(),
                 "SKU类型只能作为同层级补充排序，不能覆盖更高优先级主排序条件");
-        assertEquals("MAT-T", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-F", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     @Test

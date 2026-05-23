@@ -534,6 +534,8 @@ class ScheduleAdjustCarryForwardRegressionTest {
         plan.setStructureName("S-LOCK");
         plan.setSpecifications("SPEC-LOCK");
         plan.setTotalQty(200);
+        plan.setYear(2026);
+        plan.setMonth(4);
         plan.setBeginDay(7);
         plan.setDay9(20);
         plan.setDay11(40);
@@ -552,7 +554,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
 
         SkuScheduleDTO sku = context.getStructureSkuMap().get("S-LOCK").get(0);
         assertEquals(true, sku.isDeliveryLocked());
-        assertEquals(4, sku.getDelayDays());
+        assertEquals((Integer) (-4), sku.getDelayDays());
         assertEquals(11, sku.getHighPriorityPendingQty());
         assertEquals(9, sku.getCycleProductionPendingQty());
         assertEquals(7, sku.getMidPriorityPendingQty());
@@ -560,7 +562,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
-    void doHandle_shouldSetDelayDaysToMinusOneWhenBeginDayMissingOrInvalid() {
+    void doHandle_shouldSetDelayDaysToNullWhenBeginDayMissingOrInvalid() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
@@ -575,6 +577,8 @@ class ScheduleAdjustCarryForwardRegressionTest {
         missingBeginDayPlan.setStructureName("S-BEGIN-MISS");
         missingBeginDayPlan.setSpecifications("SPEC-BEGIN-MISS");
         missingBeginDayPlan.setTotalQty(100);
+        missingBeginDayPlan.setYear(2026);
+        missingBeginDayPlan.setMonth(4);
         missingBeginDayPlan.setDay11(30);
 
         FactoryMonthPlanProductionFinalResult invalidBeginDayPlan = new FactoryMonthPlanProductionFinalResult();
@@ -583,6 +587,8 @@ class ScheduleAdjustCarryForwardRegressionTest {
         invalidBeginDayPlan.setStructureName("S-BEGIN-INVALID");
         invalidBeginDayPlan.setSpecifications("SPEC-BEGIN-INVALID");
         invalidBeginDayPlan.setTotalQty(100);
+        invalidBeginDayPlan.setYear(2026);
+        invalidBeginDayPlan.setMonth(4);
         invalidBeginDayPlan.setBeginDay(0);
         invalidBeginDayPlan.setDay11(30);
 
@@ -592,8 +598,8 @@ class ScheduleAdjustCarryForwardRegressionTest {
 
         SkuScheduleDTO missingBeginDaySku = context.getStructureSkuMap().get("S-BEGIN-MISS").get(0);
         SkuScheduleDTO invalidBeginDaySku = context.getStructureSkuMap().get("S-BEGIN-INVALID").get(0);
-        assertEquals(-1, missingBeginDaySku.getDelayDays());
-        assertEquals(-1, invalidBeginDaySku.getDelayDays());
+        assertNull(missingBeginDaySku.getDelayDays());
+        assertNull(invalidBeginDaySku.getDelayDays());
     }
 
     @Test
