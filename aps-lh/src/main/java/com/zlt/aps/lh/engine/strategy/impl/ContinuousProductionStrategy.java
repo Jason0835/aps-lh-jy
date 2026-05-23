@@ -121,6 +121,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         log.info("续作排产 - 续作收尾判定, 续作SKU数: {}", context.getContinuousSkuList().size());
 
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
+        Map<String, Integer> continuationGroupMachineCountMap = buildContinuationGroupMachineCountMap(
+                context.getContinuousSkuList());
 
         for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
             String machineCode = sku.getContinuousMachineCode();
@@ -133,9 +135,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
             sku.setStrictTargetQty(ProductionQuantityPolicy.from(sku, isEnding).isStrictUpperLimit());
+            boolean isSingleMachine = continuationGroupMachineCountMap
+                    .getOrDefault(buildContinuationGroupKey(sku), 0) == 1;
 
             // 滚动衔接时沿用机台继承后的可用时间，避免从重叠窗口首班重复起排。
             Date startTime = resolveContinuousStartTime(context, machine, shifts);
+            applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
+                    isEnding, isSingleMachine);
             Date specifySwitchStartTime = !isEnding
                     ? tryReserveSpecifySqueezeSwitchStartTime(context, machine, sku, shifts) : null;
             List<LhShiftConfigVO> effectiveShifts = specifySwitchStartTime == null
@@ -188,6 +194,52 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         log.info("续作收尾判定结束, 续作SKU: {}, 当前排程结果数: {}, 待新增SKU: {}",
                 context.getContinuousSkuList().size(), context.getScheduleResultList().size(),
                 context.getNewSpecSkuList().size());
+    }
+
+    /**
+     * 单机台续作目标量决策。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machine 机台
+     * @param startTime 开产时间
+     * @param shifts 排程窗口班次
+     * @param isEnding 是否收尾
+     * @param isSingleMachine 是否单机台
+     */
+    private void applySingleMachineContinuousTargetRule(LhScheduleContext context,
+                                                        SkuScheduleDTO sku,
+                                                        MachineScheduleDTO machine,
+                                                        Date startTime,
+                                                        List<LhShiftConfigVO> shifts,
+                                                        boolean isEnding,
+                                                        boolean isSingleMachine) {
+        if (sku == null || machine == null) {
+            return;
+        }
+        int originalTargetQty = sku.resolveTargetScheduleQty();
+        int windowCapacityQty = startTime == null ? 0
+                : getTargetScheduleQtyResolver().calcMachineAvailableCapacityByStartTime(
+                context, sku, machine, null, startTime, shifts);
+        String appliedRule = "沿用原规则";
+        if (isSingleMachine && isEnding) {
+            getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
+            appliedRule = "单机台收尾MAX(余量,胎胚库存)";
+        } else if (isSingleMachine && getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
+            sku.setTargetScheduleQty(windowCapacityQty);
+            sku.setRemainingScheduleQty(windowCapacityQty);
+            appliedRule = "单机台非收尾满排窗口";
+        } else if (!isSingleMachine) {
+            appliedRule = "多机台沿用原规则";
+        } else if (!getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
+            appliedRule = "按需求模式沿用原规则";
+        }
+        log.info("S4.4续作目标量决策, scene: continuous, materialCode: {}, machineCode: {}, isSingleMachine: {}, "
+                        + "isEnding: {}, surplusQty: {}, embryoStock: {}, originalTargetQty: {}, windowCapacityQty: {}, "
+                        + "adoptedTargetQty: {}, rule: {}",
+                sku.getMaterialCode(), machine.getMachineCode(), isSingleMachine, isEnding,
+                Math.max(0, sku.getSurplusQty()), Math.max(0, sku.getEmbryoStock()), originalTargetQty,
+                windowCapacityQty, sku.resolveTargetScheduleQty(), appliedRule);
     }
 
     /**
@@ -567,6 +619,27 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 ? String.valueOf(System.identityHashCode(quotaMap))
                 : "SKU-" + System.identityHashCode(sourceSku);
         return sourceSku.getMaterialCode() + "#" + quotaIdentity;
+    }
+
+    /**
+     * 统计续作业务分组对应的机台数。
+     *
+     * @param continuousSkuList 续作SKU列表
+     * @return 分组机台数
+     */
+    private Map<String, Integer> buildContinuationGroupMachineCountMap(List<SkuScheduleDTO> continuousSkuList) {
+        Map<String, Integer> groupMachineCountMap = new LinkedHashMap<String, Integer>(16);
+        if (CollectionUtils.isEmpty(continuousSkuList)) {
+            return groupMachineCountMap;
+        }
+        for (SkuScheduleDTO sku : continuousSkuList) {
+            if (sku == null) {
+                continue;
+            }
+            String groupKey = buildContinuationGroupKey(sku);
+            groupMachineCountMap.merge(groupKey, 1, Integer::sum);
+        }
+        return groupMachineCountMap;
     }
 
     /**

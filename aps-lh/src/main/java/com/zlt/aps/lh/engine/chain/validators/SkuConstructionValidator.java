@@ -18,7 +18,8 @@ import java.util.Objects;
 
 /**
  * SKU与示方书关系校验器
- * <p>校验月生产计划中物料的硫化示方书号(lhNo)和硫化示方书类型(lhType)是否为空。</p>
+ * <p>校验月生产计划中物料的硫化示方书号(lhNo)和硫化示方书类型(lhType)是否为空，
+ * 同时校验月计划产品状态与示方书关系产品状态是否一致。</p>
  *
  * @author APS
  */
@@ -42,7 +43,7 @@ public class SkuConstructionValidator implements IDataValidator {
                     + context.getFactoryDisplayName());
             return false;
         }
-        // 遍历月计划物料，校验 lhNo 或 lhType 是否为空
+        // 遍历月计划物料，校验产品状态一致性及 lhNo/lhType 是否为空
         Map<String, String> missingFieldMap = new LinkedHashMap<>();
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
             String materialCode = plan.getMaterialCode();
@@ -54,6 +55,14 @@ public class SkuConstructionValidator implements IDataValidator {
                 missingFieldMap.put(materialCode, "未找到SKU与示方书关系数据");
                 continue;
             }
+            // 校验产品状态一致性：月计划 productStatus 与示方书关系 trialStatus 须一致
+            String productStatus = plan.getProductStatus();
+            if (StringUtils.isNotEmpty(productStatus) && StringUtils.isNotEmpty(ref.getTrialStatus())
+                    && !StringUtils.equals(productStatus, ref.getTrialStatus())) {
+                missingFieldMap.put(materialCode, "产品状态不一致：月计划=" + productStatus + ", 示方书关系=" + ref.getTrialStatus());
+                continue;
+            }
+            // 校验 lhNo / lhType 是否为空
             if (StringUtils.isEmpty(ref.getLhNo()) && StringUtils.isEmpty(ref.getLhType())) {
                 missingFieldMap.put(materialCode, "硫化示方书号和硫化示方书类型均为空");
             } else if (StringUtils.isEmpty(ref.getLhNo())) {
@@ -64,7 +73,7 @@ public class SkuConstructionValidator implements IDataValidator {
         }
         if (!missingFieldMap.isEmpty()) {
             StringBuilder errorMsg = new StringBuilder("[").append(getValidatorName()).append("] ");
-            errorMsg.append("硫化示方书数据不完整: ");
+            errorMsg.append("月计划物料示方书数据异常: ");
             for (Map.Entry<String, String> missingEntry : missingFieldMap.entrySet()) {
                 errorMsg.append("[物料编码:").append(missingEntry.getKey())
                         .append(", ").append(missingEntry.getValue()).append("]; ");

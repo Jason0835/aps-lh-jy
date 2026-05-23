@@ -158,7 +158,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 SkuScheduleDTO specifySku = isTypeBlockCandidate(context, machine, limitSpecifySku)
                         ? limitSpecifySku : null;
                 if (specifySku != null && appendSpecifyTypeBlockResult(
-                        context, machine, specifySku, shifts, completedMachineMap)) {
+                        context, machine, specifySku, shifts, completedMachineMap, activeMachines)) {
                     clearSpecifyReservation(context, machineCode, specifySku.getMaterialCode());
                     scheduledInCurrentRound = true;
                     typeBlockScheduledCount++;
@@ -191,8 +191,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                         context, machine, machine.getEstimatedEndTime());
                 Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
                         context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
+                int eligibleMachineCount = countEligibleTypeBlockMachines(context, typeBlockSku, activeMachines);
                 boolean success = appendTypeBlockResultWithRollback(
-                        context, machine, typeBlockSku, typeBlockStartTime, typeBlockSwitchStartTime, shifts);
+                        context, machine, typeBlockSku, typeBlockStartTime, typeBlockSwitchStartTime, shifts,
+                        eligibleMachineCount == 1);
                 traceTypeBlockDecision(context, machine, typeBlockCandidates,
                         typeBlockSku, matchedLayer, success, typeBlockSwitchStartTime, typeBlockStartTime,
                         machineTriggerSourceMap.get(machineCode));
@@ -312,19 +314,23 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      * @param specifySku 定点物料
      * @param shifts 班次
      * @param completedMachineMap 已完成机台
+     * @param activeMachines 当前轮可尝试机台
      * @return true-追加成功
      */
     private boolean appendSpecifyTypeBlockResult(LhScheduleContext context,
                                                  MachineScheduleDTO machine,
                                                  SkuScheduleDTO specifySku,
                                                  List<LhShiftConfigVO> shifts,
-                                                 Map<String, Boolean> completedMachineMap) {
+                                                 Map<String, Boolean> completedMachineMap,
+                                                 List<MachineScheduleDTO> activeMachines) {
         Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(
                 context, machine, machine.getEstimatedEndTime());
         Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
                 context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
+        int eligibleMachineCount = countEligibleTypeBlockMachines(context, specifySku, activeMachines);
         boolean success = appendTypeBlockResultWithRollback(
-                context, machine, specifySku, typeBlockStartTime, typeBlockSwitchStartTime, shifts);
+                context, machine, specifySku, typeBlockStartTime, typeBlockSwitchStartTime, shifts,
+                eligibleMachineCount == 1);
         if (success) {
             if (!machine.isEnding()) {
                 completedMachineMap.put(machine.getMachineCode(), true);
@@ -973,22 +979,26 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                          SkuScheduleDTO sku,
                                          Date startTime,
                                          Date switchStartTime,
-                                         List<LhShiftConfigVO> shifts) {
+                                         List<LhShiftConfigVO> shifts,
+                                         boolean isSingleMachine) {
         if (startTime == null) {
             return false;
         }
         Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
+        int originalRemainingScheduleQty = sku.getRemainingScheduleQty();
+        boolean originalStrictTargetQty = sku.isStrictTargetQty();
         boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
-        // 收尾SKU严格限制目标量，不允许为了填满班次而超排
-        if (isEnding) {
-            sku.setStrictTargetQty(true);
-        }
+        applySingleMachineTypeBlockTargetRule(context, machine, sku, startTime, switchStartTime, shifts,
+                isEnding, isSingleMachine);
+        int adoptedTargetQty = sku.resolveTargetScheduleQty();
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
         sku.setMouldQty(machineMouldQty);
         LhScheduleResult result = buildScheduleResult(
                 context, machine, sku, startTime, switchStartTime, shifts, machineMouldQty, isEnding);
         if (result == null || result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
             sku.setTargetScheduleQty(originalTargetScheduleQty);
+            sku.setRemainingScheduleQty(originalRemainingScheduleQty);
+            sku.setStrictTargetQty(originalStrictTargetQty);
             return false;
         }
         result.setScheduleType(ScheduleTypeEnum.TYPE_BLOCK.getCode());
@@ -1015,8 +1025,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         context.getNewSpecSkuList().remove(sku);
         // 换活字块产能不足以覆盖全目标量时，添加未排记录
         int scheduledQty = result.getDailyPlanQty() == null ? 0 : result.getDailyPlanQty();
-        int originalTarget = originalTargetScheduleQty != null ? originalTargetScheduleQty : sku.resolveTargetScheduleQty();
-        int remainingQty = Math.max(0, originalTarget - scheduledQty);
+        int remainingQty = Math.max(0, adoptedTargetQty - scheduledQty);
         if (remainingQty > 0) {
             LhUnscheduledResult unscheduled = new LhUnscheduledResult();
             unscheduled.setFactoryCode(context.getFactoryCode());
@@ -1051,13 +1060,90 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                       SkuScheduleDTO sku,
                                                       Date startTime,
                                                       Date switchStartTime,
-                                                      List<LhShiftConfigVO> shifts) {
-        boolean success = appendFollowUpResult(context, machine, sku, startTime, switchStartTime, shifts);
+                                                      List<LhShiftConfigVO> shifts,
+                                                      boolean isSingleMachine) {
+        boolean success = appendFollowUpResult(context, machine, sku, startTime, switchStartTime, shifts,
+                isSingleMachine);
         if (!success && switchStartTime != null) {
             // 换活字块结果落地失败时，回滚本轮已占用的切换配额。
             getMouldChangeBalanceStrategy().rollbackMouldChange(context, switchStartTime);
         }
         return success;
+    }
+
+    /**
+     * 单机台换活字块目标量决策。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param sku SKU
+     * @param startTime 开产时间
+     * @param switchStartTime 切换开始时间
+     * @param shifts 班次
+     * @param isEnding 是否收尾
+     * @param isSingleMachine 是否单机台
+     */
+    private void applySingleMachineTypeBlockTargetRule(LhScheduleContext context,
+                                                       MachineScheduleDTO machine,
+                                                       SkuScheduleDTO sku,
+                                                       Date startTime,
+                                                       Date switchStartTime,
+                                                       List<LhShiftConfigVO> shifts,
+                                                       boolean isEnding,
+                                                       boolean isSingleMachine) {
+        if (sku == null || machine == null) {
+            return;
+        }
+        int originalTargetQty = sku.resolveTargetScheduleQty();
+        int windowCapacityQty = startTime == null ? 0
+                : getTargetScheduleQtyResolver().calcMachineAvailableCapacityByStartTime(
+                context, sku, machine, switchStartTime, startTime, shifts);
+        String appliedRule = "沿用原规则";
+        if (isSingleMachine && isEnding) {
+            getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
+            appliedRule = "单机台收尾MAX(余量,胎胚库存)";
+        } else if (isSingleMachine && getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
+            sku.setTargetScheduleQty(windowCapacityQty);
+            sku.setRemainingScheduleQty(windowCapacityQty);
+            sku.setStrictTargetQty(false);
+            appliedRule = "单机台非收尾满排窗口";
+        } else if (isEnding) {
+            sku.setStrictTargetQty(true);
+            appliedRule = isSingleMachine ? "单机台收尾严格原目标" : "多机台沿用原规则";
+        } else if (!isSingleMachine) {
+            appliedRule = "多机台沿用原规则";
+        } else if (!getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
+            appliedRule = "按需求模式沿用原规则";
+        }
+        log.info("S4.4换活字块目标量决策, scene: typeBlock, materialCode: {}, machineCode: {}, isSingleMachine: {}, "
+                        + "isEnding: {}, surplusQty: {}, embryoStock: {}, originalTargetQty: {}, windowCapacityQty: {}, "
+                        + "adoptedTargetQty: {}, rule: {}",
+                sku.getMaterialCode(), machine.getMachineCode(), isSingleMachine, isEnding,
+                Math.max(0, sku.getSurplusQty()), Math.max(0, sku.getEmbryoStock()), originalTargetQty,
+                windowCapacityQty, sku.resolveTargetScheduleQty(), appliedRule);
+    }
+
+    /**
+     * 统计当前轮可承接指定换活字块 SKU 的机台数。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param activeMachines 当前轮可尝试机台
+     * @return 可承接机台数
+     */
+    private int countEligibleTypeBlockMachines(LhScheduleContext context,
+                                               SkuScheduleDTO sku,
+                                               List<MachineScheduleDTO> activeMachines) {
+        if (context == null || sku == null || CollectionUtils.isEmpty(activeMachines)) {
+            return 0;
+        }
+        int eligibleCount = 0;
+        for (MachineScheduleDTO activeMachine : activeMachines) {
+            if (activeMachine != null && isTypeBlockCandidate(context, activeMachine, sku, false)) {
+                eligibleCount++;
+            }
+        }
+        return eligibleCount;
     }
 
     /**

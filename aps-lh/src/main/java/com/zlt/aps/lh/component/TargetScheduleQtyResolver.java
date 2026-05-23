@@ -343,6 +343,27 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 按指定开产时刻计算机台在剩余窗口内的实际可排产量。
+     * <p>供 S4.4 单机台续作 / 换活字块场景复用，保证与结果构建阶段产能口径一致。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machine 机台
+     * @param switchStartTime 切换开始时间
+     * @param productionStartTime 实际开产时间
+     * @param shifts 排程窗口班次
+     * @return 机台在剩余窗口内的实际可排产量
+     */
+    public int calcMachineAvailableCapacityByStartTime(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       MachineScheduleDTO machine,
+                                                       Date switchStartTime,
+                                                       Date productionStartTime,
+                                                       List<LhShiftConfigVO> shifts) {
+        return resolveActualWindowCapacity(context, sku, machine, switchStartTime, productionStartTime, shifts);
+    }
+
+    /**
      * 计算单台机台在排程窗口内的可用产能。
      * <p>从机台预计可用时间起，逐班次累加该机台可排量。</p>
      *

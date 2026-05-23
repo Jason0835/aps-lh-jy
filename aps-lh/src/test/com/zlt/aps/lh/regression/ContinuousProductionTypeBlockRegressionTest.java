@@ -122,6 +122,69 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
+    void scheduleTypeBlockChange_shouldUseMaxSurplusAndEmbryoStockForSingleMachineEnding() {
+        LhScheduleContext context = newContext();
+        context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
+        SkuScheduleDTO continuousSku = buildContinuousSku("MAT-C1", "M1", "EMB-1",
+                "STRUCT-A", "SPEC-A", "PAT-A", 1);
+        continuousSku.setSurplusQty(1);
+        continuousSku.setEmbryoStock(1);
+        context.getContinuousSkuList().add(continuousSku);
+        SkuScheduleDTO sku = buildNewSku("MAT-T1", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 1);
+        sku.setSurplusQty(10);
+        sku.setEmbryoStock(12);
+        context.getNewSpecSkuList().add(sku);
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO currentSku = invocation.getArgument(1);
+            return "MAT-C1".equals(currentSku.getMaterialCode()) || "MAT-T1".equals(currentSku.getMaterialCode());
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(2, context.getScheduleResultList().size());
+        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
+        assertEquals(12, typeBlockResult.getDailyPlanQty(), "单机台换活字块收尾应按 MAX(余量, 胎胚库存) 严格排产");
+        assertEquals("1", typeBlockResult.getIsEnd());
+    }
+
+    @Test
+    void scheduleTypeBlockChange_shouldFillWindowCapacityForSingleMachineInFullCapacityMode() {
+        LhScheduleContext context = newContext();
+        enableFullCapacityScheduling(context);
+        context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
+        SkuScheduleDTO continuousSku = buildContinuousSku("MAT-C1", "M1", "EMB-1",
+                "STRUCT-A", "SPEC-A", "PAT-A", 1);
+        continuousSku.setSurplusQty(1);
+        continuousSku.setEmbryoStock(1);
+        context.getContinuousSkuList().add(continuousSku);
+        SkuScheduleDTO sku = buildNewSku("MAT-T1", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 1);
+        sku.setSurplusQty(50);
+        sku.setEmbryoStock(50);
+        context.getNewSpecSkuList().add(sku);
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO currentSku = invocation.getArgument(1);
+            return "MAT-C1".equals(currentSku.getMaterialCode());
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(2, context.getScheduleResultList().size());
+        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
+        assertTrue(typeBlockResult.getDailyPlanQty() > 1,
+                "单机台换活字块非收尾在满排模式下应排满窗口，不应达到原目标量后停止");
+    }
+
+    @Test
     void scheduleTypeBlockChange_shouldContinueSameMachineChainWhenStillEnding() {
         LhScheduleContext context = newContext();
         context.setScheduleDate(date(2026, 4, 24));
@@ -1494,6 +1557,12 @@ class ContinuousProductionTypeBlockRegressionTest {
     private void enableSpecifyMachineRule(LhScheduleContext context) {
         Map<String, String> paramMap = new HashMap<>(1);
         paramMap.put(LhScheduleParamConstant.ENABLE_SPECIFY_MACHINE_RULE, "1");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+    }
+
+    private void enableFullCapacityScheduling(LhScheduleContext context) {
+        Map<String, String> paramMap = new HashMap<>(2);
+        paramMap.put(LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, "1");
         context.setScheduleConfig(new LhScheduleConfig(paramMap));
     }
 

@@ -3,7 +3,9 @@ package com.zlt.aps.lh.regression;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.component.OrderNoGenerator;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
@@ -27,8 +29,10 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -119,6 +123,57 @@ class ContinuousFollowUpResultValidationRegressionTest {
         assertDoesNotThrow(() -> resultValidationHandler.handle(context));
         verify(schedulePersistenceService).replaceScheduleAtomically(context);
         verify(scheduleEventPublisher).publish(any());
+    }
+
+    @Test
+    void handle_shouldUseMaxSurplusAndEmbryoStockForSingleMachineEndingContinuous() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine = buildMachine("M1", "MAT-C1");
+        context.getMachineScheduleMap().put("M1", machine);
+        SkuScheduleDTO continuousSku = buildContinuousSku("MAT-C1", "M1", "EMB-1",
+                "STRUCT-A", "SPEC-A", "PAT-A", 1);
+        continuousSku.setSurplusQty(10);
+        continuousSku.setEmbryoStock(12);
+        context.getContinuousSkuList().add(continuousSku);
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(true);
+        when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
+        when(strategyFactory.getProductionStrategy("01")).thenReturn(continuousProductionStrategy);
+
+        continuousProductionHandler.handle(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult continuousResult = context.getScheduleResultList().get(0);
+        assertEquals(12, continuousResult.getDailyPlanQty(), "单机台续作收尾应按 MAX(余量, 胎胚库存) 严格排产");
+        assertEquals("1", continuousResult.getIsEnd());
+    }
+
+    @Test
+    void handle_shouldFillWindowCapacityForSingleMachineContinuousInFullCapacityMode() {
+        LhScheduleContext context = newContext();
+        enableFullCapacityScheduling(context);
+        MachineScheduleDTO machine = buildMachine("M1", "MAT-C1");
+        context.getMachineScheduleMap().put("M1", machine);
+        SkuScheduleDTO continuousSku = buildContinuousSku("MAT-C1", "M1", "EMB-1",
+                "STRUCT-A", "SPEC-A", "PAT-A", 1);
+        continuousSku.setSurplusQty(50);
+        continuousSku.setEmbryoStock(50);
+        context.getContinuousSkuList().add(continuousSku);
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
+        when(strategyFactory.getProductionStrategy("01")).thenReturn(continuousProductionStrategy);
+
+        continuousProductionHandler.handle(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult continuousResult = context.getScheduleResultList().get(0);
+        assertTrue(continuousResult.getDailyPlanQty() > 1,
+                "单机台续作非收尾在满排模式下应排满窗口，不应达到原目标量后停止");
     }
 
     @Test
@@ -266,6 +321,12 @@ class ContinuousFollowUpResultValidationRegressionTest {
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
         context.setMachineScheduleMap(new LinkedHashMap<>());
         return context;
+    }
+
+    private void enableFullCapacityScheduling(LhScheduleContext context) {
+        Map<String, String> paramMap = new HashMap<>(2);
+        paramMap.put(LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, "1");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
     }
 
     private MachineScheduleDTO buildMachine(String machineCode, String currentMaterialCode) {
