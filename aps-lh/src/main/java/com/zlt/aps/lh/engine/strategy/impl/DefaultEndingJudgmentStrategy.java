@@ -6,8 +6,6 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
-import com.zlt.aps.lh.util.LhScheduleTimeUtil;
-import org.springframework.util.CollectionUtils;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -92,18 +90,17 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
         return (int) Math.ceil((double) shifts / LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY);
     }
 
-    /**
-     * 获取排程期总班次数
-     * <p>可配置，默认8班（T日2班 + T+1日3班 + T+2日3班）</p>
-     *
-     * @param context 排程上下文
-     * @return 排程窗口内总班次数
-     */
-    private int getTotalScheduleShifts(LhScheduleContext context) {
-        if (!CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
-            return context.getScheduleWindowShifts().size();
+    @Override
+    public int calculateEndingDaysForStructurePriority(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null) {
+            return -1;
         }
-        return LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate()).size();
+        TargetScheduleQtyResolver.StructureEndingCapacitySnapshot snapshot =
+                getTargetScheduleQtyResolver().evaluateStructureEndingCapacity(context, sku);
+        if (snapshot != null) {
+            return snapshot.getEndingDaysWithinStructureWindow();
+        }
+        return calculateEndingDays(context, sku);
     }
 
     /**

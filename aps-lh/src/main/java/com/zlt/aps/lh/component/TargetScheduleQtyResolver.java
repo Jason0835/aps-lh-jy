@@ -7,6 +7,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -21,9 +22,13 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -322,6 +327,119 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 按候选机台真实窗口产能计算结构排序使用的收尾天数。
+     * <p>逐日汇总所有候选机台的实际可排量，目标量首次被覆盖的当天即为最晚收尾日。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 收尾天数；0-无目标量；-1-窗口内无法收敛
+     */
+    public int calcSkuActualEndingDaysInWindow(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)) {
+            return -1;
+        }
+        int targetScheduleQty = Math.max(0, sku.resolveTargetScheduleQty());
+        if (targetScheduleQty <= 0) {
+            return 0;
+        }
+        IMachineMatchStrategy matchStrategy = getMachineMatchStrategy();
+        if (Objects.isNull(matchStrategy)) {
+            log.warn("机台匹配策略未注入，无法计算真实收尾天数, materialCode: {}", sku.getMaterialCode());
+            return -1;
+        }
+        List<MachineScheduleDTO> candidates = matchStrategy.matchMachines(context, sku);
+        if (CollectionUtils.isEmpty(candidates)) {
+            return -1;
+        }
+        List<LhShiftConfigVO> shifts = resolveScheduleShifts(context);
+        if (CollectionUtils.isEmpty(shifts)) {
+            return -1;
+        }
+        LinkedHashMap<LocalDate, Integer> totalCapacityByDate = initCapacityByDate(shifts);
+        for (MachineScheduleDTO machine : candidates) {
+            Map<LocalDate, Integer> machineCapacityByDate = calculateMachineAvailableCapacityByDateInWindow(
+                    context, sku, machine, shifts);
+            for (Map.Entry<LocalDate, Integer> entry : machineCapacityByDate.entrySet()) {
+                totalCapacityByDate.merge(entry.getKey(), entry.getValue(), Integer::sum);
+            }
+        }
+        int cumulativeCapacity = 0;
+        int endingDays = 0;
+        for (Integer capacityQty : totalCapacityByDate.values()) {
+            endingDays++;
+            cumulativeCapacity += Math.max(0, capacityQty == null ? 0 : capacityQty);
+            if (cumulativeCapacity >= targetScheduleQty) {
+                return endingDays;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * 评估结构收尾排序专用的未来 N 天有效产能。
+     * <p>口径固定为“未来结构收尾判定天数内，首选机台在真实换模/续作条件下的有效产能是否覆盖硫化余量”。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 结构收尾评估快照
+     */
+    public StructureEndingCapacitySnapshot evaluateStructureEndingCapacity(LhScheduleContext context, SkuScheduleDTO sku) {
+        int structureEndingDays = resolveStructureEndingDays(context);
+        StructureEndingCapacitySnapshot emptySnapshot = StructureEndingCapacitySnapshot.empty(structureEndingDays);
+        if (Objects.isNull(context) || Objects.isNull(sku)) {
+            return emptySnapshot;
+        }
+        IMachineMatchStrategy matchStrategy = getMachineMatchStrategy();
+        if (Objects.isNull(matchStrategy)) {
+            log.warn("机台匹配策略未注入，无法评估结构收尾有效产能, materialCode: {}", sku.getMaterialCode());
+            return emptySnapshot;
+        }
+        List<MachineScheduleDTO> candidates = matchStrategy.matchMachines(context, sku);
+        if (CollectionUtils.isEmpty(candidates) || Objects.isNull(candidates.get(0))) {
+            log.info("结构收尾有效产能评估跳过, materialCode: {}, reason: 无候选机台", sku.getMaterialCode());
+            return emptySnapshot;
+        }
+        MachineScheduleDTO machine = candidates.get(0);
+        List<LhShiftConfigVO> structureShifts = resolveStructurePriorityShifts(context, structureEndingDays);
+        if (CollectionUtils.isEmpty(structureShifts)) {
+            log.info("结构收尾有效产能评估跳过, materialCode: {}, reason: 无结构收尾班次窗口", sku.getMaterialCode());
+            return emptySnapshot;
+        }
+        LinkedHashMap<Integer, Integer> theoreticalShiftCapacityMap = calculateMachineAvailableCapacityByShiftInWindow(
+                context, sku, machine, structureShifts, false);
+        LinkedHashMap<Integer, Integer> effectiveShiftCapacityMap = calculateMachineAvailableCapacityByShiftInWindow(
+                context, sku, machine, structureShifts, true);
+        int demandQty = resolveStructureEndingDemandQty(sku);
+        int theoreticalShiftCount = countEffectiveShiftCount(theoreticalShiftCapacityMap);
+        int effectiveShiftCount = countEffectiveShiftCount(effectiveShiftCapacityMap);
+        int deductedChangeoverShiftCount = Math.max(0, theoreticalShiftCount - effectiveShiftCount);
+        int effectiveCapacityQty = sumShiftCapacity(effectiveShiftCapacityMap);
+        boolean hitStructureEnding = demandQty > 0 && effectiveCapacityQty >= demandQty;
+        int endingDaysWithinStructureWindow = resolveStructureEndingDaysWithinWindow(
+                structureShifts, effectiveShiftCapacityMap, demandQty, structureEndingDays);
+        StructureEndingCapacitySnapshot snapshot = new StructureEndingCapacitySnapshot(
+                sku.getMaterialCode(),
+                machine.getMachineCode(),
+                structureEndingDays,
+                demandQty,
+                Math.max(0, sku.getShiftCapacity()),
+                theoreticalShiftCount,
+                deductedChangeoverShiftCount,
+                effectiveShiftCount,
+                effectiveCapacityQty,
+                endingDaysWithinStructureWindow,
+                hitStructureEnding);
+        log.info("结构五天内收尾评估, materialCode: {}, machineCode: {}, surplusQty: {}, shiftCapacity: {}, "
+                        + "theoreticalShiftCount: {}, deductedChangeoverShiftCount: {}, effectiveShiftCount: {}, "
+                        + "effectiveCapacityQty: {}, hitStructureEnding: {}",
+                snapshot.getMaterialCode(), snapshot.getMachineCode(), snapshot.getDemandQty(),
+                snapshot.getShiftCapacity(), snapshot.getTheoreticalShiftCount(),
+                snapshot.getDeductedChangeoverShiftCount(), snapshot.getEffectiveShiftCount(),
+                snapshot.getEffectiveCapacityQty(), snapshot.isHitStructureEnding());
+        return snapshot;
+    }
+
+    /**
      * 计算单台机台在排程窗口内的可用产能。
      *
      * @param context 排程上下文
@@ -377,27 +495,73 @@ public class TargetScheduleQtyResolver {
                                                           SkuScheduleDTO sku,
                                                           MachineScheduleDTO machine,
                                                           List<LhShiftConfigVO> shifts) {
-        if (Objects.isNull(machine) || Objects.isNull(sku)) {
-            return 0;
+        return sumMachineCapacityByDate(calculateMachineAvailableCapacityByDateInWindow(
+                context, sku, machine, shifts));
+    }
+
+    /**
+     * 计算单台机台在窗口内按业务日拆分的可排产量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @param machine 机台
+     * @param shifts 排程窗口班次
+     * @return key=业务日，value=当日可排量
+     */
+    private LinkedHashMap<LocalDate, Integer> calculateMachineAvailableCapacityByDateInWindow(LhScheduleContext context,
+                                                                                               SkuScheduleDTO sku,
+                                                                                               MachineScheduleDTO machine,
+                                                                                               List<LhShiftConfigVO> shifts) {
+        LinkedHashMap<LocalDate, Integer> capacityByDate = initCapacityByDate(shifts);
+        LinkedHashMap<Integer, Integer> capacityByShift = calculateMachineAvailableCapacityByShiftInWindow(
+                context, sku, machine, shifts, true);
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift == null || shift.getShiftIndex() == null) {
+                continue;
+            }
+            Integer shiftMaxQty = capacityByShift.get(shift.getShiftIndex());
+            if (shiftMaxQty == null || shiftMaxQty <= 0) {
+                continue;
+            }
+            LocalDate workDate = toLocalDate(shift.getWorkDate());
+            if (workDate != null) {
+                capacityByDate.merge(workDate, shiftMaxQty, Integer::sum);
+            }
+        }
+        return capacityByDate;
+    }
+
+    /**
+     * 计算单台机台在窗口内按班次拆分的可排产量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machine 机台
+     * @param shifts 班次窗口
+     * @param deductChangeover 是否扣减首次换模/换活字块时间
+     * @return key=班次索引，value=班次可排量
+     */
+    private LinkedHashMap<Integer, Integer> calculateMachineAvailableCapacityByShiftInWindow(LhScheduleContext context,
+                                                                                              SkuScheduleDTO sku,
+                                                                                              MachineScheduleDTO machine,
+                                                                                              List<LhShiftConfigVO> shifts,
+                                                                                              boolean deductChangeover) {
+        LinkedHashMap<Integer, Integer> capacityByShift = new LinkedHashMap<>(Math.max(16, shifts.size()));
+        if (Objects.isNull(machine) || Objects.isNull(sku) || CollectionUtils.isEmpty(shifts)) {
+            return capacityByShift;
         }
         int shiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
                 context, machine, sku.getShiftCapacity());
         int lhTimeSeconds = sku.getLhTimeSeconds();
         if (shiftCapacity <= 0 && lhTimeSeconds <= 0) {
-            return 0;
+            return capacityByShift;
         }
         int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-        // 机台可用起点：取预计完工时间和窗口首班开始时间的较晚者
         Date machineAvailableTime = machine.getEstimatedEndTime();
         Date windowStartTime = shifts.get(0).getShiftStartDateTime();
-        Date cursorStartTime;
-        if (machineAvailableTime != null && machineAvailableTime.after(windowStartTime)) {
-            cursorStartTime = machineAvailableTime;
-        } else {
-            cursorStartTime = windowStartTime;
-        }
-        // 机台当前在产物料不同于待排SKU时，扣除换模时长估算净可用产能，使收尾判断规则2基于真实产能
-        if (!StringUtils.equals(machine.getPreviousMaterialCode(), sku.getMaterialCode())) {
+        Date cursorStartTime = machineAvailableTime != null && machineAvailableTime.after(windowStartTime)
+                ? machineAvailableTime : windowStartTime;
+        if (deductChangeover && !StringUtils.equals(machine.getPreviousMaterialCode(), sku.getMaterialCode())) {
             int mouldChangeHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
             if (mouldChangeHours > 0) {
                 cursorStartTime = LhScheduleTimeUtil.addHours(cursorStartTime, mouldChangeHours);
@@ -407,10 +571,11 @@ public class TargetScheduleQtyResolver {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
-
-        int totalQty = 0;
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
+            if (shift == null || shift.getShiftIndex() == null) {
+                continue;
+            }
             if (!started) {
                 if (cursorStartTime.before(shift.getShiftEndDateTime())) {
                     started = true;
@@ -441,10 +606,10 @@ public class TargetScheduleQtyResolver {
             if (shiftMaxQty <= 0) {
                 continue;
             }
-            totalQty += shiftMaxQty;
+            capacityByShift.put(shift.getShiftIndex(), shiftMaxQty);
             cursorStartTime = effectiveEndTime;
         }
-        return Math.max(totalQty, 0);
+        return capacityByShift;
     }
 
     /**
@@ -492,5 +657,269 @@ public class TargetScheduleQtyResolver {
      */
     private IMachineMatchStrategy getMachineMatchStrategy() {
         return machineMatchStrategy;
+    }
+
+    private LinkedHashMap<LocalDate, Integer> initCapacityByDate(List<LhShiftConfigVO> shifts) {
+        LinkedHashMap<LocalDate, Integer> capacityByDate = new LinkedHashMap<LocalDate, Integer>(8);
+        if (CollectionUtils.isEmpty(shifts)) {
+            return capacityByDate;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            LocalDate workDate = toLocalDate(shift.getWorkDate());
+            if (workDate != null && !capacityByDate.containsKey(workDate)) {
+                capacityByDate.put(workDate, 0);
+            }
+        }
+        return capacityByDate;
+    }
+
+    private int sumMachineCapacityByDate(Map<LocalDate, Integer> capacityByDate) {
+        int totalQty = 0;
+        if (capacityByDate == null || capacityByDate.isEmpty()) {
+            return totalQty;
+        }
+        for (Integer capacityQty : capacityByDate.values()) {
+            totalQty += Math.max(0, capacityQty == null ? 0 : capacityQty);
+        }
+        return Math.max(totalQty, 0);
+    }
+
+    private int sumShiftCapacity(Map<Integer, Integer> capacityByShift) {
+        int totalQty = 0;
+        if (capacityByShift == null || capacityByShift.isEmpty()) {
+            return totalQty;
+        }
+        for (Integer capacityQty : capacityByShift.values()) {
+            totalQty += Math.max(0, capacityQty == null ? 0 : capacityQty);
+        }
+        return Math.max(totalQty, 0);
+    }
+
+    private int countEffectiveShiftCount(Map<Integer, Integer> capacityByShift) {
+        int shiftCount = 0;
+        if (capacityByShift == null || capacityByShift.isEmpty()) {
+            return shiftCount;
+        }
+        for (Integer capacityQty : capacityByShift.values()) {
+            if (capacityQty != null && capacityQty > 0) {
+                shiftCount++;
+            }
+        }
+        return shiftCount;
+    }
+
+    private int resolveStructureEndingDays(LhScheduleContext context) {
+        if (context == null || context.getScheduleConfig() == null) {
+            return LhScheduleConstant.DEFAULT_STRUCTURE_ENDING_DAYS;
+        }
+        return Math.max(1, context.getScheduleConfig().getStructureEndingDays());
+    }
+
+    private int resolveStructureEndingDemandQty(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return 0;
+        }
+        return Math.max(0, sku.getSurplusQty());
+    }
+
+    private List<LhShiftConfigVO> resolveStructurePriorityShifts(LhScheduleContext context, int structureEndingDays) {
+        List<LhShiftConfigVO> baseShifts = resolveScheduleShifts(context);
+        if (CollectionUtils.isEmpty(baseShifts)) {
+            return new ArrayList<>(0);
+        }
+        int targetDays = Math.max(1, structureEndingDays);
+        int currentDays = resolveCoveredDays(baseShifts);
+        if (currentDays >= targetDays) {
+            return new ArrayList<>(baseShifts);
+        }
+        List<LhShiftConfigVO> extendedShifts = new ArrayList<>(baseShifts.size() + (targetDays - currentDays) * 3);
+        extendedShifts.addAll(baseShifts);
+        List<LhShiftConfigVO> templateDayShifts = collectShiftsByOffset(baseShifts, currentDays - 1);
+        if (CollectionUtils.isEmpty(templateDayShifts)) {
+            return extendedShifts;
+        }
+        int nextShiftIndex = baseShifts.get(baseShifts.size() - 1).getShiftIndex() == null
+                ? baseShifts.size() + 1 : baseShifts.get(baseShifts.size() - 1).getShiftIndex() + 1;
+        for (int offset = currentDays; offset < targetDays; offset++) {
+            for (LhShiftConfigVO templateShift : templateDayShifts) {
+                extendedShifts.add(cloneShiftForOffset(templateShift, offset, nextShiftIndex++));
+            }
+        }
+        return extendedShifts;
+    }
+
+    private int resolveCoveredDays(List<LhShiftConfigVO> shifts) {
+        int maxOffset = -1;
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift != null && shift.getDateOffset() != null) {
+                maxOffset = Math.max(maxOffset, shift.getDateOffset());
+            }
+        }
+        return maxOffset + 1;
+    }
+
+    private List<LhShiftConfigVO> collectShiftsByOffset(List<LhShiftConfigVO> shifts, int dateOffset) {
+        List<LhShiftConfigVO> templateDayShifts = new ArrayList<>(4);
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift != null && shift.getDateOffset() != null && shift.getDateOffset() == dateOffset) {
+                templateDayShifts.add(shift);
+            }
+        }
+        return templateDayShifts;
+    }
+
+    private LhShiftConfigVO cloneShiftForOffset(LhShiftConfigVO templateShift, int dateOffset, int shiftIndex) {
+        LhShiftConfigVO clonedShift = new LhShiftConfigVO();
+        clonedShift.setScheduleBaseDate(templateShift.getScheduleBaseDate());
+        clonedShift.setShiftType(templateShift.getShiftType());
+        clonedShift.setShiftCode(templateShift.getShiftCode());
+        clonedShift.setStartTime(templateShift.getStartTime());
+        clonedShift.setEndTime(templateShift.getEndTime());
+        clonedShift.setShiftDuration(templateShift.getShiftDuration());
+        clonedShift.setDateOffset(dateOffset);
+        clonedShift.setShiftIndex(shiftIndex);
+        ShiftEnum shiftType = templateShift.resolveShiftTypeEnum();
+        if (shiftType != null) {
+            clonedShift.setShiftName(buildStructureShiftName(dateOffset, shiftType));
+        } else {
+            clonedShift.setShiftName(templateShift.getShiftName());
+        }
+        return clonedShift;
+    }
+
+    private String buildStructureShiftName(int dateOffset, ShiftEnum shiftType) {
+        String prefix = dateOffset == 0 ? "T日" : "T+" + dateOffset + "日";
+        return prefix + shiftType.getDescription();
+    }
+
+    private int resolveStructureEndingDaysWithinWindow(List<LhShiftConfigVO> shifts,
+                                                       Map<Integer, Integer> effectiveShiftCapacityMap,
+                                                       int demandQty,
+                                                       int structureEndingDays) {
+        if (demandQty <= 0) {
+            return 0;
+        }
+        LinkedHashMap<LocalDate, Integer> capacityByDate = new LinkedHashMap<>(16);
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift == null || shift.getShiftIndex() == null) {
+                continue;
+            }
+            Integer shiftQty = effectiveShiftCapacityMap.get(shift.getShiftIndex());
+            if (shiftQty == null || shiftQty <= 0) {
+                continue;
+            }
+            LocalDate workDate = toLocalDate(shift.getWorkDate());
+            if (workDate != null) {
+                capacityByDate.merge(workDate, shiftQty, Integer::sum);
+            }
+        }
+        int cumulativeCapacity = 0;
+        int endingDays = 0;
+        for (Integer dayQty : capacityByDate.values()) {
+            endingDays++;
+            cumulativeCapacity += Math.max(0, dayQty == null ? 0 : dayQty);
+            if (cumulativeCapacity >= demandQty) {
+                return endingDays;
+            }
+        }
+        return Math.max(1, structureEndingDays) + 1;
+    }
+
+    private LocalDate toLocalDate(Date workDate) {
+        if (workDate == null) {
+            return null;
+        }
+        return workDate.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+    }
+
+    /**
+     * 结构收尾有效产能评估快照。
+     */
+    public static final class StructureEndingCapacitySnapshot {
+
+        private final String materialCode;
+        private final String machineCode;
+        private final int structureEndingDays;
+        private final int demandQty;
+        private final int shiftCapacity;
+        private final int theoreticalShiftCount;
+        private final int deductedChangeoverShiftCount;
+        private final int effectiveShiftCount;
+        private final int effectiveCapacityQty;
+        private final int endingDaysWithinStructureWindow;
+        private final boolean hitStructureEnding;
+
+        private StructureEndingCapacitySnapshot(String materialCode,
+                                               String machineCode,
+                                               int structureEndingDays,
+                                               int demandQty,
+                                               int shiftCapacity,
+                                               int theoreticalShiftCount,
+                                               int deductedChangeoverShiftCount,
+                                               int effectiveShiftCount,
+                                               int effectiveCapacityQty,
+                                               int endingDaysWithinStructureWindow,
+                                               boolean hitStructureEnding) {
+            this.materialCode = materialCode;
+            this.machineCode = machineCode;
+            this.structureEndingDays = structureEndingDays;
+            this.demandQty = demandQty;
+            this.shiftCapacity = shiftCapacity;
+            this.theoreticalShiftCount = theoreticalShiftCount;
+            this.deductedChangeoverShiftCount = deductedChangeoverShiftCount;
+            this.effectiveShiftCount = effectiveShiftCount;
+            this.effectiveCapacityQty = effectiveCapacityQty;
+            this.endingDaysWithinStructureWindow = endingDaysWithinStructureWindow;
+            this.hitStructureEnding = hitStructureEnding;
+        }
+
+        public static StructureEndingCapacitySnapshot empty(int structureEndingDays) {
+            return new StructureEndingCapacitySnapshot(
+                    null, null, structureEndingDays, 0, 0, 0, 0, 0, 0, structureEndingDays + 1, false);
+        }
+
+        public String getMaterialCode() {
+            return materialCode;
+        }
+
+        public String getMachineCode() {
+            return machineCode;
+        }
+
+        public int getStructureEndingDays() {
+            return structureEndingDays;
+        }
+
+        public int getDemandQty() {
+            return demandQty;
+        }
+
+        public int getShiftCapacity() {
+            return shiftCapacity;
+        }
+
+        public int getTheoreticalShiftCount() {
+            return theoreticalShiftCount;
+        }
+
+        public int getDeductedChangeoverShiftCount() {
+            return deductedChangeoverShiftCount;
+        }
+
+        public int getEffectiveShiftCount() {
+            return effectiveShiftCount;
+        }
+
+        public int getEffectiveCapacityQty() {
+            return effectiveCapacityQty;
+        }
+
+        public int getEndingDaysWithinStructureWindow() {
+            return endingDaysWithinStructureWindow;
+        }
+
+        public boolean isHitStructureEnding() {
+            return hitStructureEnding;
+        }
     }
 }

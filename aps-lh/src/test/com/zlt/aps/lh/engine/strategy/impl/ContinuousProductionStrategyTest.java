@@ -581,6 +581,47 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void syncContinuousDailyPlanQuota_shouldSkipTypeBlockResult() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 4, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 4, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        SkuScheduleDTO sku = sku("3302002795");
+        sku.setTargetScheduleQty(98);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(firstShift), quota("3302002795", toLocalDate(firstShift), 48));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setScheduleType("03");
+        result.setIsTypeBlock("1");
+        result.setIsEnd("1");
+        result.setMaterialCode("3302002795");
+        result.setLhMachineCode("K2024");
+        result.setLhTime(0);
+        result.setMouldQty(1);
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 60,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy, "syncContinuousDailyPlanQuota", context, shifts);
+
+        assertEquals(Integer.valueOf(60), ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()),
+                "换活字块结果不应被续作 quota 同步链裁减");
+        assertEquals(48, sku.getDailyPlanQuotaMap().get(toLocalDate(firstShift)).getRemainingQty(),
+                "换活字块结果不应消费续作共享日计划账本");
+    }
+
+    @Test
     public void scheduleReduceMould_shouldRecheckIsEndAfterPlanQtyReduced() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
 

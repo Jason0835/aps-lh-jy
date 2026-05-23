@@ -25,6 +25,7 @@ import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -53,8 +54,11 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         log.info("执行SKU优先级排序, 续作SKU数: {}, 新增SKU数: {}",
                 context.getContinuousSkuList().size(), context.getNewSpecSkuList().size());
 
-        Map<String, StructurePriorityMeta> structurePriorityMap = buildStructurePriorityMap(context);
-        Comparator<SkuScheduleDTO> priorityComparator = buildPriorityComparator(structurePriorityMap);
+        Map<SkuScheduleDTO, Integer> structureEndingDaysMap = new IdentityHashMap<>(16);
+        Map<String, StructurePriorityMeta> structurePriorityMap = buildStructurePriorityMap(
+                context, structureEndingDaysMap);
+        Comparator<SkuScheduleDTO> priorityComparator = buildPriorityComparator(
+                structurePriorityMap, structureEndingDaysMap);
         Comparator<SkuScheduleDTO> tailComparator = buildTailComparator(context);
         Comparator<SkuScheduleDTO> comparator = priorityComparator.thenComparing(tailComparator)
                 .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
@@ -76,7 +80,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         }
 
         traceOpenProductionLateScore(context, orderedSkuList);
-        traceSortedSkuList(context, structurePriorityMap);
+        traceSortedSkuList(context, structurePriorityMap, structureEndingDaysMap);
         log.debug("SKU优先级排序完成, 排序后第一位: {}",
                 CollectionUtils.isEmpty(orderedSkuList) ? "空" : orderedSkuList.get(0).getMaterialCode());
     }
@@ -95,7 +99,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
      *
      * @return SKU比较器
      */
-    private Comparator<SkuScheduleDTO> buildPriorityComparator(Map<String, StructurePriorityMeta> structurePriorityMap) {
+    private Comparator<SkuScheduleDTO> buildPriorityComparator(Map<String, StructurePriorityMeta> structurePriorityMap,
+                                                               Map<SkuScheduleDTO, Integer> structureEndingDaysMap) {
         return Comparator
                 // 顺序1：锁定上机日期的优先。
                 .comparingInt((SkuScheduleDTO s) -> s.isDeliveryLocked() ? 0 : 1)
@@ -104,9 +109,10 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 // 顺序3：未来结构全收尾优先，命中结构内按最晚收尾优先。
                 .thenComparingInt((SkuScheduleDTO s) -> isStructureAllEndingPriority(structurePriorityMap, s) ? 0 : 1)
                 .thenComparingInt((SkuScheduleDTO s) -> isStructureAllEndingPriority(structurePriorityMap, s)
-                        && hasKnownEndingDays(s) ? 0 : 1)
+                        && hasKnownStructureEndingDays(structureEndingDaysMap, s) ? 0 : 1)
                 .thenComparingInt((SkuScheduleDTO s) -> isStructureAllEndingPriority(structurePriorityMap, s)
-                        && hasKnownEndingDays(s) ? -s.getEndingDaysRemaining() : 0);
+                        && hasKnownStructureEndingDays(structureEndingDaysMap, s)
+                        ? -resolveStructureEndingDays(structureEndingDaysMap, s) : 0);
     }
 
     /**
@@ -191,7 +197,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     /**
      * 构建结构全收尾优先级快照，避免比较器中重复扫描结构列表。
      */
-    private Map<String, StructurePriorityMeta> buildStructurePriorityMap(LhScheduleContext context) {
+    private Map<String, StructurePriorityMeta> buildStructurePriorityMap(LhScheduleContext context,
+                                                                         Map<SkuScheduleDTO, Integer> structureEndingDaysMap) {
         Map<String, StructurePriorityMeta> structurePriorityMap = new LinkedHashMap<>(16);
         if (CollectionUtils.isEmpty(context.getStructureSkuMap())) {
             return structurePriorityMap;
@@ -215,8 +222,10 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                     continue;
                 }
                 endingSkuCount++;
-                if (hasKnownEndingDays(sku)) {
-                    latestEndingDays = Math.max(latestEndingDays, sku.getEndingDaysRemaining());
+                int actualEndingDays = endingJudgmentStrategy.calculateEndingDaysForStructurePriority(context, sku);
+                structureEndingDaysMap.put(sku, actualEndingDays);
+                if (actualEndingDays >= 0) {
+                    latestEndingDays = Math.max(latestEndingDays, actualEndingDays);
                 }
             }
             boolean allSkusEnding = totalSkuCount > 0 && endingSkuCount == totalSkuCount;
@@ -247,8 +256,16 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     /**
      * 判断SKU是否具备可比较的收尾天数。
      */
-    private boolean hasKnownEndingDays(SkuScheduleDTO sku) {
-        return sku != null && sku.getEndingDaysRemaining() >= 0;
+    private boolean hasKnownStructureEndingDays(Map<SkuScheduleDTO, Integer> structureEndingDaysMap, SkuScheduleDTO sku) {
+        return resolveStructureEndingDays(structureEndingDaysMap, sku) >= 0;
+    }
+
+    private int resolveStructureEndingDays(Map<SkuScheduleDTO, Integer> structureEndingDaysMap, SkuScheduleDTO sku) {
+        if (sku == null || structureEndingDaysMap == null) {
+            return -1;
+        }
+        Integer endingDays = structureEndingDaysMap.get(sku);
+        return endingDays == null ? -1 : endingDays;
     }
 
     /**
@@ -431,7 +448,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
      * @param structurePriorityMap 结构收尾优先级快照
      */
     private void traceSortedSkuList(LhScheduleContext context,
-                                    Map<String, StructurePriorityMeta> structurePriorityMap) {
+                                    Map<String, StructurePriorityMeta> structurePriorityMap,
+                                    Map<SkuScheduleDTO, Integer> structureEndingDaysMap) {
         if (!PriorityTraceLogHelper.isEnabled(context)) {
             return;
         }
@@ -488,6 +506,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 boolean isSpecifyMachine = LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode());
                 boolean isSpecial = isSpecialMaterial(context, sku);
                 String constructionStageDesc = resolveConstructionStageDesc(sku);
+                int structureEndingDays = resolveStructureEndingDays(structureEndingDaysMap, sku);
 
                 // 提取延误天数，避免三元表达式中Integer/int类型推断问题
                 Integer delayDays = sku.getDelayDays();
@@ -501,7 +520,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             "L2_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
                             "L3_延误天数=" + (delayKnown ? delayDays : 0),
                             "L4_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
-                            "L5_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
+                            "L5_最晚收尾日=" + (structureAllEndingPriority && structureEndingDays >= 0 ? structureEndingDays : 0),
                             "L6_高优待排=" + sku.getHighPriorityPendingQty(),
                             "L7_周期待排=" + sku.getCycleProductionPendingQty(),
                             "L8_中优待排=" + sku.getMidPriorityPendingQty(),
@@ -513,7 +532,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             sku.isDeliveryLocked() ? 0 : 1,
                             delayKnown ? delayDays : 0,
                             structureAllEndingPriority ? 0 : 1,
-                            structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
+                            structureAllEndingPriority && structureEndingDays >= 0 ? -structureEndingDays : 0,
                             -sku.getHighPriorityPendingQty(),
                             -sku.getCycleProductionPendingQty(),
                             -sku.getMidPriorityPendingQty(),
@@ -522,11 +541,11 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             resolveNewSpecSkuTypeScore(sku));
                     defaultScores = Arrays.asList(1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 3);
                 } else {
-                    sortKeyLevels = Arrays.asList(
+                        sortKeyLevels = Arrays.asList(
                             "L1_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
                             "L2_延误天数=" + (delayKnown ? delayDays : 0),
                             "L3_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
-                            "L4_最晚收尾日=" + (structureAllEndingPriority && hasKnownEndingDays(sku) ? sku.getEndingDaysRemaining() : 0),
+                            "L4_最晚收尾日=" + (structureAllEndingPriority && structureEndingDays >= 0 ? structureEndingDays : 0),
                             "L5_高优待排=" + sku.getHighPriorityPendingQty(),
                             "L6_周期待排=" + sku.getCycleProductionPendingQty(),
                             "L7_中优待排=" + sku.getMidPriorityPendingQty(),
@@ -536,7 +555,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                             sku.isDeliveryLocked() ? 0 : 1,
                             delayKnown ? 0 : 1,
                             structureAllEndingPriority ? 0 : 1,
-                            structureAllEndingPriority && hasKnownEndingDays(sku) ? -sku.getEndingDaysRemaining() : 0,
+                            structureAllEndingPriority && structureEndingDays >= 0 ? -structureEndingDays : 0,
                             -sku.getHighPriorityPendingQty(),
                             -sku.getCycleProductionPendingQty(),
                             -sku.getMidPriorityPendingQty(),

@@ -2549,7 +2549,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         Date rollingAppendStartTime = resolveRollingAppendStartTime(context, shifts);
         for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (!isContinuousPhaseResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
+            if (!isPureContinuousResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
                 continue;
             }
             SkuScheduleDTO sku = resolveResultSourceSku(context, result);

@@ -1,21 +1,27 @@
 package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultProductionShutdownStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 排产目标量解析回归。
@@ -115,10 +121,86 @@ class TargetScheduleQtyResolverRegressionTest {
         assertEquals(50, sku.resolveTargetScheduleQty(), "收尾目标量不应被窗口产能压低");
     }
 
+    @Test
+    void evaluateStructureEndingCapacity_shouldDeductMouldChangeFromFiveDayEffectiveCapacity() {
+        TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver();
+        ReflectionTestUtils.setField(resolver, "machineMatchStrategy", fixedMachineMatch(machine("K1002", "OTHER")));
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(date(2026, 5, 1));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setScheduleConfig(createConfig("0", "5"));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002357");
+        sku.setSurplusQty(290);
+        sku.setShiftCapacity(22);
+
+        TargetScheduleQtyResolver.StructureEndingCapacitySnapshot snapshot =
+                resolver.evaluateStructureEndingCapacity(context, sku);
+
+        assertEquals(14, snapshot.getTheoreticalShiftCount(), "5天理论班次数应覆盖 14 个班次");
+        assertEquals(1, snapshot.getDeductedChangeoverShiftCount(), "首次换模应折算扣减 1 个班次");
+        assertEquals(13, snapshot.getEffectiveShiftCount(), "扣除换模后仅剩 13 个有效班次");
+        assertEquals(286, snapshot.getEffectiveCapacityQty(), "有效产能应按 22 * 13 收敛");
+        assertEquals(6, snapshot.getEndingDaysWithinStructureWindow(), "5天内无法收尾时应返回阈值外天数");
+        assertFalse(snapshot.isHitStructureEnding(), "286 < 290 时不应命中结构五天内收尾");
+    }
+
+    @Test
+    void evaluateStructureEndingCapacity_shouldNotRepeatDeductChangeoverForContinuousMachine() {
+        TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver();
+        ReflectionTestUtils.setField(resolver, "machineMatchStrategy", fixedMachineMatch(machine("K1002", "3302002357")));
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(date(2026, 5, 1));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setScheduleConfig(createConfig("0", "5"));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002357");
+        sku.setSurplusQty(286);
+        sku.setShiftCapacity(22);
+
+        TargetScheduleQtyResolver.StructureEndingCapacitySnapshot snapshot =
+                resolver.evaluateStructureEndingCapacity(context, sku);
+
+        assertEquals(14, snapshot.getTheoreticalShiftCount(), "续作场景应保留完整理论班次数");
+        assertEquals(0, snapshot.getDeductedChangeoverShiftCount(), "续作场景不应重复扣减换模班次");
+        assertEquals(14, snapshot.getEffectiveShiftCount(), "续作场景有效班次数不应减少");
+        assertEquals(308, snapshot.getEffectiveCapacityQty(), "续作场景应保留完整有效产能");
+        assertTrue(snapshot.isHitStructureEnding(), "有效产能覆盖余量时应命中结构五天内收尾");
+    }
+
     private static LhScheduleConfig createConfig(String fullCapacityMode) {
-        Map<String, String> paramMap = new HashMap<>(4);
+        return createConfig(fullCapacityMode, "5");
+    }
+
+    private static LhScheduleConfig createConfig(String fullCapacityMode, String structureEndingDays) {
+        Map<String, String> paramMap = new HashMap<>(8);
         paramMap.put(LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, fullCapacityMode);
+        paramMap.put(LhScheduleParamConstant.STRUCTURE_ENDING_DAYS, structureEndingDays);
         return new LhScheduleConfig(paramMap);
+    }
+
+    private static IMachineMatchStrategy fixedMachineMatch(MachineScheduleDTO machine) {
+        return new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku) {
+                return Collections.singletonList(machine);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext context,
+                                                        SkuScheduleDTO sku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        java.util.Set<String> excludedMachineCodes) {
+                return machine;
+            }
+        };
+    }
+
+    private static MachineScheduleDTO machine(String machineCode, String previousMaterialCode) {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setPreviousMaterialCode(previousMaterialCode);
+        return machine;
     }
 
     private static java.util.Date date(int y, int month, int day) {
