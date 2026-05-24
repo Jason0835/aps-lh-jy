@@ -338,7 +338,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldKeepMassTrialSingleControlCandidateWhenTrialPending() {
+    void matchMachines_shouldHideMassTrialSingleControlCandidateWhenTrialPending() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -353,12 +353,11 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals(1, candidates.size(), "量试SKU的单控候选不再因仍有试制SKU待排而被清空");
-        assertEquals("K1501R", candidates.get(0).getMachineCode());
+        assertTrue(candidates.isEmpty(), "量试SKU在仍有试制待排时，应等待试制释放单控机台");
     }
 
     @Test
-    void matchMachines_shouldKeepSmallBatchSingleControlCandidateWhenMassTrialPending() {
+    void matchMachines_shouldHideSmallBatchSingleControlCandidateWhenMassTrialPending() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -373,8 +372,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals(1, candidates.size(), "小批量SKU的单控候选不再因仍有量试SKU待排而被清空");
-        assertEquals("K1501R", candidates.get(0).getMachineCode());
+        assertTrue(candidates.isEmpty(), "小批量SKU在仍有量试待排时，应等待更高类型释放单控机台");
     }
 
     @Test

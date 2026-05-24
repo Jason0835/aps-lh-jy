@@ -172,7 +172,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         List<MachineScheduleDTO> filteredCandidates = resolveCandidatesBySkuType(
                 context, sku, singleControlCandidates, normalCandidates);
         markTypeRuleBlocked(context, sku, candidates, filteredCandidates, trace);
-        recordSingleControlRuleTrace(trace, candidates, filteredCandidates, sku);
+        recordSingleControlRuleTrace(trace, candidates, filteredCandidates, context, sku);
         if (filteredCandidates.size() != candidates.size()) {
             log.info("SKU选机台单控约束过滤, materialCode: {}, SKU类型: {}, 初始候选: {}, 过滤后候选: {}, "
                             + "待排试制SKU: {}, 待排量试SKU: {}, 待排小批量SKU: {}, 待排正规SKU: {}",
@@ -226,12 +226,20 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         if (isMassTrialSku(sku)) {
             if (!CollectionUtils.isEmpty(singleControlCandidates)) {
+                if (context != null && context.getPendingTrialNewSpecSkuCount() > 0) {
+                    return normalCandidates;
+                }
                 return singleControlCandidates;
             }
             return normalCandidates;
         }
         if (isSmallBatchSku(sku)) {
             if (!CollectionUtils.isEmpty(singleControlCandidates)) {
+                if (context != null
+                        && (context.getPendingTrialNewSpecSkuCount() > 0
+                        || context.getPendingMassTrialNewSpecSkuCount() > 0)) {
+                    return normalCandidates;
+                }
                 return singleControlCandidates;
             }
             return normalCandidates;
@@ -261,6 +269,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private void recordSingleControlRuleTrace(MachineFilterTrace trace,
                                               List<MachineScheduleDTO> originalCandidates,
                                               List<MachineScheduleDTO> filteredCandidates,
+                                              LhScheduleContext context,
                                               SkuScheduleDTO sku) {
         if (trace == null || CollectionUtils.isEmpty(originalCandidates)) {
             return;
@@ -274,7 +283,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 continue;
             }
             trace.singleControlRuleFilteredCount++;
-            trace.recordFilteredMachine(candidate, resolveSingleControlFilteredReason(sku, candidate));
+            trace.recordFilteredMachine(candidate, resolveSingleControlFilteredReason(context, sku, candidate));
         }
     }
 
@@ -285,14 +294,29 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param machine 机台
      * @return 过滤原因
      */
-    private String resolveSingleControlFilteredReason(SkuScheduleDTO sku, MachineScheduleDTO machine) {
+    private String resolveSingleControlFilteredReason(LhScheduleContext context,
+                                                      SkuScheduleDTO sku,
+                                                      MachineScheduleDTO machine) {
         boolean singleControlMachine = machine != null
                 && LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode());
         if (isTrialConstructionStage(sku) && !singleControlMachine) {
             return "试制SKU禁止使用普通机台";
         }
-        if (isMassTrialOrSmallBatchSku(sku) && !singleControlMachine) {
-            return "量试/小批量SKU优先使用单控机台";
+        if (isMassTrialSku(sku) && singleControlMachine
+                && context != null && context.getPendingTrialNewSpecSkuCount() > 0) {
+            return "量试等待试制释放单控机台";
+        }
+        if (isMassTrialSku(sku) && !singleControlMachine) {
+            return "量试SKU优先使用单控机台";
+        }
+        if (isSmallBatchSku(sku) && singleControlMachine
+                && context != null
+                && (context.getPendingTrialNewSpecSkuCount() > 0
+                || context.getPendingMassTrialNewSpecSkuCount() > 0)) {
+            return "小批量等待试制/量试释放单控机台";
+        }
+        if (isSmallBatchSku(sku) && !singleControlMachine) {
+            return "小批量SKU优先使用单控机台";
         }
         if (isFormalSku(sku) && singleControlMachine) {
             return "正规SKU优先使用普通机台";

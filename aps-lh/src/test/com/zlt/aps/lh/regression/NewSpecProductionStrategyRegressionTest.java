@@ -1233,7 +1233,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldUseSortedQueueInsteadOfTypeRetryForSingleControlCompetition() throws Exception {
+    void scheduleNewSpecs_shouldDeferMassTrialUntilTrialConsumesSingleControlCapacity() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -1251,8 +1251,8 @@ class NewSpecProductionStrategyRegressionTest {
         trialSku.setMaterialDesc("试制物料");
         trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
 
-        context.getNewSpecSkuList().add(trialSku);
         context.getNewSpecSkuList().add(massTrialSku);
+        context.getNewSpecSkuList().add(trialSku);
 
         MachineScheduleDTO singleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
@@ -1260,12 +1260,12 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "同一单控机台竞争应由当前排序后的队列顺序直接决定");
-        assertEquals(0, context.getUnscheduledResultList().size(), "试制与量试的单控竞争不再通过类型重试兜转");
+        assertEquals(2, context.getScheduleResultList().size(), "量试应先延后，待试制出队后再回到同一单控机台");
+        assertEquals(0, context.getUnscheduledResultList().size(), "单控竞争延后不应直接落终态未排");
         assertEquals("3302001575", context.getScheduleResultList().get(0).getMaterialCode(),
                 "试制SKU应先占用单控机台");
         assertEquals("3302002637", context.getScheduleResultList().get(1).getMaterialCode(),
-                "量试SKU应在试制之后继续按当前队列顺序占用单控机台");
+                "量试SKU应在试制排完后再占用单控剩余产能");
     }
 
     @Test

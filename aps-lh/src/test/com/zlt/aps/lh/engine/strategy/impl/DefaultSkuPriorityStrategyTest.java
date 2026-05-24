@@ -373,20 +373,44 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldNotPreferTrialConstructionStageBeforeMassTrial() {
+    void sortByPriority_shouldPreferTrialConstructionStageWithinSameStructureEndingLevel() {
         SkuScheduleDTO massTrial = sku("3302002637");
         massTrial.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
         massTrial.setHighPriorityPendingQty(999);
+        massTrial.setStructureName("结构A");
         SkuScheduleDTO trial = sku("3302002216");
         trial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trial.setHighPriorityPendingQty(1);
+        trial.setStructureName("结构A");
 
         LhScheduleContext context = contextWithNewSpec(massTrial, trial);
+        context.setFactoryCode("116");
+        context.setBatchNo("TRACE-BATCH");
+        context.setCurrentStep(ScheduleStepEnum.S4_5_NEW_PRODUCTION.getCode());
+        context.setScheduleConfig(new LhScheduleConfig(new java.util.HashMap<String, String>(2) {{
+            put(LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1");
+            put(LhScheduleParamConstant.STRUCTURE_ENDING_DAYS, "5");
+        }}));
+        Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("结构A", Arrays.asList(massTrial, trial));
+        context.setStructureSkuMap(structureSkuMap);
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(massTrial))).thenReturn(true);
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(trial))).thenReturn(true);
+        when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(massTrial)))
+                .thenReturn(3);
+        when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(trial)))
+                .thenReturn(3);
 
         strategy.sortByPriority(context);
 
-        assertEquals("3302002637", context.getNewSpecSkuList().get(0).getMaterialCode(),
-                "试制和量试不再作为排序优先层级，应继续按既有待排量等规则排序");
-        assertEquals("3302002216", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("3302002216", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "同命中结构五天内全收尾层级且最晚收尾日一致时，应按试制 > 量试补充排序");
+        assertEquals("3302002637", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals(1, context.getScheduleLogList().size());
+        String logDetail = context.getScheduleLogList().get(0).getLogDetail();
+        assertTrue(logDetail.contains("SKU类型"));
+        assertTrue(logDetail.contains("SKU类型优先级"));
+        assertTrue(logDetail.contains("最终排序名次"));
     }
 
     @Test
