@@ -758,6 +758,22 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void matchMachines_shouldAllowNormalSkuToUseSpecialMachineWithoutForcedReservation() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO specialSupportMachine = machine("M-SPECIAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-SPECIAL");
+        specialSupportMachine.setSupport195WideBase("1");
+        context.getMachineScheduleMap().put(specialSupportMachine.getMachineCode(), specialSupportMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "普通SKU没有普通机台可选时，应允许直接使用特殊机台");
+        assertEquals("M-SPECIAL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
     void matchMachines_shouldPreferNormalMachineForNonSpecialSku() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
@@ -775,6 +791,27 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertEquals(2, candidates.size());
         assertEquals("M-NORMAL", candidates.get(0).getMachineCode(),
                 "非特殊材料应优先使用普通机台，普通机台不足时才使用特殊支持机台");
+    }
+
+    @Test
+    void matchMachines_shouldTraceMachineTypeOrderingAndSpecialMachineFallbackReason() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildTraceContext();
+
+        MachineScheduleDTO specialSupportMachine = machine("M-SPECIAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-SPECIAL");
+        specialSupportMachine.setMachineName("特殊机台");
+        specialSupportMachine.setSupport195WideBase("1");
+        context.getMachineScheduleMap().put(specialSupportMachine.getMachineCode(), specialSupportMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size());
+        assertEquals(1, context.getScheduleLogList().size());
+        LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
+        assertTrue(processLog.getLogDetail().contains("机台类型=特殊机台"));
+        assertTrue(processLog.getLogDetail().contains("普通SKU允许使用特殊机台"));
+        assertTrue(processLog.getLogDetail().contains("特殊机台仅后置排序，不做强制保留"));
     }
 
     @Test

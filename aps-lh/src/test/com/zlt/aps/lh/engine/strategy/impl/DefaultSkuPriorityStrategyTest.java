@@ -314,7 +314,7 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldMoveOpenProductionRestrictedSkuBehindWhenPriorityTied() {
+    void sortByPriority_shouldOnlyMoveExistingOpenProductionRestrictedSkuBehindWhenPriorityTied() {
         SkuScheduleDTO winter = sku("MAT-A");
         winter.setPattern("雪地");
         winter.setProSize("17");
@@ -338,10 +338,10 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("MAT-Z", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("MAT-A", context.getNewSpecSkuList().get(1).getMaterialCode());
-        assertEquals("MAT-B", context.getNewSpecSkuList().get(2).getMaterialCode());
-        assertEquals("MAT-C", context.getNewSpecSkuList().get(3).getMaterialCode());
+        assertEquals("MAT-C", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("MAT-Z", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-A", context.getNewSpecSkuList().get(2).getMaterialCode());
+        assertEquals("MAT-B", context.getNewSpecSkuList().get(3).getMaterialCode());
     }
 
     @Test
@@ -484,7 +484,7 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldPreferSpecialSkuWithSingleCandidateMachine() {
+    void sortByPriority_shouldNotPreferSpecialSkuWithSingleCandidateMachine() {
         SkuScheduleDTO normalSku = sku("A-NORMAL");
         normalSku.setStructureName("结构普通");
         SkuScheduleDTO specialSku = sku("Z-SPECIAL");
@@ -505,8 +505,25 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("Z-SPECIAL", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("A-NORMAL", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("A-NORMAL", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("Z-SPECIAL", context.getNewSpecSkuList().get(1).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldStillUseDelayDaysBeforeSpecialMaterialFlag() {
+        SkuScheduleDTO normalSku = sku("A-NORMAL");
+        normalSku.setDelayDays(-5);
+        SkuScheduleDTO specialSku = sku("Z-SPECIAL");
+        specialSku.setDelayDays(-2);
+
+        LhScheduleContext context = contextWithNewSpec(specialSku, normalSku);
+        context.getSpecialMaterialCategoryByMaterialCode().put("Z-SPECIAL",
+                new HashSet<String>(Collections.singletonList(LhSpecialMaterialCategoryEnum.CHIP_TIRE.getCode())));
+
+        strategy.sortByPriority(context);
+
+        assertEquals("A-NORMAL", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("Z-SPECIAL", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     private LhScheduleContext contextWithNewSpec(SkuScheduleDTO... skus) {

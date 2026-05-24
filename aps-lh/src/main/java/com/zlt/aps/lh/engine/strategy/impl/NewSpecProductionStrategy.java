@@ -38,11 +38,8 @@ import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.LhMultiMachineDistributionUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
-import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
-import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
-import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.lh.util.ResultDowntimeSummaryUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -620,7 +617,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         int trialCount = 0;
         int massTrialCount = 0;
         int smallBatchCount = 0;
-        int specialMaterialCount = 0;
         for (SkuScheduleDTO pendingSku : context.getNewSpecSkuList()) {
             if (isTrialConstructionStage(pendingSku)) {
                 trialCount++;
@@ -636,32 +632,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
             formalCount++;
         }
-        // 统计特殊材料SKU数量
-        for (SkuScheduleDTO pendingSku : context.getNewSpecSkuList()) {
-            if (LhSpecialMaterialUtil.resolveMatchResult(context, pendingSku).isSpecial()) {
-                specialMaterialCount++;
-            }
-        }
         context.setPendingFormalNewSpecSkuCount(formalCount);
         context.setPendingTrialNewSpecSkuCount(trialCount);
         context.setPendingMassTrialNewSpecSkuCount(massTrialCount);
         context.setPendingSmallBatchNewSpecSkuCount(smallBatchCount);
-        context.setPendingSpecialMaterialNewSpecSkuCount(specialMaterialCount);
-
-        // 计算特殊机台保留集合：唯一候选特殊材料SKU所依赖的机台需要保护
-        Set<String> reservedCodes = new HashSet<>();
-        for (SkuScheduleDTO pendingSku : context.getNewSpecSkuList()) {
-            if (!LhSpecialMaterialUtil.resolveMatchResult(context, pendingSku).isSpecial()) {
-                continue;
-            }
-            String singleCandidate = resolveSingleCandidateMachineCode(context, pendingSku);
-            if (singleCandidate != null) {
-                reservedCodes.add(singleCandidate);
-            }
-        }
-        context.setSpecialMachineReservedCodes(reservedCodes);
-        log.info("新增待排SKU类型计数初始化, 试制SKU: {}, 量试SKU: {}, 小批量SKU: {}, 正规SKU: {}, 特殊材料SKU: {}, 保留特殊机台: {}",
-                trialCount, massTrialCount, smallBatchCount, formalCount, specialMaterialCount, reservedCodes.size());
+        log.info("新增待排SKU类型计数初始化, 试制SKU: {}, 量试SKU: {}, 小批量SKU: {}, 正规SKU: {}",
+                trialCount, massTrialCount, smallBatchCount, formalCount);
     }
 
     /**
@@ -689,11 +665,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                          SkuScheduleDTO sku) {
         iterator.remove();
         context.getNewSpecTypeRuleBlockedMap().remove(sku);
-        // 特殊材料SKU计数递减
-        if (LhSpecialMaterialUtil.resolveMatchResult(context, sku).isSpecial()) {
-            context.setPendingSpecialMaterialNewSpecSkuCount(
-                    Math.max(0, context.getPendingSpecialMaterialNewSpecSkuCount() - 1));
-        }
         if (isTrialConstructionStage(sku)) {
             context.setPendingTrialNewSpecSkuCount(Math.max(0, context.getPendingTrialNewSpecSkuCount() - 1));
             return;
@@ -709,38 +680,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return;
         }
         context.setPendingFormalNewSpecSkuCount(Math.max(0, context.getPendingFormalNewSpecSkuCount() - 1));
-    }
-
-    /**
-     * 解析特殊材料SKU的唯一候选机台编码。
-     * <p>遍历所有机台，通过硬匹配+启用状态+不可作业机台过滤后，
-     * 若仅剩1台候选机台则返回其编码，否则返回null。</p>
-     *
-     * @param context 排程上下文
-     * @param sku 待排SKU
-     * @return 唯一候选机台编码，无唯一候选时返回null
-     */
-    private String resolveSingleCandidateMachineCode(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (context == null || sku == null
-                || CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
-            return null;
-        }
-        String singleMachineCode = null;
-        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
-            if (machine == null
-                    || !MachineStatusUtil.isEnabled(machine.getStatus())
-                    || !LhMachineHardMatchUtil.isMachineHardMatched(context, sku, machine)
-                    || LhSpecifyMachineUtil.isNotAllowedMachine(
-                            context, machine.getMachineCode(), sku.getMaterialCode())) {
-                continue;
-            }
-            if (singleMachineCode != null) {
-                // 第二个候选机台出现，非唯一候选
-                return null;
-            }
-            singleMachineCode = machine.getMachineCode();
-        }
-        return singleMachineCode;
     }
 
     /**

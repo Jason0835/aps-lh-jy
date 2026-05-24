@@ -119,7 +119,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
 
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
-        candidates = applySpecialMachineReservationRule(context, sku, specialMaterialMatchResult, candidates, trace);
 
         // 5. 按多维度排序
         sortCandidates(context, candidates, sku, specialMaterialMatchResult);
@@ -299,71 +298,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return "正规SKU优先使用普通机台";
         }
         return "SKU类型机台约束";
-    }
-
-    /**
-     * 特殊机台资源保护规则。
-     * <p>当非特殊SKU拥有普通机台候选时，排除被唯一候选特殊材料SKU依赖的特殊机台，
-     * 避免非特殊SKU占用特殊材料SKU唯一可用的机台资源。
-     * 若非特殊SKU无普通机台可选，则保留特殊机台作为兜底。</p>
-     *
-     * @param context 排程上下文
-     * @param sku 待排SKU
-     * @param matchResult 特殊物料命中结果
-     * @param candidates 候选机台
-     * @param trace 过滤跟踪
-     * @return 过滤后候选机台
-     */
-    private List<MachineScheduleDTO> applySpecialMachineReservationRule(
-            LhScheduleContext context, SkuScheduleDTO sku,
-            SpecialMaterialMatchResult matchResult,
-            List<MachineScheduleDTO> candidates, MachineFilterTrace trace) {
-        // 特殊材料SKU不需要保护规则
-        if (matchResult != null && matchResult.isSpecial()) {
-            return candidates;
-        }
-        // 没有待排特殊材料SKU时不需要保护
-        if (context == null || context.getPendingSpecialMaterialNewSpecSkuCount() <= 0) {
-            return candidates;
-        }
-        Set<String> reservedCodes = context.getSpecialMachineReservedCodes();
-        if (CollectionUtils.isEmpty(reservedCodes)) {
-            return candidates;
-        }
-        // 分离普通机台和特殊机台
-        List<MachineScheduleDTO> normalCandidates = new ArrayList<>(candidates.size());
-        List<MachineScheduleDTO> specialCandidates = new ArrayList<>(candidates.size());
-        for (MachineScheduleDTO candidate : candidates) {
-            if (candidate == null) {
-                continue;
-            }
-            if (LhMachineHardMatchUtil.isNormalMachine(candidate)) {
-                normalCandidates.add(candidate);
-            } else {
-                specialCandidates.add(candidate);
-            }
-        }
-        // 没有普通机台候选时，保留全部特殊机台作为兜底
-        if (normalCandidates.isEmpty()) {
-            return candidates;
-        }
-        // 有普通机台候选时，过滤掉被保留的特殊机台
-        List<MachineScheduleDTO> filtered = new ArrayList<>(normalCandidates.size() + specialCandidates.size());
-        filtered.addAll(normalCandidates);
-        int reservedFilteredCount = 0;
-        for (MachineScheduleDTO special : specialCandidates) {
-            if (reservedCodes.contains(special.getMachineCode())) {
-                reservedFilteredCount++;
-                trace.recordFilteredMachine(special, "特殊机台资源保护");
-            } else {
-                filtered.add(special);
-            }
-        }
-        if (reservedFilteredCount > 0) {
-            log.info("特殊机台资源保护过滤, materialCode: {}, 过滤机台数: {}, 保留普通机台数: {}",
-                    sku.getMaterialCode(), reservedFilteredCount, normalCandidates.size());
-        }
-        return filtered;
     }
 
     /**
@@ -1175,8 +1109,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         int filteredCount = trace.notAllowedMachineFilteredCount + trace.disabledCount
                 + trace.stopTimeoutCount + trace.inchMismatchCount + trace.mouldSetMismatchCount
                 + trace.resolveSpecialSupportFilteredCount() + trace.mouldConflictCount
-                + trace.singleControlRuleFilteredCount
-                + trace.specialMachineReservedFilteredCount;
+                + trace.singleControlRuleFilteredCount;
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 PriorityTraceLogHelper.kv("候选机台总数", trace.totalMachineCount)
                         + ", " + PriorityTraceLogHelper.kv("有效候选数", PriorityTraceLogHelper.sizeOf(candidates))
@@ -1188,11 +1121,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                         + ", 模套不符=" + trace.mouldSetMismatchCount
                         + ", 特殊不支持=" + trace.resolveSpecialSupportFilteredCount()
                         + ", 模具占用=" + trace.mouldConflictCount
-                        + ", 单控规则=" + trace.singleControlRuleFilteredCount
-                        + ", 特殊机台保护=" + trace.specialMachineReservedFilteredCount);
+                        + ", 单控规则=" + trace.singleControlRuleFilteredCount);
         if (!CollectionUtils.isEmpty(trace.filteredMachineMessages)) {
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     "过滤明细: " + String.join("; ", trace.filteredMachineMessages));
+        }
+        if (!matchResult.isSpecial()) {
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "候选说明: 普通SKU允许使用特殊机台，特殊机台仅后置排序，不做强制保留");
         }
 
         // TOP N 候选机台
@@ -1238,10 +1174,12 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
 
             boolean isSingleCtrl = isSingleControlMachine(context, machine.getMachineCode());
+            String machineTypeDesc = resolveMachineTypeDesc(machine);
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     (i + 1)
                             + ". " + PriorityTraceLogHelper.kv("机台", machine.getMachineCode())
                             + ", " + PriorityTraceLogHelper.kv("名称", machine.getMachineName())
+                            + ", " + PriorityTraceLogHelper.kv("机台类型", machineTypeDesc)
                             + ", " + PriorityTraceLogHelper.kv("状态", machine.getStatus())
                             + ", " + PriorityTraceLogHelper.kv("可用", PriorityTraceLogHelper.oneZero(MachineStatusUtil.isEnabled(machine.getStatus())))
                             + ", " + PriorityTraceLogHelper.kv("单控", PriorityTraceLogHelper.oneZero(isSingleCtrl))
@@ -1304,6 +1242,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (resolveCapsuleAffinityScore(context, sku, machine) == 0) {
             reasons.add("胶囊共用");
         }
+        if (Objects.nonNull(matchResult) && !matchResult.isSpecial()
+                && !LhMachineHardMatchUtil.isNormalMachine(machine)) {
+            reasons.add("普通SKU允许使用特殊机台，特殊机台仅后置排序，不做强制保留");
+        }
         if (machine.getEstimatedEndTime() != null) {
             reasons.add("收尾时间最近");
         }
@@ -1326,6 +1268,16 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return 0;
         }
         return LhMachineHardMatchUtil.resolveNormalMachinePriority(machine);
+    }
+
+    /**
+     * 解析机台类型描述。
+     *
+     * @param machine 机台
+     * @return 普通机台/特殊机台
+     */
+    private String resolveMachineTypeDesc(MachineScheduleDTO machine) {
+        return LhMachineHardMatchUtil.isNormalMachine(machine) ? "普通机台" : "特殊机台";
     }
 
     /**
@@ -1379,8 +1331,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         private int mouldConflictCount;
         /** 单控/普通机台类型约束过滤数 */
         private int singleControlRuleFilteredCount;
-        /** 特殊机台资源保护过滤数 */
-        private int specialMachineReservedFilteredCount;
         /** 过滤明细 */
         private final List<String> filteredMachineMessages = new ArrayList<>(8);
 
