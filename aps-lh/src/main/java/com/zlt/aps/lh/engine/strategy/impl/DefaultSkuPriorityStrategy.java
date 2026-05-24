@@ -134,7 +134,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
     /**
      * 构建新增SKU比较器。
-     * <p>试制、量试、小批量不参与主排序越级，仅在新增SKU前置排序键完全一致时作为补充排序。</p>
+     * <p>试制、量试、小批量不参与主排序越级，仅在新增SKU主排序和供应链数量完全一致时作为补充排序。</p>
      *
      * @param context 排程上下文
      * @param priorityComparator 锁交期/延期/结构优先比较器
@@ -165,18 +165,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         if (compareResult != 0) {
             return compareResult;
         }
-        compareResult = compareNewSpecSkuTypeWithinLevel(left, right,
-                left != null && right != null && left.isDeliveryLocked() && right.isDeliveryLocked());
-        if (compareResult != 0) {
-            return compareResult;
-        }
 
         compareResult = compareDelayDays(left, right);
-        if (compareResult != 0) {
-            return compareResult;
-        }
-        compareResult = compareNewSpecSkuTypeWithinLevel(left, right,
-                shouldApplyDelayDaysSkuTypeTieBreaker(left, right));
         if (compareResult != 0) {
             return compareResult;
         }
@@ -185,12 +175,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         if (compareResult != 0) {
             return compareResult;
         }
-        compareResult = compareNewSpecSkuTypeWithinLevel(left, right,
-                shouldApplyStructureSkuTypeTieBreaker(structurePriorityMap, structureEndingDaysMap, left, right));
-        if (compareResult != 0) {
-            return compareResult;
-        }
 
+        // 前置主排序层级一致后，先按供应链四档待排量逐级降序比较，再进入原有兜底排序。
         compareResult = tailComparator.compare(left, right);
         if (compareResult != 0) {
             return compareResult;
@@ -692,9 +678,22 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
                 String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
 
+                String tracePrefix = isNewSpec
+                        ? "[新增排产SKU排序] rank=" + (i + 1)
+                        + ", sku=" + sku.getMaterialCode()
+                        + ", " + PriorityTraceLogHelper.kv("交付锁定", PriorityTraceLogHelper.oneZero(sku.isDeliveryLocked()))
+                        + ", " + PriorityTraceLogHelper.kv("延期天数", delayKnown ? delayDays : 0)
+                        + ", " + PriorityTraceLogHelper.kv("结构五天收尾", PriorityTraceLogHelper.oneZero(structureAllEndingPriority))
+                        + ", " + PriorityTraceLogHelper.kv("SKU类型", skuTypeDesc)
+                        + ", " + PriorityTraceLogHelper.kv("高优先级数量", sku.getHighPriorityPendingQty())
+                        + ", " + PriorityTraceLogHelper.kv("周期排产数量", sku.getCycleProductionPendingQty())
+                        + ", " + PriorityTraceLogHelper.kv("中优先级数量", sku.getMidPriorityPendingQty())
+                        + ", " + PriorityTraceLogHelper.kv("常规数量", sku.getConventionProductionPendingQty())
+                        + ", " + PriorityTraceLogHelper.kv("最终排序原因", hitLevel)
+                        : (i + 1) + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode());
+
                 PriorityTraceLogHelper.appendLine(detailBuilder,
-                        (i + 1)
-                                + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode())
+                        tracePrefix
                                 + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
                                 + ", " + PriorityTraceLogHelper.kv("排产类型", sku.getScheduleType())
                                 + ", " + PriorityTraceLogHelper.kv("SKU类型", skuTypeDesc)
@@ -721,7 +720,9 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                         "... 共" + skuCount + "条，仅展示前" + topN + "条");
             }
             if (isNewSpec) {
-                appendNewSpecSkuTypeTieBreakTrace(detailBuilder, traceSkuList,
+                appendTargetSkuSortTrace(detailBuilder, traceSkuList, "3302002637");
+                appendNewSpecSupplyChainTieBreakTrace(detailBuilder, traceSkuList);
+                appendNewSpecSkuTypeTieBreakTrace(context, detailBuilder, traceSkuList,
                         structurePriorityMap, structureEndingDaysMap);
             }
         }
@@ -730,7 +731,75 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
     }
 
-    private void appendNewSpecSkuTypeTieBreakTrace(StringBuilder detailBuilder,
+    /**
+     * 输出重点SKU的全局排序位置和前序SKU列表。
+     *
+     * @param detailBuilder 日志明细
+     * @param traceSkuList 排序后SKU列表
+     * @param targetMaterialCode 目标物料编码
+     */
+    private void appendTargetSkuSortTrace(StringBuilder detailBuilder,
+                                          List<SkuScheduleDTO> traceSkuList,
+                                          String targetMaterialCode) {
+        if (detailBuilder == null || CollectionUtils.isEmpty(traceSkuList)
+                || StringUtils.isEmpty(targetMaterialCode)) {
+            return;
+        }
+        for (int i = 0; i < traceSkuList.size(); i++) {
+            SkuScheduleDTO sku = traceSkuList.get(i);
+            if (sku == null || !StringUtils.equals(targetMaterialCode, sku.getMaterialCode())) {
+                continue;
+            }
+            List<String> previousSkuCodes = new ArrayList<>(i);
+            for (int j = 0; j < i; j++) {
+                SkuScheduleDTO previousSku = traceSkuList.get(j);
+                if (previousSku != null && StringUtils.isNotEmpty(previousSku.getMaterialCode())) {
+                    previousSkuCodes.add(previousSku.getMaterialCode());
+                }
+            }
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "重点SKU排序追踪: " + targetMaterialCode
+                            + ", 全局排序名次=" + (i + 1)
+                            + ", 前序SKU=" + (CollectionUtils.isEmpty(previousSkuCodes)
+                            ? "-" : String.join(",", previousSkuCodes)));
+            return;
+        }
+    }
+
+    private void appendNewSpecSupplyChainTieBreakTrace(StringBuilder detailBuilder,
+                                                       List<SkuScheduleDTO> traceSkuList) {
+        if (detailBuilder == null || CollectionUtils.isEmpty(traceSkuList)) {
+            return;
+        }
+        int explainedCount = 0;
+        for (int i = 0; i < traceSkuList.size() - 1; i++) {
+            SkuScheduleDTO currentSku = traceSkuList.get(i);
+            SkuScheduleDTO nextSku = traceSkuList.get(i + 1);
+            String levelDesc = resolveSupplyChainTieBreakLevelDesc(currentSku, nextSku);
+            if (StringUtils.isEmpty(levelDesc)) {
+                continue;
+            }
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "供应链数量比较命中: "
+                            + currentSku.getMaterialCode() + " > " + nextSku.getMaterialCode()
+                            + ", 层级=" + levelDesc
+                            + ", 当前SKU[高优先级数量=" + currentSku.getHighPriorityPendingQty()
+                            + ",周期排产数量=" + currentSku.getCycleProductionPendingQty()
+                            + ",中优先级数量=" + currentSku.getMidPriorityPendingQty()
+                            + ",常规数量=" + currentSku.getConventionProductionPendingQty()
+                            + "], 后续SKU[高优先级数量=" + nextSku.getHighPriorityPendingQty()
+                            + ",周期排产数量=" + nextSku.getCycleProductionPendingQty()
+                            + ",中优先级数量=" + nextSku.getMidPriorityPendingQty()
+                            + ",常规数量=" + nextSku.getConventionProductionPendingQty() + "]");
+            explainedCount++;
+            if (explainedCount >= 10) {
+                break;
+            }
+        }
+    }
+
+    private void appendNewSpecSkuTypeTieBreakTrace(LhScheduleContext context,
+                                                   StringBuilder detailBuilder,
                                                    List<SkuScheduleDTO> traceSkuList,
                                                    Map<String, StructurePriorityMeta> structurePriorityMap,
                                                    Map<SkuScheduleDTO, Integer> structureEndingDaysMap) {
@@ -741,7 +810,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         for (int i = 0; i < traceSkuList.size() - 1; i++) {
             SkuScheduleDTO currentSku = traceSkuList.get(i);
             SkuScheduleDTO nextSku = traceSkuList.get(i + 1);
-            String levelDesc = resolveSkuTypeTieBreakLevelDesc(structurePriorityMap,
+            String levelDesc = resolveSkuTypeTieBreakLevelDesc(context, structurePriorityMap,
                     structureEndingDaysMap, currentSku, nextSku);
             if (StringUtils.isEmpty(levelDesc)) {
                 continue;
@@ -760,7 +829,27 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         }
     }
 
-    private String resolveSkuTypeTieBreakLevelDesc(Map<String, StructurePriorityMeta> structurePriorityMap,
+    private String resolveSupplyChainTieBreakLevelDesc(SkuScheduleDTO left, SkuScheduleDTO right) {
+        if (left == null || right == null) {
+            return null;
+        }
+        if (left.getHighPriorityPendingQty() != right.getHighPriorityPendingQty()) {
+            return "高优先级数量";
+        }
+        if (left.getCycleProductionPendingQty() != right.getCycleProductionPendingQty()) {
+            return "周期排产数量";
+        }
+        if (left.getMidPriorityPendingQty() != right.getMidPriorityPendingQty()) {
+            return "中优先级数量";
+        }
+        if (left.getConventionProductionPendingQty() != right.getConventionProductionPendingQty()) {
+            return "常规数量";
+        }
+        return null;
+    }
+
+    private String resolveSkuTypeTieBreakLevelDesc(LhScheduleContext context,
+                                                   Map<String, StructurePriorityMeta> structurePriorityMap,
                                                    Map<SkuScheduleDTO, Integer> structureEndingDaysMap,
                                                    SkuScheduleDTO left,
                                                    SkuScheduleDTO right) {
@@ -770,21 +859,23 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         if (resolveNewSpecSkuTypeScore(left) == resolveNewSpecSkuTypeScore(right)) {
             return null;
         }
-        if (left.isDeliveryLocked() && right.isDeliveryLocked()) {
-            return "锁交期同层";
+        if (StringUtils.isNotEmpty(resolveSupplyChainTieBreakLevelDesc(left, right))) {
+            return null;
         }
-        if (shouldApplyDelayDaysSkuTypeTieBreaker(left, right)) {
-            return "延误天数同层";
-        }
-        if (shouldApplyStructureSkuTypeTieBreaker(structurePriorityMap, structureEndingDaysMap, left, right)) {
-            return "结构全收尾同层";
-        }
-        return isComparableByTailOnly(left, right) ? "尾部排序同层" : null;
+        return isComparableBySkuTypeFallback(context, structurePriorityMap,
+                structureEndingDaysMap, left, right) ? "主排序和供应链数量同层" : null;
     }
 
-    private boolean isComparableByTailOnly(SkuScheduleDTO left, SkuScheduleDTO right) {
+    private boolean isComparableBySkuTypeFallback(LhScheduleContext context,
+                                                  Map<String, StructurePriorityMeta> structurePriorityMap,
+                                                  Map<SkuScheduleDTO, Integer> structureEndingDaysMap,
+                                                  SkuScheduleDTO left,
+                                                  SkuScheduleDTO right) {
         return resolveDeliveryLockedScore(left) == resolveDeliveryLockedScore(right)
-                && Objects.equals(left.getDelayDays(), right.getDelayDays());
+                && resolveSpecifyMachineScore(context, left) == resolveSpecifyMachineScore(context, right)
+                && Objects.equals(left.getDelayDays(), right.getDelayDays())
+                && compareStructurePriority(structurePriorityMap, structureEndingDaysMap, left, right) == 0
+                && resolveOpenProductionLateScore(context, left) == resolveOpenProductionLateScore(context, right);
     }
 
     /**

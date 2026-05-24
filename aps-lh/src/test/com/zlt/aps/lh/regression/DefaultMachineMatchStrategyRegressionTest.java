@@ -163,9 +163,9 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals(1, candidates.size());
+        assertEquals(2, candidates.size(), "isTrial总标识不等同于试制施工阶段，应保留普通候选作为单控不足后的回落机台");
         assertEquals("K1501L", candidates.get(0).getMachineCode(),
-                "试制量试 SKU 命中收尾单控机台时，应继续优先等待并占用单控机台");
+                "试制量试 SKU 命中收尾单控机台时，应优先选择单控机台");
     }
 
     @Test
@@ -186,9 +186,9 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals(1, candidates.size(), "有单控且有普通机台时，量试只应保留单控候选");
+        assertEquals(2, candidates.size(), "有单控且有普通机台时，量试应保留普通候选作为单控不足后的回落机台");
         assertEquals("K1501L", candidates.get(0).getMachineCode(),
-                "量试命中单控机台时，不应同时保留普通机台候选");
+                "量试命中单控机台时，单控候选必须排在普通机台前");
     }
 
     @Test
@@ -272,9 +272,9 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals(1, candidates.size(), "量试施工阶段在有单控机台时，只应保留单控候选");
+        assertEquals(2, candidates.size(), "量试施工阶段在有单控机台时，应保留普通候选作为单控不足后的回落机台");
         assertEquals("K1501R", candidates.get(0).getMachineCode(),
-                "量试施工阶段命中单控机台时，不应同时保留普通机台候选");
+                "量试施工阶段命中单控机台时，单控候选必须排在普通机台前");
     }
 
     @Test
@@ -338,7 +338,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldHideMassTrialSingleControlCandidateWhenTrialPending() {
+    void matchMachines_shouldKeepMassTrialSingleControlCandidateWhenTrialPending() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -353,11 +353,12 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertTrue(candidates.isEmpty(), "量试SKU在仍有试制待排时，应等待试制释放单控机台");
+        assertEquals(1, candidates.size(), "量试SKU全局排序在前时，不应因后续试制待排让出单控机台");
+        assertEquals("K1501R", candidates.get(0).getMachineCode());
     }
 
     @Test
-    void matchMachines_shouldHideSmallBatchSingleControlCandidateWhenMassTrialPending() {
+    void matchMachines_shouldKeepSmallBatchSingleControlCandidateWhenMassTrialPending() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -372,7 +373,8 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertTrue(candidates.isEmpty(), "小批量SKU在仍有量试待排时，应等待更高类型释放单控机台");
+        assertEquals(1, candidates.size(), "小批量SKU全局排序在前时，不应因后续量试待排让出单控机台");
+        assertEquals("K1501R", candidates.get(0).getMachineCode());
     }
 
     @Test

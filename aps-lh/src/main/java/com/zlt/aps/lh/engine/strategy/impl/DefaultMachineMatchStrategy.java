@@ -224,25 +224,12 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (isTrialConstructionStage(sku)) {
             return singleControlCandidates;
         }
-        if (isMassTrialSku(sku)) {
-            if (!CollectionUtils.isEmpty(singleControlCandidates)) {
-                if (context != null && context.getPendingTrialNewSpecSkuCount() > 0) {
-                    return normalCandidates;
-                }
-                return singleControlCandidates;
-            }
-            return normalCandidates;
-        }
-        if (isSmallBatchSku(sku)) {
-            if (!CollectionUtils.isEmpty(singleControlCandidates)) {
-                if (context != null
-                        && (context.getPendingTrialNewSpecSkuCount() > 0
-                        || context.getPendingMassTrialNewSpecSkuCount() > 0)) {
-                    return normalCandidates;
-                }
-                return singleControlCandidates;
-            }
-            return normalCandidates;
+        if (isMassTrialSku(sku) || isSmallBatchSku(sku)) {
+            List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
+                    singleControlCandidates.size() + normalCandidates.size());
+            retainedCandidates.addAll(singleControlCandidates);
+            retainedCandidates.addAll(normalCandidates);
+            return retainedCandidates;
         }
         if (!CollectionUtils.isEmpty(normalCandidates)) {
             if (LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode())
@@ -302,21 +289,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (isTrialConstructionStage(sku) && !singleControlMachine) {
             return "试制SKU禁止使用普通机台";
         }
-        if (isMassTrialSku(sku) && singleControlMachine
-                && context != null && context.getPendingTrialNewSpecSkuCount() > 0) {
-            return "量试等待试制释放单控机台";
-        }
         if (isMassTrialSku(sku) && !singleControlMachine) {
-            return "量试SKU优先使用单控机台";
-        }
-        if (isSmallBatchSku(sku) && singleControlMachine
-                && context != null
-                && (context.getPendingTrialNewSpecSkuCount() > 0
-                || context.getPendingMassTrialNewSpecSkuCount() > 0)) {
-            return "小批量等待试制/量试释放单控机台";
+            return "量试SKU优先使用单控机台，单控候选不足时允许普通机台";
         }
         if (isSmallBatchSku(sku) && !singleControlMachine) {
-            return "小批量SKU优先使用单控机台";
+            return "小批量SKU优先使用单控机台，单控候选不足时允许普通机台";
         }
         if (isFormalSku(sku) && singleControlMachine) {
             return "正规SKU优先使用普通机台";
@@ -1175,7 +1152,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
             List<String> sortKeyLevels = java.util.Arrays.asList(
                     "L1_定点机台=" + (specifyScore == 0 ? 1 : 0),
-                    "L2_单控拆分=" + (singleCtrlScore == 0 ? 1 : 0),
+                    "L2_单控拆分=" + (isSingleControlMachine(context, machine.getMachineCode()) ? 1 : 0),
                     "L3_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
                     "L4_收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()),
                     "L5_同规格=" + (specMatchScore == 0 ? 1 : 0),
@@ -1207,6 +1184,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                             + ", " + PriorityTraceLogHelper.kv("状态", machine.getStatus())
                             + ", " + PriorityTraceLogHelper.kv("可用", PriorityTraceLogHelper.oneZero(MachineStatusUtil.isEnabled(machine.getStatus())))
                             + ", " + PriorityTraceLogHelper.kv("单控", PriorityTraceLogHelper.oneZero(isSingleCtrl))
+                            + ", " + PriorityTraceLogHelper.kv("普通机台", PriorityTraceLogHelper.oneZero(!isSingleCtrl))
+                            + ", " + PriorityTraceLogHelper.kv("机台偏好原因", resolveMachinePreferenceReason(context, sku, machine))
                             + ", " + PriorityTraceLogHelper.kv("定点", PriorityTraceLogHelper.oneZero(specifyScore == 0))
                             + ", " + PriorityTraceLogHelper.kv("支持SKU", PriorityTraceLogHelper.oneZero(true))
                             + ", " + PriorityTraceLogHelper.kv("当前在机", machine.getPreviousMaterialCode())
@@ -1277,6 +1256,29 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             reasons.add("排序首位默认");
         }
         return String.join("，", reasons);
+    }
+
+    /**
+     * 解析当前SKU对候选机台类型的偏好原因。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @return 偏好原因
+     */
+    private String resolveMachinePreferenceReason(LhScheduleContext context, SkuScheduleDTO sku,
+                                                  MachineScheduleDTO machine) {
+        boolean singleControlMachine = isSingleControlMachine(context, machine.getMachineCode());
+        if (isTrialConstructionStage(sku)) {
+            return singleControlMachine ? "试制SKU只能使用单控机台" : "试制SKU禁止使用普通机台";
+        }
+        if (isMassTrialSku(sku)) {
+            return singleControlMachine ? "量试SKU优先使用单控机台" : "量试SKU单控不足时允许使用普通机台";
+        }
+        if (isSmallBatchSku(sku)) {
+            return singleControlMachine ? "小批量SKU优先使用单控机台" : "小批量SKU单控不足时允许使用普通机台";
+        }
+        return singleControlMachine ? "正规SKU普通机台不足时允许使用单控机台" : "正规SKU优先使用普通机台";
     }
 
     /**

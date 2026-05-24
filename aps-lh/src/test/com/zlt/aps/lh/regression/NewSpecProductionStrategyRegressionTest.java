@@ -1233,7 +1233,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldDeferMassTrialUntilTrialConsumesSingleControlCapacity() throws Exception {
+    void scheduleNewSpecs_shouldKeepGlobalOrderWhenMassTrialCompetesWithTrialForSingleControl() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -1260,12 +1260,14 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "量试应先延后，待试制出队后再回到同一单控机台");
-        assertEquals(0, context.getUnscheduledResultList().size(), "单控竞争延后不应直接落终态未排");
-        assertEquals("3302001575", context.getScheduleResultList().get(0).getMaterialCode(),
-                "试制SKU应先占用单控机台");
-        assertEquals("3302002637", context.getScheduleResultList().get(1).getMaterialCode(),
-                "量试SKU应在试制排完后再占用单控剩余产能");
+        assertEquals(1, context.getScheduleResultList().size(), "单控机台分配必须遵循全局SKU排序顺序");
+        assertEquals(1, context.getUnscheduledResultList().size(), "后续试制SKU单控产能不足时应进入未排");
+        assertEquals("3302002637", context.getScheduleResultList().get(0).getMaterialCode(),
+                "量试SKU全局排序在前时，应先占用单控机台");
+        assertEquals("3302001575", context.getUnscheduledResultList().get(0).getMaterialCode(),
+                "试制SKU不能绕过全局排序提前抢占单控机台");
+        assertEquals("试制SKU只能使用单控机台，但单控机台已被全局排序更靠前的SKU占用，或当前单控机台产能不足，无法排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
     @Test
@@ -1379,7 +1381,7 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals("试制SKU无可用单控机台，禁止使用普通机台",
+        assertEquals("试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产",
                 findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001575").getUnscheduledReason(),
                 "试制SKU仅剩普通机台候选时，应返回单控专属未排原因");
     }

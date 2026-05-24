@@ -284,6 +284,46 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
+    void sortByPriority_shouldCompareSupplyChainBeforeSkuTypeFallbackForNewSpec() {
+        SkuScheduleDTO massTrialSku = sku("3302002637");
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSku.setHighPriorityPendingQty(1);
+        massTrialSku.setStructureName("结构A");
+        SkuScheduleDTO formalSku = sku("3302001724");
+        formalSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        formalSku.setHighPriorityPendingQty(10);
+        formalSku.setStructureName("结构A");
+
+        LhScheduleContext context = contextWithNewSpec(massTrialSku, formalSku);
+        context.setFactoryCode("116");
+        context.setBatchNo("TRACE-BATCH");
+        context.setCurrentStep(ScheduleStepEnum.S4_5_NEW_PRODUCTION.getCode());
+        context.setScheduleConfig(new LhScheduleConfig(new java.util.HashMap<String, String>(2) {{
+            put(LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1");
+            put(LhScheduleParamConstant.STRUCTURE_ENDING_DAYS, "5");
+        }}));
+        Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("结构A", Arrays.asList(massTrialSku, formalSku));
+        context.setStructureSkuMap(structureSkuMap);
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(massTrialSku))).thenReturn(true);
+        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(formalSku))).thenReturn(true);
+        when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(massTrialSku)))
+                .thenReturn(3);
+        when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(formalSku)))
+                .thenReturn(3);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("3302001724", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "前置排序层级完全一致时，应先按供应链优先级数量逐档比较，再走SKU类型兜底");
+        assertEquals("3302002637", context.getNewSpecSkuList().get(1).getMaterialCode());
+        String logDetail = context.getScheduleLogList().get(0).getLogDetail();
+        assertTrue(logDetail.contains("[新增排产SKU排序] rank=1, sku=3302001724"));
+        assertTrue(logDetail.contains("高优先级数量=10"));
+        assertTrue(logDetail.contains("供应链数量比较命中: 3302001724 > 3302002637, 层级=高优先级数量"));
+    }
+
+    @Test
     void sortByPriority_shouldKeepDeliveryLockAndDelayPriorityBeforeStructureAllEndingRule() {
         SkuScheduleDTO locked = sku("MAT-L");
         locked.setStructureName("S2");
@@ -414,7 +454,7 @@ class DefaultSkuPriorityStrategyTest {
     void sortByPriority_shouldPreferTrialConstructionStageWithinSameStructureEndingLevel() {
         SkuScheduleDTO massTrial = sku("3302002637");
         massTrial.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
-        massTrial.setHighPriorityPendingQty(999);
+        massTrial.setHighPriorityPendingQty(1);
         massTrial.setStructureName("结构A");
         SkuScheduleDTO trial = sku("3302002216");
         trial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
