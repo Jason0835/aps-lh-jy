@@ -18,8 +18,7 @@ import java.util.Objects;
 
 /**
  * SKU与示方书关系校验器
- * <p>校验月生产计划中物料的硫化示方书号(lhNo)和硫化示方书类型(lhType)是否为空，
- * 同时校验月计划产品状态与示方书关系产品状态是否一致。</p>
+ * <p>按物料编码 + 产品状态精确查找示方书关系，校验 lhNo 和 lhType 是否为空。</p>
  *
  * @author APS
  */
@@ -36,30 +35,24 @@ public class SkuConstructionValidator implements IDataValidator {
         if (CollectionUtils.isEmpty(monthPlanList)) {
             return true;
         }
-        Map<String, MdmSkuConstructionRef> refMap = context.getSkuConstructionRefMap();
-        if (CollectionUtils.isEmpty(refMap)) {
+        Map<String, MdmSkuConstructionRef> compositeKeyMap = context.getSkuConstructionRefCompositeKeyMap();
+        if (CollectionUtils.isEmpty(compositeKeyMap)) {
             log.warn("SKU与示方书关系数据为空, 工厂: {}", context.getFactoryCode());
             context.addValidationError("[" + getValidatorName() + "] SKU与示方书关系数据为空, 工厂: "
                     + context.getFactoryDisplayName());
             return false;
         }
-        // 遍历月计划物料，校验产品状态一致性及 lhNo/lhType 是否为空
+        // 遍历月计划物料，按物料编码+产品状态精确查找并校验 lhNo/lhType
         Map<String, String> missingFieldMap = new LinkedHashMap<>();
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
             String materialCode = plan.getMaterialCode();
             if (StringUtils.isEmpty(materialCode)) {
                 continue;
             }
-            MdmSkuConstructionRef ref = refMap.get(materialCode);
+            String compositeKey = materialCode + "::" + plan.getProductStatus();
+            MdmSkuConstructionRef ref = compositeKeyMap.get(compositeKey);
             if (Objects.isNull(ref)) {
-                missingFieldMap.put(materialCode, "未找到SKU与示方书关系数据");
-                continue;
-            }
-            // 校验产品状态一致性：月计划 productStatus 与示方书关系 trialStatus 须一致
-            String productStatus = plan.getProductStatus();
-            if (StringUtils.isNotEmpty(productStatus) && StringUtils.isNotEmpty(ref.getTrialStatus())
-                    && !StringUtils.equals(productStatus, ref.getTrialStatus())) {
-                missingFieldMap.put(materialCode, "产品状态不一致：月计划=" + productStatus + ", 示方书关系=" + ref.getTrialStatus());
+                missingFieldMap.put(materialCode, "未找到匹配物料编码和产品状态的示方书关系数据");
                 continue;
             }
             // 校验 lhNo / lhType 是否为空
@@ -73,18 +66,18 @@ public class SkuConstructionValidator implements IDataValidator {
         }
         if (!missingFieldMap.isEmpty()) {
             StringBuilder errorMsg = new StringBuilder("[").append(getValidatorName()).append("] ");
-            errorMsg.append("月计划物料示方书数据异常: ");
+            errorMsg.append("硫化示方书数据不完整: ");
             for (Map.Entry<String, String> missingEntry : missingFieldMap.entrySet()) {
                 errorMsg.append("[物料编码:").append(missingEntry.getKey())
                         .append(", ").append(missingEntry.getValue()).append("]; ");
             }
             String errorText = errorMsg.toString();
-            log.warn("SKU与示方书关系校验失败, 工厂: {}, 不完整物料数: {}, 详情: {}",
+            log.warn("SKU与示方书关系校验失败, 工厂: {}, 异常物料数: {}, 详情: {}",
                     context.getFactoryCode(), missingFieldMap.size(), errorText);
             context.addValidationError(errorText);
             return false;
         }
-        log.info("SKU与示方书关系校验通过, 数据条数: {}", monthPlanList.size());
+        log.info("SKU与示方书关系校验通过, 月计划物料数: {}", monthPlanList.size());
         return true;
     }
 

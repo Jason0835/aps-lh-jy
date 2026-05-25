@@ -1247,15 +1247,20 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .eq(MdmSkuConstructionRef::getFactoryCode, factoryCode)
                         .eq(MdmSkuConstructionRef::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         Map<String, MdmSkuConstructionRef> refMap = new HashMap<>(256);
+        Map<String, MdmSkuConstructionRef> compositeKeyMap = new HashMap<>(256);
         if (refList != null) {
             for (MdmSkuConstructionRef ref : refList) {
                 if (StringUtils.isNotEmpty(ref.getMaterialCode())) {
+                    // 按物料编码（后者覆盖前者），供策略类使用
                     refMap.put(ref.getMaterialCode(), ref);
+                    // 按物料编码 + 产品状态（复合key，完整保留所有记录），供校验器精确查找
+                    compositeKeyMap.put(ref.getMaterialCode() + "::" + ref.getTrialStatus(), ref);
                 }
             }
         }
         context.setSkuConstructionRefMap(refMap);
-        log.debug("SKU与示方书关系加载完成, 数量: {}", refMap.size());
+        context.setSkuConstructionRefCompositeKeyMap(compositeKeyMap);
+        log.debug("SKU与示方书关系加载完成, 数量: {}, 复合Key数量: {}", refMap.size(), compositeKeyMap.size());
     }
 
     /**

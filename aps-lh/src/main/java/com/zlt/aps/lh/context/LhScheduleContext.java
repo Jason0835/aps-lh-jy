@@ -143,6 +143,8 @@ public class LhScheduleContext {
     private Map<String, Set<String>> specialMaterialCategoryByStructureName = new HashMap<>();
     /** SKU与示方书关系Map, key=materialCode */
     private Map<String, MdmSkuConstructionRef> skuConstructionRefMap = new HashMap<>();
+    /** SKU与示方书关系Map(复合key), key=materialCode + "::" + trialStatus */
+    private Map<String, MdmSkuConstructionRef> skuConstructionRefCompositeKeyMap = new HashMap<>();
 
     // ========== 中间计算结果(S4.3) ==========
 
