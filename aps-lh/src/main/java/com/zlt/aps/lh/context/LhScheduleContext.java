@@ -178,6 +178,8 @@ public class LhScheduleContext {
     private int pendingSmallBatchNewSpecSkuCount;
     /** 新增SKU最近一次选机是否被单控/普通机台让位规则清空候选，使用对象身份避免同物料编码互相覆盖 */
     private Map<SkuScheduleDTO, Boolean> newSpecTypeRuleBlockedMap = new IdentityHashMap<>();
+    /** 新增SKU进入S4.5时是否命中结构五天内收尾层级快照，使用对象身份避免SKU出队后判定漂移 */
+    private Map<SkuScheduleDTO, Boolean> newSpecSingleControlStructureEndingLayerMap = new IdentityHashMap<>();
     /** 续作结果日额度账本是否已完成最终同步，防止同一上下文重复扣账 */
     private boolean continuousDailyQuotaSynced;
     /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中 */

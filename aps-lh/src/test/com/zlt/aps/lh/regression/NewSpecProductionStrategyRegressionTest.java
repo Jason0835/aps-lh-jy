@@ -29,6 +29,7 @@ import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -575,7 +576,72 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldNotFallbackToNormalMachineWhenMassTrialSingleControlFailed() throws Exception {
+    void scheduleNewSpecs_shouldTryAllSingleControlMachinesBeforeFallbackToNormalMachine() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002637");
+        sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO firstSingleControlMachine = buildMachine("K1501L", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO secondSingleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO normalMachine = buildMachine("K1111", dateTime(2026, 4, 17, 6, 0));
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                return Arrays.asList(firstSingleControlMachine, secondSingleControlMachine, normalMachine);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (!excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+        IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                if ("K1501L".equals(machineCode)) {
+                    return null;
+                }
+                return endingTime;
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                return 99;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "量试存在多个单控候选时，应先尝试完其它单控机台");
+        assertEquals(0, context.getUnscheduledResultList().size(), "存在可用单控机台时，不应提前生成未排记录");
+        assertEquals("K1501R", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "首个单控失败后，应继续尝试其它单控机台，而不是直接回落普通机台");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldFallbackToNormalMachineAfterAllSingleControlMachinesFailed() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -632,9 +698,9 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(0, context.getScheduleResultList().size(), "量试存在单控候选时，单控失败后不应回落普通机台排产");
-        assertEquals(1, context.getUnscheduledResultList().size(), "量试单控候选失败后应保留未排记录");
-        assertEquals("3302002637", context.getUnscheduledResultList().get(0).getMaterialCode());
+        assertEquals(1, context.getScheduleResultList().size(), "所有单控机台都失败后，量试才允许回落普通机台");
+        assertEquals(0, context.getUnscheduledResultList().size(), "普通机台可承接时，不应保留未排记录");
+        assertEquals("K1111", context.getScheduleResultList().get(0).getLhMachineCode());
     }
 
     @Test
@@ -649,12 +715,12 @@ class NewSpecProductionStrategyRegressionTest {
 
             @Override
             public boolean canScheduleTrialOnDate(LhScheduleContext context, Date targetDate) {
-                return false;
+                return true;
             }
 
             @Override
             public boolean canScheduleTrialSkuOnDate(LhScheduleContext context, SkuScheduleDTO trialSku, Date targetDate) {
-                return false;
+                return !StringUtils.equals("3302002216", trialSku.getMaterialCode());
             }
 
             @Override
@@ -1233,9 +1299,86 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldKeepGlobalOrderWhenMassTrialCompetesWithTrialForSingleControl() throws Exception {
+    void scheduleNewSpecs_shouldDeferMassTrialSingleControlCompetitionToTrialWithinSameStructureEndingLayer() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
-        injectDependencies(strategy, false);
+        injectDependencies(strategy, true);
+        injectTrialProductionStrategy(strategy, new ITrialProductionStrategy() {
+            @Override
+            public List<SkuScheduleDTO> filterTrialSkus(LhScheduleContext context, List<SkuScheduleDTO> allSkus) {
+                return allSkus;
+            }
+
+            @Override
+            public boolean canScheduleTrialOnDate(LhScheduleContext context, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public boolean canScheduleTrialSkuOnDate(LhScheduleContext context, SkuScheduleDTO trialSku, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate) {
+                return false;
+            }
+
+            @Override
+            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate, String materialCode) {
+                return false;
+            }
+
+            @Override
+            public String matchTrialMachine(LhScheduleContext context, SkuScheduleDTO trialSku) {
+                if (StringUtils.equals("3302002216", trialSku.getMaterialCode())) {
+                    return "K1501L";
+                }
+                return null;
+            }
+        });
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO massTrialSku = buildSku();
+        massTrialSku.setMaterialCode("3302002637");
+        massTrialSku.setMaterialDesc("量试物料");
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSku.setStructureName("STRUCT-MASS");
+        massTrialSku.setSurplusQty(1);
+
+        SkuScheduleDTO trialSku = buildSku();
+        trialSku.setMaterialCode("3302002216");
+        trialSku.setMaterialDesc("试制物料");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setStructureName("STRUCT-TRIAL");
+        trialSku.setSurplusQty(1);
+
+        context.getNewSpecSkuList().add(massTrialSku);
+        context.getNewSpecSkuList().add(trialSku);
+
+        MachineScheduleDTO leftSingleControlMachine = buildMachine("K1501L", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO rightSingleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 5, 0));
+        MachineScheduleDTO normalMachine = buildMachine("K1105", dateTime(2026, 4, 17, 6, 0));
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(rightSingleControlMachine, leftSingleControlMachine, normalMachine),
+                defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(2, context.getScheduleResultList().size(), "同为结构五天内收尾时，即便结构名不同，也应优先消化单控机台");
+        assertEquals(0, context.getUnscheduledResultList().size(), "仍有可用单控机台时，不应直接生成未排");
+        assertEquals("3302002216", context.getScheduleResultList().get(0).getMaterialCode(),
+                "同层级单控竞争时，应先让试制SKU占用单控机台");
+        assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals("3302002637", context.getScheduleResultList().get(1).getMaterialCode(),
+                "试制排完后，量试SKU应继续消化剩余单控机台");
+        assertEquals("K1501L", context.getScheduleResultList().get(1).getLhMachineCode(),
+                "量试SKU应先复用试制刚占用单控机台的剩余产能，不能因为结构名不同就跳过单控竞争延后");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldContinueDeferredMassTrialAfterTrialSkuBecomesUnscheduled() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
 
         LhScheduleContext context = buildContext();
@@ -1245,29 +1388,157 @@ class NewSpecProductionStrategyRegressionTest {
         massTrialSku.setMaterialCode("3302002637");
         massTrialSku.setMaterialDesc("量试物料");
         massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSku.setStructureName("STRUCT-B");
+        massTrialSku.setSurplusQty(1);
 
         SkuScheduleDTO trialSku = buildSku();
-        trialSku.setMaterialCode("3302001575");
+        trialSku.setMaterialCode("3302002216");
         trialSku.setMaterialDesc("试制物料");
         trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setStructureName("STRUCT-B");
+        trialSku.setSurplusQty(1);
 
         context.getNewSpecSkuList().add(massTrialSku);
         context.getNewSpecSkuList().add(trialSku);
 
-        MachineScheduleDTO singleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
-        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+        MachineScheduleDTO leftSingleControlMachine = buildMachine("K1501L", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO normalMachine = buildMachine("K1105", dateTime(2026, 4, 17, 6, 0));
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            private int trialMatchCount = 0;
 
-        strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                if (StringUtils.equals("3302002216", scheduleSku.getMaterialCode())) {
+                    trialMatchCount++;
+                    if (trialMatchCount == 1) {
+                        return Arrays.asList(leftSingleControlMachine);
+                    }
+                    return Arrays.asList();
+                }
+                return Arrays.asList(leftSingleControlMachine, normalMachine);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (candidate != null && !excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+        strategy.scheduleNewSpecs(context, machineMatchStrategy,
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "高优先级试制当轮停排后，被延后的量试仍应继续处理");
+        assertEquals("3302002637", context.getScheduleResultList().get(0).getMaterialCode());
+        assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals(1, context.getUnscheduledResultList().size(), "试制停排后应保留未排记录");
+        assertEquals("3302002216", context.getUnscheduledResultList().get(0).getMaterialCode());
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "所有SKU处理完成后不应残留在待排列表");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldResumeStructureEndingMassTrialBeforeNonStructureEndingTrial() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+        injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
+
+        Field endingField = NewSpecProductionStrategy.class.getDeclaredField("endingJudgmentStrategy");
+        endingField.setAccessible(true);
+        endingField.set(strategy, new IEndingJudgmentStrategy() {
+            @Override
+            public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+                return !StringUtils.equals("3302001575", sku.getMaterialCode());
+            }
+
+            @Override
+            public int calculateEndingShifts(LhScheduleContext context, SkuScheduleDTO sku) {
+                return isEnding(context, sku) ? 1 : 6;
+            }
+
+            @Override
+            public int calculateEndingDays(LhScheduleContext context, SkuScheduleDTO sku) {
+                return isEnding(context, sku) ? 1 : 6;
+            }
+        });
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO massTrialSku = buildSku();
+        massTrialSku.setMaterialCode("3302002637");
+        massTrialSku.setMaterialDesc("量试物料");
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSku.setStructureName("STRUCT-MASS");
+        massTrialSku.setSurplusQty(1);
+
+        SkuScheduleDTO endingTrialSku = buildSku();
+        endingTrialSku.setMaterialCode("3302002216");
+        endingTrialSku.setMaterialDesc("结构收尾试制");
+        endingTrialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        endingTrialSku.setStructureName("STRUCT-TRIAL");
+        endingTrialSku.setSurplusQty(1);
+
+        SkuScheduleDTO normalTrialSku = buildSku();
+        normalTrialSku.setMaterialCode("3302001575");
+        normalTrialSku.setMaterialDesc("非结构收尾试制");
+        normalTrialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        normalTrialSku.setStructureName("STRUCT-NORMAL");
+        normalTrialSku.setSurplusQty(1);
+
+        context.getNewSpecSkuList().add(massTrialSku);
+        context.getNewSpecSkuList().add(endingTrialSku);
+        context.getNewSpecSkuList().add(normalTrialSku);
+
+        MachineScheduleDTO leftSingleControlMachine = buildMachine("K1501L", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO rightSingleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                if (StringUtils.equals("3302002216", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(leftSingleControlMachine);
+                }
+                if (StringUtils.equals("3302002637", scheduleSku.getMaterialCode())) {
+                    if (ctx.getScheduleResultList().isEmpty()) {
+                        return Arrays.asList(leftSingleControlMachine, rightSingleControlMachine);
+                    }
+                    return Arrays.asList(rightSingleControlMachine);
+                }
+                if (StringUtils.equals("3302001575", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(rightSingleControlMachine);
+                }
+                return Arrays.asList();
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (candidate != null && !excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(1, context.getScheduleResultList().size(), "单控机台分配必须遵循全局SKU排序顺序");
-        assertEquals(1, context.getUnscheduledResultList().size(), "后续试制SKU单控产能不足时应进入未排");
-        assertEquals("3302002637", context.getScheduleResultList().get(0).getMaterialCode(),
-                "量试SKU全局排序在前时，应先占用单控机台");
-        assertEquals("3302001575", context.getUnscheduledResultList().get(0).getMaterialCode(),
-                "试制SKU不能绕过全局排序提前抢占单控机台");
-        assertEquals("试制SKU只能使用单控机台，但单控机台已被全局排序更靠前的SKU占用，或当前单控机台产能不足，无法排产",
-                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+        assertEquals(3, context.getScheduleResultList().size(), "结构五天内收尾试制与量试应先消化单控机台，后续SKU再按主排序继续");
+        assertEquals("3302002216", context.getScheduleResultList().get(0).getMaterialCode());
+        assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals("3302002637", context.getScheduleResultList().get(1).getMaterialCode(),
+                "结构五天内收尾量试应在非结构收尾试制之前恢复单控排产");
+        assertEquals("K1501R", context.getScheduleResultList().get(1).getLhMachineCode());
+        assertEquals("3302001575", context.getScheduleResultList().get(2).getMaterialCode(),
+                "非结构五天内收尾试制只能在结构收尾层级量试之后再按主排序继续");
     }
 
     @Test
