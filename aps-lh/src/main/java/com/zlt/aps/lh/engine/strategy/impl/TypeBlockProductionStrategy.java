@@ -1184,18 +1184,15 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
             appliedRule = "单机台收尾MAX(余量,胎胚库存)";
         } else if (isSingleMachine && getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
-            // 满排目标量不超过硫化余量，避免超产
-            int surplusQty = Math.max(0, sku.getSurplusQty());
-            int cappedQty = windowCapacityQty;
-            boolean surplusCapped = false;
-            if (surplusQty > 0 && surplusQty < cappedQty) {
-                cappedQty = surplusQty;
-                surplusCapped = true;
-            }
-            sku.setTargetScheduleQty(cappedQty);
-            sku.setRemainingScheduleQty(cappedQty);
+            boolean newSpecExpansionAvailable = hasSchedulableNewSpecExpansionMachine(context, machine, sku, shifts);
+            int adoptedTargetQty = resolveSingleMachineTypeBlockTargetQty(
+                    sku, windowCapacityQty, newSpecExpansionAvailable);
+            sku.setTargetScheduleQty(adoptedTargetQty);
+            sku.setRemainingScheduleQty(adoptedTargetQty);
             sku.setStrictTargetQty(false);
-            appliedRule = surplusCapped ? "单机台非收尾满排窗口(余量封顶)" : "单机台非收尾满排窗口";
+            appliedRule = newSpecExpansionAvailable
+                    ? "单机台换活字块承接+新增换模扩机"
+                    : resolveSingleMachineWindowRuleName(sku, adoptedTargetQty, windowCapacityQty);
         } else if (isEnding) {
             sku.setStrictTargetQty(true);
             appliedRule = isSingleMachine ? "单机台收尾严格原目标" : "多机台沿用原规则";
@@ -1210,6 +1207,108 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 sku.getMaterialCode(), machine.getMachineCode(), isSingleMachine, isEnding,
                 Math.max(0, sku.getSurplusQty()), Math.max(0, sku.getEmbryoStock()), originalTargetQty,
                 windowCapacityQty, sku.resolveTargetScheduleQty(), appliedRule);
+    }
+
+    /**
+     * 解析单机台换活字块在非收尾场景下的目标量。
+     * <p>若后续仍有新增换模扩机能力，则保留窗口账本需求量，允许剩余量回流 S4.5；
+     * 否则沿用当前单机台满排窗口口径。</p>
+     *
+     * @param sku SKU
+     * @param windowCapacityQty 当前机台窗口产能
+     * @param newSpecExpansionAvailable 是否存在可承接的新增换模机台
+     * @return 目标量
+     */
+    private int resolveSingleMachineTypeBlockTargetQty(SkuScheduleDTO sku,
+                                                       int windowCapacityQty,
+                                                       boolean newSpecExpansionAvailable) {
+        int adoptedTargetQty = Math.max(0, windowCapacityQty);
+        if (newSpecExpansionAvailable) {
+            adoptedTargetQty = Math.max(adoptedTargetQty, resolveTypeBlockExpansionDemandQty(sku));
+        }
+        int surplusQty = sku == null ? 0 : Math.max(0, sku.getSurplusQty());
+        if (surplusQty > 0 && surplusQty < adoptedTargetQty) {
+            return surplusQty;
+        }
+        return adoptedTargetQty;
+    }
+
+    /**
+     * 解析单机台换活字块在可扩机场景下应保留的窗口需求量。
+     *
+     * @param sku SKU
+     * @return 窗口需求量
+     */
+    private int resolveTypeBlockExpansionDemandQty(SkuScheduleDTO sku) {
+        if (sku == null) {
+            return 0;
+        }
+        int quotaDemandQty = SkuDailyPlanQuotaUtil.sumRemainingQty(sku.getDailyPlanQuotaMap());
+        int windowRemainingQty = Math.max(0, sku.getWindowRemainingPlanQty());
+        if (windowRemainingQty > 0) {
+            quotaDemandQty = quotaDemandQty > 0 ? Math.min(quotaDemandQty, windowRemainingQty) : windowRemainingQty;
+        }
+        if (quotaDemandQty > 0) {
+            return quotaDemandQty;
+        }
+        int windowPlanQty = Math.max(0, sku.getWindowPlanQty());
+        if (windowPlanQty > 0) {
+            return windowPlanQty;
+        }
+        return Math.max(0, sku.resolveTargetScheduleQty());
+    }
+
+    /**
+     * 判断当前换活字块 SKU 是否仍有可承接的新增换模机台。
+     *
+     * @param context 排程上下文
+     * @param currentMachine 当前换活字块机台
+     * @param sku SKU
+     * @param shifts 班次窗口
+     * @return true-存在可承接机台
+     */
+    private boolean hasSchedulableNewSpecExpansionMachine(LhScheduleContext context,
+                                                          MachineScheduleDTO currentMachine,
+                                                          SkuScheduleDTO sku,
+                                                          List<LhShiftConfigVO> shifts) {
+        if (context == null
+                || currentMachine == null
+                || sku == null
+                || CollectionUtils.isEmpty(shifts)
+                || CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
+            return false;
+        }
+        for (MachineScheduleDTO candidateMachine : context.getMachineScheduleMap().values()) {
+            if (candidateMachine == null
+                    || StringUtils.isEmpty(candidateMachine.getMachineCode())
+                    || StringUtils.equals(candidateMachine.getMachineCode(), currentMachine.getMachineCode())
+                    || candidateMachine.getEstimatedEndTime() == null
+                    || !isMachineHardMatched(context, candidateMachine, sku)) {
+                continue;
+            }
+            if (canScheduleSpecifySkuByNewSpecPath(
+                    context, candidateMachine, sku, shifts, candidateMachine.getEstimatedEndTime())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析单机台满排窗口规则日志名称。
+     *
+     * @param sku SKU
+     * @param adoptedTargetQty 目标量
+     * @param windowCapacityQty 当前机台窗口产能
+     * @return 规则名称
+     */
+    private String resolveSingleMachineWindowRuleName(SkuScheduleDTO sku,
+                                                      int adoptedTargetQty,
+                                                      int windowCapacityQty) {
+        if (sku != null && adoptedTargetQty < Math.max(0, windowCapacityQty)) {
+            return "单机台非收尾满排窗口(余量封顶)";
+        }
+        return "单机台非收尾满排窗口";
     }
 
     /**
