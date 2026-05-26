@@ -34,13 +34,16 @@ import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.math.BigDecimal;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -395,7 +398,7 @@ class NewSpecProductionStrategyRegressionTest {
 
         LhScheduleContext context = buildContext();
         SkuScheduleDTO sku = buildSku();
-        sku.setTrial(true);
+        sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
         sku.setMaterialCode("3302001575");
         context.getNewSpecSkuList().add(sku);
 
@@ -1300,7 +1303,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldDeferMassTrialSingleControlCompetitionToTrialWithinSameStructureEndingLayer() throws Exception {
+    void scheduleNewSpecs_shouldKeepProvidedSkuOrderWithoutSingleControlDeferral() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
         injectTrialProductionStrategy(strategy, new ITrialProductionStrategy() {
@@ -1365,19 +1368,17 @@ class NewSpecProductionStrategyRegressionTest {
                 defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "同为结构五天内收尾时，即便结构名不同，也应优先消化单控机台");
-        assertEquals(0, context.getUnscheduledResultList().size(), "仍有可用单控机台时，不应直接生成未排");
-        assertEquals("3302002216", context.getScheduleResultList().get(0).getMaterialCode(),
-                "同层级单控竞争时，应先让试制SKU占用单控机台");
-        assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode());
-        assertEquals("3302002637", context.getScheduleResultList().get(1).getMaterialCode(),
-                "试制排完后，量试SKU应继续消化剩余单控机台");
-        assertEquals("K1501L", context.getScheduleResultList().get(1).getLhMachineCode(),
-                "量试SKU应先复用试制刚占用单控机台的剩余产能，不能因为结构名不同就跳过单控竞争延后");
+        assertEquals(2, context.getScheduleResultList().size(), "停用单控竞争延后后，应严格按传入顺序逐个处理 SKU");
+        assertEquals(0, context.getUnscheduledResultList().size(), "仍有可用候选时，不应生成未排");
+        assertEquals("3302002637", context.getScheduleResultList().get(0).getMaterialCode(),
+                "S4.5 不再因为单控竞争把后面的试制SKU提前到前面");
+        assertEquals("K1501R", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals("3302002216", context.getScheduleResultList().get(1).getMaterialCode());
+        assertEquals("K1501L", context.getScheduleResultList().get(1).getLhMachineCode());
     }
 
     @Test
-    void scheduleNewSpecs_shouldContinueDeferredMassTrialAfterTrialSkuBecomesUnscheduled() throws Exception {
+    void scheduleNewSpecs_shouldContinueNextSkuAfterFrontTrialBecomesUnscheduled() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -1399,21 +1400,15 @@ class NewSpecProductionStrategyRegressionTest {
         trialSku.setStructureName("STRUCT-B");
         trialSku.setSurplusQty(1);
 
-        context.getNewSpecSkuList().add(massTrialSku);
         context.getNewSpecSkuList().add(trialSku);
+        context.getNewSpecSkuList().add(massTrialSku);
 
         MachineScheduleDTO leftSingleControlMachine = buildMachine("K1501L", dateTime(2026, 4, 17, 6, 0));
         MachineScheduleDTO normalMachine = buildMachine("K1105", dateTime(2026, 4, 17, 6, 0));
         IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
-            private int trialMatchCount = 0;
-
             @Override
             public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
                 if (StringUtils.equals("3302002216", scheduleSku.getMaterialCode())) {
-                    trialMatchCount++;
-                    if (trialMatchCount == 1) {
-                        return Arrays.asList(leftSingleControlMachine);
-                    }
                     return Arrays.asList();
                 }
                 return Arrays.asList(leftSingleControlMachine, normalMachine);
@@ -1434,16 +1429,16 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, machineMatchStrategy,
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(1, context.getScheduleResultList().size(), "高优先级试制当轮停排后，被延后的量试仍应继续处理");
+        assertEquals(1, context.getScheduleResultList().size(), "前面的试制SKU未排后，后续SKU仍应继续处理");
         assertEquals("3302002637", context.getScheduleResultList().get(0).getMaterialCode());
         assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode());
-        assertEquals(1, context.getUnscheduledResultList().size(), "试制停排后应保留未排记录");
+        assertEquals(1, context.getUnscheduledResultList().size(), "前面的试制SKU应保留未排记录");
         assertEquals("3302002216", context.getUnscheduledResultList().get(0).getMaterialCode());
         assertTrue(context.getNewSpecSkuList().isEmpty(), "所有SKU处理完成后不应残留在待排列表");
     }
 
     @Test
-    void scheduleNewSpecs_shouldResumeStructureEndingMassTrialBeforeNonStructureEndingTrial() throws Exception {
+    void scheduleNewSpecs_shouldNotReorderByStructureEndingLayerAfterSortingStage() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -1505,13 +1500,10 @@ class NewSpecProductionStrategyRegressionTest {
                     return Arrays.asList(leftSingleControlMachine);
                 }
                 if (StringUtils.equals("3302002637", scheduleSku.getMaterialCode())) {
-                    if (ctx.getScheduleResultList().isEmpty()) {
-                        return Arrays.asList(leftSingleControlMachine, rightSingleControlMachine);
-                    }
                     return Arrays.asList(rightSingleControlMachine);
                 }
                 if (StringUtils.equals("3302001575", scheduleSku.getMaterialCode())) {
-                    return Arrays.asList(rightSingleControlMachine);
+                    return Arrays.asList(leftSingleControlMachine);
                 }
                 return Arrays.asList();
             }
@@ -1532,14 +1524,14 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(3, context.getScheduleResultList().size(), "结构五天内收尾试制与量试应先消化单控机台，后续SKU再按主排序继续");
-        assertEquals("3302002216", context.getScheduleResultList().get(0).getMaterialCode());
-        assertEquals("K1501L", context.getScheduleResultList().get(0).getLhMachineCode());
-        assertEquals("3302002637", context.getScheduleResultList().get(1).getMaterialCode(),
-                "结构五天内收尾量试应在非结构收尾试制之前恢复单控排产");
-        assertEquals("K1501R", context.getScheduleResultList().get(1).getLhMachineCode());
+        assertEquals(3, context.getScheduleResultList().size(), "停用单控竞争重排后，应严格按当前列表顺序处理");
+        assertEquals("3302002637", context.getScheduleResultList().get(0).getMaterialCode(),
+                "量试SKU不应再因为结构五天内收尾层级被恢复到后续试制之前");
+        assertEquals("K1501R", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals("3302002216", context.getScheduleResultList().get(1).getMaterialCode());
+        assertEquals("K1501L", context.getScheduleResultList().get(1).getLhMachineCode());
         assertEquals("3302001575", context.getScheduleResultList().get(2).getMaterialCode(),
-                "非结构五天内收尾试制只能在结构收尾层级量试之后再按主排序继续");
+                "后续试制SKU应继续按原始顺序处理，而不是被结构层级再次重排");
     }
 
     @Test
@@ -1656,6 +1648,37 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals("试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产",
                 findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001575").getUnscheduledReason(),
                 "试制SKU仅剩普通机台候选时，应返回单控专属未排原因");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldUseSpecialMaterialReasonWhenBaseMachineLacksSupportCapability() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO specialSku = buildSku();
+        specialSku.setMaterialCode("3302001513");
+        specialSku.setMaterialDesc("19.5宽基特殊材料");
+        specialSku.setProSize("19.5");
+        specialSku.setSpecCode("SPEC-19");
+        context.getSpecialMaterialCategoryByMaterialCode().put(specialSku.getMaterialCode(),
+                new LinkedHashSet<String>(Collections.singletonList("01")));
+        context.getNewSpecSkuList().add(specialSku);
+
+        MachineScheduleDTO baseMatchedMachine = buildMachine("K1111", dateTime(2026, 4, 17, 6, 0));
+        baseMatchedMachine.setDimensionMinimum(new BigDecimal("15"));
+        baseMatchedMachine.setDimensionMaximum(new BigDecimal("25"));
+        context.getMachineScheduleMap().put(baseMatchedMachine.getMachineCode(), baseMatchedMachine);
+
+        strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals("特殊材料SKU无匹配特殊支持机台，无法排产",
+                findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001513").getUnscheduledReason(),
+                "特殊材料SKU基础条件匹配但缺少特殊支持能力时，应返回专属未排原因");
     }
 
     @Test

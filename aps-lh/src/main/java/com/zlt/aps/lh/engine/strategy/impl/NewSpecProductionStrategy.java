@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
+import com.zlt.aps.lh.api.domain.dto.SpecialMaterialMatchResult;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -38,6 +39,7 @@ import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
+import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.LhMultiMachineDistributionUtil;
@@ -50,6 +52,7 @@ import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import com.zlt.aps.lh.util.SingleMouldShiftQtyUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
+import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
@@ -217,7 +220,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
         Map<String, Integer> unscheduledReasonCountMap = new LinkedHashMap<>(8);
         initializePendingNewSpecSkuTypeCounts(context);
-        initializeSingleControlStructureEndingLayerSnapshot(context);
         int scheduledCount = schedulePendingNewSpecs(context, machineMatch, mouldChangeBalance,
                 inspectionBalance, capacityCalculate, shifts, unscheduledReasonCountMap);
         log.info("新增排产完成, 成功: {}, 未排: {}, 原因分布: {}",
@@ -246,23 +248,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                         ICapacityCalculateStrategy capacityCalculate,
                                         List<LhShiftConfigVO> shifts,
                                         Map<String, Integer> unscheduledReasonCountMap) {
-        int totalScheduledCount = 0;
-        int roundCount = 0;
-        while (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
-            roundCount++;
-            RoundScheduleSummary roundSummary = schedulePendingNewSpecsRound(context, machineMatch, mouldChangeBalance,
-                    inspectionBalance, capacityCalculate, shifts, unscheduledReasonCountMap);
-            totalScheduledCount += roundSummary.getScheduledCount();
-            if (!roundSummary.isDeferred()) {
-                break;
-            }
-            if (!roundSummary.isProgressed()) {
-                log.warn("新增排产单控竞争延后后仍无进展，终止后续轮次避免死循环, remainingSkuCount: {}, round: {}",
-                        context.getNewSpecSkuList().size(), roundCount);
-                break;
-            }
-        }
-        return totalScheduledCount;
+        RoundScheduleSummary roundSummary = schedulePendingNewSpecsRound(context, machineMatch, mouldChangeBalance,
+                inspectionBalance, capacityCalculate, shifts, unscheduledReasonCountMap);
+        return roundSummary.getScheduledCount();
     }
 
     private RoundScheduleSummary schedulePendingNewSpecsRound(LhScheduleContext context,
@@ -274,17 +262,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                               Map<String, Integer> unscheduledReasonCountMap) {
         int scheduledCount = 0;
         boolean progressed = false;
-        boolean deferred = false;
-        boolean deferredResumePrioritized = false;
-        List<SkuScheduleDTO> deferredSkuList = new ArrayList<SkuScheduleDTO>(4);
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
         while (iterator.hasNext()) {
             SkuScheduleDTO sku = iterator.next();
-            if (!CollectionUtils.isEmpty(deferredSkuList)
-                    && shouldPrioritizeDeferredSingleControlSku(context, sku, deferredSkuList)) {
-                deferredResumePrioritized = true;
-                break;
-            }
             // 续作阶段未命中的SKU在此继续参与新增排产兜底，不做提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
             // 收尾SKU在排产前上调目标量（考虑胎胚库存），非收尾SKU保持按余量计算的目标量
@@ -331,16 +311,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             MachineScheduleDTO localSearchSuggestedMachine = selectPreferredMachineByLocalSearch(
                     context, sku, candidates, shifts, machineMatch, mouldChangeBalance, inspectionBalance, capacityCalculate);
             MachineScheduleDTO preferredTrialMachine = resolvePreferredTrialMachine(context, sku, candidates);
-            if (shouldDeferSingleControlCompetition(context, sku, candidates, machineMatch)) {
-                log.info("新增SKU单控竞争延后, materialCode: {}, skuType: {}, structureName: {}, isStructureEndingPriority: {}, reason: {}",
-                        sku.getMaterialCode(), resolveNewSpecSkuType(sku), sku.getStructureName(),
-                        isStructureAllEndingPriority(context, sku),
-                        "同层级存在更高优先级试制/量试/小批量SKU，当前SKU延后等待单控剩余产能");
-                iterator.remove();
-                deferredSkuList.add(sku);
-                deferred = true;
-                continue;
-            }
 
             // 2. 基于策略选择最优机台，失败后排除并继续选择下一台。
             // 多机台拆量：当一台机台产能不足以排完目标量时，继续尝试下一台机台。
@@ -674,14 +644,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         PriorityTraceLogHelper.formatDateTime(finalProductionStartTime));
             }
         }
-        if (!CollectionUtils.isEmpty(deferredSkuList)) {
-            if (deferredResumePrioritized) {
-                context.getNewSpecSkuList().addAll(0, deferredSkuList);
-            } else {
-                context.getNewSpecSkuList().addAll(deferredSkuList);
-            }
-        }
-        return new RoundScheduleSummary(scheduledCount, progressed, deferred);
+        return new RoundScheduleSummary(scheduledCount, progressed);
     }
 
     /**
@@ -770,6 +733,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (isTypeRuleBlocked(context, sku) && isTrialConstructionStage(sku)) {
             return "试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产";
         }
+        if (isSpecialMaterialSupportBlocked(context, sku)) {
+            return "特殊材料SKU无匹配特殊支持机台，无法排产";
+        }
         return "无可用硫化机台";
     }
 
@@ -786,6 +752,40 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return "试制SKU只能使用单控机台，但单控机台已被全局排序更靠前的SKU占用，或当前单控机台产能不足，无法排产";
         }
         return failReason.getDescription();
+    }
+
+    /**
+     * 判断是否命中特殊材料支持能力阻塞。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-基础条件可匹配，但缺少特殊支持机台
+     */
+    private boolean isSpecialMaterialSupportBlocked(LhScheduleContext context, SkuScheduleDTO sku) {
+        SpecialMaterialMatchResult matchResult = LhSpecialMaterialUtil.resolveMatchResult(context, sku);
+        if (context == null || sku == null || matchResult == null || !matchResult.isSpecial()
+                || CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
+            return false;
+        }
+        boolean hasBaseMatchedMachine = false;
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (machine == null || !MachineStatusUtil.isEnabled(machine.getStatus())) {
+                continue;
+            }
+            if (!LhMachineHardMatchUtil.isInchInRange(
+                    LhMachineHardMatchUtil.parseInch(sku.getProSize()),
+                    machine.getDimensionMinimum(), machine.getDimensionMaximum())) {
+                continue;
+            }
+            if (!LhMachineHardMatchUtil.isMouldSetMatched(context, sku, machine)) {
+                continue;
+            }
+            hasBaseMatchedMachine = true;
+            if (LhMachineHardMatchUtil.isSpecialMaterialSupported(matchResult, machine)) {
+                return false;
+            }
+        }
+        return hasBaseMatchedMachine;
     }
 
     /**
@@ -2233,7 +2233,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (sku == null) {
             return false;
         }
-        if (sku.isTrial() || sku.isSmallBatchValidation()) {
+        if (sku.isSmallBatchValidation()) {
             return true;
         }
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
@@ -2251,8 +2251,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return false;
         }
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
-                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
-                || sku.isTrial();
+                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage());
     }
 
     /**
@@ -2520,8 +2519,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (sku == null) {
             return false;
         }
-        return StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
-                || sku.isTrial();
+        return StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage());
     }
 
     /**
@@ -2557,12 +2555,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static class RoundScheduleSummary {
         private final int scheduledCount;
         private final boolean progressed;
-        private final boolean deferred;
-
-        private RoundScheduleSummary(int scheduledCount, boolean progressed, boolean deferred) {
+        private RoundScheduleSummary(int scheduledCount, boolean progressed) {
             this.scheduledCount = scheduledCount;
             this.progressed = progressed;
-            this.deferred = deferred;
         }
 
         private int getScheduledCount() {
@@ -2571,10 +2566,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
         private boolean isProgressed() {
             return progressed;
-        }
-
-        private boolean isDeferred() {
-            return deferred;
         }
     }
 

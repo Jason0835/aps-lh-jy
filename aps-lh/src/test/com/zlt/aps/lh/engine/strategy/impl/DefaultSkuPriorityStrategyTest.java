@@ -105,7 +105,7 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldPreferLaterStructureEndingDayBeforeSkuTypeTieBreaker() {
+    void sortByPriority_shouldPreferTrialGroupBeforeFormalStructureEndingRule() {
         SkuScheduleDTO trialSku = sku("3302002216");
         trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
         trialSku.setTrial(true);
@@ -138,8 +138,8 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("3302001724", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("3302002216", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("3302002216", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("3302001724", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     @Test
@@ -284,7 +284,7 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldCompareSupplyChainBeforeSkuTypeFallbackForNewSpec() {
+    void sortByPriority_shouldPreferMassTrialGroupBeforeFormalSupplyChainRuleForNewSpec() {
         SkuScheduleDTO massTrialSku = sku("3302002637");
         massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
         massTrialSku.setHighPriorityPendingQty(1);
@@ -314,13 +314,14 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("3302001724", context.getNewSpecSkuList().get(0).getMaterialCode(),
-                "前置排序层级完全一致时，应先按供应链优先级数量逐档比较，再走SKU类型兜底");
-        assertEquals("3302002637", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("3302002637", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "量试组应整体排在正规组之前，不再等待供应链优先级兜底");
+        assertEquals("3302001724", context.getNewSpecSkuList().get(1).getMaterialCode());
         String logDetail = context.getScheduleLogList().get(0).getLogDetail();
-        assertTrue(logDetail.contains("[新增排产SKU排序] rank=1, sku=3302001724"));
-        assertTrue(logDetail.contains("高优先级数量=10"));
-        assertTrue(logDetail.contains("供应链数量比较命中: 3302001724 > 3302002637, 层级=高优先级数量"));
+        assertTrue(logDetail.contains("[新增排产SKU排序] rank=1, sku=3302002637"));
+        assertTrue(logDetail.contains("分组优先级=量试组"));
+        assertTrue(logDetail.contains("HitLevel="));
+        assertTrue(logDetail.contains("L1_分组优先级"));
     }
 
     @Test
@@ -423,16 +424,22 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldNotPreferTrialOrSmallBatchBeforeFormalSku() {
+    void sortByPriority_shouldPreferTrialAndMassTrialGroupsBeforeFormalGroup() {
         SkuScheduleDTO normal = sku("MAT-N");
         normal.setHighPriorityPendingQty(999);
+        normal.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
         SkuScheduleDTO smallBatch = sku("MAT-S");
         smallBatch.setSmallBatchValidation(true);
+        smallBatch.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
         SkuScheduleDTO trial = sku("MAT-T");
-        trial.setTrial(true);
+        trial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trial.setTargetScheduleQty(20);
+        SkuScheduleDTO massTrial = sku("MAT-M");
+        massTrial.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrial.setTargetScheduleQty(18);
         SkuScheduleDTO specify = sku("MAT-P");
 
-        LhScheduleContext context = contextWithNewSpec(normal, smallBatch, trial, specify);
+        LhScheduleContext context = contextWithNewSpec(normal, smallBatch, trial, massTrial, specify);
         context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
                 LhScheduleParamConstant.ENABLE_SPECIFY_MACHINE_RULE, "1")));
         context.getSpecifyMachineMap().put("MAT-P", Collections.singletonList(new com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine()));
@@ -442,12 +449,15 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("MAT-P", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("MAT-N", context.getNewSpecSkuList().get(1).getMaterialCode(),
-                "正规SKU高优待排量更高时，不应被试制或小批量提前");
-        assertEquals("MAT-T", context.getNewSpecSkuList().get(2).getMaterialCode(),
-                "前置排序条件相同时，应按试制 > 量试 > 小批量 > 正规补充排序");
-        assertEquals("MAT-S", context.getNewSpecSkuList().get(3).getMaterialCode());
+        assertEquals("MAT-T", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "试制组应整体排在量试组和正规组之前");
+        assertEquals("MAT-M", context.getNewSpecSkuList().get(1).getMaterialCode(),
+                "量试组应整体排在正规组之前");
+        assertEquals("MAT-P", context.getNewSpecSkuList().get(2).getMaterialCode(),
+                "指定机台等原有排序逻辑仅在正规组内部继续生效");
+        assertEquals("MAT-N", context.getNewSpecSkuList().get(3).getMaterialCode(),
+                "正规组继续沿用原有排序逻辑，小批量不再天然提前");
+        assertEquals("MAT-S", context.getNewSpecSkuList().get(4).getMaterialCode());
     }
 
     @Test
@@ -492,23 +502,40 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldUseSkuTypeAsTieBreakerWhenAllPrimaryKeysEqual() {
+    void sortByPriority_shouldUseTrialAndMassTrialInnerComparatorBeforeFormalGroup() {
         SkuScheduleDTO formal = sku("MAT-F");
+        formal.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        formal.setTargetScheduleQty(999);
         SkuScheduleDTO smallBatch = sku("MAT-S");
         smallBatch.setSmallBatchValidation(true);
+        smallBatch.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        smallBatch.setTargetScheduleQty(5);
         SkuScheduleDTO massTrial = sku("MAT-M");
         massTrial.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrial.setDelayDays(-5);
+        massTrial.setTargetScheduleQty(10);
         SkuScheduleDTO trial = sku("MAT-T");
         trial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trial.setDelayDays(-5);
+        trial.setTargetScheduleQty(20);
+        SkuScheduleDTO trialLater = sku("MAT-U");
+        trialLater.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialLater.setDelayDays(-3);
+        trialLater.setTargetScheduleQty(100);
 
-        LhScheduleContext context = contextWithNewSpec(formal, smallBatch, massTrial, trial);
+        LhScheduleContext context = contextWithNewSpec(formal, smallBatch, massTrial, trial, trialLater);
 
         strategy.sortByPriority(context);
 
         assertEquals("MAT-T", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("MAT-M", context.getNewSpecSkuList().get(1).getMaterialCode());
-        assertEquals("MAT-S", context.getNewSpecSkuList().get(2).getMaterialCode());
-        assertEquals("MAT-F", context.getNewSpecSkuList().get(3).getMaterialCode());
+        assertEquals("MAT-U", context.getNewSpecSkuList().get(1).getMaterialCode(),
+                "试制组内应先比较延误，再比较排产量和物料编码");
+        assertEquals("MAT-M", context.getNewSpecSkuList().get(2).getMaterialCode(),
+                "量试组整体应排在正规组之前");
+        assertEquals("MAT-F", context.getNewSpecSkuList().get(3).getMaterialCode(),
+                "正规组内继续使用原有排序逻辑");
+        assertEquals("MAT-S", context.getNewSpecSkuList().get(4).getMaterialCode(),
+                "小批量并入正规组，不再单独排在正规之前");
     }
 
     @Test
@@ -529,13 +556,16 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
-    void sortByPriority_shouldPreferStructureEndingBeforeTrialInNewSpecSort() {
+    void sortByPriority_shouldKeepTrialGroupAheadOfFormalStructureEndingSku() {
         SkuScheduleDTO trialSku = sku("3302001575");
         trialSku.setStructureName("结构A");
-        trialSku.setTrial(true);
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setDelayDays(-3);
+        trialSku.setTargetScheduleQty(20);
         trialSku.setEndingDaysRemaining(1);
 
         SkuScheduleDTO endingSku = sku("3302001724");
+        endingSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
         endingSku.setStructureName("结构B");
         endingSku.setEndingDaysRemaining(3);
 
@@ -554,8 +584,62 @@ class DefaultSkuPriorityStrategyTest {
 
         strategy.sortByPriority(context);
 
-        assertEquals("3302001724", context.getNewSpecSkuList().get(0).getMaterialCode());
-        assertEquals("3302001575", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("3302001575", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("3302001724", context.getNewSpecSkuList().get(1).getMaterialCode(),
+                "新增排产应先按试制/量试/正规分组，再进入正规组内部结构收尾排序");
+    }
+
+    @Test
+    void sortByPriority_shouldSortMassTrialByDelayThenTargetQtyThenMaterialCode() {
+        SkuScheduleDTO delayLonger = sku("MAT-A");
+        delayLonger.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        delayLonger.setDelayDays(-6);
+        delayLonger.setTargetScheduleQty(10);
+
+        SkuScheduleDTO qtyLarger = sku("MAT-B");
+        qtyLarger.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        qtyLarger.setDelayDays(-4);
+        qtyLarger.setTargetScheduleQty(20);
+
+        SkuScheduleDTO codeSmaller = sku("MAT-C");
+        codeSmaller.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        codeSmaller.setDelayDays(-4);
+        codeSmaller.setTargetScheduleQty(20);
+
+        SkuScheduleDTO codeLarger = sku("MAT-D");
+        codeLarger.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        codeLarger.setDelayDays(-4);
+        codeLarger.setTargetScheduleQty(20);
+
+        LhScheduleContext context = contextWithNewSpec(codeLarger, qtyLarger, delayLonger, codeSmaller);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-A", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("MAT-B", context.getNewSpecSkuList().get(1).getMaterialCode());
+        assertEquals("MAT-C", context.getNewSpecSkuList().get(2).getMaterialCode());
+        assertEquals("MAT-D", context.getNewSpecSkuList().get(3).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldNotTreatLegacyTrialFlagAsMassTrialGroup() {
+        SkuScheduleDTO formalWithLegacyTrialFlag = sku("MAT-F");
+        formalWithLegacyTrialFlag.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        formalWithLegacyTrialFlag.setTrial(true);
+        formalWithLegacyTrialFlag.setHighPriorityPendingQty(999);
+
+        SkuScheduleDTO massTrialSku = sku("MAT-M");
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSku.setHighPriorityPendingQty(1);
+
+        LhScheduleContext context = contextWithNewSpec(formalWithLegacyTrialFlag, massTrialSku);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-M", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "施工阶段为量试的SKU应进入量试组，不应被正规SKU残留的isTrial标记打平");
+        assertEquals("MAT-F", context.getNewSpecSkuList().get(1).getMaterialCode(),
+                "施工阶段为正规时，即使isTrial=true，也仍应留在正规组");
     }
 
     @Test

@@ -23,6 +23,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -311,7 +312,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (sku == null) {
             return false;
         }
-        if (sku.isTrial() || sku.isSmallBatchValidation()) {
+        if (sku.isSmallBatchValidation()) {
             return true;
         }
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
@@ -350,8 +351,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (sku == null) {
             return false;
         }
-        return StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
-                || sku.isTrial();
+        return StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage());
     }
 
     /**
@@ -398,8 +398,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (sku != null && sku.isSmallBatchValidation()) {
             return "小批量";
         }
-        if (sku != null && (StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
-                || sku.isTrial())) {
+        if (sku != null && StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())) {
             return "量试";
         }
         return "正规";
@@ -704,6 +703,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 return compareResult;
             }
 
+            compareResult = compareSpecialSupportCapabilityCount(matchResult, left, right);
+            if (compareResult != 0) {
+                return compareResult;
+            }
+
             compareResult = compareEndingTime(context, left, right);
             if (compareResult != 0) {
                 return compareResult;
@@ -758,6 +762,24 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         return Integer.compare(LhMachineHardMatchUtil.resolveNormalMachinePriority(left),
                 LhMachineHardMatchUtil.resolveNormalMachinePriority(right));
+    }
+
+    /**
+     * 比较特殊支持能力数量，能力越少越优先。
+     *
+     * @param matchResult 特殊物料命中结果
+     * @param left 左机台
+     * @param right 右机台
+     * @return 比较结果
+     */
+    private int compareSpecialSupportCapabilityCount(SpecialMaterialMatchResult matchResult,
+                                                     MachineScheduleDTO left,
+                                                     MachineScheduleDTO right) {
+        if (Objects.nonNull(matchResult) && matchResult.isSpecial()) {
+            return 0;
+        }
+        return Integer.compare(resolveSpecialSupportCapabilityCount(left),
+                resolveSpecialSupportCapabilityCount(right));
     }
 
     /**
@@ -1137,40 +1159,49 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         int topCount = Math.min(topN, PriorityTraceLogHelper.sizeOf(candidates));
         PriorityTraceLogHelper.appendLine(detailBuilder, "TOP" + topCount + "候选排序:");
         List<String> levelNames = java.util.Arrays.asList(
-                "L1_定点机台", "L2_单控拆分", "L3_普通机台优先", "L4_收尾时间",
-                "L5_同规格", "L6_同英寸", "L7_英寸接近度", "L8_胶囊共用", "L9_胎胚共用");
+                "L1_定点机台", "L2_单控拆分", "L3_普通机台优先", "L4_特殊支持能力数量", "L5_收尾时间",
+                "L6_同规格", "L7_同英寸", "L8_英寸接近度", "L9_胶囊共用", "L10_胎胚共用");
         for (int i = 0; i < topCount; i++) {
             MachineScheduleDTO machine = candidates.get(i);
             int specifyScore = resolveLimitSpecifyScore(context, sku, machine);
             int singleCtrlScore = resolveSingleControlScore(context, sku, machine);
             int normalMachineScore = resolveNormalMachinePriorityValue(matchResult, machine);
+            int specialSupportCapabilityCount = resolveSpecialSupportCapabilityCount(machine);
             int specMatchScore = resolveSpecMatchScore(sku, machine);
             int proSizeMatchScore = resolveProSizeMatchScore(sku, machine);
             double inchDistance = resolveInchDistance(sku, machine);
             int capsuleScore = resolveCapsuleAffinityScore(context, sku, machine);
             int embryoShareCount = resolveEmbryoShareCount(context, machine);
+            boolean inchMatched = LhMachineHardMatchUtil.isInchInRange(
+                    parseInch(sku.getProSize()), machine.getDimensionMinimum(), machine.getDimensionMaximum());
+            boolean mouldSetMatched = LhMachineHardMatchUtil.isMouldSetMatched(context, sku, machine);
+            boolean specialMatched = LhMachineHardMatchUtil.isSpecialMaterialSupported(matchResult, machine);
+            boolean specialSupportMachine = !LhMachineHardMatchUtil.isNormalMachine(machine);
+            String skuShellStandard = resolveSkuShellStandardDisplay(context, sku);
 
             List<String> sortKeyLevels = java.util.Arrays.asList(
                     "L1_定点机台=" + (specifyScore == 0 ? 1 : 0),
                     "L2_单控拆分=" + (isSingleControlMachine(context, machine.getMachineCode()) ? 1 : 0),
                     "L3_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
-                    "L4_收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()),
-                    "L5_同规格=" + (specMatchScore == 0 ? 1 : 0),
-                    "L6_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
-                    "L7_英寸接近度=" + formatInchDistance(inchDistance),
-                    "L8_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
-                    "L9_胎胚共用=" + embryoShareCount);
+                    "L4_特殊支持能力数量=" + specialSupportCapabilityCount,
+                    "L5_收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()),
+                    "L6_同规格=" + (specMatchScore == 0 ? 1 : 0),
+                    "L7_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
+                    "L8_英寸接近度=" + formatInchDistance(inchDistance),
+                    "L9_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
+                    "L10_胎胚共用=" + embryoShareCount);
             List<Integer> scores = java.util.Arrays.asList(
                     specifyScore,
                     singleCtrlScore,
                     normalMachineScore,
+                    specialSupportCapabilityCount,
                     resolveEndingTimeScore(machine),
                     specMatchScore,
                     proSizeMatchScore,
                     safeInchDistanceScore(inchDistance),
                     capsuleScore,
                     embryoShareCount);
-            List<Integer> defaultScores = java.util.Arrays.asList(1, 1, 0, 0, 1, 1, 0, 1, 0);
+            List<Integer> defaultScores = java.util.Arrays.asList(1, 1, 0, 0, 0, 1, 1, 0, 1, 0);
             String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
             String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
 
@@ -1184,10 +1215,20 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                             + ", " + PriorityTraceLogHelper.kv("状态", machine.getStatus())
                             + ", " + PriorityTraceLogHelper.kv("可用", PriorityTraceLogHelper.oneZero(MachineStatusUtil.isEnabled(machine.getStatus())))
                             + ", " + PriorityTraceLogHelper.kv("单控", PriorityTraceLogHelper.oneZero(isSingleCtrl))
-                            + ", " + PriorityTraceLogHelper.kv("普通机台", PriorityTraceLogHelper.oneZero(!isSingleCtrl))
+                            + ", " + PriorityTraceLogHelper.kv("普通机台", PriorityTraceLogHelper.oneZero(LhMachineHardMatchUtil.isNormalMachine(machine)))
+                            + ", " + PriorityTraceLogHelper.kv("特殊支持机台", PriorityTraceLogHelper.oneZero(specialSupportMachine))
+                            + ", " + PriorityTraceLogHelper.kv("特殊支持能力数量", specialSupportCapabilityCount)
                             + ", " + PriorityTraceLogHelper.kv("机台偏好原因", resolveMachinePreferenceReason(context, sku, machine))
                             + ", " + PriorityTraceLogHelper.kv("定点", PriorityTraceLogHelper.oneZero(specifyScore == 0))
                             + ", " + PriorityTraceLogHelper.kv("支持SKU", PriorityTraceLogHelper.oneZero(true))
+                            + ", " + PriorityTraceLogHelper.kv("英寸匹配", PriorityTraceLogHelper.oneZero(inchMatched))
+                            + ", " + PriorityTraceLogHelper.kv("SKU英寸", sku.getProSize())
+                            + ", " + PriorityTraceLogHelper.kv("机台英寸下限", machine.getDimensionMinimum())
+                            + ", " + PriorityTraceLogHelper.kv("机台英寸上限", machine.getDimensionMaximum())
+                            + ", " + PriorityTraceLogHelper.kv("模套匹配", PriorityTraceLogHelper.oneZero(mouldSetMatched))
+                            + ", " + PriorityTraceLogHelper.kv("SKU模套型号", skuShellStandard)
+                            + ", " + PriorityTraceLogHelper.kv("机台适用模套型号", machine.getShellStandard())
+                            + ", " + PriorityTraceLogHelper.kv("特殊材料匹配", PriorityTraceLogHelper.oneZero(specialMatched))
                             + ", " + PriorityTraceLogHelper.kv("当前在机", machine.getPreviousMaterialCode())
                             + ", " + PriorityTraceLogHelper.kv("收尾时间", PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()))
                             + ", " + PriorityTraceLogHelper.kv("同规格", PriorityTraceLogHelper.oneZero(specMatchScore == 0))
@@ -1248,6 +1289,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (Objects.nonNull(matchResult) && !matchResult.isSpecial()
                 && !LhMachineHardMatchUtil.isNormalMachine(machine)) {
             reasons.add("普通SKU允许使用特殊机台，特殊机台仅后置排序，不做强制保留");
+            reasons.add("特殊支持能力更少优先");
         }
         if (machine.getEstimatedEndTime() != null) {
             reasons.add("收尾时间最近");
@@ -1297,6 +1339,26 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
+     * 统计机台特殊支持能力数量。
+     *
+     * @param machine 机台
+     * @return 能力数量
+     */
+    private int resolveSpecialSupportCapabilityCount(MachineScheduleDTO machine) {
+        int capabilityCount = 0;
+        if (LhMachineHardMatchUtil.isSupport195WideBase(machine)) {
+            capabilityCount++;
+        }
+        if (LhMachineHardMatchUtil.isSupport225WideBase(machine)) {
+            capabilityCount++;
+        }
+        if (LhMachineHardMatchUtil.isSupportChipTire(machine)) {
+            capabilityCount++;
+        }
+        return capabilityCount;
+    }
+
+    /**
      * 解析机台类型描述。
      *
      * @param machine 机台
@@ -1304,6 +1366,35 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      */
     private String resolveMachineTypeDesc(MachineScheduleDTO machine) {
         return LhMachineHardMatchUtil.isNormalMachine(machine) ? "普通机台" : "特殊机台";
+    }
+
+    /**
+     * 汇总SKU模套型号，供日志输出。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 模套型号文本
+     */
+    private String resolveSkuShellStandardDisplay(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return null;
+        }
+        List<MdmSkuMouldRel> mouldRelList = context.getSkuMouldRelMap().get(sku.getMaterialCode());
+        if (CollectionUtils.isEmpty(mouldRelList) || CollectionUtils.isEmpty(context.getModelInfoMap())) {
+            return null;
+        }
+        Set<String> shellStandardSet = new java.util.LinkedHashSet<String>(mouldRelList.size());
+        for (MdmSkuMouldRel mouldRel : mouldRelList) {
+            if (mouldRel == null || StringUtils.isEmpty(mouldRel.getMouldCode())) {
+                continue;
+            }
+            MdmModelInfo modelInfo = context.getModelInfoMap().get(mouldRel.getMouldCode());
+            String shellStandard = normalizeToken(modelInfo == null ? null : modelInfo.getShellStandard());
+            if (StringUtils.isNotEmpty(shellStandard)) {
+                shellStandardSet.add(shellStandard);
+            }
+        }
+        return CollectionUtils.isEmpty(shellStandardSet) ? null : StringUtils.join(shellStandardSet, ",");
     }
 
     /**

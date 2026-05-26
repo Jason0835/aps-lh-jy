@@ -145,7 +145,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldKeepSingleControlPriorityForTrialSkuWhenSingleControlIsEnding() {
+    void matchMachines_shouldKeepSingleControlPriorityForMassTrialSkuWhenSingleControlIsEnding() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -159,7 +159,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
 
         SkuScheduleDTO sku = sku("3302001575", "SPEC-A", "22.5");
-        sku.setTrial(true);
+        sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -169,7 +169,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldPreferSingleControlCandidatesForTrialSkuWhenAvailable() {
+    void matchMachines_shouldPreferSingleControlCandidatesForMassTrialSkuWhenAvailable() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -182,7 +182,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
 
         SkuScheduleDTO sku = sku("3302002637", "SPEC-A", "19.5");
-        sku.setTrial(true);
+        sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -794,6 +794,28 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void matchMachines_shouldPreferSpecialMachineWithFewerSupportCapabilitiesForNonSpecialSku() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO supportTwoCapabilitiesMachine = machine("M-SPECIAL-2", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-SPECIAL-2");
+        supportTwoCapabilitiesMachine.setSupport195WideBase("1");
+        supportTwoCapabilitiesMachine.setSupportChipTire("1");
+        MachineScheduleDTO supportOneCapabilityMachine = machine("M-SPECIAL-1", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-SPECIAL-1");
+        supportOneCapabilityMachine.setSupport195WideBase("1");
+        context.getMachineScheduleMap().put(supportTwoCapabilitiesMachine.getMachineCode(), supportTwoCapabilitiesMachine);
+        context.getMachineScheduleMap().put(supportOneCapabilityMachine.getMachineCode(), supportOneCapabilityMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size());
+        assertEquals("M-SPECIAL-1", candidates.get(0).getMachineCode(),
+                "普通SKU只能落到特殊支持机台时，应优先选择特殊支持能力更少的机台");
+    }
+
+    @Test
     void matchMachines_shouldTraceMachineTypeOrderingAndSpecialMachineFallbackReason() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildTraceContext();
@@ -810,8 +832,35 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertEquals(1, context.getScheduleLogList().size());
         LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
         assertTrue(processLog.getLogDetail().contains("机台类型=特殊机台"));
+        assertTrue(processLog.getLogDetail().contains("普通机台=0"));
+        assertTrue(processLog.getLogDetail().contains("特殊支持机台=1"));
         assertTrue(processLog.getLogDetail().contains("普通SKU允许使用特殊机台"));
         assertTrue(processLog.getLogDetail().contains("特殊机台仅后置排序，不做强制保留"));
+        assertTrue(processLog.getLogDetail().contains("特殊支持能力数量"));
+    }
+
+    @Test
+    void matchMachines_shouldNotTreatLegacyTrialFlagAsMassTrialWhenConstructionStageIsFormal() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+
+        MachineScheduleDTO singleControlMachine = machine("K1501L", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        MachineScheduleDTO normalMachine = machine("K1111", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+
+        SkuScheduleDTO formalSku = sku("MAT-LEGACY", "SPEC-A", "22.5");
+        formalSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        formalSku.setTrial(true);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, formalSku);
+
+        assertEquals(1, candidates.size());
+        assertEquals("K1111", candidates.get(0).getMachineCode(),
+                "施工阶段为正规时，即使残留isTrial=true，也不应被当成量试SKU而改成单控优先");
     }
 
     @Test
