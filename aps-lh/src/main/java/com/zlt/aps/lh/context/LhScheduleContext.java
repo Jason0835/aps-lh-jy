@@ -145,8 +145,8 @@ public class LhScheduleContext {
     private Map<String, MdmSkuConstructionRef> skuConstructionRefMap = new HashMap<>();
     /** SKU与示方书关系Map(复合key), key=materialCode + "::" + trialStatus */
     private Map<String, MdmSkuConstructionRef> skuConstructionRefCompositeKeyMap = new HashMap<>();
-    /** SKU与示方书关系产品状态Map, key=materialCode + "::" + lhNo, value=trialStatus */
-    private Map<String, String> skuLhNoTrialStatusMap = new HashMap<>();
+    /** SKU与示方书关系Map, key=materialCode + "::" + embryoNo */
+    private Map<String, MdmSkuConstructionRef> skuEmbryoRefMap = new HashMap<>();
 
     // ========== 中间计算结果(S4.3) ==========
 

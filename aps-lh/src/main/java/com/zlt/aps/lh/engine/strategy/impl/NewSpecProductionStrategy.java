@@ -55,6 +55,7 @@ import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -2921,16 +2922,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         result.setIsChangeMould("1");
         result.setIsTypeBlock("0");
         result.setConstructionStage(sku.getConstructionStage());
-        // 设置产品状态（通过物料编码+硫化示方书号查询SKU与示方书关系）
+        // 通过物料编码+制造示方书号查询SKU与示方书关系获取硫化示方类型和硫化示方书号
         String trialStatus = null;
-        if (StringUtils.isNotEmpty(sku.getLhNo())) {
-            trialStatus = context.getSkuLhNoTrialStatusMap().get(sku.getMaterialCode() + "::" + sku.getLhNo());
+        String lhNo = null;
+        if (StringUtils.isNotEmpty(sku.getEmbryoNo())) {
+            MdmSkuConstructionRef constructionRef = context.getSkuEmbryoRefMap().get(sku.getMaterialCode() + "::" + sku.getEmbryoNo());
+            if (constructionRef != null) {
+                trialStatus = constructionRef.getLhType();
+                lhNo = constructionRef.getLhNo();
+            }
         }
         result.setTrialStatus(trialStatus);
         result.setChangedTrialStatus(trialStatus);
         result.setEmbryoNo(sku.getEmbryoNo());
         result.setTextNo(sku.getTextNo());
-        result.setLhNo(sku.getLhNo());
+        result.setLhNo(lhNo != null ? lhNo : sku.getLhNo());
         result.setMonthPlanVersion(sku.getMonthPlanVersion());
         result.setProductionVersion(sku.getProductionVersion());
         result.setIsTrial(sku.isTrial() ? "1" : "0");
