@@ -2,13 +2,16 @@ package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -21,8 +24,10 @@ import java.util.Calendar;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -318,6 +323,73 @@ class ContinuousProductionResultQtyRegressionTest {
         assertEquals(128, sku.getTargetScheduleQty().intValue(), "续作降模前后都应保留物料级全局目标量");
     }
 
+    @Test
+    void scheduleReduceMould_shouldAggregateSameShiftEndingWithinContinuationGroup() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine1 = new MachineScheduleDTO();
+        machine1.setMachineCode("M6");
+        machine1.setMachineName("FC-M6");
+        machine1.setMaxMoldNum(1);
+        machine1.setCapsuleUsageCount(10);
+        MachineScheduleDTO machine2 = new MachineScheduleDTO();
+        machine2.setMachineCode("M7");
+        machine2.setMachineName("FC-M7");
+        machine2.setMaxMoldNum(1);
+        machine2.setCapsuleUsageCount(5);
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.getMachineScheduleMap().put("M6", machine1);
+        context.getMachineScheduleMap().put("M7", machine2);
+        context.getInitialMachineScheduleMap().put("M6", machine1);
+        context.getInitialMachineScheduleMap().put("M7", machine2);
+
+        LhShiftConfigVO morningShift = context.getScheduleWindowShifts().get(0);
+        Map<java.time.LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
+        java.time.LocalDate workDate = morningShift.getWorkDate().toInstant()
+                .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setMaterialCode("MAT-C5");
+        quota.setProductionDate(workDate);
+        quota.setDayPlanQty(16);
+        quota.setRemainingQty(16);
+        quotaMap.put(workDate, quota);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("MAT-C5");
+        sku.setMaterialDesc("MAT-C5-DESC");
+        sku.setStructureName("S5");
+        sku.setSpecCode("SPEC-C5");
+        sku.setEmbryoCode("EMB-5");
+        sku.setContinuousMachineCode("M6");
+        sku.setTargetScheduleQty(16);
+        sku.setPendingQty(16);
+        sku.setSurplusQty(16);
+        sku.setShiftCapacity(16);
+        sku.setLhTimeSeconds(3600);
+        sku.setMouldQty(1);
+        sku.setDailyPlanQuotaMap(quotaMap);
+        context.getContinuousSkuList().add(sku);
+
+        LhScheduleResult firstResult = buildSameShiftContinuousResult("M6", morningShift, 8);
+        LhScheduleResult secondResult = buildSameShiftContinuousResult("M7", morningShift, 8);
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+        context.getMachineAssignmentMap().put("M6", new ArrayList<LhScheduleResult>());
+        context.getMachineAssignmentMap().get("M6").add(firstResult);
+        context.getMachineAssignmentMap().put("M7", new ArrayList<LhScheduleResult>());
+        context.getMachineAssignmentMap().get("M7").add(secondResult);
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(1, context.getScheduleResultList().size(), "同班次尾量归集后应清理零计划机台");
+        LhScheduleResult retainedResult = context.getScheduleResultList().get(0);
+        assertEquals("M6", retainedResult.getLhMachineCode(), "尾量应优先向保留排序更靠前机台集中");
+        assertEquals(16, retainedResult.getDailyPlanQty().intValue());
+        assertEquals(Integer.valueOf(16), retainedResult.getClass1PlanQty());
+        assertNull(retainedResult.getClass2PlanQty(), "同班次归集不应再把尾量顺延到下一班次");
+    }
+
     private LhScheduleContext newContext() {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");
@@ -338,6 +410,29 @@ class ContinuousProductionResultQtyRegressionTest {
         List<MachineCleaningWindowDTO> cleaningWindowList = new ArrayList<>();
         cleaningWindowList.add(cleaningWindow);
         return cleaningWindowList;
+    }
+
+    private LhScheduleResult buildSameShiftContinuousResult(String machineCode, LhShiftConfigVO shift, int qty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setScheduleType("01");
+        result.setIsTypeBlock("0");
+        result.setMaterialCode("MAT-C5");
+        result.setMaterialDesc("MAT-C5-DESC");
+        result.setLhMachineCode(machineCode);
+        result.setLhMachineName(machineCode);
+        result.setEmbryoCode("EMB-5");
+        result.setMouldSurplusQty(16);
+        result.setEmbryoStock(0);
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        result.setSingleMouldShiftQty(16);
+        result.setIsEnd("1");
+        ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), qty,
+                shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setSpecEndTime(shift.getShiftEndDateTime());
+        result.setTdaySpecEndTime(shift.getShiftEndDateTime());
+        return result;
     }
 
     private static Date date(int year, int month, int day) {

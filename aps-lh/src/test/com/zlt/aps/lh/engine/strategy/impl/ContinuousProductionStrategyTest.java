@@ -958,116 +958,130 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void scheduleReduceMould_shouldNotForceStaggerWhenContinuousEndingAtNightShift() {
+    public void scheduleReduceMould_shouldAggregateContinuousEndingWithinSameNightShift() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiMachineEndingStaggerContext(ShiftEnum.NIGHT_SHIFT.getCode());
+        LhShiftConfigVO nightShift = findShiftByType(context.getScheduleWindowShifts(), ShiftEnum.NIGHT_SHIFT.getCode());
 
         strategy.scheduleReduceMould(context);
 
-        assertEquals(2, context.getScheduleResultList().size(), "晚班收尾不强制错开");
-        for (LhScheduleResult result : context.getScheduleResultList()) {
-            assertEquals(8, result.getDailyPlanQty().intValue());
-        }
+        assertEquals(1, context.getScheduleResultList().size(), "同班次尾量归集后应释放零计划机台");
+        LhScheduleResult retainedResult = context.getScheduleResultList().get(0);
+        assertEquals(16, retainedResult.getDailyPlanQty().intValue());
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, nightShift.getShiftIndex()));
         assertEquals(16, sumScheduledQty(context));
     }
 
     @Test
-    public void scheduleReduceMould_shouldStaggerContinuousEndingAtMorningOrAfternoonShift() {
+    public void scheduleReduceMould_shouldAggregateContinuousEndingWithinSameShift() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiMachineEndingStaggerContext(ShiftEnum.MORNING_SHIFT.getCode());
 
         strategy.scheduleReduceMould(context);
 
-        assertEquals(1, context.getScheduleResultList().size(), "早中班同SKU多机台收尾应尝试错开并释放一台机台");
+        assertEquals(1, context.getScheduleResultList().size(), "同班次尾量归集后应释放零计划机台");
         LhScheduleResult retainedResult = context.getScheduleResultList().get(0);
         LhShiftConfigVO morningShift = findShiftByType(context.getScheduleWindowShifts(), ShiftEnum.MORNING_SHIFT.getCode());
         assertEquals(16, retainedResult.getDailyPlanQty().intValue());
-        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(retainedResult, morningShift.getShiftIndex()));
-        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(retainedResult, morningShift.getShiftIndex() + 1));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, morningShift.getShiftIndex()));
+        assertNull(ShiftFieldUtil.getShiftPlanQty(retainedResult, morningShift.getShiftIndex() + 1));
     }
 
     @Test
-    public void adjustContinuousSameSkuMultiMachineEndingStagger_shouldStaggerMachineEndingWhenSkuIsNotEnding() {
+    public void scheduleReduceMould_shouldConcentrateSameShiftEndingTailOnRetainedPrimaryMachine() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
-        LhScheduleContext context = buildMultiMachineEndingStaggerContext(
-                ShiftEnum.MORNING_SHIFT.getCode(), false);
-        LhShiftConfigVO morningShift = findShiftByType(
-                context.getScheduleWindowShifts(), ShiftEnum.MORNING_SHIFT.getCode());
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-TEST-3302002546");
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
 
-        ReflectionTestUtils.invokeMethod(strategy, "adjustContinuousSameSkuMultiMachineEndingStagger",
-                context, context.getScheduleWindowShifts());
+        addMachine(context, "K1113", 10);
+        addMachine(context, "K2024", 5);
 
-        LhScheduleResult donorResult = findResultByMachineCode(context, "K1101");
-        LhScheduleResult receiverResult = findResultByMachineCode(context, "K1102");
-        assertEquals(0, donorResult.getDailyPlanQty().intValue(), "非SKU收尾的机台尾量也应允许释放");
-        assertEquals(16, receiverResult.getDailyPlanQty().intValue(), "承接机台应在下一班次承接释放尾量");
-        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(
-                receiverResult, morningShift.getShiftIndex()));
-        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(
-                receiverResult, morningShift.getShiftIndex() + 1));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO morningShift = findShiftByType(shifts, ShiftEnum.MORNING_SHIFT.getCode());
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(morningShift), quota("3302002546", toLocalDate(morningShift), 16));
+
+        SkuScheduleDTO primarySku = buildContinuationSku(
+                "3302002546", ConstructionStageEnum.FORMAL.getCode(), true, 16, quotaMap);
+        primarySku.setContinuousMachineCode("K1113");
+        SkuScheduleDTO auxSku = buildContinuationSku(
+                "3302002546", ConstructionStageEnum.FORMAL.getCode(), true, 16, quotaMap);
+        auxSku.setContinuousMachineCode("K2024");
+        context.setContinuousSkuList(Arrays.asList(primarySku, auxSku));
+
+        LhScheduleResult primaryResult = buildSingleShiftContinuationResult(
+                "3302002546", "K1113", morningShift, 8, true);
+        LhScheduleResult auxResult = buildSingleShiftContinuationResult(
+                "3302002546", "K2024", morningShift, 8, true);
+        context.getScheduleResultList().add(primaryResult);
+        context.getScheduleResultList().add(auxResult);
+        context.getScheduleResultSourceSkuMap().put(primaryResult, primarySku);
+        context.getScheduleResultSourceSkuMap().put(auxResult, auxSku);
+        context.getMachineAssignmentMap().put("K1113",
+                new ArrayList<LhScheduleResult>(Collections.singletonList(primaryResult)));
+        context.getMachineAssignmentMap().put("K2024",
+                new ArrayList<LhScheduleResult>(Collections.singletonList(auxResult)));
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(1, context.getScheduleResultList().size(), "3302002546 同班次收尾后应只保留主机结果");
+        LhScheduleResult retainedResult = context.getScheduleResultList().get(0);
+        assertEquals("K1113", retainedResult.getLhMachineCode(), "3302002546 应保留胶囊次数更高的主机");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, morningShift.getShiftIndex()));
+        assertNull(ShiftFieldUtil.getShiftPlanQty(retainedResult, morningShift.getShiftIndex() + 1),
+                "3302002546 当前实现会把同班次尾量继续留在原班次，先锁定主机归集机台");
+        assertEquals(16, retainedResult.getDailyPlanQty().intValue(), "3302002546 尾量集中后主机汇总量应刷新为16");
     }
 
     @Test
-    public void adjustContinuousSameSkuMultiMachineEndingStagger_shouldPreferReceiverWithSameSkuPlanInNextShift() {
+    public void adjustContinuousSameSkuMultiMachineEndingStagger_shouldKeepAtMostOneRemainderPerShift() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiMachineEndingStaggerContext(
-                ShiftEnum.MORNING_SHIFT.getCode(), false);
+                ShiftEnum.MORNING_SHIFT.getCode(), true);
         LhShiftConfigVO morningShift = findShiftByType(
                 context.getScheduleWindowShifts(), ShiftEnum.MORNING_SHIFT.getCode());
         addMachine(context, "K1103", 4);
-        SkuScheduleDTO sku = buildContinuationSku(
-                "MAT-END-STAGGER", ConstructionStageEnum.FORMAL.getCode(), false, 24,
+        SkuScheduleDTO thirdSku = buildContinuationSku(
+                "MAT-END-STAGGER", ConstructionStageEnum.FORMAL.getCode(), true, 20,
                 context.getContinuousSkuList().get(0).getDailyPlanQuotaMap());
-        sku.setContinuousMachineCode("K1103");
+        thirdSku.setContinuousMachineCode("K1103");
         context.setContinuousSkuList(new ArrayList<SkuScheduleDTO>(context.getContinuousSkuList()));
-        context.getContinuousSkuList().add(sku);
+        context.getContinuousSkuList().add(thirdSku);
+        LhScheduleResult firstResult = findResultByMachineCode(context, "K1101");
+        LhScheduleResult secondResult = findResultByMachineCode(context, "K1102");
+        ShiftFieldUtil.setShiftPlanQty(firstResult, morningShift.getShiftIndex(), 8,
+                morningShift.getShiftStartDateTime(), morningShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(firstResult);
+        ShiftFieldUtil.setShiftPlanQty(secondResult, morningShift.getShiftIndex(), 7,
+                morningShift.getShiftStartDateTime(), morningShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(secondResult);
         LhScheduleResult thirdResult = buildSingleShiftContinuationResult(
-                "MAT-END-STAGGER", "K1103", morningShift, 8, false);
+                "MAT-END-STAGGER", "K1103", morningShift, 5, true);
         context.getScheduleResultList().add(thirdResult);
-        context.getScheduleResultSourceSkuMap().put(thirdResult, sku);
+        context.getScheduleResultSourceSkuMap().put(thirdResult, thirdSku);
         context.getMachineAssignmentMap().put("K1103",
                 new ArrayList<LhScheduleResult>(Collections.singletonList(thirdResult)));
-        LhScheduleResult preferredReceiver = findResultByMachineCode(context, "K1102");
-        ShiftFieldUtil.setShiftPlanQty(preferredReceiver, morningShift.getShiftIndex() + 1, 4,
-                context.getScheduleWindowShifts().get(1).getShiftStartDateTime(), null);
-        ShiftFieldUtil.syncDailyPlanQty(preferredReceiver);
 
         ReflectionTestUtils.invokeMethod(strategy, "adjustContinuousSameSkuMultiMachineEndingStagger",
                 context, context.getScheduleWindowShifts());
 
-        assertEquals(Integer.valueOf(12), ShiftFieldUtil.getShiftPlanQty(
-                preferredReceiver, morningShift.getShiftIndex() + 1), "下一班次已有当前SKU计划的机台应优先承接");
-        assertEquals(8, findResultByMachineCode(context, "K1103").getDailyPlanQty().intValue(),
-                "空闲机台不应抢在已有当前SKU计划的机台前承接");
-    }
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(firstResult, morningShift.getShiftIndex()));
+        assertEquals(Integer.valueOf(4), ShiftFieldUtil.getShiftPlanQty(secondResult, morningShift.getShiftIndex()));
+        assertEquals(0, thirdResult.getDailyPlanQty().intValue(), "保留排序靠后的机台应被同班次归集清空");
+        assertEquals(20, sumScheduledQty(context), "同班次尾量归集不得改变 continuation group 总量");
 
-    @Test
-    public void adjustContinuousSameSkuMultiMachineEndingStagger_shouldSkipWhenReceiverNextShiftOccupiedByOtherSku() {
-        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
-        LhScheduleContext context = buildMultiMachineEndingStaggerContext(
-                ShiftEnum.MORNING_SHIFT.getCode(), false);
-        LhShiftConfigVO morningShift = findShiftByType(
-                context.getScheduleWindowShifts(), ShiftEnum.MORNING_SHIFT.getCode());
-        LhScheduleResult receiverResult = findResultByMachineCode(context, "K1102");
-        LhScheduleResult occupiedResult = baseContinuationResult("MAT-OTHER", "K1102", false);
-        ShiftFieldUtil.setShiftPlanQty(occupiedResult, morningShift.getShiftIndex() + 1, 4,
-                context.getScheduleWindowShifts().get(1).getShiftStartDateTime(),
-                context.getScheduleWindowShifts().get(1).getShiftEndDateTime());
-        ShiftFieldUtil.syncDailyPlanQty(occupiedResult);
-        context.getScheduleResultList().add(occupiedResult);
-        context.getMachineAssignmentMap().get("K1102").add(occupiedResult);
-        context.getScheduleResultSourceSkuMap().put(occupiedResult, buildContinuationSku(
-                "MAT-OTHER", ConstructionStageEnum.FORMAL.getCode(), false, 4,
-                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(2)));
-
-        ReflectionTestUtils.invokeMethod(strategy, "adjustContinuousSameSkuMultiMachineEndingStagger",
-                context, context.getScheduleWindowShifts());
-
-        assertEquals(8, findResultByMachineCode(context, "K1101").getDailyPlanQty().intValue(),
-                "承接机台下一班次被其他SKU占用时不应释放尾量");
-        assertEquals(8, receiverResult.getDailyPlanQty().intValue(),
-                "承接机台被占用时当前SKU原计划量不应变化");
-        assertEquals(4, occupiedResult.getDailyPlanQty().intValue(), "其他SKU占用量不应被改动");
+        int remainderMachineCount = 0;
+        for (LhScheduleResult result : Arrays.asList(firstResult, secondResult, thirdResult)) {
+            Integer shiftQty = ShiftFieldUtil.getShiftPlanQty(result, morningShift.getShiftIndex());
+            if (shiftQty != null && shiftQty > 0 && shiftQty < 16) {
+                remainderMachineCount++;
+            }
+        }
+        assertEquals(1, remainderMachineCount, "同班次尾量归集后最多只允许一台机台保留零头");
     }
 
     @Test
@@ -1256,7 +1270,7 @@ public class ContinuousProductionStrategyTest {
     }
 
     /**
-     * 构建续作同SKU多机台收尾错峰测试上下文。
+     * 构建续作同SKU多机台同班次尾量归集测试上下文。
      *
      * @param endingShiftType 收尾班次类型
      * @return 排程上下文
