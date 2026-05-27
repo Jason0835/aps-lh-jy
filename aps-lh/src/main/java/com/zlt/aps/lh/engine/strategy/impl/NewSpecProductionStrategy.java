@@ -530,6 +530,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
 
                 sku.setMouldQty(machineMouldQty);
+                applyNightNoMouldChangeContinuationFill(context, sku, result, shifts, quantityPolicy);
                 // 7. 先按账本硬约束回裁结果，再落地结果与刷新机台状态，避免窗口总量被结果行放大。
                 int machineScheduledQty = applyBlockToDailyQuota(context, sku, result, shifts);
                 if (machineScheduledQty <= 0) {
@@ -603,7 +604,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
 
             sku.setTargetScheduleQty(scheduled ? finalTargetScheduleQty : originalTargetScheduleQty);
-            if (scheduled && isEnding) {
+            if (scheduled) {
                 adjustSameSkuMultiMachineEndingStagger(context, sku, shifts);
             }
             if (!scheduled) {
@@ -2980,8 +2981,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 同SKU多机台收尾时，针对早班/中班同班次收尾做尾量错开。
-     * <p>仅处理新增排产收尾结果；晚班不调整，避免破坏“晚班不能换模”下的有效产能。</p>
+     * 同SKU多机台机台收尾时，针对早班/中班同班次收尾做尾量错开。
+     * <p>这里处理的是机台尾量，不改变SKU收尾判断；晚班不调整，避免破坏“晚班不能换模”下的有效产能。</p>
      *
      * @param context 排程上下文
      * @param sku 当前SKU
@@ -2998,7 +2999,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (result == null
                     || !NEW_SPEC_SCHEDULE_TYPE.equals(result.getScheduleType())
-                    || !"1".equals(result.getIsEnd())
                     || "1".equals(result.getIsTypeBlock())
                     || !StringUtils.equals(sku.getMaterialCode(), result.getMaterialCode())
                     || ShiftFieldUtil.resolveScheduledQty(result) <= 0) {
@@ -3042,15 +3042,22 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                               List<LhScheduleResult> results) {
         LhShiftConfigVO endingShift = findShiftByIndex(shifts, endingShiftIndex);
         LhShiftConfigVO nextShift = findShiftByIndex(shifts, endingShiftIndex + 1);
-        if (endingShift == null || nextShift == null
-                || StringUtils.equals(ShiftEnum.NIGHT_SHIFT.getCode(), endingShift.getShiftType())) {
+        if (endingShift == null || nextShift == null) {
+            return false;
+        }
+        boolean nightShift = StringUtils.equals(ShiftEnum.NIGHT_SHIFT.getCode(), endingShift.getShiftType());
+        log.info("同SKU多机台机台收尾错峰判断, materialCode: {}, 收尾班次: {}, 是否晚班: {}, 是否同SKU多机台收尾: 1",
+                sku.getMaterialCode(), endingShiftIndex, nightShift);
+        if (nightShift) {
+            log.info("同SKU多机台机台收尾错峰跳过, materialCode: {}, 收尾班次: {}, 原因: 晚班不可换模不强制错峰",
+                    sku.getMaterialCode(), endingShiftIndex);
             return false;
         }
         if (!isSameWorkDate(endingShift.getWorkDate(), nextShift.getWorkDate())) {
             return false;
         }
         LhScheduleResult donor = resolveTailDonorResult(results, endingShiftIndex);
-        LhScheduleResult receiver = resolveTailReceiverResult(results, donor, endingShiftIndex + 1);
+        LhScheduleResult receiver = resolveTailReceiverResult(context, sku, results, donor, nextShift);
         if (donor == null || receiver == null) {
             return false;
         }
@@ -3058,8 +3065,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (donorQty == null || donorQty <= 0) {
             return false;
         }
+        int donorShiftCapacity = resolveAvailableShiftQtyForEndingStagger(context, donor, endingShift);
+        if (donorShiftCapacity > 0 && donorQty >= donorShiftCapacity) {
+            log.info("同SKU多机台机台收尾错峰跳过, materialCode: {}, 释放机台: {}, 收尾班次: {}, "
+                            + "原因: 当前班次为满班产量，不属于可释放尾量",
+                    sku.getMaterialCode(), donor.getLhMachineCode(), endingShiftIndex);
+            return false;
+        }
         int nextShiftCapacity = resolveAvailableShiftQtyForEndingStagger(context, receiver, nextShift);
         if (nextShiftCapacity <= 0 || donorQty > nextShiftCapacity) {
+            log.info("同SKU多机台机台收尾错峰跳过, materialCode: {}, 承接机台: {}, 需转移: {}, 可用: {}",
+                    sku.getMaterialCode(), receiver.getLhMachineCode(), donorQty, nextShiftCapacity);
             return false;
         }
         setShiftPlanQty(donor, endingShiftIndex, 0, null, null);
@@ -3068,7 +3084,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         refreshResultSummary(context, receiver);
         refreshMachineStateAfterEndingStagger(context, donor);
         refreshMachineStateAfterEndingStagger(context, receiver);
-        log.info("同SKU多机台收尾尾量错开, materialCode: {}, 释放机台: {}, 承接机台: {}, "
+        log.info("同SKU多机台机台收尾尾量错开, materialCode: {}, 释放机台: {}, 承接机台: {}, "
                         + "原收尾班次: {}, 承接班次: {}, 转移数量: {}",
                 sku.getMaterialCode(), donor.getLhMachineCode(), receiver.getLhMachineCode(),
                 endingShiftIndex, nextShift.getShiftIndex(), donorQty);
@@ -3091,14 +3107,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         return donor;
     }
 
-    private LhScheduleResult resolveTailReceiverResult(List<LhScheduleResult> results,
+    private LhScheduleResult resolveTailReceiverResult(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       List<LhScheduleResult> results,
                                                        LhScheduleResult donor,
-                                                       int nextShiftIndex) {
+                                                       LhShiftConfigVO nextShift) {
         for (LhScheduleResult result : results) {
             if (result == null || result == donor) {
                 continue;
             }
-            Integer nextShiftQty = ShiftFieldUtil.getShiftPlanQty(result, nextShiftIndex);
+            if (isMachineShiftOccupiedByOtherSku(context, sku, result, nextShift)) {
+                continue;
+            }
+            Integer nextShiftQty = ShiftFieldUtil.getShiftPlanQty(result, nextShift.getShiftIndex());
             if (nextShiftQty == null || nextShiftQty <= 0) {
                 return result;
             }
@@ -3195,6 +3216,148 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
         }
         return maxShiftQty;
+    }
+
+    /**
+     * 晚班不可换模时，正规/量试/小批量非收尾SKU在当前机台无换模续作补满下一晚班。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param result 当前机台结果
+     * @param shifts 班次列表
+     * @param quantityPolicy 数量控制策略
+     */
+    private void applyNightNoMouldChangeContinuationFill(LhScheduleContext context,
+                                                         SkuScheduleDTO sku,
+                                                         LhScheduleResult result,
+                                                         List<LhShiftConfigVO> shifts,
+                                                         ProductionQuantityPolicy quantityPolicy) {
+        if (context == null || sku == null || result == null || CollectionUtils.isEmpty(shifts)
+                || quantityPolicy == null || quantityPolicy.isEnding()
+                || !quantityPolicy.isAllowFillStartedShift() || quantityPolicy.isStrictUpperLimit()) {
+            return;
+        }
+        if ("1".equals(result.getIsEnd())) {
+            return;
+        }
+        int lastShiftIndex = resolveLastPlannedShiftIndex(result);
+        if (lastShiftIndex <= 0) {
+            return;
+        }
+        LhShiftConfigVO nextShift = findShiftByIndex(shifts, lastShiftIndex + 1);
+        if (nextShift == null || !nextShift.isNightShift() || nextShift.isAllowMouldChange()
+                || nextShift.getShiftStartDateTime() == null
+                || !LhScheduleTimeUtil.isNoMouldChangeTime(context, nextShift.getShiftStartDateTime())) {
+            return;
+        }
+        if (isMachineShiftOccupiedByOtherSku(context, sku, result, nextShift)) {
+            log.info("晚班不可换模续作补满跳过, materialCode: {}, 机台: {}, 晚班班次: {}, 原因: 下一晚班已被其他SKU占用",
+                    sku.getMaterialCode(), result.getLhMachineCode(), nextShift.getShiftIndex());
+            return;
+        }
+        int realSurplusRemainingQty = resolveRealSurplusRemainingQty(context, sku, result);
+        if (realSurplusRemainingQty <= 0) {
+            return;
+        }
+        Integer existingQty = ShiftFieldUtil.getShiftPlanQty(result, nextShift.getShiftIndex());
+        int currentQty = existingQty == null ? 0 : Math.max(0, existingQty);
+        int availableQty = Math.max(0, resolveAvailableShiftQtyForEndingStagger(context, result, nextShift) - currentQty);
+        int fillQty = Math.min(availableQty, realSurplusRemainingQty);
+        if (fillQty <= 0) {
+            return;
+        }
+        setShiftPlanQty(result, nextShift.getShiftIndex(), currentQty + fillQty,
+                nextShift.getShiftStartDateTime(), null);
+        refreshResultSummary(context, result);
+        log.info("晚班不可换模续作补满命中, materialCode: {}, 机台: {}, 当前收尾班次: {}, 晚班班次: {}, "
+                        + "补满数量: {}, 真实余量剩余: {}, 原因: 晚班不可换模且当前SKU可无换模续作",
+                sku.getMaterialCode(), result.getLhMachineCode(), lastShiftIndex, nextShift.getShiftIndex(),
+                fillQty, realSurplusRemainingQty);
+    }
+
+    /**
+     * 计算当前SKU真实余量扣除已排后的剩余量。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param currentResult 当前结果
+     * @return 剩余真实余量
+     */
+    private int resolveRealSurplusRemainingQty(LhScheduleContext context,
+                                               SkuScheduleDTO sku,
+                                               LhScheduleResult currentResult) {
+        if (sku == null || sku.getSurplusQty() <= 0) {
+            return 0;
+        }
+        int scheduledQty = ShiftFieldUtil.resolveScheduledQty(currentResult);
+        if (context != null && !CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            for (LhScheduleResult result : context.getScheduleResultList()) {
+                if (result == null || result == currentResult
+                        || !StringUtils.equals(sku.getMaterialCode(), result.getMaterialCode())) {
+                    continue;
+                }
+                scheduledQty += ShiftFieldUtil.resolveScheduledQty(result);
+            }
+        }
+        return Math.max(0, sku.getSurplusQty() - scheduledQty);
+    }
+
+    /**
+     * 判断承接机台目标班次是否已被其他SKU占用。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param receiver 承接结果
+     * @param targetShift 目标班次
+     * @return true-其他SKU已占用
+     */
+    private boolean isMachineShiftOccupiedByOtherSku(LhScheduleContext context,
+                                                     SkuScheduleDTO sku,
+                                                     LhScheduleResult receiver,
+                                                     LhShiftConfigVO targetShift) {
+        if (context == null || sku == null || receiver == null || targetShift == null
+                || StringUtils.isEmpty(receiver.getLhMachineCode())
+                || targetShift.getShiftIndex() == null) {
+            return false;
+        }
+        List<LhScheduleResult> machineResults = CollectionUtils.isEmpty(context.getMachineAssignmentMap())
+                ? null : context.getMachineAssignmentMap().get(receiver.getLhMachineCode());
+        if (isMachineShiftOccupiedByOtherSku(machineResults, sku, receiver, targetShift)) {
+            return true;
+        }
+        return isMachineShiftOccupiedByOtherSku(context.getScheduleResultList(), sku, receiver, targetShift);
+    }
+
+    /**
+     * 判断结果列表中是否存在同机台同班次其他SKU计划。
+     *
+     * @param results 结果列表
+     * @param sku 当前SKU
+     * @param receiver 承接结果
+     * @param targetShift 目标班次
+     * @return true-其他SKU已占用
+     */
+    private boolean isMachineShiftOccupiedByOtherSku(List<LhScheduleResult> results,
+                                                     SkuScheduleDTO sku,
+                                                     LhScheduleResult receiver,
+                                                     LhShiftConfigVO targetShift) {
+        if (CollectionUtils.isEmpty(results)) {
+            return false;
+        }
+        for (LhScheduleResult result : results) {
+            if (result == null || result == receiver
+                    || !StringUtils.equals(receiver.getLhMachineCode(), result.getLhMachineCode())) {
+                continue;
+            }
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, targetShift.getShiftIndex());
+            if (planQty == null || planQty <= 0) {
+                continue;
+            }
+            if (!StringUtils.equals(sku.getMaterialCode(), result.getMaterialCode())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private LhShiftConfigVO findShiftByIndex(List<LhShiftConfigVO> shifts, int shiftIndex) {
