@@ -70,8 +70,19 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 续作排产策略实现
- * <p>处理续作场景下的排产逻辑, 包括收尾判定、班次分配、库存调整、降模等</p>
+ * 续作排产策略实现。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>处理 S4.4 中 MES 在机或滚动继承形成的续作 SKU；</li>
+ *   <li>负责续作收尾判断、单机台目标量调整、班次分配、胎胚库存裁剪、日计划账本同步和多机台降模；</li>
+ *   <li>在非收尾场景下可触发定点机台挤量，为后续 S4.5 新增换模预留窗口；</li>
+ *   <li>生成的结果会进入 S4.6 统一校验、换模计划和持久化流程。</li>
+ * </ul>
+ *
+ * <p>注意：续作路径与换活字块、新增路径共享 {@code LhScheduleContext} 的机台状态和日计划账本。
+ * 维护本类时需要同步确认 {@code TypeBlockProductionStrategy}、{@code NewSpecProductionStrategy}
+ * 和后置校验的 sourceSku 口径。</p>
  *
  * @author APS
  */
@@ -133,6 +144,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
 
+            // SKU收尾判定决定是否严格控量：收尾必须按目标量停，非收尾才允许后续补满可用班次。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
             sku.setStrictTargetQty(ProductionQuantityPolicy.from(sku, isEnding).isStrictUpperLimit());
             boolean isSingleMachine = continuationGroupMachineCountMap
@@ -142,12 +154,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             Date startTime = resolveContinuousStartTime(context, machine, shifts);
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine);
+            // 非收尾续作可以为定点新增物料挤出后续换模窗口；收尾场景不走挤量预留。
             Date specifySwitchStartTime = !isEnding
                     ? tryReserveSpecifySqueezeSwitchStartTime(context, machine, sku, shifts) : null;
             List<LhShiftConfigVO> effectiveShifts = specifySwitchStartTime == null
                     ? shifts : filterShiftsBeforeSwitchStart(shifts, specifySwitchStartTime);
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
             sku.setMouldQty(machineMouldQty);
+            // 滚动继承结果可直接追加班次量，避免同一机台同一SKU拆成两条连续结果。
             LhScheduleResult inheritedResult = findMergeableRollingInheritedResult(context, machineCode, sku.getMaterialCode());
             LhScheduleResult result = inheritedResult != null
                     ? appendScheduleToInheritedResult(context, inheritedResult, machine, sku,
@@ -166,7 +180,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 // 续作已完成当日排产，不应继续参与后续结构优先级判断。
                 context.removePendingSkuFromStructureMap(sku);
 
-                // 如果是收尾，更新机台收尾信息
+                // 如果是收尾，更新机台收尾信息；换活字块策略会基于该时间寻找后续衔接SKU。
                 if (isEnding && result.getSpecEndTime() != null) {
                     Date actualCompletionTime = resolveActualCompletionTime(context, result);
                     machine.setEnding(true);
@@ -198,6 +212,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * 单机台续作目标量决策。
+     *
+     * <p>规则说明：</p>
+     * <ul>
+     *   <li>单机台收尾：按收尾上调规则处理，确保尾量和胎胚库存口径一致；</li>
+     *   <li>单机台非收尾且满排模式：按当前机台真实窗口产能作为目标量；</li>
+     *   <li>多机台：保持原多机台分摊/降模规则，不在此处改写目标量；</li>
+     *   <li>按需求模式：沿用 S4.3 计算出的需求目标量。</li>
+     * </ul>
      *
      * @param context 排程上下文
      * @param sku SKU

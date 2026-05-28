@@ -79,6 +79,7 @@ public class OrderNoGenerator {
      * @return 序列号
      */
     private String generate(String prefix, Date targetDate) {
+        // TODO 后续可统一替换为 Hutool 或 java.time 格式化，当前保持历史批次号/工单号格式不变。
         String dateStr = new SimpleDateFormat("yyyyMMdd").format(targetDate);
         int seq = getNextSequence(prefix, dateStr);
         return String.format("%s%s%03d", prefix, dateStr, seq % 1000);

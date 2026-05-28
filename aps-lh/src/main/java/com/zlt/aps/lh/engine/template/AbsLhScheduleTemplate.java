@@ -12,8 +12,14 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 硫化排程模板方法抽象类
- * <p>定义排程的标准六步流程骨架，子类实现各步骤的具体逻辑</p>
+ * 硫化排程模板方法抽象类。
+ *
+ * <p>业务职责：</p>
+ * <ul>
+ *   <li>固定硫化排程主流程顺序，保证前置校验、数据初始化、SKU归集、续作、新增和保存按约定执行；</li>
+ *   <li>统一处理中断响应、领域异常响应和执行耗时日志；</li>
+ *   <li>各步骤只暴露抽象方法，具体业务委托给对应 Handler，避免主流程与算法细节耦合。</li>
+ * </ul>
  *
  * <pre>
  * 流程: S4.1前置校验 -> S4.2数据初始化 -> S4.3排程调整与SKU归集
@@ -26,7 +32,13 @@ import java.util.List;
 public abstract class AbsLhScheduleTemplate {
 
     /**
-     * 执行排程(模板方法) - 定义不可变的算法骨架
+     * 执行排程模板方法。
+     *
+     * <p>该方法定义不可变的算法骨架：S4.1 校验通过后才允许加载数据，S4.2 数据完整后才归集 SKU，
+     * S4.4 续作和换活字块必须先于 S4.5 新增规格执行，S4.6 负责最终校验、换模计划生成和持久化。</p>
+     *
+     * <p>方法会持续修改 {@link LhScheduleContext} 中的基础数据、机台状态、排程结果、未排结果、
+     * 模具交替计划和日志列表。</p>
      *
      * @param context 排程上下文
      * @return 排程响应结果
@@ -65,7 +77,7 @@ public abstract class AbsLhScheduleTemplate {
                 return buildInterruptResponse(context);
             }
 
-            // S4.4 续作规格排产
+            // S4.4 续作规格排产：优先消费 MES 在机和滚动继承状态，必要时产生换活字块衔接结果。
             context.setCurrentStep(ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION.getCode());
             log.info(">>> 步骤 S4.4: {}", ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION.getDescription());
             doContinuousProduction(context);
@@ -74,7 +86,7 @@ public abstract class AbsLhScheduleTemplate {
                 return buildInterruptResponse(context);
             }
 
-            // S4.5 新增规格排产
+            // S4.5 新增规格排产：只处理仍在新增待排列表中的 SKU，执行选机、换模、首检和班次分配。
             context.setCurrentStep(ScheduleStepEnum.S4_5_NEW_PRODUCTION.getCode());
             log.info(">>> 步骤 S4.5: {}", ScheduleStepEnum.S4_5_NEW_PRODUCTION.getDescription());
             doNewSpecProduction(context);
@@ -83,7 +95,7 @@ public abstract class AbsLhScheduleTemplate {
                 return buildInterruptResponse(context);
             }
 
-            // S4.6 结果校验与发布保存
+            // S4.6 结果校验与发布保存：生成换模计划、补全工单号，并原子替换目标日结果。
             context.setCurrentStep(ScheduleStepEnum.S4_6_RESULT_VALIDATION.getCode());
             log.info(">>> 步骤 S4.6: {}", ScheduleStepEnum.S4_6_RESULT_VALIDATION.getDescription());
             doResultValidationAndSave(context);
@@ -162,6 +174,9 @@ public abstract class AbsLhScheduleTemplate {
 
     /**
      * 输出步骤执行后的关键上下文快照。
+     *
+     * <p>该日志用于定位排程在哪个阶段改变了 SKU 列表或结果数量。排查“为什么只排到某一步”
+     * 或“续作/新增数量不一致”时，应重点关注批次号、机台数、续作SKU、新增SKU、排程结果和未排数量。</p>
      *
      * @param context 排程上下文
      * @param stepEnum 当前步骤

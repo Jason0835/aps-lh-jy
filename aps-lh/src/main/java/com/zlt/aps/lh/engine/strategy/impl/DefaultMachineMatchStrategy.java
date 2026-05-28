@@ -45,8 +45,17 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 默认机台匹配策略实现
- * <p>基于收尾时间、规格、英寸、胶囊共用性和胎胚共用性进行多层级匹配排序</p>
+ * 默认机台匹配策略实现。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>为新增排产、局部搜索和目标量评估提供候选硫化机台；</li>
+ *   <li>先执行硬性过滤：定点不可作业、机台状态、寸口/模套/特殊材料能力、模具占用和停机窗口；</li>
+ *   <li>再执行单控/普通机台类型约束，区分试制、量试、小批量和正规 SKU；</li>
+ *   <li>最后按定点机台、特殊机台后置、单控优先级、收尾时间、规格/英寸/胶囊/胎胚亲和度和窗口画像排序。</li>
+ * </ul>
+ *
+ * <p>注意：该策略不直接分配班次排量，只返回候选和排序；真正的换模、首检和产能落地在新增策略中执行。</p>
  *
  * @author APS
  */
@@ -83,7 +92,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 3. 获取已被其他计划占用的模具集合
         Set<String> occupiedMouldCodes = getOccupiedMouldCodes(context);
 
-        // 4. 过滤候选机台：状态启用 + 硬性指标匹配 + 模具未被占用
+        // 4. 过滤候选机台：状态启用 + 硬性指标匹配 + 模具未被占用。
+        // 这里只保留业务上可承接的机台，不在这里提前决定最终排产量。
         BigDecimal skuInch = parseInch(sku.getProSize());
         SpecialMaterialMatchResult specialMaterialMatchResult =
                 LhSpecialMaterialUtil.resolveMatchResult(context, sku);
@@ -122,9 +132,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
 
+        // 单控/普通机台约束是类型规则：试制强约束单控，量试/小批量优先单控，正规优先普通。
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
-        // 5. 按多维度排序
+        // 5. 按多维度排序：排序只改变候选顺序，不改变候选集合中的业务可排性。
         sortCandidates(context, candidates, sku, specialMaterialMatchResult);
         traceMachineCandidates(context, sku, specialMaterialMatchResult, candidates, trace);
 
@@ -226,9 +237,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                                                                 List<MachineScheduleDTO> singleControlCandidates,
                                                                 List<MachineScheduleDTO> normalCandidates) {
         if (isTrialConstructionStage(sku)) {
+            // 试制SKU只能使用单控机台，无单控候选时不回落普通机台。
             return singleControlCandidates;
         }
         if (isMassTrialSku(sku) || isSmallBatchSku(sku)) {
+            // 量试/小批量优先单控，但允许普通机台兜住可排性，具体顺序由后续排序控制。
             List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
                     singleControlCandidates.size() + normalCandidates.size());
             retainedCandidates.addAll(singleControlCandidates);
@@ -238,6 +251,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (!CollectionUtils.isEmpty(normalCandidates)) {
             if (LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode())
                     && !CollectionUtils.isEmpty(singleControlCandidates)) {
+                // 定点机台配置优先级高于正规SKU普通机台偏好，保留单控候选给定点规则排序。
                 List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
                         singleControlCandidates.size() + normalCandidates.size());
                 retainedCandidates.addAll(singleControlCandidates);
@@ -246,6 +260,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
             return normalCandidates;
         }
+        // 正规SKU仅在没有普通机台候选时才允许进入单控机台。
         return singleControlCandidates;
     }
 

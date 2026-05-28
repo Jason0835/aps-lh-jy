@@ -8,8 +8,13 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * SKU排程数据传输对象
- * <p>在排程过程中携带SKU的计算中间数据</p>
+ * SKU排程数据传输对象。
+ *
+ * <p>该对象在 S4.3 由月计划、产能、胎胚库存和历史完成量组装生成，随后在 S4.4/S4.5
+ * 作为排序、选机、收尾、班次分配和日计划账本扣减的核心入参。</p>
+ *
+ * <p>注意：多数数量字段会在排程过程中动态变化，例如 {@link #pendingQty}、
+ * {@link #remainingScheduleQty}、{@link #dailyPlanQuotaMap}。维护时不要把它当成只读月计划快照。</p>
  *
  * @author APS
  */
@@ -66,7 +71,7 @@ public class SkuScheduleDTO {
     private int mouldQty;
 
     // ========== 状态标记 ==========
-    /** SKU标记: 01-常规, 02-收尾 */
+    /** SKU标记: 01-常规, 02-收尾；由收尾判断策略写入，影响严格目标量和结果收尾标识 */
     private String skuTag;
     /** 排程类型: 01-续作, 02-新增, 03-换活字块 */
     private String scheduleType;
@@ -76,7 +81,7 @@ public class SkuScheduleDTO {
     private String constructionStage;
     /** 试制量试需求量 */
     private int trialDemandQty;
-    /** 是否小批量验证SKU */
+    /** 是否小批量验证SKU；正规 SKU 余量低于参数阈值时置为 true，主要影响单控/普通机台选择规则 */
     private boolean smallBatchValidation;
     /** 月计划结构起产日 */
     private Integer beginDay;
@@ -84,7 +89,7 @@ public class SkuScheduleDTO {
     // ========== 优先级信息 ==========
     /** 排产优先级代码 */
     private String priorityCode;
-    /** 排产顺序 */
+    /** 排产顺序；由 SKU 排序策略回写，最终用于排程结果 scheduleOrder */
     private int scheduleOrder;
     /** 是否有发货要求(锁定交期) */
     private boolean deliveryLocked;
@@ -102,7 +107,7 @@ public class SkuScheduleDTO {
     private int conventionProductionPendingQty;
 
     // ========== 机台信息(续作时使用) ==========
-    /** 续作机台编号 */
+    /** 续作机台编号；来源于 MES 在机/前批次结果，S4.4 按该机台继续排产 */
     private String continuousMachineCode;
     /** 续作机台上的模具号列表 */
     private List<String> mouldCodeList;
@@ -112,7 +117,7 @@ public class SkuScheduleDTO {
     private int endingDaysRemaining;
 
     // ========== 胎胚相关 ==========
-    /** 胎胚库存 */
+    /** 胎胚库存；-1 表示算法内部未知库存，结果落库时会按展示口径转换，避免未知库存直接误导排产裁剪 */
     private int embryoStock = -1;
     /** 胎胚可供硫化时长(小时) */
     private double embryoSupplyHours;
@@ -121,7 +126,7 @@ public class SkuScheduleDTO {
     /** 多机台拆量剩余排产量（收尾上调后由TargetScheduleQtyResolver写入，后续每台机台排产后递减） */
     private int remainingScheduleQty;
 
-    /** 窗口内每日计划额度，key = productionDate */
+    /** 窗口内每日计划额度，key = productionDate；由月计划 dayN 映射到排程窗口日期后生成 */
     private Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap;
 
     /** 窗口内日计划剩余量汇总（已扣减继承量、锁定量的每日剩余计划量之和） */
@@ -146,7 +151,7 @@ public class SkuScheduleDTO {
     /** 硫化示方书号 */
     private String lhNo;
 
-    /** 产品状态（来自月计划） */
+    /** 产品状态（来自月计划），后续用于匹配硫化示方类型和结果字段 PRODUCT_STATUS */
     private String productStatus;
 
     /**

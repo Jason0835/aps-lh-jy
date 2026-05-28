@@ -14,7 +14,18 @@ import java.math.BigDecimal;
 import java.util.Date;
 
 /**
- * 硫化排程结果实体类
+ * 硫化排程结果实体类。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>对应 {@code T_LH_SCHEDULE_RESULT}，保存一次硫化排程生成的机台、SKU、班次、示方、换模和状态结果；</li>
+ *   <li>S4.4 续作、换活字块和 S4.5 新增规格策略都会构建该对象；</li>
+ *   <li>S4.6 会在保存前补全工单号、班次收尾标记、硫化示方历史保护和审计字段；</li>
+ *   <li>发布 MES 时按批次号读取该表结果，不重新计算排程。</li>
+ * </ul>
+ *
+ * <p>注意：class1～class8 字段跟排程窗口班次索引绑定，不能按自然日固定理解；
+ * 窗口班次由班次配置和排程天数决定。</p>
  *
  * @author 自动生成
  * @date 2026-03-23
@@ -124,7 +135,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String mainMaterialDesc;
 
     /**
-     * 胎胚库存
+     * 胎胚库存。结果展示字段，来源于 SKU 分摊库存；算法内部未知库存可能用 -1 表示，落库时按展示口径处理。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.embryoStock")
     @ApiModelProperty(value = "胎胚库存", name = "embryoStock")
@@ -148,7 +159,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Integer lhTime;
 
     /**
-     * 日计划数量
+     * 日计划数量。当前结果行排到的总计划量，通常等于 class1～class8 计划量汇总。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.dailyPlanQty")
     @ApiModelProperty(value = "日计划数量", name = "dailyPlanQty")
@@ -229,7 +240,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String productionStatus;
 
     /**
-     * 1班计划量
+     * 1班计划量。班次索引由本次排程窗口决定，不固定等同自然日早/中/晚某一班。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class1PlanQty")
     @ApiModelProperty(value = "1班计划量", name = "class1PlanQty")
@@ -549,7 +560,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Integer class8FinishQty;
 
     /**
-     * 1班是否收尾 0-正常 1-收尾
+     * 1班是否收尾 0-正常 1-收尾。S4.6 按同 SKU 多机台、SKU 收尾和机台收尾规则统一回填。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class1IsEnd")
     @ApiModelProperty(value = "1班是否收尾 0-正常 1-收尾", name = "class1IsEnd")
@@ -709,7 +720,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String textNo;
 
     /**
-     * 硫化示方书号
+     * 硫化示方书号。来源于月计划/示方关系，并在后置阶段受历史班次保护逻辑约束。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.lhNo")
     @ApiModelProperty(value = "硫化示方书号", name = "lhNo")
@@ -855,7 +866,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
 
 
     /**
-     * 产品状态（来自月计划）
+     * 产品状态（来自月计划），用于区分试验示方、量试示方、正规示方等结果口径。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.productStatus", dictType = "trial_status")
     @ApiModelProperty(value = "产品状态", name = "productStatus")
@@ -870,7 +881,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String changedTrialStatus;
 
     /**
-     * 1班硫化示方书号
+     * 1班硫化示方书号。后置历史保护会保留已经开始或已过班次的历史示方，避免重排覆盖运行中班次。
      */
     @ApiModelProperty(value = "1班硫化示方书号", name = "class1LhNo")
     @TableField(value = "CLASS1_LH_NO")

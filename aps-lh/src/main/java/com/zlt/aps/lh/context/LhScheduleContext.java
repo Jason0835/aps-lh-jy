@@ -35,8 +35,18 @@ import java.util.*;
 import java.util.Objects;
 
 /**
- * 硫化排程上下文
- * <p>贯穿整个排程流程的数据总线，持有排程过程中所有需要的基础数据和中间结果</p>
+ * 硫化排程上下文。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>贯穿一次硫化排程从 S4.1 到 S4.6 的可变数据总线；</li>
+ *   <li>承载月计划、日计划额度、机台、模具、胎胚库存、MES在机、工作日历、保养/清洗等基础数据；</li>
+ *   <li>承载 SKU 归集结果、续作列表、新增列表、机台分配状态、结果列表、未排列表和模具交替计划；</li>
+ *   <li>为排序、选机、收尾、换模、换活字块、班次分配和结果校验策略共享同一运行态。</li>
+ * </ul>
+ *
+ * <p>注意：该对象会被多个 Handler/Strategy 原地修改。新增字段时必须同时确认初始化入口、消费策略、
+ * 结果落库和回归测试，避免上下文字段只有写入没有消费，或只有消费没有初始化。</p>
  *
  * @author APS
  */
@@ -91,7 +101,7 @@ public class LhScheduleContext {
 
     // ========== 基础数据(S4.2加载) ==========
 
-    /** 月生产计划列表 */
+    /** 月生产计划列表，来源于月计划最终结果表，是 SKU 归集和 day1/day2/day3 窗口计划量的主数据来源 */
     private List<FactoryMonthPlanProductionFinalResult> monthPlanList = new ArrayList<>();
     /** 周程滚动调整结果Map, key=materialCode */
     private Map<String, List<MpAdjustResult>> mpAdjustResultMap = new HashMap<>();
@@ -111,7 +121,7 @@ public class LhScheduleContext {
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
     /** 月底计划余量Map, key=materialCode */
     private Map<String, MdmMonthSurplus> monthSurplusMap = new HashMap<>();
-    /** 胎胚实时库存Map, key=embryoCode */
+    /** 胎胚实时库存Map, key=embryoCode；S4.3 会按同胎胚 SKU 标准产能占比分摊到 SKU 维度 */
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
     /** 日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd) */
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
@@ -162,9 +172,9 @@ public class LhScheduleContext {
     private boolean rollingScheduleHandoff;
     /** SKU按结构归集, key=structureName, value=SKU排程DTO列表 */
     private Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
-    /** 续作SKU列表 */
+    /** 续作SKU列表，来源于 MES 在机/前批次状态，S4.4 优先排产 */
     private List<SkuScheduleDTO> continuousSkuList = new ArrayList<>();
-    /** 新增SKU列表 */
+    /** 新增SKU列表，续作和换活字块未消费完的 SKU 会继续保留到 S4.5 新增链路 */
     private List<SkuScheduleDTO> newSpecSkuList = new ArrayList<>();
     /** 前一日欠产/超产向当日传导的净值，key=materialCode */
     private Map<String, Integer> carryForwardQtyMap = new HashMap<>();
@@ -184,7 +194,7 @@ public class LhScheduleContext {
     private Map<SkuScheduleDTO, Boolean> newSpecSingleControlStructureEndingLayerMap = new IdentityHashMap<>();
     /** 续作结果日额度账本是否已完成最终同步，防止同一上下文重复扣账 */
     private boolean continuousDailyQuotaSynced;
-    /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中 */
+    /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中，供后置校验回到原始日计划账本 */
     private Map<LhScheduleResult, SkuScheduleDTO> scheduleResultSourceSkuMap = new IdentityHashMap<>();
 
     // ========== 机台分配状态 ==========
@@ -195,7 +205,7 @@ public class LhScheduleContext {
     private Map<String, MachineScheduleDTO> initialMachineScheduleMap = new LinkedHashMap<>();
     /** 机台剩余产能Map, key=machineCode, value=各班次剩余产能 */
     private Map<String, int[]> machineShiftCapacityMap = new LinkedHashMap<>();
-    /** 班次运行态，key=班次索引 1～N（N≤8） */
+    /** 班次运行态，key=班次索引 1～N（N≤8），承载开停产、工作日历和历史班次保护后的可排状态 */
     private Map<Integer, ShiftRuntimeState> shiftRuntimeStateMap = new LinkedHashMap<>(8);
     /** 本次排程解析后的班次窗口 */
     private List<LhShiftConfigVO> scheduleWindowShifts = new ArrayList<>();
@@ -203,7 +213,7 @@ public class LhScheduleContext {
     private Map<Integer, ShiftProductionControlDTO> shiftProductionControlMap = new LinkedHashMap<>(8);
     /** 机台已分配SKU Map, key=machineCode, value=已分配的排程结果 */
     private Map<String, List<LhScheduleResult>> machineAssignmentMap = new LinkedHashMap<>();
-    /** 定点机台挤量预留切换开始时间, key=machineCode */
+    /** 定点机台挤量预留切换开始时间, key=machineCode；用于续作非收尾给后续定点新增留出换模窗口 */
     private Map<String, Date> specifyMachineReservedSwitchStartTimeMap = new LinkedHashMap<>();
     /** 定点机台挤量预留物料编码, key=machineCode */
     private Map<String, String> specifyMachineReservedMaterialMap = new LinkedHashMap<>();

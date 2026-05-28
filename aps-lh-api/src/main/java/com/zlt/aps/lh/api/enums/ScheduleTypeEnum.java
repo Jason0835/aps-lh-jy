@@ -7,7 +7,9 @@ import lombok.AllArgsConstructor;
 import lombok.Getter;
 
 /**
- * 排程类型枚举
+ * 排程类型枚举。
+ *
+ * <p>对应排程结果 {@code SCHEDULE_TYPE} 字段，也用于策略工厂选择排产策略。</p>
  *
  * @author zlt
  */
@@ -15,8 +17,11 @@ import lombok.Getter;
 @AllArgsConstructor
 public enum ScheduleTypeEnum {
 
+    /** 01-续作，S4.4 对 MES 在机/滚动继承规格继续排产 */
     CONTINUOUS("01", "续作"),
+    /** 02-新增，S4.5 对新增待排 SKU 执行选机、换模、首检和班次分配 */
     NEW_SPEC("02", "新增"),
+    /** 03-换活字块，S4.4 收尾后同胎胚同模具等条件满足时衔接下一规格 */
     TYPE_BLOCK("03", "换活字块");
 
     /** 类型编码 */

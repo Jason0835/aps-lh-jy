@@ -731,6 +731,7 @@ public final class LhScheduleTimeUtil {
         };
         for (String pattern : patterns) {
             try {
+                // TODO 后续可统一替换为 Hutool 日期解析，当前保留多格式兼容行为。
                 SimpleDateFormat format = new SimpleDateFormat(pattern);
                 format.setLenient(false);
                 return format.parse(text);

@@ -42,8 +42,18 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * S4.3 排程调整与SKU归集处理器
- * <p>基于前日排程修正产量，从月计划获取SKU，按结构归集，计算硫化余量，标记收尾/续作状态</p>
+ * S4.3 排程调整与SKU归集处理器。
+ *
+ * <p>主要职责：</p>
+ * <ul>
+ *   <li>将前批次/前日排程与实际完成量对比，形成欠产或超产向本窗口传导的净值；</li>
+ *   <li>从月计划结果构建 {@link SkuScheduleDTO}，映射物料、结构、胎胚、dayN、余量、库存和产能；</li>
+ *   <li>按产品结构归集 SKU，标记 SKU 收尾、结构收尾、续作和新增；</li>
+ *   <li>初始化日计划额度账本，供后续 S4.4/S4.5 按班次消费。</li>
+ * </ul>
+ *
+ * <p>该步骤会修改上下文中的 SKU 列表、结构分组、欠产传导 Map 和未排结果列表，
+ * 但不直接生成正常排程结果。</p>
  *
  * @author APS
  */
@@ -167,7 +177,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         Map<String, Integer> embryoStandardCapacitySumMap = buildEmbryoStandardCapacitySumMap(context);
 
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
-            // 计算硫化余量
+            // 计算硫化余量：当前代码统一使用月计划总量减完成量，不再读取月余量表作为兜底。
             SurplusCalculation surplus = calculateSurplusQty(context, plan);
             SkuScheduleDTO dto = buildSkuScheduleDTO(context, plan, surplus, embryoStandardCapacitySumMap);
 
@@ -320,7 +330,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int inheritedPlanQty = Math.max(0, context.getInheritedPlanQtyMap().getOrDefault(plan.getMaterialCode(), 0));
         dto.setWindowPlanQty(windowPlanQty);
 
-        // 初始化日计划额度账本：按排程窗口日期读取月计划 dayN，扣减继承量
+        // 初始化日计划额度账本：按排程窗口日期读取月计划 dayN，扣减继承量。
+        // day1/day2/day3 的业务日期由窗口 T日～目标日决定，不能按字段名固定绑定自然日。
         Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap = buildDailyPlanQuotaMap(
                 context, plan, dto.getMaterialCode());
         deductInheritedFromDailyQuota(dailyPlanQuotaMap, inheritedPlanQty);
@@ -387,7 +398,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setMidPriorityPendingQty(safeInt(plan.getMidProductionQty()));
         dto.setConventionProductionPendingQty(safeInt(plan.getConventionProductionQty()));
 
-        // 施工阶段
+        // 施工阶段：试制/量试/正规来自月计划，后续影响排序、单控机台选择和严格目标量。
         dto.setConstructionStage(plan.getConstructionStage());
         dto.setTrialDemandQty(safeInt(plan.getTrialQty()));
         dto.setBeginDay(plan.getBeginDay());
@@ -415,7 +426,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 产品状态（来自月计划）
         dto.setProductStatus(plan.getProductStatus());
 
-        // 试制SKU严格限制目标量，不允许超出dayN补满班次
+        // 试制SKU严格限制目标量，不允许超出dayN补满班次；量试/正规仍可按后续策略补满可用班次。
         if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), dto.getConstructionStage())) {
             dto.setStrictTargetQty(true);
         }

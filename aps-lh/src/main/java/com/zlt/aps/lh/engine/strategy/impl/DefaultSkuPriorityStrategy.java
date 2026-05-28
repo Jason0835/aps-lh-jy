@@ -32,8 +32,18 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * 默认SKU排产优先级策略实现
- * <p>基于发货要求、延误天数、结构全收尾优先级和供应链优先级进行多维度排序</p>
+ * 默认SKU排产优先级策略实现。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>同时服务 S4.4 续作和 S4.5 新增排产的 SKU 顺序整理；</li>
+ *   <li>主排序优先考虑交期锁定、延误天数、结构全收尾、供应链优先级等全局因素；</li>
+ *   <li>试制、量试、小批量只在新增 SKU 的同层级 tie-break 中体现，不直接越过交期、延误和结构收尾主排序；</li>
+ *   <li>排序完成后回写 {@code scheduleOrder}，供最终结果展示和日志追踪。</li>
+ * </ul>
+ *
+ * <p>注意：该类只负责 SKU 顺序，不负责机台可用性、单控约束或排产量计算；
+ * 这些规则分别在机台匹配策略和目标量策略中处理。</p>
  *
  * @author APS
  */
@@ -54,6 +64,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         log.info("执行SKU优先级排序, 续作SKU数: {}, 新增SKU数: {}",
                 context.getContinuousSkuList().size(), context.getNewSpecSkuList().size());
 
+        // 结构收尾元数据使用对象身份保存，避免相同物料编码在不同阶段/列表中互相覆盖。
         Map<SkuScheduleDTO, Integer> structureEndingDaysMap = new IdentityHashMap<>(16);
         Map<String, StructurePriorityMeta> structurePriorityMap = buildStructurePriorityMap(
                 context, structureEndingDaysMap);
@@ -62,6 +73,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         Comparator<SkuScheduleDTO> tailComparator = buildTailComparator(context);
         Comparator<SkuScheduleDTO> comparator = priorityComparator.thenComparing(tailComparator)
                 .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
+        // 新增规格有试制/量试/小批量 tie-break，因此使用专用比较器；续作沿用主比较器。
         Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(
                 context, structurePriorityMap, structureEndingDaysMap, tailComparator);
         sortSkuList(context.getContinuousSkuList(), comparator);
@@ -155,14 +167,17 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                                   Comparator<SkuScheduleDTO> tailComparator,
                                   SkuScheduleDTO left,
                                   SkuScheduleDTO right) {
+        // 新增SKU先按施工阶段分组：试制、量试、小批量/正规分层；分组内再走各自规则。
         int compareResult = Integer.compare(resolveNewSpecGroupScore(left), resolveNewSpecGroupScore(right));
         if (compareResult != 0) {
             return compareResult;
         }
 
         if (isTrialGroupSku(left) || isMassTrialGroupSku(left)) {
+            // 试制/量试组不套用完整供应链排序，避免被正规SKU的供应链量级干扰。
             compareResult = compareTrialOrMassTrialGroup(left, right);
         } else {
+            // 正规组继续复用交期、延误、结构收尾、供应链等主排序。
             compareResult = compareFormalGroupSku(context, structurePriorityMap,
                     structureEndingDaysMap, tailComparator, left, right);
         }
@@ -221,6 +236,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
     /**
      * 正规组内继续复用现有新增排序逻辑。
+     *
+     * <p>排序层级：定点机台优先、交期锁定、延误天数、结构全收尾、供应链待排量和开产靠后因素。</p>
      */
     private int compareFormalGroupSku(LhScheduleContext context,
                                       Map<String, StructurePriorityMeta> structurePriorityMap,
@@ -250,6 +267,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
     /**
      * 试制/量试组内只按延误、排产量、物料编码排序。
+     *
+     * <p>该分支用于避免试制/量试 SKU 在同组内继续受正规供应链字段影响。</p>
      */
     private int compareTrialOrMassTrialGroup(SkuScheduleDTO left, SkuScheduleDTO right) {
         int compareResult = compareDelayDays(left, right);

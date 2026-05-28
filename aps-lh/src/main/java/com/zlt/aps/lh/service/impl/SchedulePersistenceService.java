@@ -42,7 +42,15 @@ import java.util.stream.Collectors;
 /**
  * 排程结果原子替换持久化服务。
  *
- * <p>统一负责二次发布校验、删除旧数据并写入新批次结果，确保同一目标日只出现一套完整数据。</p>
+ * <p>业务职责：</p>
+ * <ul>
+ *   <li>在事务中完成目标日旧排程结果、未排结果、换模计划和过程日志的删除与新数据写入；</li>
+ *   <li>保存前二次校验发布状态，避免覆盖已下发 MES 的目标日结果；</li>
+ *   <li>补齐审计字段，并统一计算 class1～class8 班次收尾标记；</li>
+ *   <li>保持 S4.6 的持久化边界集中，避免各策略直接写库。</li>
+ * </ul>
+ *
+ * <p>注意：该服务不重新计算排程量，不改变机台选择和排序，只做保存前字段补齐与同目标日原子替换。</p>
  *
  * @author APS
  */
@@ -75,6 +83,15 @@ public class SchedulePersistenceService {
 
     /**
      * 以事务方式原子替换目标日排程结果。
+     *
+     * <p>处理流程：</p>
+     * <ol>
+     *   <li>再次校验目标日是否已有已发布结果；</li>
+     *   <li>删除同工厂同目标日旧排程结果、未排结果和换模计划；</li>
+     *   <li>按旧批次号删除旧过程日志；</li>
+     *   <li>补齐新结果审计字段和班次收尾标记；</li>
+     *   <li>批量写入新结果、未排结果、换模计划和过程日志。</li>
+     * </ol>
      *
      * @param context 排程上下文
      */
@@ -128,7 +145,7 @@ public class SchedulePersistenceService {
         }
 
         if (!context.getScheduleResultList().isEmpty()) {
-            // 为排程结果补齐审计字段和班次收尾标记
+            // 为排程结果补齐审计字段和班次收尾标记；不改变已生成的班次计划量。
             fillScheduleResultAuditInfo(context, context.getScheduleResultList());
             fillClassEndFlags(context, context.getScheduleResultList());
             scheduleResultMapper.insertBatch(context.getScheduleResultList());
@@ -177,6 +194,9 @@ public class SchedulePersistenceService {
 
     /**
      * 保存前统一计算1-8班收尾标记。
+     *
+     * <p>同 SKU 多机台场景下，辅助机台最后一个有计划量的班次也视为机台收尾；
+     * 单机台或普通非收尾场景则仅按 SKU 收尾标记回填。</p>
      *
      * @param context 排程上下文
      * @param scheduleResults 排程结果列表
@@ -244,6 +264,9 @@ public class SchedulePersistenceService {
     /**
      * 按同SKU结果分组计算班次收尾标记。
      *
+     * <p>该方法只写 classNIsEnd 字段，不调整 classNPlanQty 或排程结束时间。</p>
+     *
+     * @param context 排程上下文
      * @param resultGroup 同SKU结果分组
      */
     private void fillClassEndFlagsForGroup(LhScheduleContext context, List<LhScheduleResult> resultGroup) {

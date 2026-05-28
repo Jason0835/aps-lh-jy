@@ -26,15 +26,17 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 排程策略工厂（改进版）
- * <p>
- * 改进点：
+ * 硫化排程策略工厂。
+ *
+ * <p>业务定位：</p>
  * <ul>
- *   <li>支持策略自注册：策略实现类通过接口方法声明自己的类型</li>
- *   <li>支持多实现：同一类型可注册多个策略，通过策略名称区分</li>
- *   <li>集中管理：所有策略通过工厂获取，便于统一管理和监控</li>
+ *   <li>集中管理续作、新增、机台匹配、SKU排序、换模均衡、首检均衡、产能计算等策略 Bean；</li>
+ *   <li>排产策略按 {@code scheduleType} 自注册，S4.4/S4.5 Handler 通过工厂获取对应策略；</li>
+ *   <li>单例策略通过明确 getter 提供给 Handler，避免业务入口直接依赖具体实现类。</li>
  * </ul>
- * </p>
+ *
+ * <p>注意：该类只负责策略获取和注册，不承载排程规则。新增策略时必须保证策略类型与
+ * {@code ScheduleTypeEnum} 或调用方约定一致。</p>
  *
  * @author APS
  */

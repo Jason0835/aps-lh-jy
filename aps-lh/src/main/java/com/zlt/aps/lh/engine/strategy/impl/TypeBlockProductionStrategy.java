@@ -61,8 +61,18 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 换活字块排产子策略
- * <p>负责 S4.4 收尾后的换活字块衔接排产，与续作收尾策略分开维护。</p>
+ * 换活字块排产子策略。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>在 S4.4 续作收尾后，根据机台收尾时间寻找可以更换活字块衔接的新增 SKU；</li>
+ *   <li>优先使用收尾机台，必要时使用在机前规格兜底机台；</li>
+ *   <li>候选 SKU 需要满足同胎胚、同模具、可更换活字块、机台硬性准入等条件；</li>
+ *   <li>结果落地后仍作为排程结果进入统一日计划账本、胎胚库存和后置校验链路。</li>
+ * </ul>
+ *
+ * <p>注意：本类只处理“无需走新增换模主链”的换活字块衔接。若候选物料存在定点机台或新增换模
+ * 更适合承接，会回流到 S4.5 新增规格链路。</p>
  *
  * @author APS
  */
@@ -135,6 +145,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 endingMachines.size(), fallbackMachines.size(), candidateMachines.size(),
                 context.getNewSpecSkuList().size());
 
+        // completedMachineMap 记录本轮不再尝试的机台，避免同一机台在一轮中反复失败重试。
         Map<String, Boolean> completedMachineMap = new HashMap<>(Math.max(16, candidateMachines.size() * 2));
         Set<String> returnedToNewSpecMaterialCodes = new LinkedHashSet<String>(16);
         int typeBlockScheduledCount = 0;
@@ -153,6 +164,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             for (MachineScheduleDTO machine : activeMachines) {
                 String machineCode = machine.getMachineCode();
                 SkuScheduleDTO limitSpecifySku = selectLimitSpecifySkuByMachine(context, machine);
+                // 定点物料若更适合走新增换模主链，则当前收尾机台预留给 S4.5，不在 S4.4 抢先换活字块。
                 if (shouldReserveMachineForSpecifyNewSpec(context, machine, limitSpecifySku, shifts)) {
                     completedMachineMap.put(machineCode, true);
                     log.info("收尾机台预留给定点物料新增换模链路, machineCode: {}, materialCode: {}",
@@ -177,6 +189,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     break;
                 }
 
+                // 基于同胎胚、同模具、同主花纹等条件筛选可换活字块候选。
                 List<SkuScheduleDTO> typeBlockCandidates = filterTypeBlockCandidates(
                         context, machine, returnedToNewSpecMaterialCodes);
                 SkuScheduleDTO typeBlockSku = selectPreferredSkuFromCandidates(typeBlockCandidates);
@@ -190,6 +203,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     completedMachineMap.put(machineCode, true);
                     continue;
                 }
+                // 候选SKU如需完整换模/首检能力评估，则让渡给新增排产链路。
                 if (shouldReserveMachineForNewSpecPath(context, machine, typeBlockSku, shifts)) {
                     completedMachineMap.put(machineCode, true);
                     log.info("候选SKU需走新增换模主链，当前阶段预留机台, machineCode: {}, materialCode: {}",
@@ -200,6 +214,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                             context, machine, machine.getEstimatedEndTime());
                 }
+                // 换活字块切换起点需要避开晚班不可换模、保养、停机等窗口。
                 Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(
                         context, machine, machine.getEstimatedEndTime());
                 Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
@@ -224,7 +239,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 if (!machine.isEnding()) {
                     completedMachineMap.put(machineCode, true);
                 }
-                // 每轮仅落一条结果，随后按更新后的机台收尾时间重新排序。
+                // 每轮仅落一条结果，随后按更新后的机台收尾时间重新排序，避免旧排序继续影响后续衔接。
                 break;
             }
             if (!scheduledInCurrentRound) {

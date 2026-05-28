@@ -27,8 +27,19 @@ import java.util.Date;
 import java.util.List;
 
 /**
- * 硫化排程主服务实现
- * <p>排程入口，负责构建上下文并委托给排程执行器</p>
+ * 硫化排程主服务实现。
+ *
+ * <p>主要职责：</p>
+ * <ul>
+ *   <li>接收控制器传入的排程请求，构建本次排程上下文；</li>
+ *   <li>解析并固化本次排程参数快照，保证一次排程内规则口径稳定；</li>
+ *   <li>通过 {@link ScheduleExecutionGuard} 控制同工厂同目标日的并发排程；</li>
+ *   <li>委托 {@link IScheduleExecutor} 进入模板链路，执行基础数据初始化、SKU归集、续作、新增和结果校验保存；</li>
+ *   <li>按批次号发布已保存的排程结果并触发发布事件。</li>
+ * </ul>
+ *
+ * <p>该类位于整体流程的服务入口层，只做流程编排和边界控制，不直接实现 SKU 排序、机台匹配、
+ * 班次排量、换模或换活字块算法。</p>
  *
  * @author APS
  */
@@ -59,6 +70,7 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
         LhScheduleContext context = buildContext(request);
         String lockToken = null;
         try {
+            // 同工厂同目标日串行执行，避免两个批次同时替换同一天结果。
             log.info("准备获取排程执行锁, 工厂: {}, 目标日: {}, T日: {}, 排程天数: {}",
                     context.getFactoryCode(),
                     LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
@@ -99,7 +111,7 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
                 return LhScheduleResponseDTO.fail(batchNo, "批次号[" + batchNo + "]对应的排程结果不存在");
             }
 
-            // 2. 更新发布状态为"已发布"（1）
+            // 2. 只更新发布状态，不调整排程结果中的机台、班次、计划量和换模字段。
             for (LhScheduleResult result : results) {
                 result.setIsRelease(ReleaseStatusEnum.RELEASED.getCode());
             }
@@ -108,7 +120,7 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
                     .eq(LhScheduleResult::getBatchNo, batchNo)
                     .eq(LhScheduleResult::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
 
-            // 3. 发布排程结果发布事件（通知MES系统）
+            // 3. 发布排程结果发布事件（通知MES系统），事件消费者只基于当前批次结果工作。
             LhScheduleContext publishContext = new LhScheduleContext();
             publishContext.setBatchNo(batchNo);
             publishContext.setScheduleResultList(results);
@@ -124,8 +136,17 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
     }
 
     /**
-     * 构建排程上下文
-     * <p>先解析本次排程配置快照，再按 scheduleDays 计算窗口起点 T 日</p>
+     * 构建排程上下文。
+     *
+     * <p>处理流程：</p>
+     * <ol>
+     *   <li>写入工厂、操作人、月计划版本等请求参数；</li>
+     *   <li>将请求日期标准化为排程目标日；</li>
+     *   <li>解析硫化参数形成 {@code LhScheduleConfig} 快照；</li>
+     *   <li>根据 {@code SCHEDULE_DAYS} 反推出窗口起点 T 日，供班次、日计划 dayN 和基础数据加载使用。</li>
+     * </ol>
+     *
+     * <p>该方法会修改并返回新建的 {@link LhScheduleContext}，不访问排程结果表，也不触发算法计算。</p>
      *
      * @param request 排程请求
      * @return 排程上下文

@@ -8,8 +8,14 @@ import java.util.Date;
 import java.util.List;
 
 /**
- * 机台排程数据传输对象
- * <p>记录机台在排程过程中的状态</p>
+ * 机台排程数据传输对象。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>S4.2 根据机台台账、MES在机、停机、保养、清洗、胶囊等数据初始化；</li>
+ *   <li>S4.4/S4.5 排产过程中持续更新当前在机物料、预计结束时间、班次可用状态和换模/清洗窗口；</li>
+ *   <li>供机台匹配、换模均衡、首检均衡、产能计算、换活字块和结果校验共同读取。</li>
+ * </ul>
  *
  * @author APS
  */
@@ -40,11 +46,11 @@ public class MachineScheduleDTO {
     private int machineOrder;
 
     // ========== 在产信息 ==========
-    /** 当前在产物料编码 */
+    /** 当前在产物料编码，来源于 MES 在机或排程运行态更新，是续作和换活字块判断的基础 */
     private String currentMaterialCode;
     /** 当前在产物料描述 */
     private String currentMaterialDesc;
-    /** 前规格物料编码（换模前机台当前在机物料编码） */
+    /** 前规格物料编码（换模前机台当前在机物料编码），用于生成换模计划前规格信息 */
     private String previousMaterialCode;
     /** 前规格物料描述（换模前机台当前在机物料描述） */
     private String previousMaterialDesc;
@@ -54,7 +60,7 @@ public class MachineScheduleDTO {
     private String previousProSize;
 
     // ========== 收尾信息 ==========
-    /** 是否即将收尾 */
+    /** 是否即将收尾；续作/换活字块会用该标识判断机台是否可以衔接下一规格 */
     private boolean ending;
     /** 预计收尾时间 */
     private Date estimatedEndTime;
@@ -62,9 +68,9 @@ public class MachineScheduleDTO {
     private String nextMaterialCode;
 
     // ========== 产能信息 ==========
-    /** 各班次剩余产能: 按班次索引(0-8对应9个班次) */
+    /** 各班次剩余产能: 按班次索引(0-8对应9个班次)，实际业务班次从1开始使用 */
     private int[] shiftRemainingCapacity = new int[9];
-    /** 各班次是否可用(考虑停机/清洗等) */
+    /** 各班次是否可用(考虑工作日历、开停产、停机、清洗等约束) */
     private boolean[] shiftAvailable = new boolean[9];
 
     // ========== 设备停机信息 ==========

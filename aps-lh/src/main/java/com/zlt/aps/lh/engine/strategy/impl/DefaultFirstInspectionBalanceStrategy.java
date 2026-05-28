@@ -140,6 +140,7 @@ public class DefaultFirstInspectionBalanceStrategy implements IFirstInspectionBa
     }
 
     private String formatDateKey(Date date) {
+        // TODO 后续可统一替换为 Hutool 或 java.time 格式化，当前保持首检日维度计数键不变。
         return new SimpleDateFormat(DATE_KEY_FORMAT).format(date);
     }
 

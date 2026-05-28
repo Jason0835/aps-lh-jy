@@ -32,8 +32,16 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * 排产目标量解析器
- * <p>统一承载"按需求排产 / 按产能满排"的目标量口径，避免分散判断。</p>
+ * 排产目标量解析器。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>统一承载“按需求排产”和“按产能满排”的目标量口径；</li>
+ *   <li>根据 SKU 待排量、日计划账本、严格目标量、窗口理论产能和机台实际可用窗口收敛目标量；</li>
+ *   <li>为结构五天内收尾、单机台满排、收尾上调和多机台产能评估提供同一套容量计算入口。</li>
+ * </ul>
+ *
+ * <p>注意：该组件只计算目标量或产能上限，不直接修改排程结果；调用方负责把目标量写回 SKU 并消费账本。</p>
  *
  * @author APS
  */
@@ -62,7 +70,7 @@ public class TargetScheduleQtyResolver {
             return 0;
         }
         int upperLimitQty;
-        // 试制SKU严格按日计划排产，不允许超出dayN补满班次，忽略全局满排模式
+        // 试制/收尾等严格目标量 SKU 按 dayN 与余量控制，不允许为了补满班次突破目标量。
         if (sku.isStrictTargetQty()) {
             int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
             if (windowRemainingPlanQty > 0) {
@@ -72,12 +80,12 @@ public class TargetScheduleQtyResolver {
                 upperLimitQty = pendingQty;
             }
         } else if (isFullCapacityMode(context)) {
-            // 正式/量试SKU允许超出dayN补满班次，按理论窗口产能封顶
+            // 正式/量试SKU允许超出dayN补满班次，按理论窗口产能封顶。
             upperLimitQty = resolveTheoreticalWindowCapacity(context, sku);
             // 满排模式下目标量直接取窗口理论满产产能，不因 dayN 计划量较小而被钳制
             return Math.max(0, upperLimitQty);
         } else {
-            // 按需求排产只保留”需求口径”，不在此阶段按窗口额度压缩目标量。
+            // 按需求排产只保留“需求口径”，不在此阶段按窗口额度压缩目标量。
             // 欠产滚动、未来预占、窗口总量封顶统一交由日计划账本消费链路处理，
             // 避免 DTO 初始化后再次把需求量压回 dayN 额度。
             upperLimitQty = pendingQty;
@@ -105,7 +113,8 @@ public class TargetScheduleQtyResolver {
             return 0;
         }
         int currentTargetQty = sku.resolveTargetScheduleQty();
-        // 试制/收尾SKU严格限制目标量，不允许为了凑满班次而超排
+        // 试制/收尾SKU严格限制目标量，不允许为了凑满班次而超排。
+        // 满排模式下的正式/量试SKU才会根据真实机台窗口再次收敛目标量。
         if (currentTargetQty <= 0 || !isFullCapacityMode(context) || sku.isStrictTargetQty()) {
             return Math.max(currentTargetQty, 0);
         }

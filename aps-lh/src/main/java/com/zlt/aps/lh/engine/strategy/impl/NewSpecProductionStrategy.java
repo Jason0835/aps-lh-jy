@@ -80,8 +80,18 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * 新增规格排产策略实现
- * <p>处理新增规格上机的排产逻辑, 包括机台匹配、换模均衡、首检分配、产能计算等</p>
+ * 新增规格排产策略实现。
+ *
+ * <p>业务定位：</p>
+ * <ul>
+ *   <li>处理 S4.5 新增 SKU 的选机、换模、首检、开产时间、班次分配和未排原因归集；</li>
+ *   <li>支持同 SKU 单机台、多机台、尾量归集、非收尾补满、收尾严格控量和晚班不可换模衔接；</li>
+ *   <li>消费 S4.3 初始化的日计划账本，并在胎胚库存裁剪后同步机台运行态；</li>
+ *   <li>与机台匹配、换模均衡、首检均衡、目标量解析和局部搜索策略协作完成新增规格排产。</li>
+ * </ul>
+ *
+ * <p>注意：本类方法较长且历史规则较多。维护时应优先局部补注释和小方法，不应改变排序、
+ * 机台选择、日计划账本和收尾判断的既有语义。</p>
  *
  * @author APS
  */
@@ -173,7 +183,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 refreshResultSummary(context, result);
             }
         }
-        // 多机台余量和胎胚库存按机台数均分，最后一台补尾差
+        // 多机台余量和胎胚库存按机台数均分，最后一台补尾差，保证展示口径与总量一致。
         distributeMultiMachineSurplusAndStock(context);
         finalizeZeroPlanNewSpecResults(context);
         // 新增结果在库存裁剪后需按最终计划量复核收尾语义，避免"未收完却标收尾"。
@@ -218,6 +228,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                  ICapacityCalculateStrategy capacityCalculate) {
         log.info("新增排产 - 执行新增规格排产, 新增SKU数: {}", context.getNewSpecSkuList().size());
 
+        // shifts 是本次排程窗口 class1～class8 的实际业务班次，后续所有班次排量都按该列表落字段。
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
         Map<String, Integer> unscheduledReasonCountMap = new LinkedHashMap<>(8);
         initializePendingNewSpecSkuTypeCounts(context);
@@ -249,6 +260,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                         ICapacityCalculateStrategy capacityCalculate,
                                         List<LhShiftConfigVO> shifts,
                                         Map<String, Integer> unscheduledReasonCountMap) {
+        // TODO 后续建议把新增排产主循环拆为“候选生成、窗口分配、结果构建、账本消费”四个私有阶段，降低单方法维护成本。
         RoundScheduleSummary roundSummary = schedulePendingNewSpecsRound(context, machineMatch, mouldChangeBalance,
                 inspectionBalance, capacityCalculate, shifts, unscheduledReasonCountMap);
         return roundSummary.getScheduledCount();

@@ -42,8 +42,15 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * S4.2 基础数据初始化处理器
- * <p>加载所有基础数据并通过责任链校验，封装成排程可用的对象结构</p>
+ * S4.2 基础数据初始化处理器。
+ *
+ * <p>业务职责：</p>
+ * <ul>
+ *   <li>解析本次排程窗口内的班次配置，确定 class1～class8 的运行时含义；</li>
+ *   <li>加载月计划、机台、模具、示方、MES在机、胎胚库存、工作日历、停机、保养和清洗等基础数据；</li>
+ *   <li>通过数据校验链确认关键基础数据完整；</li>
+ *   <li>初始化 {@link MachineScheduleDTO} 机台运行态，供续作、新增、换模、换活字块共享。</li>
+ * </ul>
  *
  * @author APS
  */
@@ -120,7 +127,8 @@ public class DataInitHandler extends AbsScheduleStepHandler {
             return;
         }
 
-        // S4.2.4 封装标准化数据对象（初始化机台排程状态）
+        // S4.2.4 封装标准化数据对象（初始化机台排程状态）。
+        // 机台运行态会在后续策略中持续修改，因此这里保留 initialMachineScheduleMap 作为基线快照。
         buildStandardDataObjects(context);
 
         List<LhShiftConfigVO> windowShifts = context.getScheduleWindowShifts();
