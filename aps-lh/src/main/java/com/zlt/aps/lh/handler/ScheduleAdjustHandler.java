@@ -412,6 +412,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setMonthPlanVersion(plan.getMonthPlanVersion());
         dto.setProductionVersion(plan.getProductionVersion());
 
+        // 产品状态（来自月计划）
+        dto.setProductStatus(plan.getProductStatus());
+
         // 试制SKU严格限制目标量，不允许超出dayN补满班次
         if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), dto.getConstructionStage())) {
             dto.setStrictTargetQty(true);

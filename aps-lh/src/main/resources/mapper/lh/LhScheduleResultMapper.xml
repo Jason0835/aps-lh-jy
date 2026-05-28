@@ -26,7 +26,10 @@
             CONSTRUCTION_STAGE, EMBRYO_NO, TEXT_NO, LH_NO, MONTH_PLAN_VERSION,
             MACHINE_ORDER, IS_TRIAL, REAL_SCHEDULE_DATE, TDAY_SPEC_END_TIME,
             IS_FIRST, MOULD_SURPLUS_QTY, IS_END, PRODUCTION_VERSION, MOULD_CODE,
-            HAS_SPECIAL_MATERIAL, IS_SPLIT, SCHEDULE_ORDER, SCHEDULE_TYPE, IS_CHANGE_MOULD, TOTAL_DAILY_PLAN_QTY, IS_TYPE_BLOCK, TRIAL_STATUS, CHANGED_TRIAL_STATUS, MOULD_CHANGE_START_TIME,
+            HAS_SPECIAL_MATERIAL, IS_SPLIT, SCHEDULE_ORDER, SCHEDULE_TYPE, IS_CHANGE_MOULD, TOTAL_DAILY_PLAN_QTY, IS_TYPE_BLOCK, PRODUCT_STATUS, CHANGED_TRIAL_STATUS,
+            CLASS1_LH_NO, CLASS1_LH_TYPE, CLASS2_LH_NO, CLASS2_LH_TYPE, CLASS3_LH_NO, CLASS3_LH_TYPE, CLASS4_LH_NO, CLASS4_LH_TYPE,
+            CLASS5_LH_NO, CLASS5_LH_TYPE, CLASS6_LH_NO, CLASS6_LH_TYPE, CLASS7_LH_NO, CLASS7_LH_TYPE, CLASS8_LH_NO, CLASS8_LH_TYPE,
+            MOULD_CHANGE_START_TIME,
             CREATE_BY, CREATE_TIME, UPDATE_BY, UPDATE_TIME, REMARK, IS_DELETE
         ) VALUES
         <foreach collection="list" item="item" separator=",">
@@ -51,7 +54,10 @@
                 #{item.constructionStage}, #{item.embryoNo}, #{item.textNo}, #{item.lhNo}, #{item.monthPlanVersion},
                 #{item.machineOrder}, #{item.isTrial}, #{item.realScheduleDate}, #{item.tdaySpecEndTime},
                 #{item.isFirst}, #{item.mouldSurplusQty}, #{item.isEnd}, #{item.productionVersion}, #{item.mouldCode},
-                #{item.hasSpecialMaterial}, #{item.isSplit}, #{item.scheduleOrder}, #{item.scheduleType}, #{item.isChangeMould}, #{item.totalDailyPlanQty}, #{item.isTypeBlock}, #{item.trialStatus}, #{item.changedTrialStatus}, #{item.mouldChangeStartTime},
+                #{item.hasSpecialMaterial}, #{item.isSplit}, #{item.scheduleOrder}, #{item.scheduleType}, #{item.isChangeMould}, #{item.totalDailyPlanQty}, #{item.isTypeBlock}, #{item.productStatus}, #{item.changedTrialStatus},
+                #{item.class1LhNo}, #{item.class1LhType}, #{item.class2LhNo}, #{item.class2LhType}, #{item.class3LhNo}, #{item.class3LhType}, #{item.class4LhNo}, #{item.class4LhType},
+                #{item.class5LhNo}, #{item.class5LhType}, #{item.class6LhNo}, #{item.class6LhType}, #{item.class7LhNo}, #{item.class7LhType}, #{item.class8LhNo}, #{item.class8LhType},
+                #{item.mouldChangeStartTime},
                 #{item.createBy}, #{item.createTime}, #{item.updateBy}, #{item.updateTime}, #{item.remark}, #{item.isDelete}
             )
         </foreach>

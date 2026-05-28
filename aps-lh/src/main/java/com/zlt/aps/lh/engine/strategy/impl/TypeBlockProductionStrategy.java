@@ -2038,21 +2038,34 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setScheduleType(ScheduleTypeEnum.TYPE_BLOCK.getCode());
         result.setIsTypeBlock(YES_FLAG);
         result.setConstructionStage(sku.getConstructionStage());
-        // 通过物料编码+制造示方书号查询SKU与示方书关系获取硫化示方类型和硫化示方书号
-        String trialStatus = null;
+        // 产品状态从月计划获取
+        result.setProductStatus(sku.getProductStatus());
+
+        // 通过物料编码+产品状态查询SKU与示方书关系获取硫化示方类型和硫化示方书号
         String lhNo = null;
-        if (StringUtils.isNotEmpty(sku.getEmbryoNo())) {
-            MdmSkuConstructionRef constructionRef = context.getSkuEmbryoRefMap().get(sku.getMaterialCode() + "::" + sku.getEmbryoNo());
+        String lhType = null;
+        if (StringUtils.isNotEmpty(sku.getProductStatus())) {
+            MdmSkuConstructionRef constructionRef = context.getSkuConstructionRefCompositeKeyMap()
+                    .get(sku.getMaterialCode() + "::" + sku.getProductStatus());
             if (constructionRef != null) {
-                trialStatus = constructionRef.getLhType();
                 lhNo = constructionRef.getLhNo();
+                lhType = constructionRef.getLhType();
             }
         }
-        result.setTrialStatus(trialStatus);
-        result.setChangedTrialStatus(trialStatus);
+        // 设置1-8班硫化示方书号和硫化示方书类型
+        result.setClass1LhNo(lhNo); result.setClass1LhType(lhType);
+        result.setClass2LhNo(lhNo); result.setClass2LhType(lhType);
+        result.setClass3LhNo(lhNo); result.setClass3LhType(lhType);
+        result.setClass4LhNo(lhNo); result.setClass4LhType(lhType);
+        result.setClass5LhNo(lhNo); result.setClass5LhType(lhType);
+        result.setClass6LhNo(lhNo); result.setClass6LhType(lhType);
+        result.setClass7LhNo(lhNo); result.setClass7LhType(lhType);
+        result.setClass8LhNo(lhNo); result.setClass8LhType(lhType);
+        // 硫化示方书号回写
+        result.setLhNo(lhNo != null ? lhNo : sku.getLhNo());
+        result.setChangedTrialStatus(lhType);
         result.setEmbryoNo(sku.getEmbryoNo());
         result.setTextNo(sku.getTextNo());
-        result.setLhNo(lhNo != null ? lhNo : sku.getLhNo());
         result.setMonthPlanVersion(sku.getMonthPlanVersion());
         result.setProductionVersion(sku.getProductionVersion());
         result.setIsTrial(sku.isTrial() ? YES_FLAG : NO_FLAG);
