@@ -2392,14 +2392,22 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
         }
         // 设置1-8班硫化示方书号和硫化示方书类型
-        result.setClass1LhNo(lhNo); result.setClass1LhType(lhType);
-        result.setClass2LhNo(lhNo); result.setClass2LhType(lhType);
-        result.setClass3LhNo(lhNo); result.setClass3LhType(lhType);
-        result.setClass4LhNo(lhNo); result.setClass4LhType(lhType);
-        result.setClass5LhNo(lhNo); result.setClass5LhType(lhType);
-        result.setClass6LhNo(lhNo); result.setClass6LhType(lhType);
-        result.setClass7LhNo(lhNo); result.setClass7LhType(lhType);
-        result.setClass8LhNo(lhNo); result.setClass8LhType(lhType);
+        result.setClass1LhNo(lhNo);
+        result.setClass1LhType(lhType);
+        result.setClass2LhNo(lhNo);
+        result.setClass2LhType(lhType);
+        result.setClass3LhNo(lhNo);
+        result.setClass3LhType(lhType);
+        result.setClass4LhNo(lhNo);
+        result.setClass4LhType(lhType);
+        result.setClass5LhNo(lhNo);
+        result.setClass5LhType(lhType);
+        result.setClass6LhNo(lhNo);
+        result.setClass6LhType(lhType);
+        result.setClass7LhNo(lhNo);
+        result.setClass7LhType(lhType);
+        result.setClass8LhNo(lhNo);
+        result.setClass8LhType(lhType);
         // 硫化示方书号回写
         result.setLhNo(lhNo != null ? lhNo : sku.getLhNo());
         result.setChangedTrialStatus(lhType);
