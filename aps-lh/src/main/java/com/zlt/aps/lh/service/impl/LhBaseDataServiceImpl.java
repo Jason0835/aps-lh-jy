@@ -69,6 +69,7 @@ import javax.annotation.Resource;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -79,6 +80,10 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.Executor;
+import java.util.function.IntSupplier;
 
 /**
  * 硫化排程基础数据服务实现
@@ -167,11 +172,20 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     @Resource
     private MdmSkuConstructionRefMapper skuConstructionRefMapper;
 
+    @Resource(name = "lhDataInitExecutor")
+    private Executor lhDataInitExecutor;
+
     @Override
     public void loadAllBaseData(LhScheduleContext context) {
+        long totalStartTime = System.currentTimeMillis();
         String factoryCode = context.getFactoryCode();
         Date scheduleDate = context.getScheduleDate();
         Date targetDate = context.getScheduleTargetDate();
+        log.info("[DataInit] 开始全部初始化：factory={}, targetDate={}, scheduleDate={}, thread={}",
+                factoryCode,
+                LhScheduleTimeUtil.formatDate(targetDate),
+                LhScheduleTimeUtil.formatDate(scheduleDate),
+                Thread.currentThread().getName());
 
         // 加载排程时间范围：[startDate, endDate) 覆盖 T～T+(SCHEDULE_DAYS-1)，与连续排程窗口日历日一致
         Date startDate = LhScheduleTimeUtil.clearTime(scheduleDate);
@@ -186,91 +200,231 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         int year = cal.get(Calendar.YEAR);
         int month = cal.get(Calendar.MONTH) + 1;
 
-        // 1. 加载定稿排产版本
-        loadFinalProductionVersion(context, factoryCode, year, month);
+        // 1. 定稿排产版本是月计划、周程滚动调整等任务的前置条件，先单独完成。
+        waitForDataInitTasks(runDataInitTaskAsync("月生产计划版本",
+                () -> loadFinalProductionVersion(context, factoryCode, year, month),
+                () -> StringUtils.isNotEmpty(context.getProductionVersion()) ? 1 : 0));
         if (context.isInterrupted()) {
+            log.warn("[DataInit] 基础数据初始化中断：totalCost={}ms, reason={}",
+                    System.currentTimeMillis() - totalStartTime, context.getInterruptReason());
             return;
         }
 
-        // 2. 加载月生产计划
-        loadMonthPlan(context, factoryCode, year, month);
-
-        // 3. 加载特殊物料清单，并构建物料编码/结构名称分类Map
-        loadSpecialMaterialBom(context, factoryCode);
-
-        // 4. 加载胎胚实时库存
-        loadEmbryoRealtimeStock(context, factoryCode, startDate);
-
-        // 5. 加载周程滚动调整结果
-        loadAdjustResult(context, factoryCode, year, month);
-
-        // 6. 加载工作日历
-        loadWorkCalendar(context, factoryCode, calendarControlStartDate, endDate);
-
-        // 7. 加载SKU日硫化产能
-        loadSkuLhCapacity(context, factoryCode);
-
-        // 8. 加载设备停机计划
-        loadDevicePlanShut(context, factoryCode, calendarControlStartDate, endDate);
-
-        // 9. 加载SKU与模具关系
-        loadSkuMouldRel(context, factoryCode);
-
-        // 10. 加载模具台账
-        loadModelInfo(context, factoryCode);
-
-        // 11. 加载硫化机台信息
-        loadMachineInfo(context, factoryCode);
-
-        // 12. 加载模具清洗计划
-        loadCleaningPlan(context, factoryCode, startDate, endDate);
-
-        // 13. 加载月底计划余量
-        loadMonthSurplus(context, factoryCode, year, month);
-
-        // 14. 加载前日物料日完成量（用于前日欠/超产差值修正,滚动模式取目标日前一日；强制重排取T-1）
         Date previousDataDate = resolvePreviousDataDate(context, targetDate);
-        loadDayFinishQty(context, factoryCode, previousDataDate);
-
-        // 15. 加载月累计完成量（截至排产T-1日（包含），按目标日所在月份统计）
-        loadMaterialMonthFinishedQty(context, factoryCode, LhScheduleTimeUtil.addDays(scheduleDate, -1));
-
-        // 15.1 加载T日排程班次完成量（来自LhScheFinishQty表，scheduleDate=T日，按物料汇总class1FinishQty）
-        loadScheDayFinishQty(context, factoryCode, scheduleDate);
-
-        // 16. 加载物料信息
-        loadMaterialInfo(context, factoryCode);
-
-        // 16.1 加载胶囊卡盘分组
-        loadCapsuleChuck(context, factoryCode);
-
-        // 17. 加载MES硫化在机信息（从 T 日开始，按配置天数向前追溯最近有数据日期）
         int machineOnlineLookbackDays = context.getParamIntValue(
                 LhScheduleParamConstant.MACHINE_ONLINE_LOOKBACK_DAYS,
                 LhScheduleConstant.MACHINE_ONLINE_LOOKBACK_DAYS);
-        loadMachineOnlineInfo(context, factoryCode, startDate, machineOnlineLookbackDays);
 
-        // 18. 加载硫化定点机台
-        loadSpecifyMachine(context, factoryCode);
+        CompletableFuture<Void> monthPlanFuture = runDataInitTaskAsync("月生产计划",
+                () -> loadMonthPlan(context, factoryCode, year, month),
+                () -> sizeOf(context.getMonthPlanList()));
+        CompletableFuture<Void> specialMaterialBomFuture = runAfterDataInitTask(monthPlanFuture, "特殊物料清单",
+                () -> loadSpecialMaterialBom(context, factoryCode),
+                () -> sizeOf(context.getSpecialMaterialBomList()));
+        CompletableFuture<Void> embryoStockFuture = runAfterDataInitTask(monthPlanFuture, "胎胚实时库存",
+                () -> loadEmbryoRealtimeStock(context, factoryCode, startDate),
+                () -> sizeOf(context.getEmbryoRealtimeStockMap()));
+        CompletableFuture<Void> machineInfoFuture = runDataInitTaskAsync("硫化机台信息",
+                () -> loadMachineInfo(context, factoryCode),
+                () -> sizeOf(context.getMachineInfoMap()));
+        CompletableFuture<Void> cleaningPlanFuture = runAfterDataInitTask(machineInfoFuture, "模具清洗计划",
+                () -> loadCleaningPlan(context, factoryCode, startDate, endDate),
+                () -> sizeOf(context.getCleaningPlanList()));
 
-        // 19. 加载硫化机胶囊已使用次数
-        loadCapsuleUsage(context, factoryCode);
-
-        // 20. 加载设备保养计划
-        loadMaintenancePlan(context, factoryCode);
-
-        // 21. 加载前日硫化排程结果
-        loadPreviousScheduleResults(context, factoryCode, targetDate);
-        // 22. 加载前日模具交替计划，供滚动衔接继承
-        loadPreviousMouldChangePlans(context, factoryCode, targetDate);
-        // 23. 加载SKU与示方书关系
-        loadSkuConstructionRef(context, factoryCode);
-
-        // 24. 加载当前目标日上一轮排程结果（用于硫化示方历史保护）
-        loadHistoryCureFormulaResults(context, factoryCode, targetDate);
+        waitForDataInitTasks(
+                monthPlanFuture,
+                specialMaterialBomFuture,
+                embryoStockFuture,
+                runDataInitTaskAsync("周程滚动调整结果",
+                        () -> loadAdjustResult(context, factoryCode, year, month),
+                        () -> sizeOf(context.getMpAdjustResultMap())),
+                runDataInitTaskAsync("工作日历",
+                        () -> loadWorkCalendar(context, factoryCode, calendarControlStartDate, endDate),
+                        () -> sizeOf(context.getWorkCalendarList())),
+                runDataInitTaskAsync("SKU日硫化产能",
+                        () -> loadSkuLhCapacity(context, factoryCode),
+                        () -> sizeOf(context.getSkuLhCapacityMap())),
+                runDataInitTaskAsync("设备停机计划",
+                        () -> loadDevicePlanShut(context, factoryCode, calendarControlStartDate, endDate),
+                        () -> sizeOf(context.getDevicePlanShutList())),
+                runDataInitTaskAsync("SKU与模具关系",
+                        () -> loadSkuMouldRel(context, factoryCode),
+                        () -> sizeOf(context.getSkuMouldRelMap())),
+                runDataInitTaskAsync("模具台账",
+                        () -> loadModelInfo(context, factoryCode),
+                        () -> sizeOf(context.getModelInfoMap())),
+                machineInfoFuture,
+                cleaningPlanFuture,
+                runDataInitTaskAsync("月底计划余量",
+                        () -> loadMonthSurplus(context, factoryCode, year, month),
+                        () -> sizeOf(context.getMonthSurplusMap())),
+                runDataInitTaskAsync("前日物料日完成量",
+                        () -> loadDayFinishQty(context, factoryCode, previousDataDate),
+                        () -> sizeOf(context.getMaterialDayFinishedQtyMap())),
+                runDataInitTaskAsync("月累计完成量",
+                        () -> loadMaterialMonthFinishedQty(context, factoryCode, LhScheduleTimeUtil.addDays(scheduleDate, -1)),
+                        () -> sizeOf(context.getMaterialMonthFinishedQtyMap())),
+                runDataInitTaskAsync("T日排程班次完成量",
+                        () -> loadScheDayFinishQty(context, factoryCode, scheduleDate),
+                        () -> sizeOf(context.getMaterialScheDayFinishQtyMap())),
+                runDataInitTaskAsync("物料信息",
+                        () -> loadMaterialInfo(context, factoryCode),
+                        () -> sizeOf(context.getMaterialInfoMap())),
+                runDataInitTaskAsync("胶囊卡盘分组",
+                        () -> loadCapsuleChuck(context, factoryCode),
+                        () -> sizeOf(context.getCapsuleSpecPeerMap()) + sizeOf(context.getCapsuleProSizePeerMap())),
+                runDataInitTaskAsync("MES硫化在机信息",
+                        () -> loadMachineOnlineInfo(context, factoryCode, startDate, machineOnlineLookbackDays),
+                        () -> sizeOf(context.getMachineOnlineInfoMap())),
+                runDataInitTaskAsync("硫化定点机台",
+                        () -> loadSpecifyMachine(context, factoryCode),
+                        () -> sizeOf(context.getSpecifyMachineMap())),
+                runDataInitTaskAsync("硫化机胶囊已使用次数",
+                        () -> loadCapsuleUsage(context, factoryCode),
+                        () -> sizeOf(context.getCapsuleUsageMap())),
+                runDataInitTaskAsync("设备保养计划",
+                        () -> loadMaintenancePlan(context, factoryCode),
+                        () -> sizeOf(context.getMaintenancePlanMap())),
+                runDataInitTaskAsync("前日硫化排程结果",
+                        () -> loadPreviousScheduleResults(context, factoryCode, targetDate),
+                        () -> sizeOf(context.getPreviousScheduleResultList())),
+                runDataInitTaskAsync("前日模具交替计划",
+                        () -> loadPreviousMouldChangePlans(context, factoryCode, targetDate),
+                        () -> sizeOf(context.getPreviousMouldChangePlanList())),
+                runDataInitTaskAsync("SKU与示方书关系",
+                        () -> loadSkuConstructionRef(context, factoryCode),
+                        () -> sizeOf(context.getSkuConstructionRefMap())),
+                runDataInitTaskAsync("硫化示方历史排程结果",
+                        () -> loadHistoryCureFormulaResults(context, factoryCode, targetDate),
+                        () -> sizeOf(context.getPreviousCureFormulaResultList()))
+        );
 
         log.info("基础数据加载完成, 工厂: {}, 目标日: {}, T日: {}",
                 factoryCode, LhScheduleTimeUtil.formatDate(targetDate), LhScheduleTimeUtil.formatDate(scheduleDate));
+        log.info("[DataInit] 全部初始化完成：totalCost={}ms", System.currentTimeMillis() - totalStartTime);
+    }
+
+    /**
+     * 异步执行基础数据初始化任务。
+     *
+     * @param taskName      任务名称
+     * @param task          初始化逻辑
+     * @param countSupplier 数据量统计
+     * @return 异步任务
+     */
+    private CompletableFuture<Void> runDataInitTaskAsync(String taskName, Runnable task, IntSupplier countSupplier) {
+        return CompletableFuture.runAsync(() -> executeDataInitTask(taskName, task, countSupplier), lhDataInitExecutor);
+    }
+
+    /**
+     * 在依赖任务完成后异步执行后续初始化任务。
+     *
+     * @param dependency    前置任务
+     * @param taskName      任务名称
+     * @param task          初始化逻辑
+     * @param countSupplier 数据量统计
+     * @return 异步任务
+     */
+    private CompletableFuture<Void> runAfterDataInitTask(CompletableFuture<Void> dependency, String taskName,
+                                                          Runnable task, IntSupplier countSupplier) {
+        return dependency.thenCompose(result -> runDataInitTaskAsync(taskName, task, countSupplier));
+    }
+
+    /**
+     * 执行单个基础数据初始化任务并打印耗时。
+     *
+     * @param taskName      任务名称
+     * @param task          初始化逻辑
+     * @param countSupplier 数据量统计
+     */
+    private void executeDataInitTask(String taskName, Runnable task, IntSupplier countSupplier) {
+        long startTime = System.currentTimeMillis();
+        String threadName = Thread.currentThread().getName();
+        log.info("[DataInit] 开始初始化：task={}, thread={}", taskName, threadName);
+        try {
+            task.run();
+            long cost = System.currentTimeMillis() - startTime;
+            log.info("[DataInit] 完成初始化：task={}, count={}, cost={}ms, thread={}",
+                    taskName, resolveDataInitTaskCount(taskName, countSupplier), cost, threadName);
+        } catch (Throwable e) {
+            long cost = System.currentTimeMillis() - startTime;
+            log.error("[DataInit] 初始化失败：task={}, cost={}ms, thread={}, error={}",
+                    taskName, cost, threadName, e.getMessage(), e);
+            if (e instanceof RuntimeException) {
+                throw (RuntimeException) e;
+            }
+            if (e instanceof Error) {
+                throw (Error) e;
+            }
+            throw new IllegalStateException("基础数据初始化失败", e);
+        }
+    }
+
+    /**
+     * 等待基础数据初始化任务完成并透传真实异常。
+     *
+     * @param futures 初始化任务集合
+     */
+    private void waitForDataInitTasks(CompletableFuture<?>... futures) {
+        try {
+            CompletableFuture.allOf(futures).join();
+        } catch (CompletionException e) {
+            Throwable cause = unwrapCompletionException(e);
+            if (cause instanceof RuntimeException) {
+                throw (RuntimeException) cause;
+            }
+            throw new IllegalStateException("基础数据初始化失败", cause);
+        }
+    }
+
+    /**
+     * 获取任务数据量，避免统计日志影响初始化结果。
+     *
+     * @param taskName      任务名称
+     * @param countSupplier 数据量统计
+     * @return 数据量
+     */
+    private int resolveDataInitTaskCount(String taskName, IntSupplier countSupplier) {
+        try {
+            return countSupplier.getAsInt();
+        } catch (RuntimeException e) {
+            log.warn("[DataInit] 初始化数据量统计失败：task={}, error={}", taskName, e.getMessage());
+            return 0;
+        }
+    }
+
+    /**
+     * 解包 CompletableFuture 包装异常。
+     *
+     * @param throwable 异常
+     * @return 根因异常
+     */
+    private Throwable unwrapCompletionException(Throwable throwable) {
+        Throwable cause = throwable;
+        while (cause instanceof CompletionException && Objects.nonNull(cause.getCause())) {
+            cause = cause.getCause();
+        }
+        return cause;
+    }
+
+    /**
+     * 统计集合大小。
+     *
+     * @param collection 集合
+     * @return 数量
+     */
+    private int sizeOf(Collection<?> collection) {
+        return CollectionUtils.isEmpty(collection) ? 0 : collection.size();
+    }
+
+    /**
+     * 统计Map大小。
+     *
+     * @param map Map
+     * @return 数量
+     */
+    private int sizeOf(Map<?, ?> map) {
+        return CollectionUtils.isEmpty(map) ? 0 : map.size();
     }
 
     /**

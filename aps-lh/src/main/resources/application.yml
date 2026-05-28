@@ -57,6 +57,13 @@ logging:
 
 aps:
   lh:
+    data-init:
+      executor:
+        core-pool-size: 4
+        max-pool-size: 8
+        queue-capacity: 32
+        keep-alive-seconds: 60
+        thread-name-prefix: lh-data-init-
     validation:
       validators:
         skuConstructionValidator: false
