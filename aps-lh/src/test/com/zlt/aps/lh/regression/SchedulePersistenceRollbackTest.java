@@ -37,9 +37,9 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class SchedulePersistenceRollbackTest {
 
-    private static final int CLASS_END_NORMAL = 0;
+    private static final String CLASS_END_NORMAL = "0";
 
-    private static final int CLASS_END_MARK = 1;
+    private static final String CLASS_END_MARK = "1";
 
     @Mock
     private LhScheduleResultMapper scheduleResultMapper;
@@ -200,8 +200,8 @@ class SchedulePersistenceRollbackTest {
 
     private void assertClassEndFlags(LhScheduleResult result, int expectedEndShiftIndex) {
         for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
-            int expectedValue = shiftIndex == expectedEndShiftIndex ? CLASS_END_MARK : CLASS_END_NORMAL;
-            assertEquals(Integer.valueOf(expectedValue), ShiftFieldUtil.getShiftIsEnd(result, shiftIndex));
+            String expectedValue = shiftIndex == expectedEndShiftIndex ? CLASS_END_MARK : CLASS_END_NORMAL;
+            assertEquals(expectedValue, ShiftFieldUtil.getShiftIsEnd(result, shiftIndex));
         }
     }
 

@@ -20,9 +20,9 @@ import java.util.Objects;
 @Slf4j
 public final class ShiftFieldUtil {
 
-    private static final int SHIFT_END_NORMAL = 0;
+    private static final String SHIFT_END_NORMAL = "0";
 
-    private static final int SHIFT_END_MARK = 1;
+    private static final String SHIFT_END_MARK = "1";
 
     private ShiftFieldUtil() {
     }
@@ -149,7 +149,7 @@ public final class ShiftFieldUtil {
      * @param shiftIndex 班次索引
      * @param isEnd 是否收尾，1-收尾，其他按0处理
      */
-    public static void setShiftIsEnd(LhScheduleResult result, int shiftIndex, Integer isEnd) {
+    public static void setShiftIsEnd(LhScheduleResult result, int shiftIndex, String isEnd) {
         if (Objects.isNull(result)) {
             return;
         }
@@ -167,11 +167,12 @@ public final class ShiftFieldUtil {
      * @param shiftIndex 班次索引
      * @return 1-收尾，其他返回0，越界返回 null
      */
-    public static Integer getShiftIsEnd(LhScheduleResult result, int shiftIndex) {
+    public static String getShiftIsEnd(LhScheduleResult result, int shiftIndex) {
         if (Objects.isNull(result) || !isValidIndex(shiftIndex)) {
             return null;
         }
-        return normalizeShiftEndFlag(toInteger(BeanUtil.getProperty(result, propertyPrefix(shiftIndex) + "IsEnd")));
+        Object value = BeanUtil.getProperty(result, propertyPrefix(shiftIndex) + "IsEnd");
+        return normalizeShiftEndFlag(Objects.isNull(value) ? null : String.valueOf(value));
     }
 
     /**
@@ -235,7 +236,7 @@ public final class ShiftFieldUtil {
             if (shiftIndex > 1) {
                 builder.append(",");
             }
-            Integer shiftIsEnd = getShiftIsEnd(result, shiftIndex);
+            String shiftIsEnd = getShiftIsEnd(result, shiftIndex);
             builder.append("class").append(shiftIndex).append("IsEnd=")
                     .append(Objects.isNull(shiftIsEnd) ? SHIFT_END_NORMAL : shiftIsEnd);
         }
@@ -285,8 +286,8 @@ public final class ShiftFieldUtil {
         return null;
     }
 
-    private static int normalizeShiftEndFlag(Integer isEnd) {
-        return Objects.nonNull(isEnd) && SHIFT_END_MARK == isEnd ? SHIFT_END_MARK : SHIFT_END_NORMAL;
+    private static String normalizeShiftEndFlag(String isEnd) {
+        return SHIFT_END_MARK.equals(isEnd) ? SHIFT_END_MARK : SHIFT_END_NORMAL;
     }
 
     /**

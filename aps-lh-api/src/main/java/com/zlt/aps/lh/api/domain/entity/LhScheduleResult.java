@@ -565,7 +565,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class1IsEnd")
     @ApiModelProperty(value = "1班是否收尾 0-正常 1-收尾", name = "class1IsEnd")
     @TableField(value = "CLASS1_IS_END")
-    private Integer class1IsEnd = 0;
+    private String class1IsEnd;
 
     /**
      * 2班是否收尾 0-正常 1-收尾
@@ -573,7 +573,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class2IsEnd")
     @ApiModelProperty(value = "2班是否收尾 0-正常 1-收尾", name = "class2IsEnd")
     @TableField(value = "CLASS2_IS_END")
-    private Integer class2IsEnd = 0;
+    private String class2IsEnd;
 
     /**
      * 3班是否收尾 0-正常 1-收尾
@@ -581,7 +581,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class3IsEnd")
     @ApiModelProperty(value = "3班是否收尾 0-正常 1-收尾", name = "class3IsEnd")
     @TableField(value = "CLASS3_IS_END")
-    private Integer class3IsEnd = 0;
+    private String class3IsEnd;
 
     /**
      * 4班是否收尾 0-正常 1-收尾
@@ -589,7 +589,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class4IsEnd")
     @ApiModelProperty(value = "4班是否收尾 0-正常 1-收尾", name = "class4IsEnd")
     @TableField(value = "CLASS4_IS_END")
-    private Integer class4IsEnd = 0;
+    private String class4IsEnd;
 
     /**
      * 5班是否收尾 0-正常 1-收尾
@@ -597,7 +597,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class5IsEnd")
     @ApiModelProperty(value = "5班是否收尾 0-正常 1-收尾", name = "class5IsEnd")
     @TableField(value = "CLASS5_IS_END")
-    private Integer class5IsEnd = 0;
+    private String class5IsEnd;
 
     /**
      * 6班是否收尾 0-正常 1-收尾
@@ -605,7 +605,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class6IsEnd")
     @ApiModelProperty(value = "6班是否收尾 0-正常 1-收尾", name = "class6IsEnd")
     @TableField(value = "CLASS6_IS_END")
-    private Integer class6IsEnd = 0;
+    private String class6IsEnd;
 
     /**
      * 7班是否收尾 0-正常 1-收尾
@@ -613,7 +613,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class7IsEnd")
     @ApiModelProperty(value = "7班是否收尾 0-正常 1-收尾", name = "class7IsEnd")
     @TableField(value = "CLASS7_IS_END")
-    private Integer class7IsEnd = 0;
+    private String class7IsEnd;
 
     /**
      * 8班是否收尾 0-正常 1-收尾
@@ -621,7 +621,7 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     @Excel(name = "ui.data.column.lhScheduleResult.class8IsEnd")
     @ApiModelProperty(value = "8班是否收尾 0-正常 1-收尾", name = "class8IsEnd")
     @TableField(value = "CLASS8_IS_END")
-    private Integer class8IsEnd = 0;
+    private String class8IsEnd;
 
     /**
      * 是否交期，0--否，1--是
