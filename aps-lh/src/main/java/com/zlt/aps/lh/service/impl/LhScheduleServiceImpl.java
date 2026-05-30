@@ -9,7 +9,6 @@ import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.api.enums.FactoryCodeEnum;
 import com.zlt.aps.lh.api.enums.ReleaseStatusEnum;
 import com.zlt.aps.lh.component.LhScheduleConfigResolver;
-import com.zlt.aps.lh.component.ScheduleExecutionGuard;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.decorator.IScheduleExecutor;
 import com.zlt.aps.lh.engine.observer.ScheduleEvent;
@@ -33,7 +32,7 @@ import java.util.List;
  * <ul>
  *   <li>接收控制器传入的排程请求，构建本次排程上下文；</li>
  *   <li>解析并固化本次排程参数快照，保证一次排程内规则口径稳定；</li>
- *   <li>通过 {@link ScheduleExecutionGuard} 控制同工厂同目标日的并发排程；</li>
+ *   <li>同工厂同目标日的并发排程由 Controller 层 {@link com.zlt.aps.redissonLock.annotation.DistributedLock} 注解控制；</li>
  *   <li>委托 {@link IScheduleExecutor} 进入模板链路，执行基础数据初始化、SKU归集、续作、新增和结果校验保存；</li>
  *   <li>按批次号发布已保存的排程结果并触发发布事件。</li>
  * </ul>
@@ -59,24 +58,13 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
     @Resource
     private ScheduleEventPublisher scheduleEventPublisher;
 
-    @Resource
-    private ScheduleExecutionGuard scheduleExecutionGuard;
-
     @Override
     public LhScheduleResponseDTO executeSchedule(LhScheduleRequestDTO request) {
         log.info("接收排程请求, 工厂: {}, 日期: {}, 月计划版本: {}, 生产版本: {}",
                 request.getFactoryCode(), LhScheduleTimeUtil.formatDate(request.getScheduleDate()),
                 request.getMonthPlanVersion(), request.getProductionVersion());
         LhScheduleContext context = buildContext(request);
-        String lockToken = null;
         try {
-            // 同工厂同目标日串行执行，避免两个批次同时替换同一天结果。
-            log.info("准备获取排程执行锁, 工厂: {}, 目标日: {}, T日: {}, 排程天数: {}",
-                    context.getFactoryCode(),
-                    LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
-                    LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
-                    context.getScheduleConfig().getScheduleDays());
-            lockToken = scheduleExecutionGuard.acquire(context.getFactoryCode(), context.getScheduleTargetDate());
             LhScheduleResponseDTO response = scheduleExecutor.execute(context);
             log.info("排程服务执行完成, 工厂: {}, 批次号: {}, 成功: {}, 排程结果数: {}, 未排产数: {}, 模具计划数: {}",
                     context.getFactoryCode(), response.getBatchNo(), response.isSuccess(),
@@ -90,11 +78,6 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
             log.error("排程服务入口异常, 工厂: {}, 日期: {}",
                     context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()), e);
             return LhScheduleResponseDTO.fail(context.getBatchNo(), "排程执行异常: " + e.getMessage());
-        } finally {
-            scheduleExecutionGuard.release(context.getFactoryCode(), context.getScheduleTargetDate(), lockToken);
-            log.debug("排程执行锁释放完成, 工厂: {}, 目标日: {}, 锁令牌是否存在: {}",
-                    context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
-                    StringUtils.isNotEmpty(lockToken));
         }
     }
 

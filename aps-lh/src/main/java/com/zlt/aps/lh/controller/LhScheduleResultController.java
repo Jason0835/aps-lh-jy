@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.domain.dto.LhScheduleRequestDTO;
 import com.zlt.aps.lh.api.domain.dto.LhScheduleResponseDTO;
 import com.zlt.aps.lh.service.ILhScheduleService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.redissonLock.annotation.DistributedLock;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
 import lombok.extern.slf4j.Slf4j;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.annotation.Resource;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 硫化排程对外接口控制器。
@@ -50,6 +52,11 @@ public class LhScheduleResultController {
      */
     @PostMapping("/execute")
     @ApiOperation("执行自动排程")
+    @DistributedLock(
+            key = "'APS:LH:SCHEDULE:LOCK:' + #request.factoryCode + ':' + T(com.zlt.aps.lh.util.LhScheduleTimeUtil).getDateStr(T(com.zlt.aps.lh.util.LhScheduleTimeUtil).clearTime(#request.scheduleDate))",
+            waitTime = 5,
+            leaseTime = -1,
+            failMsg = "正在执行中，请稍候!")
     public LhScheduleResponseDTO executeSchedule(@RequestBody LhScheduleRequestDTO request) {
         log.info("收到排程请求, 工厂: {}, 日期: {}",
                 request.getFactoryCode(), LhScheduleTimeUtil.formatDate(request.getScheduleDate()));
