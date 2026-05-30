@@ -93,6 +93,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private static final String CONTINUOUS_SCHEDULE_TYPE = "01";
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "续作结果裁剪为0";
+    private static final String WINDOW_NO_PLAN_UNSCHEDULED_REASON =
+            "当前排程窗口内无日计划量，等待后续滚动窗口排产";
     private static final int TYPE_BLOCK_SWITCH_MAX_ATTEMPTS = 16;
 
     @Resource
@@ -140,6 +142,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
             if (machine == null) {
                 log.warn("续作SKU未匹配到机台状态，跳过续作排产, materialCode: {}, 续作机台: {}, 目标量: {}",
+                        sku.getMaterialCode(), machineCode, sku.resolveTargetScheduleQty());
+                continue;
+            }
+            if (isContinuousWindowNoDailyPlan(sku)) {
+                appendWindowNoPlanContinuousUnscheduledResult(context, sku);
+                log.info("续作SKU当前窗口无日计划量，释放续作机台给换模/新增排产, materialCode: {}, machineCode: {}, targetQty: {}",
                         sku.getMaterialCode(), machineCode, sku.resolveTargetScheduleQty());
                 continue;
             }
@@ -597,7 +605,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         List<LhScheduleResult> activeResults = new ArrayList<LhScheduleResult>(skuResults);
         int remainingTargetQty = Math.max(0, sourceSku.resolveTargetScheduleQty());
         int shortageLookAheadDays = resolveContinuationShortageLookAheadDays(context);
-        int carryShortageQty = resolveContinuationInitialCarryShortage(sourceSku, shiftMapByDate);
+        int rollingDiffQty = 0;
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, false);
         for (Map.Entry<LocalDate, List<LhShiftConfigVO>> entry : shiftMapByDate.entrySet()) {
             if (CollectionUtils.isEmpty(activeResults)) {
@@ -605,8 +613,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             LocalDate productionDate = entry.getKey();
             List<LhShiftConfigVO> dayShifts = entry.getValue();
-            int demandQty = resolveContinuationDayPlanQtyByDate(sourceSku, productionDate);
-            int todayRequiredQty = carryShortageQty + demandQty;
+            int dayPlanQty = resolveContinuationDayPlanQtyByDate(sourceSku, productionDate);
+            int demandQty = resolveContinuationDayDemandQtyByDate(sourceSku, productionDate);
+            int todayRequiredQty = rollingDiffQty + demandQty;
             int effectiveDemandQty = policy.isStrictUpperLimit()
                     ? Math.min(Math.max(0, todayRequiredQty), remainingTargetQty)
                     : Math.max(0, todayRequiredQty);
@@ -614,31 +623,31 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     calculateMachineDailyCapacityMapByDate(context, activeResults, dayShifts);
             int totalCapacity = capacityMap.values().stream().mapToInt(Integer::intValue).sum();
             int totalPlanQty = sumScheduledQtyByShifts(activeResults, dayShifts);
-            boolean futureDayPlanDrops = hasPositiveDayPlanDropAroundDate(sourceSku, shiftMapByDate, productionDate);
-            List<LhScheduleResult> keptResults;
-            if (futureDayPlanDrops || effectiveDemandQty <= 0) {
-                keptResults = selectMachinesToKeepForContinuationByLookAhead(
-                        context, sourceSku, activeResults, shiftMapByDate, productionDate,
-                        carryShortageQty, remainingTargetQty, shortageLookAheadDays, policy);
-            } else {
-                keptResults = new ArrayList<LhScheduleResult>(activeResults);
+            List<LhScheduleResult> keptResults = selectMachinesToKeepForContinuationByLookAhead(
+                    context, sourceSku, activeResults, shiftMapByDate, productionDate,
+                    rollingDiffQty, remainingTargetQty, shortageLookAheadDays, policy);
+            if (CollectionUtils.isEmpty(keptResults) && effectiveDemandQty > 0) {
+                keptResults = selectMachinesToKeepForContinuation(
+                        context, activeResults, capacityMap, effectiveDemandQty);
             }
             int keptTodayCapacity = sumCapacityForResults(capacityMap, keptResults);
             boolean recoverable = canContinuationMachinesMeetLookAhead(
                     context, sourceSku, keptResults, shiftMapByDate, productionDate,
-                    carryShortageQty, remainingTargetQty, shortageLookAheadDays, policy);
+                    rollingDiffQty, remainingTargetQty, shortageLookAheadDays, policy);
             log.info("续作多机台按天降模判断, materialCode: {}, 日期: {}, shortageLookAheadDays: {}, dayN计划量: {}, "
-                            + "carryShortage: {}, 当日需求量: {}, 剩余窗口目标量: {}, 当日生效目标量: {}, 未来正计划是否下降: {}, 当前在机最大日产能: {}, "
+                            + "dayN剩余额度: {}, 前日排后差额: {}, 当日需求量: {}, 剩余窗口目标量: {}, 当日生效目标量: {}, 当前在机最大日产能: {}, "
                             + "保留机台当日产能: {}, 当前排产量: {}, 是否满足dayN欠产追补约束: {}",
-                    sourceSku.getMaterialCode(), productionDate, shortageLookAheadDays, demandQty,
-                    carryShortageQty, todayRequiredQty, remainingTargetQty, effectiveDemandQty, futureDayPlanDrops, totalCapacity,
+                    sourceSku.getMaterialCode(), productionDate, shortageLookAheadDays, dayPlanQty,
+                    demandQty, rollingDiffQty, todayRequiredQty, remainingTargetQty, effectiveDemandQty, totalCapacity,
                     keptTodayCapacity, totalPlanQty, recoverable);
             applyContinuationDayAllocation(context, sourceSku, activeResults, keptResults, capacityMap,
                     demandQty, effectiveDemandQty, remainingTargetQty, productionDate, dayShifts, shifts);
-            int actualTodayQty = sumScheduledQtyByShifts(keptResults, dayShifts);
-            carryShortageQty = Math.max(0, effectiveDemandQty - actualTodayQty);
+            int actualTodayQty = sumScheduledQtyByShifts(activeResults, dayShifts);
+            rollingDiffQty = effectiveDemandQty - actualTodayQty;
             remainingTargetQty = Math.max(0, remainingTargetQty - sumScheduledQtyByShifts(activeResults, dayShifts));
             activeResults = new ArrayList<LhScheduleResult>(keptResults);
+            log.info("续作多机台每日排后差额, materialCode: {}, 日期: {}, actualTodayQty: {}, rollingDiffQty: {}, nextActiveMachines: {}",
+                    sourceSku.getMaterialCode(), productionDate, actualTodayQty, rollingDiffQty, joinMachineCodes(activeResults));
         }
     }
 
@@ -681,6 +690,57 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             groupMachineCountMap.merge(groupKey, 1, Integer::sum);
         }
         return groupMachineCountMap;
+    }
+
+    /**
+     * 判断续作SKU在当前排程窗口内是否完全没有日计划量。
+     *
+     * @param sku 续作SKU
+     * @return true-当前窗口无日计划量
+     */
+    private boolean isContinuousWindowNoDailyPlan(SkuScheduleDTO sku) {
+        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
+            if (quota != null && quota.getDayPlanQty() > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 写入当前窗口无日计划量的续作未排结果。
+     *
+     * @param context 排程上下文
+     * @param sku 续作SKU
+     */
+    private void appendWindowNoPlanContinuousUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return;
+        }
+        LhUnscheduledResult existing = findUnscheduledResultByMaterial(context, sku.getMaterialCode());
+        if (existing != null) {
+            existing.setUnscheduledReason(WINDOW_NO_PLAN_UNSCHEDULED_REASON);
+            return;
+        }
+        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+        unscheduled.setFactoryCode(context.getFactoryCode());
+        unscheduled.setBatchNo(context.getBatchNo());
+        unscheduled.setScheduleDate(context.getScheduleTargetDate());
+        unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setMaterialDesc(sku.getMaterialDesc());
+        unscheduled.setStructureName(sku.getStructureName());
+        unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
+        unscheduled.setSpecCode(sku.getSpecCode());
+        unscheduled.setEmbryoCode(sku.getEmbryoCode());
+        unscheduled.setMouldQty(sku.getMouldQty());
+        unscheduled.setUnscheduledQty(0);
+        unscheduled.setUnscheduledReason(WINDOW_NO_PLAN_UNSCHEDULED_REASON);
+        unscheduled.setDataSource(AUTO_DATA_SOURCE);
+        unscheduled.setIsDelete(0);
+        context.getUnscheduledResultList().add(unscheduled);
     }
 
     /**
@@ -796,6 +856,24 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 解析续作多机台指定业务日的实际剩余需求。
+     *
+     * @param sourceSku 来源SKU
+     * @param productionDate 业务日
+     * @return dayN剩余额度
+     */
+    private int resolveContinuationDayDemandQtyByDate(SkuScheduleDTO sourceSku, LocalDate productionDate) {
+        if (sourceSku == null || productionDate == null || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
+            return 0;
+        }
+        SkuDailyPlanQuotaDTO quota = sourceSku.getDailyPlanQuotaMap().get(productionDate);
+        if (quota == null) {
+            return 0;
+        }
+        return Math.max(0, quota.getRemainingQty());
+    }
+
+    /**
      * 判断当前业务日前后是否存在正日计划下降。
      * <p>降模只服务于计划下降后的减机台；窗口尾部无计划的0量日期不作为降模触发依据。</p>
      *
@@ -845,9 +923,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      */
     private int resolveContinuationShortageLookAheadDays(LhScheduleContext context) {
         if (context == null || context.getScheduleConfig() == null) {
-            return LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS;
+            return LhScheduleConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS;
         }
-        return context.getScheduleConfig().getNewSpecShortageLookAheadDays();
+        return context.getScheduleConfig().getContinuousShortageLookAheadDays();
     }
 
     /**
@@ -1188,11 +1266,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             ProductionQuantityPolicy policy) {
         List<LhScheduleResult> sortedResults = new ArrayList<LhScheduleResult>(skuResults);
         sortedResults.sort(buildContinuationKeepComparator(context));
-        int cumulativeRequired = calculateContinuationLookAheadRequired(
+        int cumulativeRequired = calculateContinuationFutureRequired(
                 sourceSku, shiftMapByDate, productionDate, carryShortageQty, remainingTargetQty,
                 shortageLookAheadDays, policy);
         if (cumulativeRequired <= 0) {
-            log.info("续作多机台降模追补模拟, materialCode: {}, 日期: {}, 累计需求: 0, 保留机台为空，释放机台: {}",
+            log.info("续作多机台降模追补模拟, materialCode: {}, 日期: {}, 后续追补需求: 0, 保留机台为空，释放机台: {}",
                     sourceSku.getMaterialCode(), productionDate, joinMachineCodes(sortedResults));
             return new ArrayList<LhScheduleResult>(0);
         }
@@ -1200,10 +1278,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         int cumulativeCapacity = 0;
         for (LhScheduleResult result : sortedResults) {
             keptResults.add(result);
-            cumulativeCapacity = calculateContinuationLookAheadCapacity(
+            cumulativeCapacity = calculateContinuationFutureCapacity(
                     context, keptResults, shiftMapByDate, productionDate, shortageLookAheadDays);
             log.debug("续作多机台降模追补模拟, materialCode: {}, 日期: {}, 尝试保留机台: {}, "
-                            + "carryShortage: {}, 累计需求: {}, 累计产能: {}, 是否满足: {}",
+                            + "前日排后差额: {}, 后续追补需求: {}, 后续追补产能: {}, 是否满足: {}",
                     sourceSku.getMaterialCode(), productionDate, joinMachineCodes(keptResults),
                     carryShortageQty, cumulativeRequired, cumulativeCapacity, cumulativeCapacity >= cumulativeRequired);
             if (cumulativeCapacity >= cumulativeRequired) {
@@ -1211,7 +1289,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
         }
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, skuResults, keptResults);
-        log.info("续作多机台降模排序, 保留排序: {}, 下机排序: {}, 累计需求: {}, 累计产能: {}, 保留排序明细: {}, 下机排序明细: {}",
+        log.info("续作多机台降模排序, 保留排序: {}, 下机排序: {}, 后续追补需求: {}, 后续追补产能: {}, 保留排序明细: {}, 下机排序明细: {}",
                 joinMachineCodes(sortedResults), joinMachineCodes(removedResults), cumulativeRequired, cumulativeCapacity,
                 formatContinuationMachineDetails(context, sortedResults,
                         calculateMachineDailyCapacityMapByDateSilently(context, sortedResults, shiftMapByDate.get(productionDate))),
@@ -1243,12 +1321,85 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                          int remainingTargetQty,
                                                          int shortageLookAheadDays,
                                                          ProductionQuantityPolicy policy) {
-        int cumulativeRequired = calculateContinuationLookAheadRequired(
+        int cumulativeRequired = calculateContinuationFutureRequired(
                 sourceSku, shiftMapByDate, productionDate, carryShortageQty, remainingTargetQty,
                 shortageLookAheadDays, policy);
-        int cumulativeCapacity = calculateContinuationLookAheadCapacity(
+        int cumulativeCapacity = calculateContinuationFutureCapacity(
                 context, keptResults, shiftMapByDate, productionDate, shortageLookAheadDays);
         return cumulativeCapacity >= cumulativeRequired;
+    }
+
+    /**
+     * 计算当前日之后追补窗口内的续作累计需求。
+     * <p>当前日不足由下机机台只补当天，保留机台只承担后续日期续作能力判断。</p>
+     *
+     * @param sourceSku 来源SKU
+     * @param shiftMapByDate 业务日班次
+     * @param productionDate 当前业务日
+     * @param rollingDiffQty 前日排后差额
+     * @param remainingTargetQty 剩余窗口目标量
+     * @param shortageLookAheadDays 欠产追补观察天数
+     * @param policy 排产量策略
+     * @return 后续追补需求量
+     */
+    private int calculateContinuationFutureRequired(SkuScheduleDTO sourceSku,
+                                                    Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate,
+                                                    LocalDate productionDate,
+                                                    int rollingDiffQty,
+                                                    int remainingTargetQty,
+                                                    int shortageLookAheadDays,
+                                                    ProductionQuantityPolicy policy) {
+        if (sourceSku == null || CollectionUtils.isEmpty(shiftMapByDate) || productionDate == null) {
+            return 0;
+        }
+        int cumulativeRequired = 0;
+        LocalDate lookAheadEndDate = resolveLookAheadEndDate(shiftMapByDate, productionDate, shortageLookAheadDays);
+        for (LocalDate date : shiftMapByDate.keySet()) {
+            if (!date.isAfter(productionDate) || date.isAfter(lookAheadEndDate)) {
+                continue;
+            }
+            cumulativeRequired += resolveContinuationDayDemandQtyByDate(sourceSku, date);
+        }
+        if (policy != null && policy.isStrictUpperLimit()) {
+            int currentDayDemandQty = resolveContinuationDayDemandQtyByDate(sourceSku, productionDate);
+            int currentEffectiveDemandQty = Math.min(Math.max(0, rollingDiffQty + currentDayDemandQty),
+                    Math.max(0, remainingTargetQty));
+            cumulativeRequired = Math.min(cumulativeRequired,
+                    Math.max(0, remainingTargetQty - currentEffectiveDemandQty));
+        }
+        return Math.max(0, cumulativeRequired);
+    }
+
+    /**
+     * 计算当前日之后追补窗口内的续作保留机台累计产能。
+     *
+     * @param context 排程上下文
+     * @param keptResults 保留机台结果
+     * @param shiftMapByDate 业务日班次
+     * @param productionDate 当前业务日
+     * @param shortageLookAheadDays 欠产追补观察天数
+     * @return 后续追补产能
+     */
+    private int calculateContinuationFutureCapacity(LhScheduleContext context,
+                                                    List<LhScheduleResult> keptResults,
+                                                    Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate,
+                                                    LocalDate productionDate,
+                                                    int shortageLookAheadDays) {
+        if (CollectionUtils.isEmpty(keptResults) || CollectionUtils.isEmpty(shiftMapByDate) || productionDate == null) {
+            return 0;
+        }
+        int cumulativeCapacity = 0;
+        LocalDate lookAheadEndDate = resolveLookAheadEndDate(shiftMapByDate, productionDate, shortageLookAheadDays);
+        for (Map.Entry<LocalDate, List<LhShiftConfigVO>> entry : shiftMapByDate.entrySet()) {
+            LocalDate date = entry.getKey();
+            if (!date.isAfter(productionDate) || date.isAfter(lookAheadEndDate)) {
+                continue;
+            }
+            for (LhScheduleResult result : keptResults) {
+                cumulativeCapacity += calculateMachineDailyCapacityByDate(context, result, entry.getValue());
+            }
+        }
+        return Math.max(0, cumulativeCapacity);
     }
 
     /**
@@ -1501,7 +1652,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         int remainingDemandQty = Math.max(0, effectiveDemandQty);
         for (LhScheduleResult result : keptResults) {
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
-            int allocation = fillKeptMachineCapacity ? machineCapacity : Math.min(remainingDemandQty, machineCapacity);
+            int allocation = effectiveDemandQty <= 0 ? 0
+                    : fillKeptMachineCapacity ? machineCapacity : Math.min(remainingDemandQty, machineCapacity);
             redistributeShiftQty(context, result, dayShifts, allocation);
             remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
             log.info("续作多机台保留机台排量, materialCode: {}, 日期: {}, machineCode: {}, allocation: {}, "
@@ -1509,17 +1661,57 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     sourceSku.getMaterialCode(), productionDate, result.getLhMachineCode(), allocation,
                     machineCapacity, fillKeptMachineCapacity, effectiveDemandQty, remainingTargetQty, false);
         }
+        List<LhScheduleResult> supplementResults = selectDaySupplementMachines(context, activeResults, keptResults);
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, activeResults, keptResults);
-        for (LhScheduleResult result : removedResults) {
-            clearContinuationShiftsFromDate(context, result, allShifts, productionDate);
+        for (LhScheduleResult result : supplementResults) {
+            int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
+            int allocation = Math.min(remainingDemandQty, machineCapacity);
+            redistributeShiftQty(context, result, dayShifts, allocation);
+            clearContinuationShiftsAfterDate(context, result, allShifts, productionDate);
+            remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
+            log.info("续作多机台当日补量下机机台排量, materialCode: {}, 日期: {}, machineCode: {}, allocation: {}, "
+                            + "machineCapacity: {}, 当日剩余需求: {}",
+                    sourceSku.getMaterialCode(), productionDate, result.getLhMachineCode(), allocation,
+                    machineCapacity, remainingDemandQty);
         }
-        log.info("续作多机台降模结果, materialCode: {}, 日期: {}, 原始机台: {}, 保留机台: {}, 下机机台: {}, 原始机台明细: {}, "
+        for (LhScheduleResult result : removedResults) {
+            if (keptResults.contains(result) || supplementResults.contains(result)) {
+                continue;
+            }
+            redistributeShiftQty(context, result, dayShifts, 0);
+            clearContinuationShiftsAfterDate(context, result, allShifts, productionDate);
+        }
+        log.info("续作多机台降模结果, materialCode: {}, 日期: {}, 原始机台: {}, 保留机台: {}, 当日补量下机机台: {}, 下机机台: {}, 原始机台明细: {}, "
                         + "保留机台明细: {}, 下机机台明细: {}, 原因: dayN保障量={}，当日生效目标量={}，剩余窗口目标量={}，按胶囊使用次数和机台编码排序",
                 sourceSku.getMaterialCode(), productionDate, joinMachineCodes(activeResults), joinMachineCodes(keptResults),
-                joinMachineCodes(removedResults), formatContinuationMachineDetails(context, activeResults, capacityMap),
+                joinMachineCodes(supplementResults), joinMachineCodes(removedResults),
+                formatContinuationMachineDetails(context, activeResults, capacityMap),
                 formatContinuationMachineDetails(context, keptResults, capacityMap),
                 formatContinuationMachineDetails(context, removedResults, capacityMap),
                 demandQty, effectiveDemandQty, remainingTargetQty);
+    }
+
+    /**
+     * 选择当天补量后下机的机台。
+     * <p>补量机台按续作保留优先级选择保留机台之后的下一批，确保当天补量仍优先使用胶囊次数更高的机台。</p>
+     *
+     * @param context 排程上下文
+     * @param activeResults 当前仍在机结果
+     * @param keptResults 后续保留结果
+     * @return 当天补量下机机台
+     */
+    private List<LhScheduleResult> selectDaySupplementMachines(LhScheduleContext context,
+                                                               List<LhScheduleResult> activeResults,
+                                                               List<LhScheduleResult> keptResults) {
+        List<LhScheduleResult> supplementResults = new ArrayList<LhScheduleResult>(activeResults.size());
+        List<LhScheduleResult> sortedResults = new ArrayList<LhScheduleResult>(activeResults);
+        sortedResults.sort(buildContinuationKeepComparator(context));
+        for (LhScheduleResult result : sortedResults) {
+            if (!keptResults.contains(result)) {
+                supplementResults.add(result);
+            }
+        }
+        return supplementResults;
     }
 
     /**
@@ -1541,6 +1733,32 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             LocalDate shiftDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
             if (!shiftDate.isBefore(productionDate)) {
+                shiftsToClear.add(shift);
+            }
+        }
+        clearShiftPlanQty(result, shiftsToClear);
+        refreshResultSummary(context, result, shifts);
+    }
+
+    /**
+     * 清空结果在指定业务日之后的全部班次计划量。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param shifts 全窗口班次
+     * @param productionDate 当前业务日
+     */
+    private void clearContinuationShiftsAfterDate(LhScheduleContext context,
+                                                  LhScheduleResult result,
+                                                  List<LhShiftConfigVO> shifts,
+                                                  LocalDate productionDate) {
+        List<LhShiftConfigVO> shiftsToClear = new ArrayList<LhShiftConfigVO>(4);
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift == null || shift.getWorkDate() == null) {
+                continue;
+            }
+            LocalDate shiftDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            if (shiftDate.isAfter(productionDate)) {
                 shiftsToClear.add(shift);
             }
         }

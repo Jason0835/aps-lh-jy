@@ -88,4 +88,23 @@ public class LhScheduleConfigTest {
 
         Assertions.assertEquals(3, config.getNewSpecShortageLookAheadDays());
     }
+
+    /**
+     * 用例说明：续作欠产追补判断天数使用独立参数，默认1天，允许配置为0。
+     */
+    @Test
+    public void shouldReadContinuousShortageLookAheadDaysConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals(1, defaultConfig.getContinuousShortageLookAheadDays());
+
+        Map<String, String> zeroParamMap = new HashMap<>(1);
+        zeroParamMap.put(LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, "0");
+        LhScheduleConfig zeroConfig = new LhScheduleConfig(zeroParamMap);
+        Assertions.assertEquals(0, zeroConfig.getContinuousShortageLookAheadDays());
+
+        Map<String, String> twoParamMap = new HashMap<>(1);
+        twoParamMap.put(LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, "2");
+        LhScheduleConfig twoConfig = new LhScheduleConfig(twoParamMap);
+        Assertions.assertEquals(2, twoConfig.getContinuousShortageLookAheadDays());
+    }
 }

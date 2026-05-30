@@ -131,6 +131,73 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
+    void doHandle_shouldDeductTDayNightFinishedQtyFromFirstDayQuota() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleDate(date(2026, 5, 1));
+        context.setScheduleTargetDate(date(2026, 5, 3));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("3302002353");
+        plan.setMaterialDesc("3302002353-DESC");
+        plan.setStructureName("S-FINISH");
+        plan.setSpecifications("SPEC-FINISH");
+        plan.setTotalQty(1000);
+        plan.setDay1(270);
+        plan.setDay2(270);
+        plan.setDay3(270);
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialScheDayFinishQtyMap().put("3302002353", 90);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-FINISH").get(0);
+        assertEquals(180, sku.getDailyPlanQuotaMap().get(java.time.LocalDate.of(2026, 5, 1)).getRemainingQty());
+        assertEquals(270, sku.getDailyPlanQuotaMap().get(java.time.LocalDate.of(2026, 5, 2)).getRemainingQty());
+        assertEquals(720, sku.getWindowRemainingPlanQty());
+    }
+
+    @Test
+    void doHandle_shouldCarryForwardOverProductionToDeductWindowQuota() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleDate(date(2026, 5, 3));
+        context.setScheduleTargetDate(date(2026, 5, 5));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("3302001888");
+        plan.setMaterialDesc("3302001888-DESC");
+        plan.setStructureName("S-OVER");
+        plan.setSpecifications("SPEC-OVER");
+        plan.setTotalQty(1000);
+        plan.setDay3(100);
+        plan.setDay4(100);
+        plan.setDay5(100);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        LhScheduleResult previous = new LhScheduleResult();
+        previous.setLhMachineCode("K1501");
+        previous.setMaterialCode("3302001888");
+        previous.setClass1PlanQty(120);
+        context.setPreviousScheduleResultList(Collections.singletonList(previous));
+        context.getMaterialDayFinishedQtyMap().put("3302001888_2026-05-02", 150);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-OVER").get(0);
+        assertEquals(-30, context.getCarryForwardQtyMap().get("3302001888").intValue());
+        assertEquals(70, sku.getDailyPlanQuotaMap().get(java.time.LocalDate.of(2026, 5, 3)).getRemainingQty());
+        assertEquals(100, sku.getDailyPlanQuotaMap().get(java.time.LocalDate.of(2026, 5, 4)).getRemainingQty());
+        assertEquals(270, sku.getWindowRemainingPlanQty());
+    }
+
+    @Test
     void doHandle_shouldNotDoubleDeductWhenSameMaterialHasMultipleMachines() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 

@@ -323,7 +323,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 计划量信息
         dto.setMonthPlanQty(plan.getTotalQty() != null ? plan.getTotalQty() : 0);
         dto.setFinishedQty(Math.max(0, dto.getMonthPlanQty() - surplus.getSurplusQty()));
-        int carryForwardQty = Math.max(0, context.getCarryForwardQtyMap().getOrDefault(plan.getMaterialCode(), 0));
+        int carryForwardQty = context.getCarryForwardQtyMap().getOrDefault(plan.getMaterialCode(), 0);
         int windowPlanQty = MonthPlanDayQtyUtil.resolveWindowPlanQty(
                 plan, context.getScheduleDate(), context.getScheduleTargetDate());
         // 继承量已由滚动衔接占用，需从窗口待排量中扣减，防止重复排产
@@ -335,13 +335,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap = buildDailyPlanQuotaMap(
                 context, plan, dto.getMaterialCode());
         deductInheritedFromDailyQuota(dailyPlanQuotaMap, inheritedPlanQty);
+        deductScheDayFinishFromDailyQuota(context, dailyPlanQuotaMap, dto.getMaterialCode());
 
-        // 将欠产传导量叠加到首日额度，确保日计划账本反映补产需求。
-        // 欠产需尽早补回，因此叠加到窗口最早日期。
-        if (carryForwardQty > 0 && !dailyPlanQuotaMap.isEmpty()) {
-            SkuDailyPlanQuotaDTO firstDayQuota = dailyPlanQuotaMap.values().iterator().next();
-            firstDayQuota.setRemainingQty(firstDayQuota.getRemainingQty() + carryForwardQty);
-        }
+        // 将欠/超产净值写入日计划账本：欠产叠加首日，超产从首日起顺序抵扣。
+        applyCarryForwardToDailyQuota(dailyPlanQuotaMap, carryForwardQty, dto.getMaterialCode());
         dto.setDailyPlanQuotaMap(dailyPlanQuotaMap);
 
         // 窗口内日计划剩余量汇总（已扣减继承量，已叠加欠产传导）
@@ -632,6 +629,91 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
+     * 从日计划额度账本中扣减T日排程晚班完成量。
+     * <p>T日晚班完成量已经计入月计划完成量，日计划账本也必须同步扣减，避免续作首日重复排产。</p>
+     *
+     * @param context 排程上下文
+     * @param dailyPlanQuotaMap 日计划额度账本
+     * @param materialCode 物料编码
+     */
+    private void deductScheDayFinishFromDailyQuota(LhScheduleContext context,
+                                                   Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap,
+                                                   String materialCode) {
+        int scheDayFinishQty = resolveScheDayFinishQty(context, materialCode);
+        if (scheDayFinishQty <= 0) {
+            return;
+        }
+        int deductedQty = deductQuotaByDateOrder(dailyPlanQuotaMap, scheDayFinishQty);
+        if (deductedQty > 0) {
+            log.info("T日排程晚班完成量扣减日计划账本, materialCode: {}, finishQty: {}, deductedQty: {}, windowRemainingQty: {}",
+                    materialCode, scheDayFinishQty, deductedQty, SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap));
+        }
+        if (deductedQty < scheDayFinishQty) {
+            log.debug("T日排程晚班完成量超出窗口日计划额度, materialCode: {}, finishQty: {}, deductedQty: {}, overflowQty: {}",
+                    materialCode, scheDayFinishQty, deductedQty, scheDayFinishQty - deductedQty);
+        }
+    }
+
+    /**
+     * 将T-1欠产/超产净值写入日计划额度账本。
+     * <p>正值表示欠产，追加到首日优先追补；负值表示超产，从首日起顺序抵扣。</p>
+     *
+     * @param dailyPlanQuotaMap 日计划额度账本
+     * @param carryForwardQty T-1欠产/超产净值
+     * @param materialCode 物料编码
+     */
+    private void applyCarryForwardToDailyQuota(Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap,
+                                               int carryForwardQty,
+                                               String materialCode) {
+        if (carryForwardQty == 0 || CollectionUtils.isEmpty(dailyPlanQuotaMap)) {
+            return;
+        }
+        if (carryForwardQty > 0) {
+            SkuDailyPlanQuotaDTO firstDayQuota = dailyPlanQuotaMap.values().iterator().next();
+            firstDayQuota.setRemainingQty(firstDayQuota.getRemainingQty() + carryForwardQty);
+            SkuDailyPlanQuotaUtil.refreshRollingFields(dailyPlanQuotaMap);
+            log.info("T-1欠产追加到首日日计划账本, materialCode: {}, carryForwardQty: {}, firstDate: {}, windowRemainingQty: {}",
+                    materialCode, carryForwardQty, firstDayQuota.getProductionDate(),
+                    SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap));
+            return;
+        }
+        int overProductionQty = Math.abs(carryForwardQty);
+        int deductedQty = deductQuotaByDateOrder(dailyPlanQuotaMap, overProductionQty);
+        log.info("T-1超产抵扣日计划账本, materialCode: {}, overProductionQty: {}, deductedQty: {}, windowRemainingQty: {}",
+                materialCode, overProductionQty, deductedQty, SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap));
+    }
+
+    /**
+     * 按日期顺序扣减日计划额度。
+     *
+     * @param dailyPlanQuotaMap 日计划额度账本
+     * @param qty 待扣减数量
+     * @return 实际扣减数量
+     */
+    private int deductQuotaByDateOrder(Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap, int qty) {
+        if (qty <= 0 || CollectionUtils.isEmpty(dailyPlanQuotaMap)) {
+            return 0;
+        }
+        int remainingToDeduct = qty;
+        int deductedQty = 0;
+        for (SkuDailyPlanQuotaDTO quota : dailyPlanQuotaMap.values()) {
+            if (remainingToDeduct <= 0) {
+                break;
+            }
+            if (Objects.isNull(quota)) {
+                continue;
+            }
+            int deduction = Math.min(Math.max(0, quota.getRemainingQty()), remainingToDeduct);
+            quota.setScheduledQty(quota.getScheduledQty() + deduction);
+            quota.setRemainingQty(Math.max(0, quota.getRemainingQty() - deduction));
+            deductedQty += deduction;
+            remainingToDeduct -= deduction;
+        }
+        SkuDailyPlanQuotaUtil.refreshRollingFields(dailyPlanQuotaMap);
+        return deductedQty;
+    }
+
+    /**
      * 解析停产收尾需求量。
      *
      * @param context 排程上下文
@@ -652,12 +734,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
     /**
      * 解析常规待排需求量。
-     * <p>欠产传导量(carryForwardQty)暂不计入待排需求，避免余量为0的SKU因前次排程未完成而持续被排产。
-     * 该逻辑已在调整前序排程时通过 adjustPreviousSchedule 做了传导记录，但不应影响本次待排量的计算。</p>
+     * <p>待排需求 = 月计划余量 - 已继承量 + T-1欠产/超产净值；负向超产用于抵扣当前窗口需求。</p>
      *
      * @param surplusQty 月计划余量
      * @param inheritedPlanQty 已继承量
-     * @param carryForwardQty 欠产传导量（当前暂不使用）
+     * @param carryForwardQty 欠产/超产净值
      * @param embryoStock 胎胚库存
      * @return 待排需求量
      */
@@ -665,7 +746,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                                       int inheritedPlanQty,
                                       int carryForwardQty,
                                       int embryoStock) {
-        int surplusDemandQty = Math.max(0, surplusQty - Math.max(0, inheritedPlanQty));
+        int surplusDemandQty = Math.max(0, surplusQty - Math.max(0, inheritedPlanQty) + carryForwardQty);
         int effectiveEmbryoStock = Math.max(0, embryoStock);
         return Math.max(surplusDemandQty, effectiveEmbryoStock);
     }

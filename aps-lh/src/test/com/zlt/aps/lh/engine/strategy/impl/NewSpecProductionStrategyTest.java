@@ -42,7 +42,20 @@ public class NewSpecProductionStrategyTest {
     @Test
     public void shouldSelectMachineThatCanFinishRemainingQtyFirst() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
-        injectTargetScheduleQtyResolver(strategy, new TargetScheduleQtyResolver());
+        injectTargetScheduleQtyResolver(strategy, new TargetScheduleQtyResolver() {
+            @Override
+            public int calcMachineAvailableCapacityInWindow(LhScheduleContext context,
+                                                            SkuScheduleDTO sku,
+                                                            MachineScheduleDTO machine) {
+                if ("K1111L".equals(machine.getMachineCode())) {
+                    return 20;
+                }
+                if ("K1105L".equals(machine.getMachineCode())) {
+                    return 16;
+                }
+                return 0;
+            }
+        });
 
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(toDate(2026, 5, 13, 0, 0, 0));
@@ -58,8 +71,8 @@ public class NewSpecProductionStrategyTest {
         sku.setStrictTargetQty(true);
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
 
-        MachineScheduleDTO firstMachine = buildMachine("K1105", 1);
-        MachineScheduleDTO secondMachine = buildMachine("K1111", 4);
+        MachineScheduleDTO firstMachine = buildMachine("K1105L", 1);
+        MachineScheduleDTO secondMachine = buildMachine("K1111L", 4);
         List<MachineScheduleDTO> candidates = Arrays.asList(firstMachine, secondMachine);
 
         MachineScheduleDTO selected = invokeSelectCandidateMachine(
@@ -73,7 +86,7 @@ public class NewSpecProductionStrategyTest {
                 ProductionQuantityPolicy.from(sku, false));
 
         Assertions.assertNotNull(selected);
-        Assertions.assertEquals("K1111", selected.getMachineCode());
+        Assertions.assertEquals("K1111L", selected.getMachineCode());
     }
 
     /**
@@ -202,6 +215,8 @@ public class NewSpecProductionStrategyTest {
         sku.setMaterialCode("3302001724");
         sku.setTrial(true);
         sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        sku.setWindowPlanQty(46);
+        sku.setWindowRemainingPlanQty(46);
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>(4);
         LocalDate productionDate = shifts.get(0).getWorkDate().toInstant()
                 .atZone(java.time.ZoneId.systemDefault()).toLocalDate();

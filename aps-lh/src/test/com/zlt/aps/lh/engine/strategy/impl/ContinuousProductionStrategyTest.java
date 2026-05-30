@@ -807,28 +807,32 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void scheduleReduceMould_shouldReduceFromFirstDayWhenLookAheadCanRecoverShortage() {
+    public void scheduleReduceMould_shouldUseDownMachineToFillFirstDayWhenLookAheadCanRecoverShortage() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiDayContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), 64, 48, 16, 10, 5, "K1405", "K1702");
 
         strategy.scheduleReduceMould(context);
 
-        assertEquals(1, context.getScheduleResultList().size(),
-                "day1单台不足但day2可追回欠产时，应从day1开始降为单台续作");
-        LhScheduleResult retainedResult = context.getScheduleResultList().get(0);
+        assertEquals(2, context.getScheduleResultList().size(),
+                "day1单台不足时，下机机台只补足当天剩余量，后续窗口释放");
+        LhScheduleResult retainedResult = findResultByMachineCode(context, "K1405");
+        LhScheduleResult downMachineResult = findResultByMachineCode(context, "K1702");
         assertEquals("K1405", retainedResult.getLhMachineCode(), "降模后应保留胶囊次数更多的机台");
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 1));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 2));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 3));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 4));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 5));
-        assertEquals(80, sumScheduledQty(context),
-                "正规非收尾续作保留机台仍按可用班次补满，但不得继续占用第二台机台");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachineResult, 1));
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(downMachineResult, 2));
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(downMachineResult, 3));
+        assertEquals(96, sumScheduledQty(context),
+                "保留机台继续满班续作，下机机台只补足day1剩余量");
     }
 
     @Test
-    public void scheduleReduceMould_shouldNotReduceWhenFutureDayPlanDoesNotDrop() {
+    public void scheduleReduceMould_shouldReduceByLookAheadEvenWhenFutureDayPlanDoesNotDrop() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiDayContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), 96, 48, 48, 10, 5, "K1405", "K1702");
@@ -836,9 +840,13 @@ public class ContinuousProductionStrategyTest {
         strategy.scheduleReduceMould(context);
 
         assertEquals(2, context.getScheduleResultList().size(),
-                "未来dayN计划量未下降时，不应仅因单台追补窗口可满足就提前降模");
-        assertEquals(160, sumScheduledQty(context),
-                "正规非收尾保留两台时仍沿用原满班排产语义，本用例只锁定不降模");
+                "未来dayN计划量未下降时，也应按追补窗口模拟释放冗余机台");
+        LhScheduleResult retainedResult = findResultByMachineCode(context, "K1405");
+        LhScheduleResult downMachineResult = findResultByMachineCode(context, "K1702");
+        assertEquals(80, retainedResult.getDailyPlanQty().intValue());
+        assertEquals(16, downMachineResult.getDailyPlanQty().intValue());
+        assertEquals(96, sumScheduledQty(context),
+                "保留机台满足后续追补窗口，下机机台仅补足day1剩余量");
     }
 
     @Test
@@ -1141,6 +1149,144 @@ public class ContinuousProductionStrategyTest {
                 "缺失来源映射时应显式报错，不能静默按 materialCode 串组");
     }
 
+    @Test
+    public void scheduleReduceMould_shouldUseDownMachineOnlyToFillFirstDayRemainingQty() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildExcelContinuationContext(
+                "3302001271", 154, 184, 184, 512, "1",
+                new String[]{"K2022", "K1205", "K1614", "K1906", "K1412"});
+
+        strategy.scheduleReduceMould(context);
+
+        LhScheduleResult downMachine = findResultByMachineCode(context, "K1412");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachine, 1));
+        assertEquals(Integer.valueOf(10), ShiftFieldUtil.getShiftPlanQty(downMachine, 2));
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(downMachine, 3));
+        assertEquals(26, downMachine.getDailyPlanQty().intValue(), "下机机台只补足day1剩余量，后续班次必须释放");
+        assertEquals(5, context.getScheduleResultList().size(), "第一天下机机台有排产量，不应被零计划收口移除");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldReduceMachinesByDayForExcelThirdScenario() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildExcelContinuationContext(
+                "3302000465", 96, 96, 96, 288, "1",
+                new String[]{"K1601", "K1801", "K1505", "K1504", "K1213"});
+
+        strategy.scheduleReduceMould(context);
+
+        LhScheduleResult firstKept = findResultByMachineCode(context, "K1601");
+        LhScheduleResult secondKept = findResultByMachineCode(context, "K1801");
+        LhScheduleResult firstDayOnly = findResultByMachineCode(context, "K1505");
+        assertEquals(128, firstKept.getDailyPlanQty().intValue());
+        assertEquals(128, secondKept.getDailyPlanQty().intValue());
+        assertEquals(32, firstDayOnly.getDailyPlanQty().intValue());
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(firstDayOnly, 1));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(firstDayOnly, 2));
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(firstDayOnly, 3));
+        assertEquals(3, context.getScheduleResultList().size(), "零排产机台应释放并移出续作结果");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldKeepSingleMachineNonEndingFullWindow() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildExcelContinuationContext(
+                "3302002336", 8, 48, 48, 104, "1", new String[]{"K1307"});
+
+        strategy.scheduleReduceMould(context);
+
+        LhScheduleResult result = findResultByMachineCode(context, "K1307");
+        assertEquals(128, result.getDailyPlanQty().intValue(), "单机台非收尾续作不执行降模，应排满3天8班");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(result, 8));
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldStartFromNextDayWhenFirstDayHasNoPlan() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildExcelContinuationContext(
+                "3302001075", 0, 32, 46, 78, "1", new String[]{"K1406", "K1712"});
+
+        strategy.scheduleReduceMould(context);
+
+        LhScheduleResult kept = findResultByMachineCode(context, "K1406");
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(kept, 1));
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(kept, 2));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(kept, 3));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(kept, 8));
+        assertEquals(1, context.getScheduleResultList().size(), "day1无计划时多余续作机台应释放");
+    }
+
+    @Test
+    public void scheduleContinuousEnding_shouldReleaseMachineWhenWindowHasNoDailyPlan() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildWindowNoPlanContinuousContext();
+
+        strategy.scheduleContinuousEnding(context);
+
+        assertEquals(0, context.getScheduleResultList().size(), "窗口内无日计划的续作SKU不应占用机台");
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertTrue(context.getUnscheduledResultList().get(0).getUnscheduledReason()
+                .contains("当前排程窗口内无日计划量"));
+    }
+
+    private LhScheduleContext buildExcelContinuationContext(String materialCode,
+                                                            int firstDayQty,
+                                                            int secondDayQty,
+                                                            int thirdDayQty,
+                                                            int targetQty,
+                                                            String lookAheadDays,
+                                                            String[] machineCodes) {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-TEST-EXCEL");
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, lookAheadDays)));
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(
+                shifts.get(0), shifts.get(2), shifts.get(5), firstDayQty, secondDayQty, thirdDayQty);
+        List<SkuScheduleDTO> continuousSkuList = new ArrayList<SkuScheduleDTO>(machineCodes.length);
+        for (int index = 0; index < machineCodes.length; index++) {
+            String machineCode = machineCodes[index];
+            addMachine(context, machineCode, machineCodes.length - index);
+            SkuScheduleDTO sku = buildContinuationSku(
+                    materialCode, ConstructionStageEnum.FORMAL.getCode(), false, targetQty, quotaMap);
+            sku.setContinuousMachineCode(machineCode);
+            continuousSkuList.add(sku);
+
+            LhScheduleResult result = buildFullWindowContinuationResult(materialCode, machineCode, shifts);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+            context.getMachineAssignmentMap().put(machineCode,
+                    new ArrayList<LhScheduleResult>(Collections.singletonList(result)));
+        }
+        context.setContinuousSkuList(continuousSkuList);
+        return context;
+    }
+
+    private LhScheduleContext buildWindowNoPlanContinuousContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-TEST-NO-PLAN");
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        addMachine(context, "K1712", 1);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(
+                shifts.get(0), shifts.get(2), shifts.get(5), 0, 0, 0);
+        SkuScheduleDTO sku = buildContinuationSku(
+                "3302001077", ConstructionStageEnum.FORMAL.getCode(), false, 80, quotaMap);
+        sku.setContinuousMachineCode("K1712");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+        return context;
+    }
+
     /**
      * 构建同SKU两台续作降模测试上下文。
      *
@@ -1369,6 +1515,20 @@ public class ContinuousProductionStrategyTest {
                 shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
         ShiftFieldUtil.syncDailyPlanQty(result);
         result.setSpecEndTime(shifts.get(2).getShiftEndDateTime());
+        result.setTdaySpecEndTime(result.getSpecEndTime());
+        return result;
+    }
+
+    private LhScheduleResult buildFullWindowContinuationResult(String materialCode,
+                                                               String machineCode,
+                                                               List<LhShiftConfigVO> shifts) {
+        LhScheduleResult result = baseContinuationResult(materialCode, machineCode, false);
+        for (LhShiftConfigVO shift : shifts) {
+            ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), 16,
+                    shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+        }
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setSpecEndTime(shifts.get(shifts.size() - 1).getShiftEndDateTime());
         result.setTdaySpecEndTime(result.getSpecEndTime());
         return result;
     }

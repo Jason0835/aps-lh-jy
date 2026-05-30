@@ -469,6 +469,11 @@ public class LhScheduleConfig {
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS));
     }
 
+    public int getContinuousShortageLookAheadDays() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS,
+                LhScheduleConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS));
+    }
+
     /**
      * 判断是否启用硫化示方历史保护。
      *
