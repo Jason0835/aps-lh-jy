@@ -2,6 +2,7 @@ package com.zlt.aps.lh.service.impl;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.zlt.aps.cx.api.domain.entity.CxStock;
+import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -36,12 +37,19 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
+import java.math.BigDecimal;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -120,6 +128,107 @@ public class LhBaseDataServiceImplTest {
         Assertions.assertEquals(Integer.valueOf(12), context.getEmbryoRealtimeStockMap().get("EMB-001"));
     }
 
+    /**
+     * 用例说明：月累计完成量任务依赖月计划物料列表，必须在月计划加载完成后再执行。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldLoadMonthFinishedQtyAfterMonthPlanLoaded() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(buildDate(2026, 6, 3));
+        context.setScheduleTargetDate(buildDate(2026, 6, 5));
+        AtomicBoolean monthPlanLoaded = new AtomicBoolean(false);
+        AtomicBoolean monthFinishedQtyObserved = new AtomicBoolean(false);
+        AtomicBoolean monthFinishedQtySawLoadedMonthPlan = new AtomicBoolean(false);
+        AtomicInteger dayFinishQtyQueryCount = new AtomicInteger();
+        CountDownLatch monthPlanQueryStarted = new CountDownLatch(1);
+        CountDownLatch allowMonthPlanFinish = new CountDownLatch(1);
+
+        FactoryMonthPlanProductionFinalResult monthPlan = new FactoryMonthPlanProductionFinalResult();
+        monthPlan.setMaterialCode("3302001513");
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper = mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any())).thenAnswer(invocation -> {
+            monthPlanQueryStarted.countDown();
+            allowMonthPlanFinish.await(1, TimeUnit.SECONDS);
+            monthPlanLoaded.set(true);
+            return Collections.singletonList(monthPlan);
+        });
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        LhDayFinishQtyMapper dayFinishQtyMapper = mockMapper(LhDayFinishQtyMapper.class);
+        Mockito.when(dayFinishQtyMapper.selectList(ArgumentMatchers.any())).thenAnswer(invocation -> {
+            int queryIndex = dayFinishQtyQueryCount.incrementAndGet();
+            if (queryIndex == 2) {
+                monthPlanQueryStarted.await(1, TimeUnit.SECONDS);
+                monthFinishedQtyObserved.set(true);
+                monthFinishedQtySawLoadedMonthPlan.set(monthPlanLoaded.get());
+                allowMonthPlanFinish.countDown();
+            }
+            return Collections.emptyList();
+        });
+        injectField(service, "lhDayFinishQtyMapper", dayFinishQtyMapper);
+
+        ExecutorService executorService = Executors.newFixedThreadPool(8);
+        injectField(service, "lhDataInitExecutor", executorService);
+        try {
+            service.loadAllBaseData(context);
+        } finally {
+            executorService.shutdownNow();
+        }
+
+        Assertions.assertTrue(monthFinishedQtyObserved.get(), "测试需要实际命中月累计完成量查询");
+        Assertions.assertTrue(monthFinishedQtySawLoadedMonthPlan.get(), "月累计完成量任务必须在月计划加载完成后执行");
+    }
+
+    /**
+     * 用例说明：目标日属于新月份但排程窗口T日仍在月初时，月累计完成量只能按目标月统计，不能带入上月完成量。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldNotUsePreviousMonthFinishedQtyForTargetMonthPlan() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(buildDate(2026, 6, 1));
+        context.setScheduleTargetDate(buildDate(2026, 6, 3));
+
+        FactoryMonthPlanProductionFinalResult monthPlan = new FactoryMonthPlanProductionFinalResult();
+        monthPlan.setMaterialCode("3302001513");
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper = mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any())).thenReturn(Collections.singletonList(monthPlan));
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        LhDayFinishQty previousMonthFinishQtyA = new LhDayFinishQty();
+        previousMonthFinishQtyA.setFinishDate(buildDate(2026, 5, 7));
+        previousMonthFinishQtyA.setMaterialCode("3302001513");
+        previousMonthFinishQtyA.setDayFinishQty(BigDecimal.valueOf(103));
+        LhDayFinishQty previousMonthFinishQtyB = new LhDayFinishQty();
+        previousMonthFinishQtyB.setFinishDate(buildDate(2026, 5, 24));
+        previousMonthFinishQtyB.setMaterialCode("3302001513");
+        previousMonthFinishQtyB.setDayFinishQty(BigDecimal.valueOf(1344));
+        LhDayFinishQty previousDayFinishQty = new LhDayFinishQty();
+        previousDayFinishQty.setFinishDate(buildDate(2026, 5, 31));
+        previousDayFinishQty.setMaterialCode("3302001513");
+        previousDayFinishQty.setDayFinishQty(BigDecimal.valueOf(1447));
+
+        LhDayFinishQtyMapper dayFinishQtyMapper = mockMapper(LhDayFinishQtyMapper.class);
+        Mockito.when(dayFinishQtyMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(previousDayFinishQty),
+                Arrays.asList(previousMonthFinishQtyA, previousMonthFinishQtyB));
+        injectField(service, "lhDayFinishQtyMapper", dayFinishQtyMapper);
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertEquals(Integer.valueOf(1447),
+                context.getMaterialDayFinishedQtyMap().get("3302001513_2026-05-31"),
+                "测试数据需要保留T-1日完成量，防止月累计缺失时回退误判");
+        Assertions.assertEquals(Integer.valueOf(0), context.getMaterialMonthFinishedQtyMap().get("3302001513"),
+                "6月月计划累计完成量应明确为0，不能带入5月完成量或缺失后触发历史回退");
+    }
+
     private LhBaseDataServiceImpl buildServiceWithDefaultMocks() throws Exception {
         LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
         injectField(service, "monthPlanMapper", mockMapper(FactoryMonthPlanProductionFinalResultMapper.class));
@@ -174,6 +283,15 @@ public class LhBaseDataServiceImplTest {
         context.setScheduleTargetDate(new Date(1767283200000L));
         context.setScheduleConfig(new LhScheduleConfig(new HashMap<>(16)));
         return context;
+    }
+
+    private Date buildDate(int year, int month, int day) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.clear();
+        calendar.set(Calendar.YEAR, year);
+        calendar.set(Calendar.MONTH, month - 1);
+        calendar.set(Calendar.DAY_OF_MONTH, day);
+        return calendar.getTime();
     }
 
     private void injectField(Object target, String fieldName, Object value) throws Exception {

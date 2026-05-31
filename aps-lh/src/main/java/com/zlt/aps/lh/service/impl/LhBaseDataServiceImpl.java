@@ -229,6 +229,10 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         CompletableFuture<Void> embryoStockFuture = runAfterDataInitTask(monthPlanFuture, "胎胚实时库存",
                 () -> loadEmbryoRealtimeStock(context, factoryCode, startDate),
                 () -> sizeOf(context.getEmbryoRealtimeStockMap()));
+        CompletableFuture<Void> monthFinishedQtyFuture = runAfterDataInitTask(monthPlanFuture, "月累计完成量",
+                () -> loadMaterialMonthFinishedQty(context, factoryCode,
+                        year, month, LhScheduleTimeUtil.addDays(scheduleDate, -1)),
+                () -> sizeOf(context.getMaterialMonthFinishedQtyMap()));
         CompletableFuture<Void> machineInfoFuture = runDataInitTaskAsync("硫化机台信息",
                 () -> loadMachineInfo(context, factoryCode),
                 () -> sizeOf(context.getMachineInfoMap()));
@@ -271,9 +275,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 runDataInitTaskAsync("前日物料日完成量",
                         () -> loadDayFinishQty(context, factoryCode, previousDataDate),
                         () -> sizeOf(context.getMaterialDayFinishedQtyMap())),
-                runDataInitTaskAsync("月累计完成量",
-                        () -> loadMaterialMonthFinishedQty(context, factoryCode, LhScheduleTimeUtil.addDays(scheduleDate, -1)),
-                        () -> sizeOf(context.getMaterialMonthFinishedQtyMap())),
+                monthFinishedQtyFuture,
                 runDataInitTaskAsync("T日排程班次完成量",
                         () -> loadScheDayFinishQty(context, factoryCode, scheduleDate),
                         () -> sizeOf(context.getMaterialScheDayFinishQtyMap())),
@@ -1077,26 +1079,46 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
+     * @param year        月计划所属年份
+     * @param month       月计划所属月份
      * @param cutoffDate  截止日期（T-1日，含当天）
      */
-    private void loadMaterialMonthFinishedQty(LhScheduleContext context, String factoryCode, Date cutoffDate) {
-        Date targetDay = LhScheduleTimeUtil.clearTime(cutoffDate);
-        Date nextTargetDay = LhScheduleTimeUtil.addDays(targetDay, 1);
+    private void loadMaterialMonthFinishedQty(LhScheduleContext context, String factoryCode,
+                                              int year, int month, Date cutoffDate) {
+        Date cutoffDay = LhScheduleTimeUtil.clearTime(cutoffDate);
         Calendar calendar = Calendar.getInstance();
-        calendar.setTime(targetDay);
+        calendar.clear();
+        calendar.set(Calendar.YEAR, year);
+        calendar.set(Calendar.MONTH, month - 1);
         calendar.set(Calendar.DAY_OF_MONTH, 1);
         Date monthStart = LhScheduleTimeUtil.clearTime(calendar.getTime());
+
+        calendar.add(Calendar.MONTH, 1);
+        Date nextMonthStart = LhScheduleTimeUtil.clearTime(calendar.getTime());
+
+        Date queryEndDate = LhScheduleTimeUtil.addDays(cutoffDay, 1);
+        if (queryEndDate.after(nextMonthStart)) {
+            queryEndDate = nextMonthStart;
+        }
+
+        Map<String, Integer> materialMonthFinishedQtyMap = buildMonthPlanMaterialFinishedQtyMap(context);
+        if (!queryEndDate.after(monthStart)) {
+            context.setMaterialMonthFinishedQtyMap(materialMonthFinishedQtyMap);
+            log.debug("月累计完成量加载完成, 数量: {}, 月计划月份: {}-{}, 起始日: {}, 截止日: {}, 实际查询结束日: {}",
+                    materialMonthFinishedQtyMap.size(), year, month, LhScheduleTimeUtil.formatDate(monthStart),
+                    LhScheduleTimeUtil.formatDate(cutoffDay), LhScheduleTimeUtil.formatDate(queryEndDate));
+            return;
+        }
 
         List<LhDayFinishQty> monthFinishList = lhDayFinishQtyMapper.selectList(
                 new LambdaQueryWrapper<LhDayFinishQty>()
                         .eq(LhDayFinishQty::getFactoryCode, factoryCode)
                         .ge(LhDayFinishQty::getFinishDate, monthStart)
-                        .lt(LhDayFinishQty::getFinishDate, nextTargetDay)
+                        .lt(LhDayFinishQty::getFinishDate, queryEndDate)
                         .and(wrapper -> wrapper.eq(LhDayFinishQty::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
                                 .or()
                                 .isNull(LhDayFinishQty::getIsDelete)));
 
-        Map<String, Integer> materialMonthFinishedQtyMap = new HashMap<>(64);
         if (!CollectionUtils.isEmpty(monthFinishList)) {
             for (LhDayFinishQty finishQty : monthFinishList) {
                 if (StringUtils.isEmpty(finishQty.getMaterialCode())) {
@@ -1110,10 +1132,30 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
 
         context.setMaterialMonthFinishedQtyMap(materialMonthFinishedQtyMap);
-        log.debug("月累计完成量加载完成, 数量: {}, 起始日: {}, 截止: {}(含当天, 即T-1日)",
+        log.debug("月累计完成量加载完成, 数量: {}, 月计划月份: {}-{}, 起始日: {}, 截止日: {}, 实际查询结束日: {}",
                 materialMonthFinishedQtyMap.size(),
-                LhScheduleTimeUtil.formatDate(monthStart),
-                LhScheduleTimeUtil.formatDate(targetDay));
+                year, month, LhScheduleTimeUtil.formatDate(monthStart),
+                LhScheduleTimeUtil.formatDate(cutoffDay), LhScheduleTimeUtil.formatDate(queryEndDate));
+    }
+
+    /**
+     * 按月计划物料初始化月累计完成量，确保目标月无完成记录时下游按0处理，不回退到上月完成量。
+     *
+     * @param context 排程上下文
+     * @return 月计划物料完成量Map
+     */
+    private Map<String, Integer> buildMonthPlanMaterialFinishedQtyMap(LhScheduleContext context) {
+        Map<String, Integer> materialMonthFinishedQtyMap = new HashMap<>(64);
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getMonthPlanList())) {
+            return materialMonthFinishedQtyMap;
+        }
+        for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
+            if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())) {
+                continue;
+            }
+            materialMonthFinishedQtyMap.putIfAbsent(plan.getMaterialCode(), 0);
+        }
+        return materialMonthFinishedQtyMap;
     }
 
     /**

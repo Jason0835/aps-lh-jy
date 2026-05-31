@@ -125,7 +125,7 @@ public class LhScheduleContext {
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
     /** 日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd) */
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
-    /** 月累计完成量Map（截至目标排产日期含当天）, key=materialCode */
+    /** 月累计完成量Map（按月计划所属月份统计，截至排程窗口T日前一日）, key=materialCode */
     private Map<String, Integer> materialMonthFinishedQtyMap = new HashMap<>();
     /** T日排程班次完成量Map, key=materialCode, value=T日class1FinishQty按物料汇总值 */
     private Map<String, Integer> materialScheDayFinishQtyMap = new HashMap<>();
