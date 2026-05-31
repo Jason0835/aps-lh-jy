@@ -192,6 +192,8 @@ public final class LhScheduleParamConstant {
     public static final String NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = "SYS0304015";
     /** 续作欠产追补判断天数 */
     public static final String CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS = "SYS0304019";
+    /** 是否追加T-1欠产/超产量（0-关闭，1-开启） */
+    public static final String ENABLE_CARRY_FORWARD_QTY = "SYS0304020";
     /** 硫化示方历史保护开关（0-关闭，1-开启） */
     public static final String ENABLE_CURE_FORMULA_HISTORY_PROTECT = "SYS0304018";
 }

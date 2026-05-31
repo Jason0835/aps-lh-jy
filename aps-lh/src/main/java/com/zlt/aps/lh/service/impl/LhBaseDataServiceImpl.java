@@ -1327,8 +1327,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .ge(LhMachineOnlineInfo::getOnlineDate, lookbackStartDay)
                         .le(LhMachineOnlineInfo::getOnlineDate, tDay)
                         .orderByDesc(LhMachineOnlineInfo::getOnlineDate)
-                        // ONLINE_DATE 为 date 类型；同日多条记录时按更新时间取最近同步版本。
+                        // ONLINE_DATE 为 date 类型；同日多条记录时按更新时间和MES版本号取最近同步版本。
                         .orderByDesc(LhMachineOnlineInfo::getUpdateTime)
+                        .orderByDesc(LhMachineOnlineInfo::getDataVersion)
                         .orderByAsc(LhMachineOnlineInfo::getLhCode));
         if (CollectionUtils.isEmpty(machineOnlineInfoList)) {
             context.setMachineOnlineInfoMap(new HashMap<>(16));

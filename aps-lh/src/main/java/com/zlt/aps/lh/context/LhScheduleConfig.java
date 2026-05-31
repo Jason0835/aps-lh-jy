@@ -475,6 +475,16 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 判断是否将T-1欠产/超产净值追加到当前排程窗口。
+     *
+     * @return true-追加；false-不追加
+     */
+    public boolean isCarryForwardQtyEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.ENABLE_CARRY_FORWARD_QTY,
+                LhScheduleConstant.ENABLE_CARRY_FORWARD_QTY) == 1;
+    }
+
+    /**
      * 判断是否启用硫化示方历史保护。
      *
      * @return true-启用；false-关闭

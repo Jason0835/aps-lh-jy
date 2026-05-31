@@ -1217,6 +1217,27 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void scheduleContinuousEnding_shouldStartSingleMachineFromFirstPlannedDayWhenFirstDayHasNoPlan()
+            throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+
+        LhScheduleContext context = buildSingleMachineDayOneNoPlanContinuousContext();
+
+        strategy.scheduleContinuousEnding(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertNull(ShiftFieldUtil.getShiftPlanQty(result, 1), "day1无计划时不应占用T日早班");
+        assertNull(ShiftFieldUtil.getShiftPlanQty(result, 2), "day1无计划时不应占用T日中班");
+        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, 3));
+        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, 8));
+        assertEquals(48, result.getDailyPlanQty().intValue(), "单机台非收尾应从首个有计划日开始排满后续窗口");
+    }
+
+    @Test
     public void scheduleContinuousEnding_shouldReleaseMachineWhenWindowHasNoDailyPlan() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
@@ -1265,6 +1286,27 @@ public class ContinuousProductionStrategyTest {
                     new ArrayList<LhScheduleResult>(Collections.singletonList(result)));
         }
         context.setContinuousSkuList(continuousSkuList);
+        return context;
+    }
+
+    private LhScheduleContext buildSingleMachineDayOneNoPlanContinuousContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-TEST-DAY1-NO-PLAN");
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, "1")));
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        addMachine(context, "K1501L", 1);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(
+                shifts.get(0), shifts.get(2), shifts.get(5), 0, 32, 46);
+        SkuScheduleDTO sku = buildContinuationSku(
+                "3302001075", ConstructionStageEnum.FORMAL.getCode(), false, 78, quotaMap);
+        sku.setContinuousMachineCode("K1501L");
+        context.setContinuousSkuList(Collections.singletonList(sku));
         return context;
     }
 

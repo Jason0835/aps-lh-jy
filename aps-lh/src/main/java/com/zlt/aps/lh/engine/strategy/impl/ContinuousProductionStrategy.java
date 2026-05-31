@@ -158,8 +158,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             boolean isSingleMachine = continuationGroupMachineCountMap
                     .getOrDefault(buildContinuationGroupKey(sku), 0) == 1;
 
-            // 滚动衔接时沿用机台继承后的可用时间，避免从重叠窗口首班重复起排。
-            Date startTime = resolveContinuousStartTime(context, machine, shifts);
+            // 滚动衔接时沿用机台继承后的可用时间；普通续作从首个有日计划剩余额度的班次起排。
+            Date startTime = resolveContinuousStartTime(context, sku, machine, shifts);
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine);
             // 非收尾续作可以为定点新增物料挤出后续换模窗口；收尾场景不走挤量预留。
@@ -277,20 +277,68 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * <p>滚动衔接场景下从机台继承后的可用时间继续排；普通场景仍从窗口首班开始。</p>
      */
     private Date resolveContinuousStartTime(LhScheduleContext context,
+                                            SkuScheduleDTO sku,
                                             MachineScheduleDTO machine,
                                             List<LhShiftConfigVO> shifts) {
-        Date defaultStartTime = CollectionUtils.isEmpty(shifts) ? new Date() : shifts.get(0).getShiftStartDateTime();
+        Date defaultStartTime = resolveFirstPositiveDailyPlanStartTime(sku, shifts);
         if (context == null || !context.isRollingScheduleHandoff()) {
             return defaultStartTime;
         }
         Date appendStartTime = resolveRollingAppendStartTime(context, shifts);
-        if (machine == null || machine.getEstimatedEndTime() == null) {
-            return appendStartTime != null ? appendStartTime : defaultStartTime;
+        if (appendStartTime != null && appendStartTime.after(defaultStartTime)) {
+            defaultStartTime = appendStartTime;
         }
-        if (appendStartTime == null || machine.getEstimatedEndTime().after(appendStartTime)) {
+        if (machine == null || machine.getEstimatedEndTime() == null) {
+            return defaultStartTime;
+        }
+        if (machine.getEstimatedEndTime().after(defaultStartTime)) {
             return machine.getEstimatedEndTime();
         }
-        return appendStartTime;
+        return defaultStartTime;
+    }
+
+    /**
+     * 解析首个有日计划剩余额度的续作起排班次。
+     *
+     * @param sku 续作SKU
+     * @param shifts 排程窗口班次
+     * @return 首个可排班次开始时间；无可识别额度时返回窗口首班开始时间
+     */
+    private Date resolveFirstPositiveDailyPlanStartTime(SkuScheduleDTO sku, List<LhShiftConfigVO> shifts) {
+        Date defaultStartTime = CollectionUtils.isEmpty(shifts) ? new Date() : shifts.get(0).getShiftStartDateTime();
+        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
+            return defaultStartTime;
+        }
+        Set<LocalDate> positivePlanDateSet = new LinkedHashSet<LocalDate>(4);
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sku.getDailyPlanQuotaMap().entrySet()) {
+            SkuDailyPlanQuotaDTO quota = entry.getValue();
+            if (quota != null && quota.getRemainingQty() > 0) {
+                positivePlanDateSet.add(entry.getKey());
+            }
+        }
+        if (CollectionUtils.isEmpty(positivePlanDateSet)) {
+            return defaultStartTime;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            LocalDate workDate = resolveShiftWorkDate(shift);
+            if (workDate != null && positivePlanDateSet.contains(workDate)) {
+                return shift.getShiftStartDateTime();
+            }
+        }
+        return defaultStartTime;
+    }
+
+    /**
+     * 解析班次业务日期。
+     *
+     * @param shift 班次配置
+     * @return 业务日期；班次为空时返回null
+     */
+    private LocalDate resolveShiftWorkDate(LhShiftConfigVO shift) {
+        if (shift == null || shift.getWorkDate() == null) {
+            return null;
+        }
+        return shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     /**

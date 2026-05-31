@@ -206,6 +206,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS, 1);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS,
                 LhScheduleConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, 0);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_CARRY_FORWARD_QTY,
+                LhScheduleConstant.ENABLE_CARRY_FORWARD_QTY);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_CURE_FORMULA_HISTORY_PROTECT,
                 LhScheduleConstant.ENABLE_CURE_FORMULA_HISTORY_PROTECT);
 

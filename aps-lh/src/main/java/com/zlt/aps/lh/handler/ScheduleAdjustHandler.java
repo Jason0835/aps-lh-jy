@@ -323,7 +323,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 计划量信息
         dto.setMonthPlanQty(plan.getTotalQty() != null ? plan.getTotalQty() : 0);
         dto.setFinishedQty(Math.max(0, dto.getMonthPlanQty() - surplus.getSurplusQty()));
-        int carryForwardQty = context.getCarryForwardQtyMap().getOrDefault(plan.getMaterialCode(), 0);
+        int rawCarryForwardQty = context.getCarryForwardQtyMap().getOrDefault(plan.getMaterialCode(), 0);
+        int carryForwardQty = resolveEffectiveCarryForwardQty(context, plan.getMaterialCode(), rawCarryForwardQty);
         int windowPlanQty = MonthPlanDayQtyUtil.resolveWindowPlanQty(
                 plan, context.getScheduleDate(), context.getScheduleTargetDate());
         // 继承量已由滚动衔接占用，需从窗口待排量中扣减，防止重复排产
@@ -347,7 +348,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         dto.setSurplusQty(surplus.getSurplusQty());
         dto.setEmbryoStock(resolveAllocatedEmbryoStock(context, plan, embryoStandardCapacitySumMap));
-        // 待排量保持“需求口径”：月计划余量扣除已继承量，再叠加前一日欠产；
+        // 待排量保持“需求口径”：月计划余量扣除已继承量，再按开关决定是否叠加/抵扣T-1欠产超产净值；
         // 日计划账本仅用于结果消费约束，不在 DTO 初始化阶段压缩需求。
         int basePendingQty = resolveBasePendingQty(surplus.getSurplusQty(), inheritedPlanQty,
                 carryForwardQty, dto.getEmbryoStock());
@@ -681,6 +682,40 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int deductedQty = deductQuotaByDateOrder(dailyPlanQuotaMap, overProductionQty);
         log.info("T-1超产抵扣日计划账本, materialCode: {}, overProductionQty: {}, deductedQty: {}, windowRemainingQty: {}",
                 materialCode, overProductionQty, deductedQty, SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap));
+    }
+
+    /**
+     * 解析当前窗口实际生效的T-1欠产/超产净值。
+     * <p>净值始终归集到上下文，是否进入当前窗口需求由硫化参数开关控制。</p>
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param rawCarryForwardQty 原始T-1欠产/超产净值
+     * @return 生效净值
+     */
+    private int resolveEffectiveCarryForwardQty(LhScheduleContext context,
+                                                String materialCode,
+                                                int rawCarryForwardQty) {
+        if (rawCarryForwardQty == 0 || isCarryForwardQtyEnabled(context)) {
+            return rawCarryForwardQty;
+        }
+        log.debug("T-1欠产/超产追加开关关闭，净值不进入当前窗口需求, materialCode: {}, carryForwardQty: {}",
+                materialCode, rawCarryForwardQty);
+        return 0;
+    }
+
+    /**
+     * 判断是否启用T-1欠产/超产追加。
+     *
+     * @param context 排程上下文
+     * @return true-启用；false-关闭
+     */
+    private boolean isCarryForwardQtyEnabled(LhScheduleContext context) {
+        if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleConfig())) {
+            return context.getScheduleConfig().isCarryForwardQtyEnabled();
+        }
+        return context.getParamIntValue(LhScheduleParamConstant.ENABLE_CARRY_FORWARD_QTY,
+                LhScheduleConstant.ENABLE_CARRY_FORWARD_QTY) == 1;
     }
 
     /**

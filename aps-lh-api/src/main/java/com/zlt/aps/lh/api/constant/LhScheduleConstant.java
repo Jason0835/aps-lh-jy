@@ -333,6 +333,9 @@ public final class LhScheduleConstant {
     /** 续作欠产追补判断天数默认值（当前天发生欠产后，额外向后观察1天） */
     public static final int CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS = 1;
 
+    /** 是否追加T-1欠产/超产量默认值（0-关闭，1-开启） */
+    public static final int ENABLE_CARRY_FORWARD_QTY = 0;
+
     /** 硫化示方历史保护开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_CURE_FORMULA_HISTORY_PROTECT = 0;
 

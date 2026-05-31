@@ -269,6 +269,23 @@ class ScheduleDataWindowRegressionTest {
     }
 
     @Test
+    void loadAllBaseData_shouldOrderSameDayOnlineInfoByDataVersion() {
+        Date scheduleDate = LhScheduleTimeUtil.clearTime(date(2026, 4, 15));
+        when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setScheduleDate(scheduleDate);
+
+        ReflectionTestUtils.invokeMethod(lhBaseDataService, "loadMachineOnlineInfo",
+                context, "FC01", scheduleDate, 1);
+
+        LambdaQueryWrapper<LhMachineOnlineInfo> wrapper = captureMachineOnlineInfoWrapper();
+        String sqlSegment = wrapper.getSqlSegment().toLowerCase(Locale.ROOT);
+        assertTrue(sqlSegment.contains("data_version"), "同日多条MES在机快照必须按版本号继续倒序，避免取到当天早班旧物料");
+    }
+
+    @Test
     void loadAllBaseData_shouldKeepEmptyWhenNoDataWithinLookbackWindow() {
         Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 17));
         Date scheduleDate = LhScheduleTimeUtil.addDays(target, -2);
@@ -590,6 +607,19 @@ class ScheduleDataWindowRegressionTest {
         ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
         verify(lhMouldCleanPlanMapper).selectList(captor.capture());
         return (LambdaQueryWrapper<LhMouldCleanPlan>) captor.getValue();
+    }
+
+    /**
+     * 抓取MES在机信息查询条件。
+     *
+     * @return MES在机信息查询 wrapper
+     */
+    @SuppressWarnings("unchecked")
+    private LambdaQueryWrapper<LhMachineOnlineInfo> captureMachineOnlineInfoWrapper() {
+        initializeTableInfo(LhMachineOnlineInfo.class);
+        ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(lhMachineOnlineInfoMapper).selectList(captor.capture());
+        return (LambdaQueryWrapper<LhMachineOnlineInfo>) captor.getValue();
     }
 
     /**

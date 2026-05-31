@@ -107,4 +107,19 @@ public class LhScheduleConfigTest {
         LhScheduleConfig twoConfig = new LhScheduleConfig(twoParamMap);
         Assertions.assertEquals(2, twoConfig.getContinuousShortageLookAheadDays());
     }
+
+    /**
+     * 用例说明：T-1欠产/超产追加默认关闭，配置为1时才启用。
+     */
+    @Test
+    public void shouldReadCarryForwardQtySwitchConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertFalse(defaultConfig.isCarryForwardQtyEnabled());
+
+        Map<String, String> paramMap = new HashMap<>(1);
+        paramMap.put(LhScheduleParamConstant.ENABLE_CARRY_FORWARD_QTY, "1");
+        LhScheduleConfig config = new LhScheduleConfig(paramMap);
+
+        Assertions.assertTrue(config.isCarryForwardQtyEnabled());
+    }
 }

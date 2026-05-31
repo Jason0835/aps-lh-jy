@@ -49,7 +49,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleConfig(createConfigWithCarryForward("0"));
         context.setScheduleDate(date(2026, 4, 11));
         context.setScheduleTargetDate(date(2026, 4, 13));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
@@ -93,11 +93,51 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
+    void doHandle_shouldNotAppendCarryForwardQtyWhenSwitchDisabledByDefault() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-SWITCH");
+        plan.setMaterialDesc("MAT-SWITCH-DESC");
+        plan.setStructureName("S-SWITCH");
+        plan.setSpecifications("SPEC-SWITCH");
+        plan.setTotalQty(1000);
+        plan.setDay11(40);
+        plan.setDay12(40);
+        plan.setDay13(20);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        LhScheduleResult previous = new LhScheduleResult();
+        previous.setLhMachineCode("M-SWITCH");
+        previous.setMaterialCode("MAT-SWITCH");
+        previous.setClass1PlanQty(80);
+        context.setPreviousScheduleResultList(Collections.singletonList(previous));
+
+        context.getMaterialDayFinishedQtyMap().put("MAT-SWITCH_2026-04-12", 60);
+        context.getMaterialMonthFinishedQtyMap().put("MAT-SWITCH", 60);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-SWITCH").get(0);
+        assertEquals(20, context.getCarryForwardQtyMap().get("MAT-SWITCH").intValue());
+        assertEquals(40, sku.getDailyPlanQuotaMap().get(java.time.LocalDate.of(2026, 4, 11)).getRemainingQty());
+        assertEquals(100, sku.getWindowRemainingPlanQty());
+        assertEquals(940, sku.getPendingQty());
+        assertEquals(940, sku.getTargetScheduleQty().intValue());
+    }
+
+    @Test
     void doHandle_shouldKeepDemandQtyAndLeaveWindowCapToDailyQuotaLedger() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleConfig(createConfigWithCarryForward("0", "1"));
         context.setScheduleDate(date(2026, 5, 3));
         context.setScheduleTargetDate(date(2026, 5, 5));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
@@ -165,7 +205,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleConfig(createConfigWithCarryForward("0", "1"));
         context.setScheduleDate(date(2026, 5, 3));
         context.setScheduleTargetDate(date(2026, 5, 5));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
@@ -198,11 +238,50 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
+    void doHandle_shouldNotDeductOverProductionWhenSwitchDisabledByDefault() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleDate(date(2026, 5, 3));
+        context.setScheduleTargetDate(date(2026, 5, 5));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("3302001889");
+        plan.setMaterialDesc("3302001889-DESC");
+        plan.setStructureName("S-OVER-DISABLED");
+        plan.setSpecifications("SPEC-OVER-DISABLED");
+        plan.setTotalQty(1000);
+        plan.setDay3(100);
+        plan.setDay4(100);
+        plan.setDay5(100);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        LhScheduleResult previous = new LhScheduleResult();
+        previous.setLhMachineCode("K1502");
+        previous.setMaterialCode("3302001889");
+        previous.setClass1PlanQty(120);
+        context.setPreviousScheduleResultList(Collections.singletonList(previous));
+        context.getMaterialDayFinishedQtyMap().put("3302001889_2026-05-02", 150);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-OVER-DISABLED").get(0);
+        assertEquals(-30, context.getCarryForwardQtyMap().get("3302001889").intValue());
+        assertEquals(100, sku.getDailyPlanQuotaMap().get(java.time.LocalDate.of(2026, 5, 3)).getRemainingQty());
+        assertEquals(100, sku.getDailyPlanQuotaMap().get(java.time.LocalDate.of(2026, 5, 4)).getRemainingQty());
+        assertEquals(300, sku.getWindowRemainingPlanQty());
+        assertEquals(850, sku.getPendingQty());
+        assertEquals(850, sku.getTargetScheduleQty().intValue());
+    }
+
+    @Test
     void doHandle_shouldNotDoubleDeductWhenSameMaterialHasMultipleMachines() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleConfig(createConfigWithCarryForward("0"));
         context.setScheduleDate(date(2026, 4, 11));
         context.setScheduleTargetDate(date(2026, 4, 13));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
@@ -555,7 +634,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleConfig(createConfigWithCarryForward("0"));
         context.setScheduleDate(date(2026, 4, 11));
         context.setScheduleTargetDate(date(2026, 4, 13));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
@@ -583,6 +662,40 @@ class ScheduleAdjustCarryForwardRegressionTest {
         assertEquals(230, sku.getPendingQty());
         assertEquals(230, sku.getTargetScheduleQty().intValue());
         assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    @Test
+    void doHandle_shouldNotScheduleCarryForwardOnlySkuWhenSwitchDisabledByDefault() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-CARRY-DISABLED");
+        plan.setMaterialDesc("MAT-CARRY-DISABLED-DESC");
+        plan.setStructureName("S-CARRY-DISABLED");
+        plan.setSpecifications("SPEC-CARRY-DISABLED");
+        plan.setTotalQty(0);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        LhScheduleResult previous = new LhScheduleResult();
+        previous.setLhMachineCode("M-CARRY-DISABLED");
+        previous.setMaterialCode("MAT-CARRY-DISABLED");
+        previous.setClass1PlanQty(50);
+        context.setPreviousScheduleResultList(Collections.singletonList(previous));
+        context.getMaterialDayFinishedQtyMap().put("MAT-CARRY-DISABLED_2026-04-12", 20);
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        assertEquals(30, context.getCarryForwardQtyMap().get("MAT-CARRY-DISABLED").intValue());
+        assertEquals(0, context.getStructureSkuMap().size());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals("物料：MAT-CARRY-DISABLED 余量为0且胎胚库存为0，不需要排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
     @Test
@@ -837,7 +950,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleConfig(createConfig("0", "1"));
+        context.setScheduleConfig(createConfigWithCarryForward("0", "1"));
         context.setScheduleDate(date(2026, 4, 24));
         context.setScheduleTargetDate(date(2026, 4, 26));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
@@ -1076,6 +1189,18 @@ class ScheduleAdjustCarryForwardRegressionTest {
         Map<String, String> paramMap = new HashMap<>(4);
         paramMap.put(LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, fullCapacityMode);
         paramMap.put(LhScheduleParamConstant.FORCE_RESCHEDULE, forceReschedule);
+        return new LhScheduleConfig(paramMap);
+    }
+
+    private static LhScheduleConfig createConfigWithCarryForward(String fullCapacityMode) {
+        return createConfigWithCarryForward(fullCapacityMode, "0");
+    }
+
+    private static LhScheduleConfig createConfigWithCarryForward(String fullCapacityMode, String forceReschedule) {
+        Map<String, String> paramMap = new HashMap<>(4);
+        paramMap.put(LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, fullCapacityMode);
+        paramMap.put(LhScheduleParamConstant.FORCE_RESCHEDULE, forceReschedule);
+        paramMap.put(LhScheduleParamConstant.ENABLE_CARRY_FORWARD_QTY, "1");
         return new LhScheduleConfig(paramMap);
     }
 }
