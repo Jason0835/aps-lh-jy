@@ -43,6 +43,28 @@ class ShiftFieldUtilTest {
     }
 
     @Test
+    void clearUnplannedShiftCureFormulaFields_shouldOnlyClearShiftWithoutPlanQty() {
+        LhScheduleResult result = buildResult(10, 0, 5, 0, 0, 0, 0, 0);
+        result.setClass1LhNo("LH-1");
+        result.setClass1LhType("S");
+        result.setClass2LhNo("LH-2");
+        result.setClass2LhType("S");
+        result.setClass3LhNo("LH-3");
+        result.setClass3LhType("T");
+
+        ShiftFieldUtil.clearUnplannedShiftCureFormulaFields(result);
+
+        assertEquals("LH-1", result.getClass1LhNo());
+        assertEquals("S", result.getClass1LhType());
+        assertNull(result.getClass2LhNo());
+        assertNull(result.getClass2LhType());
+        assertEquals("LH-3", result.getClass3LhNo());
+        assertEquals("T", result.getClass3LhType());
+        assertNull(result.getClass4LhNo());
+        assertNull(result.getClass4LhType());
+    }
+
+    @Test
     void shouldPreserveSingleResultTotalWhenScalingShiftPlanQty() {
         LhScheduleResult result = buildResult(16, 16, 16, 16, 16, 16, 16, 16);
 

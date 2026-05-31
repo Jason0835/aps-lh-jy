@@ -64,6 +64,24 @@ public final class ShiftFieldUtil {
     }
 
     /**
+     * 清空无计划量班次的硫化示方号和类型。
+     *
+     * @param result 排程结果
+     */
+    public static void clearUnplannedShiftCureFormulaFields(LhScheduleResult result) {
+        if (Objects.isNull(result)) {
+            return;
+        }
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer planQty = getShiftPlanQty(result, shiftIndex);
+            if (Objects.isNull(planQty) || planQty <= 0) {
+                BeanUtil.setProperty(result, propertyPrefix(shiftIndex) + "LhNo", null);
+                BeanUtil.setProperty(result, propertyPrefix(shiftIndex) + "LhType", null);
+            }
+        }
+    }
+
+    /**
      * 复制指定班次计划字段。
      *
      * @param source 源排程结果

@@ -110,6 +110,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             // S4.6.5.2 硫化示方历史保护：逐班次判断是否保留历史值，避免运行中班次被覆盖。
             applyCureFormulaHistoryProtection(context);
 
+            // S4.6.5.3 无计划量班次不展示硫化示方号和类型，避免空班次携带示方信息。
+            clearUnplannedShiftCureFormulaFields(context);
+
             // S4.6.6 保存排程结果到数据库：由持久化服务统一做目标日原子替换。
             schedulePersistenceService.replaceScheduleAtomically(context);
 
@@ -117,6 +120,20 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             scheduleEventPublisher.publish(ScheduleEvent.completed(context));
         } finally {
             clearScheduleOrderCounter(scheduleOrderBusinessKey);
+        }
+    }
+
+    /**
+     * 清理无计划量班次的硫化示方号和类型。
+     *
+     * @param context 排程上下文
+     */
+    private void clearUnplannedShiftCureFormulaFields(LhScheduleContext context) {
+        if (CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            ShiftFieldUtil.clearUnplannedShiftCureFormulaFields(result);
         }
     }
 
