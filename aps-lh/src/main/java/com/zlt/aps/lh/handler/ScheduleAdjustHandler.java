@@ -1354,6 +1354,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         copy.setEmbryoNo(source.getEmbryoNo());
         copy.setTextNo(source.getTextNo());
         copy.setLhNo(source.getLhNo());
+        copy.setProductStatus(source.getProductStatus());
         // 机台信息 —— 指定目标机台
         copy.setContinuousMachineCode(machineCode);
         log.debug("同物料多机台续作副本已创建, materialCode: {}, targetMachine: {}",
