@@ -31,7 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -184,6 +186,45 @@ class NewSpecTimelineRegressionTest {
         LhScheduleResult result = context.getScheduleResultList().get(0);
         assertEquals(dateTime(2026, 4, 11, 23, 30), result.getClass3StartTime());
         assertEquals("MAT-NIGHT", result.getMaterialCode());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldClampPreWindowMouldChangeToWindowFirstShift() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine = machine("M1", "FC-M1", dateTime(2026, 4, 10, 14, 0));
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.getMachineScheduleMap().put("M1", machine);
+
+        SkuScheduleDTO sku = newSku("MAT-WINDOW", "SPEC-WINDOW", "18", 17);
+        context.getNewSpecSkuList().add(sku);
+
+        MdmSkuMouldRel rel = new MdmSkuMouldRel();
+        rel.setMouldCode("MOULD-04");
+        context.getSkuMouldRelMap().put("MAT-WINDOW", Collections.singletonList(rel));
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD20260411004");
+        when(machineMatchStrategy.matchMachines(any(), any())).thenReturn(Collections.singletonList(machine));
+        when(machineMatchStrategy.selectBestMachine(any(), any(), any(), any())).thenReturn(machine);
+        when(capacityCalculateStrategy.calculateStartTime(any(), anyString(), any()))
+                .thenReturn(dateTime(2026, 4, 10, 14, 0));
+        when(mouldChangeBalanceStrategy.allocateMouldChange(any(), anyString(), any(), anyInt()))
+                .thenAnswer(invocation -> invocation.getArgument(2));
+        when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(2));
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
+                inspectionBalanceStrategy, capacityCalculateStrategy);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertNull(result.getClass1PlanQty(), "窗口前已空机的新增换模不应在T日早班直接开产");
+        assertNotNull(result.getClass2PlanQty());
+        assertTrue(result.getClass2PlanQty() > 0, "窗口首班换模完成后，中班应开始排量");
+        assertEquals(dateTime(2026, 4, 11, 14, 0), result.getClass2StartTime());
+        assertEquals(dateTime(2026, 4, 11, 6, 0),
+                ReflectionTestUtils.getField(result, "mouldChangeStartTime"));
+        verify(mouldChangeBalanceStrategy).allocateMouldChange(any(), anyString(), any(), anyInt());
     }
 
     private LhScheduleContext newContext() {

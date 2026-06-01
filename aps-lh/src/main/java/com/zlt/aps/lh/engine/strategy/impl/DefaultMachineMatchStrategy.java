@@ -565,7 +565,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private boolean hasPlanStopExceededTimeout(LhScheduleContext context, MachineScheduleDTO machine) {
         int timeoutHours = context.getParamIntValue(LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS,
                 LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
-        Date candidateReferenceTime = resolveCandidateReferenceTime(context, machine);
+        Date candidateReferenceTime = resolveAlignedCandidateReferenceTime(context, machine);
         Date candidateWindowEndTime = resolveCandidateWindowEndTime(context, candidateReferenceTime);
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
             if (planShut == null || StringUtils.isEmpty(planShut.getMachineCode())
@@ -600,6 +600,35 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return context.getScheduleDate();
         }
         return context.getScheduleTargetDate();
+    }
+
+    /**
+     * 新增选机画像只允许从当前排程窗口首班开始评估换模，不提前借用窗口外空档。
+     *
+     * @param context 排程上下文
+     * @param referenceTime 机台参考结束时间
+     * @return 与排程窗口首班对齐后的参考时间
+     */
+    private Date alignCandidateReferenceTimeToWindowStart(LhScheduleContext context, Date referenceTime) {
+        if (referenceTime == null || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return referenceTime;
+        }
+        Date windowStartTime = context.getScheduleWindowShifts().get(0).getShiftStartDateTime();
+        if (windowStartTime != null && referenceTime.before(windowStartTime)) {
+            return windowStartTime;
+        }
+        return referenceTime;
+    }
+
+    /**
+     * 解析新增选机场景的对齐后参考时间。
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @return 与排程窗口首班对齐后的参考时间
+     */
+    private Date resolveAlignedCandidateReferenceTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        return alignCandidateReferenceTimeToWindowStart(context, resolveCandidateReferenceTime(context, machine));
     }
 
     /**
@@ -755,7 +784,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 return compareResult;
             }
 
-            compareResult = compareEndingTime(context, left, right);
+            compareResult = compareEndingTime(context, leftProfile, rightProfile);
             if (compareResult != 0) {
                 return compareResult;
             }
@@ -908,9 +937,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param right 右机台
      * @return 比较结果
      */
-    private int compareEndingTime(LhScheduleContext context, MachineScheduleDTO left, MachineScheduleDTO right) {
-        Date leftEndTime = left.getEstimatedEndTime();
-        Date rightEndTime = right.getEstimatedEndTime();
+    private int compareEndingTime(LhScheduleContext context,
+                                  CandidateWindowProfile leftProfile,
+                                  CandidateWindowProfile rightProfile) {
+        Date leftEndTime = leftProfile == null ? null : leftProfile.getReferenceTime();
+        Date rightEndTime = rightProfile == null ? null : rightProfile.getReferenceTime();
         if (leftEndTime == null && rightEndTime == null) {
             return 0;
         }
@@ -1155,7 +1186,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return cachedProfile;
         }
         CandidateWindowProfile profile = new CandidateWindowProfile();
-        Date referenceTime = resolveCandidateReferenceTime(context, machine);
+        Date referenceTime = resolveAlignedCandidateReferenceTime(context, machine);
         profile.setReferenceTime(referenceTime);
         boolean hitNoMouldChange = referenceTime != null
                 && LhScheduleTimeUtil.isNoMouldChangeTime(context, referenceTime);
@@ -1423,7 +1454,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                     "L7_尾部零散产能=" + profile.getTailFragmentScore(),
                     "L8_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
                     "L9_特殊支持能力数量=" + specialSupportCapabilityCount,
-                    "L10_收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()),
+                    "L10_收尾时间=" + PriorityTraceLogHelper.formatDateTime(profile.getReferenceTime()),
                     "L11_同规格=" + (specMatchScore == 0 ? 1 : 0),
                     "L12_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
                     "L13_英寸接近度=" + formatInchDistance(inchDistance),

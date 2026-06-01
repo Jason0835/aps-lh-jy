@@ -387,6 +387,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         : machineReadyTime;
                 switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, machineCode, switchReadyTime);
                 switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+                switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
 
                 // 4. 分配换模窗口；模具清洗即便重叠，也不再顺延换模起点。
                 Date mouldChangeStartTime = null;
@@ -1848,6 +1849,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 : machineReadyTime;
         switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, candidate.getMachineCode(), switchReadyTime);
         switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+        switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
         int switchDurationHours = maintenanceOverlapSwitch
                 ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                 : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
@@ -4275,6 +4277,44 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return context.getScheduleDate();
         }
         return new Date();
+    }
+
+    /**
+     * 新增换模只能从当前排程窗口首班开始发起，不能借用窗口外的空闲时段提前换模。
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     * @param switchReadyTime 当前候选机台的可切换时间
+     * @return 与排程窗口首班对齐后的可切换时间
+     */
+    private Date alignNewSpecSwitchReadyTimeToWindowStart(LhScheduleContext context,
+                                                          List<LhShiftConfigVO> shifts,
+                                                          Date switchReadyTime) {
+        if (switchReadyTime == null) {
+            return null;
+        }
+        Date windowStartTime = resolveScheduleWindowStartTime(context, shifts);
+        if (windowStartTime != null && switchReadyTime.before(windowStartTime)) {
+            return windowStartTime;
+        }
+        return switchReadyTime;
+    }
+
+    /**
+     * 解析当前排程窗口首班开始时间。
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     * @return 窗口首班开始时间
+     */
+    private Date resolveScheduleWindowStartTime(LhScheduleContext context, List<LhShiftConfigVO> shifts) {
+        if (!CollectionUtils.isEmpty(shifts) && shifts.get(0).getShiftStartDateTime() != null) {
+            return shifts.get(0).getShiftStartDateTime();
+        }
+        if (context != null && context.getScheduleDate() != null) {
+            return context.getScheduleDate();
+        }
+        return null;
     }
 
     private List<MachineCleaningWindowDTO> resolveMachineCleaningWindowList(LhScheduleContext context, String machineCode) {

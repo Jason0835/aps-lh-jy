@@ -626,6 +626,25 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void matchMachines_shouldIgnorePreWindowEndingGapWhenBothMachinesAreAlreadyIdle() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO earlierIdleMachine = machine("M-EARLIER-IDLE", dateTime(2026, 4, 20, 8, 0),
+                "SPEC-X", "22.5", "MAT-A");
+        MachineScheduleDTO specMatchedMachine = machine("M-SPEC-MATCH", dateTime(2026, 4, 20, 20, 0),
+                "SPEC-A", "22.5", "MAT-B");
+        context.getMachineScheduleMap().put(earlierIdleMachine.getMachineCode(), earlierIdleMachine);
+        context.getMachineScheduleMap().put(specMatchedMachine.getMachineCode(), specMatchedMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size());
+        assertEquals("M-SPEC-MATCH", candidates.get(0).getMachineCode(),
+                "两台机台都在窗口首班前已空机时，不应再用窗口外更早收尾时间压过后续规格优先级");
+    }
+
+    @Test
     void matchMachines_shouldPreferCapsuleAffinityBeforeEmbryoShareCount() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
@@ -798,6 +817,28 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         assertEquals(2, candidates.size(), "长停机已在待排前恢复时，不应继续排除该机台");
         assertTrue(candidates.stream().anyMatch(machine -> "M-RECOVERED".equals(machine.getMachineCode())));
+    }
+
+    @Test
+    void matchMachines_shouldKeepRecoveredMachineWhenLongStopEndsBeforeWindowStart() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, "24")));
+
+        MachineScheduleDTO recoveredBeforeWindowMachine = machine("M-WINDOW-RECOVERED", dateTime(2026, 4, 20, 14, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-B");
+        context.getMachineScheduleMap().put(recoveredBeforeWindowMachine.getMachineCode(), recoveredBeforeWindowMachine);
+        context.getMachineScheduleMap().put(availableMachine.getMachineCode(), availableMachine);
+        context.getDevicePlanShutList().add(devicePlanShut("M-WINDOW-RECOVERED",
+                dateTime(2026, 4, 20, 1, 0), dateTime(2026, 4, 21, 3, 0)));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size(), "长停机已在窗口首班前恢复时，不应继续按窗口外旧参考时间排除机台");
+        assertTrue(candidates.stream().anyMatch(machine -> "M-WINDOW-RECOVERED".equals(machine.getMachineCode())));
     }
 
     @Test
