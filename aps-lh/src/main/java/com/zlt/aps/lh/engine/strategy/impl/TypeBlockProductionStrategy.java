@@ -2056,16 +2056,18 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         // 产品状态从月计划获取
         result.setProductStatus(sku.getProductStatus());
 
-        // 通过物料编码+产品状态查询SKU与示方书关系获取硫化示方类型和硫化示方书号
+        // 通过物料编码+产品状态查询SKU与示方书关系获取文字/硫化/制造示方书号
+        String embryoNo = null;
+        String textNo = null;
         String lhNo = null;
         String lhType = null;
-        if (StringUtils.isNotEmpty(sku.getProductStatus())) {
-            MdmSkuConstructionRef constructionRef = context.getSkuConstructionRefCompositeKeyMap()
-                    .get(sku.getMaterialCode() + "::" + sku.getProductStatus());
-            if (constructionRef != null) {
-                lhNo = constructionRef.getLhNo();
-                lhType = constructionRef.getLhType();
-            }
+        MdmSkuConstructionRef constructionRef = context.findSkuConstructionRef(
+                sku.getMaterialCode(), sku.getProductStatus());
+        if (constructionRef != null) {
+            embryoNo = constructionRef.getEmbryoNo();
+            textNo = constructionRef.getTextNo();
+            lhNo = constructionRef.getLhNo();
+            lhType = constructionRef.getLhType();
         }
         // 设置1-8班硫化示方书号和硫化示方书类型
         result.setClass1LhNo(lhNo);
@@ -2084,11 +2086,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setClass7LhType(lhType);
         result.setClass8LhNo(lhNo);
         result.setClass8LhType(lhType);
-        // 硫化示方书号回写
-        result.setLhNo(sku.getLhNo());
+        // 文字/硫化/制造示方书号回写：关系查不到时置空，以关系值为准
+        result.setLhNo(lhNo);
         result.setChangedTrialStatus(lhType);
-        result.setEmbryoNo(sku.getEmbryoNo());
-        result.setTextNo(sku.getTextNo());
+        result.setEmbryoNo(embryoNo);
+        result.setTextNo(textNo);
         result.setMonthPlanVersion(sku.getMonthPlanVersion());
         result.setProductionVersion(sku.getProductionVersion());
         result.setIsTrial(sku.isTrial() ? YES_FLAG : NO_FLAG);

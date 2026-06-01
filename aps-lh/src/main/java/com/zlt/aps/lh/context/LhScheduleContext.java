@@ -419,4 +419,21 @@ public class LhScheduleContext {
         return factoryCode;
     }
 
+    /**
+     * 按物料编码 + 产品状态从SKU与示方书关系中精确查找。
+     * <p>用于排产结果写入前回写文字/硫化/制造示方书号，未命中时返回 null，
+     * 由调用方决定是否回退到其他来源或置空。</p>
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @return SKU与示方书关系，未命中返回 null
+     */
+    public MdmSkuConstructionRef findSkuConstructionRef(String materialCode, String productStatus) {
+        if (StringUtils.isEmpty(materialCode) || StringUtils.isEmpty(productStatus)
+                || CollectionUtils.isEmpty(skuConstructionRefCompositeKeyMap)) {
+            return null;
+        }
+        return skuConstructionRefCompositeKeyMap.get(materialCode + "::" + productStatus);
+    }
+
 }
