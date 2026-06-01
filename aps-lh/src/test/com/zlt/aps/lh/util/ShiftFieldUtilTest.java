@@ -65,6 +65,19 @@ class ShiftFieldUtilTest {
     }
 
     @Test
+    void applyLastPlannedShiftEndMark_shouldOnlySetPlannedShiftEndFields() {
+        LhScheduleResult result = buildResult(10, 0, 5, 0, 0, 0, 0, 0);
+
+        int lastPlannedShiftIndex = ShiftFieldUtil.applyLastPlannedShiftEndMark(result, true);
+
+        assertEquals(3, lastPlannedShiftIndex);
+        assertEquals("0", result.getClass1IsEnd());
+        assertNull(result.getClass2IsEnd());
+        assertEquals("1", result.getClass3IsEnd());
+        assertNull(result.getClass4IsEnd());
+    }
+
+    @Test
     void shouldPreserveSingleResultTotalWhenScalingShiftPlanQty() {
         LhScheduleResult result = buildResult(16, 16, 16, 16, 16, 16, 16, 16);
 
