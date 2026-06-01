@@ -145,6 +145,43 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void matchMachines_shouldDeprioritizeReleasedContinuousMachine() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.getReleasedContinuousMachineCodeSet().add("M-RELEASED");
+
+        MachineScheduleDTO releasedMachine = machine("M-RELEASED", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-OLD");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(releasedMachine.getMachineCode(), releasedMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size(), "续作释放机台只降优先级，不应从候选中移除");
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode(),
+                "存在普通候选时，续作释放机台应排在普通候选之后");
+        assertEquals("M-RELEASED", candidates.get(1).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldKeepReleasedContinuousMachineWhenOnlyCandidate() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.getReleasedContinuousMachineCodeSet().add("M-ONLY");
+
+        MachineScheduleDTO releasedMachine = machine("M-ONLY", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-OLD");
+        context.getMachineScheduleMap().put(releasedMachine.getMachineCode(), releasedMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "续作释放机台是唯一候选时仍允许承接新增SKU");
+        assertEquals("M-ONLY", candidates.get(0).getMachineCode());
+    }
+
+    @Test
     void matchMachines_shouldKeepSingleControlPriorityForMassTrialSkuWhenSingleControlIsEnding() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();

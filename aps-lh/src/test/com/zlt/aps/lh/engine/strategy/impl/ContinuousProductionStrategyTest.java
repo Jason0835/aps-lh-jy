@@ -414,6 +414,65 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void scheduleReduceMould_shouldAppendCompensationWhenDailyQuotaRemainsAfterFullContinuousMachine() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2024");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(
+                shifts.get(0), shifts.get(2), shifts.get(5), 50, 50, 50);
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002654");
+        sku.setMaterialDesc("11R22.5 149/146M 18PR AF508 BL4HAM");
+        sku.setStructureName("11R22.5-JF568");
+        sku.setSpecCode("11R22.5");
+        sku.setEmbryoCode("EMB-COMP-DAY");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setTargetScheduleQty(136);
+        sku.setPendingQty(136);
+        sku.setSurplusQty(999);
+        sku.setWindowPlanQty(150);
+        sku.setWindowRemainingPlanQty(150);
+        sku.setShiftCapacity(17);
+        sku.setLhTimeSeconds(3600);
+        sku.setDailyPlanQuotaMap(quotaMap);
+        sku.setContinuousMachineCode("K2024");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result = baseContinuationResult("3302002654", "K2024", false);
+        result.setEmbryoCode("EMB-COMP-DAY");
+        result.setSingleMouldShiftQty(17);
+        for (LhShiftConfigVO shift : shifts) {
+            ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), 17,
+                    shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+        }
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setSpecEndTime(shifts.get(shifts.size() - 1).getShiftEndDateTime());
+        result.setTdaySpecEndTime(result.getSpecEndTime());
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getNewSpecSkuList().size(),
+                "续作机台已满排但日计划账本仍有缺口时，应生成补偿SKU进入S4.5重新选机");
+        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
+        Assertions.assertTrue(compensationSku.isContinuousCompensationSku());
+        Assertions.assertEquals(14, compensationSku.resolveTargetScheduleQty());
+        Assertions.assertEquals(14, compensationSku.getRemainingScheduleQty());
+        Assertions.assertNull(compensationSku.getContinuousMachineCode(), "补偿SKU不能固定续作原机台，应交由新增链路重新选机");
+    }
+
+    @Test
     public void scheduleReduceMould_shouldNotAppendCompensationWhenSharedQuotaExhausted() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
 
@@ -1217,6 +1276,18 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void scheduleReduceMould_shouldRecordReleasedMachineWhenZeroPlanResultRemoved() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildExcelContinuationContext(
+                "3302001075", 0, 32, 46, 78, "1", new String[]{"K1406", "K1712"});
+
+        strategy.scheduleReduceMould(context);
+
+        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1712"),
+                "day1无计划导致零计划续作结果移除时，应记录释放机台供新增选机降优先级使用");
+    }
+
+    @Test
     public void scheduleContinuousEnding_shouldStartSingleMachineFromFirstPlannedDayWhenFirstDayHasNoPlan()
             throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
@@ -1235,6 +1306,8 @@ public class ContinuousProductionStrategyTest {
         assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, 3));
         assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, 8));
         assertEquals(48, result.getDailyPlanQty().intValue(), "单机台非收尾应从首个有计划日开始排满后续窗口");
+        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1501L"),
+                "续作首日无计划时，应记录原续作机台，新增排产可用但排序靠后");
     }
 
     @Test
@@ -1249,6 +1322,8 @@ public class ContinuousProductionStrategyTest {
         assertEquals(1, context.getUnscheduledResultList().size());
         assertTrue(context.getUnscheduledResultList().get(0).getUnscheduledReason()
                 .contains("当前排程窗口内无日计划量"));
+        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1712"),
+                "窗口全无日计划时，应释放续作机台给新增排产，但只作为降优先级标识");
     }
 
     private LhScheduleContext buildExcelContinuationContext(String materialCode,

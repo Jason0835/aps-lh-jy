@@ -749,6 +749,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             CandidateWindowProfile leftProfile = resolveCandidateWindowProfile(context, sku, left, profileCache);
             CandidateWindowProfile rightProfile = resolveCandidateWindowProfile(context, sku, right, profileCache);
 
+            compareResult = compareReleasedContinuousMachinePriority(leftProfile, rightProfile);
+            if (compareResult != 0) {
+                return compareResult;
+            }
+
             compareResult = compareOtherSkuOccupancy(leftProfile, rightProfile);
             if (compareResult != 0) {
                 return compareResult;
@@ -1023,6 +1028,15 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
+     * 优先选择非续作释放机台；释放机台仍保留候选，只在新增选机排序中靠后。
+     */
+    private int compareReleasedContinuousMachinePriority(CandidateWindowProfile leftProfile,
+                                                         CandidateWindowProfile rightProfile) {
+        return Integer.compare(leftProfile.getReleasedContinuousMachineScore(),
+                rightProfile.getReleasedContinuousMachineScore());
+    }
+
+    /**
      * 优先选择未被其他SKU占用的机台。
      */
     private int compareOtherSkuOccupancy(CandidateWindowProfile leftProfile, CandidateWindowProfile rightProfile) {
@@ -1194,10 +1208,26 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         Date switchStartTime = resolveCandidateSwitchStartTime(context, referenceTime);
         profile.setSwitchStartTime(switchStartTime);
         profile.setProductionStartTime(resolveCandidateProductionStartTime(context, switchStartTime));
+        profile.setReleasedContinuousMachineScore(resolveReleasedContinuousMachineScore(context, machine));
         profile.setOtherSkuOccupiedScore(resolveOtherSkuOccupiedScore(context, sku, machine));
         fillSchedulableShiftMetrics(context, sku, profile);
         profileCache.put(machine.getMachineCode(), profile);
         return profile;
+    }
+
+    /**
+     * 解析续作释放机台降级得分。
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @return 0-普通候选，1-续作释放候选
+     */
+    private int resolveReleasedContinuousMachineScore(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (context == null || machine == null || StringUtils.isEmpty(machine.getMachineCode())
+                || CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())) {
+            return 0;
+        }
+        return context.getReleasedContinuousMachineCodeSet().contains(machine.getMachineCode()) ? 1 : 0;
     }
 
     /**
@@ -1416,15 +1446,20 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     "候选说明: 普通SKU允许使用特殊机台，特殊机台仅后置排序，不做强制保留");
         }
+        if (!CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())) {
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "候选说明: 续作释放机台仅在新增选机排序中降优先级，不禁止生产");
+        }
 
         // TOP N 候选机台
         int topN = LhScheduleConstant.MACHINE_SORT_TRACE_TOP_N;
         int topCount = Math.min(topN, PriorityTraceLogHelper.sizeOf(candidates));
         PriorityTraceLogHelper.appendLine(detailBuilder, "TOP" + topCount + "候选排序:");
         List<String> levelNames = java.util.Arrays.asList(
-                "L1_定点机台", "L2_单控拆分", "L3_其他SKU占用", "L4_最早可开产班次", "L5_连续可生产班次",
-                "L6_可用总产能", "L7_尾部零散产能", "L8_普通机台优先", "L9_特殊支持能力数量", "L10_收尾时间",
-                "L11_同规格", "L12_同英寸", "L13_英寸接近度", "L14_胶囊共用", "L15_胎胚共用");
+                "L1_定点机台", "L2_单控拆分", "L3_续作释放降级", "L4_其他SKU占用", "L5_最早可开产班次",
+                "L6_连续可生产班次", "L7_可用总产能", "L8_尾部零散产能", "L9_普通机台优先",
+                "L10_特殊支持能力数量", "L11_收尾时间", "L12_同规格", "L13_同英寸", "L14_英寸接近度",
+                "L15_胶囊共用", "L16_胎胚共用");
         for (int i = 0; i < topCount; i++) {
             MachineScheduleDTO machine = candidates.get(i);
             CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, machine, profileCache);
@@ -1447,22 +1482,24 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             List<String> sortKeyLevels = java.util.Arrays.asList(
                     "L1_定点机台=" + (specifyScore == 0 ? 1 : 0),
                     "L2_单控拆分=" + (isSingleControlMachine(context, machine.getMachineCode()) ? 1 : 0),
-                    "L3_其他SKU占用=" + profile.getOtherSkuOccupiedScore(),
-                    "L4_最早可开产班次=" + profile.getFirstProductionShiftIndex(),
-                    "L5_连续可生产班次=" + profile.getContinuousSchedulableShiftCount(),
-                    "L6_可用总产能=" + profile.getAvailableCapacityQty(),
-                    "L7_尾部零散产能=" + profile.getTailFragmentScore(),
-                    "L8_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
-                    "L9_特殊支持能力数量=" + specialSupportCapabilityCount,
-                    "L10_收尾时间=" + PriorityTraceLogHelper.formatDateTime(profile.getReferenceTime()),
-                    "L11_同规格=" + (specMatchScore == 0 ? 1 : 0),
-                    "L12_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
-                    "L13_英寸接近度=" + formatInchDistance(inchDistance),
-                    "L14_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
-                    "L15_胎胚共用=" + embryoShareCount);
+                    "L3_续作释放降级=" + profile.getReleasedContinuousMachineScore(),
+                    "L4_其他SKU占用=" + profile.getOtherSkuOccupiedScore(),
+                    "L5_最早可开产班次=" + profile.getFirstProductionShiftIndex(),
+                    "L6_连续可生产班次=" + profile.getContinuousSchedulableShiftCount(),
+                    "L7_可用总产能=" + profile.getAvailableCapacityQty(),
+                    "L8_尾部零散产能=" + profile.getTailFragmentScore(),
+                    "L9_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
+                    "L10_特殊支持能力数量=" + specialSupportCapabilityCount,
+                    "L11_收尾时间=" + PriorityTraceLogHelper.formatDateTime(profile.getReferenceTime()),
+                    "L12_同规格=" + (specMatchScore == 0 ? 1 : 0),
+                    "L13_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
+                    "L14_英寸接近度=" + formatInchDistance(inchDistance),
+                    "L15_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
+                    "L16_胎胚共用=" + embryoShareCount);
             List<Integer> scores = java.util.Arrays.asList(
                     specifyScore,
                     singleCtrlScore,
+                    profile.getReleasedContinuousMachineScore(),
                     profile.getOtherSkuOccupiedScore(),
                     profile.getFirstProductionShiftIndex(),
                     profile.getContinuousSchedulableShiftCount(),
@@ -1477,7 +1514,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                     capsuleScore,
                     embryoShareCount);
             List<Integer> defaultScores = java.util.Arrays.asList(1, 1, 0, 0, 0,
-                    LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1, 0, 0, 1, 0, 1, 1, 0, 1, 0);
+                    0, LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1, 0, 0, 1, 0, 1, 1, 0, 1, 0);
             String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
             String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
 
@@ -1496,6 +1533,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                             + ", " + PriorityTraceLogHelper.kv("特殊支持能力数量", specialSupportCapabilityCount)
                             + ", " + PriorityTraceLogHelper.kv("机台偏好原因", resolveMachinePreferenceReason(context, sku, machine))
                             + ", " + PriorityTraceLogHelper.kv("定点", PriorityTraceLogHelper.oneZero(specifyScore == 0))
+                            + ", " + PriorityTraceLogHelper.kv("续作释放机台", PriorityTraceLogHelper.oneZero(profile.getReleasedContinuousMachineScore() > 0))
                             + ", " + PriorityTraceLogHelper.kv("支持SKU", PriorityTraceLogHelper.oneZero(true))
                             + ", " + PriorityTraceLogHelper.kv("英寸匹配", PriorityTraceLogHelper.oneZero(inchMatched))
                             + ", " + PriorityTraceLogHelper.kv("SKU英寸", sku.getProSize())
@@ -1575,6 +1613,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         if (profile.getOtherSkuOccupiedScore() == 0) {
             reasons.add("未被其他SKU占用");
+        }
+        if (profile.getReleasedContinuousMachineScore() > 0) {
+            reasons.add("续作释放机台仅降优先级，不禁止生产");
         }
         if (profile.getContinuousSchedulableShiftCount() > 0) {
             reasons.add("连续可生产班次更多");
@@ -1721,6 +1762,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         private int totalSchedulableShiftCount;
         /** 可用总产能 */
         private int availableCapacityQty;
+        /** 续作释放机台得分，0=普通候选，1=续作释放候选 */
+        private int releasedContinuousMachineScore;
         /** 被其他SKU占用得分，0=未占用，1=已占用 */
         private int otherSkuOccupiedScore;
         /** 尾部零散产能得分，0=否，1=是 */
@@ -1786,6 +1829,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
         private void setAvailableCapacityQty(int availableCapacityQty) {
             this.availableCapacityQty = availableCapacityQty;
+        }
+
+        private int getReleasedContinuousMachineScore() {
+            return releasedContinuousMachineScore;
+        }
+
+        private void setReleasedContinuousMachineScore(int releasedContinuousMachineScore) {
+            this.releasedContinuousMachineScore = releasedContinuousMachineScore;
         }
 
         private int getOtherSkuOccupiedScore() {

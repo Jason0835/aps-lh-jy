@@ -147,6 +147,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             if (isContinuousWindowNoDailyPlan(sku)) {
                 appendWindowNoPlanContinuousUnscheduledResult(context, sku);
+                registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(), "窗口内无日计划");
                 log.info("续作SKU当前窗口无日计划量，释放续作机台给换模/新增排产, materialCode: {}, machineCode: {}, targetQty: {}",
                         sku.getMaterialCode(), machineCode, sku.resolveTargetScheduleQty());
                 continue;
@@ -160,6 +161,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
             // 滚动衔接时沿用机台继承后的可用时间；普通续作从首个有日计划剩余额度的班次起排。
             Date startTime = resolveContinuousStartTime(context, sku, machine, shifts);
+            if (isFirstPositiveDailyPlanLaterThanWindowFirstDate(sku, shifts)) {
+                registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(), "续作首日无计划");
+            }
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine);
             // 非收尾续作可以为定点新增物料挤出后续换模窗口；收尾场景不走挤量预留。
@@ -309,16 +313,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
             return defaultStartTime;
         }
-        Set<LocalDate> positivePlanDateSet = new LinkedHashSet<LocalDate>(4);
-        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sku.getDailyPlanQuotaMap().entrySet()) {
-            SkuDailyPlanQuotaDTO quota = entry.getValue();
-            if (quota != null && quota.getRemainingQty() > 0) {
-                positivePlanDateSet.add(entry.getKey());
-            }
-        }
-        if (CollectionUtils.isEmpty(positivePlanDateSet)) {
-            return defaultStartTime;
-        }
+        Set<LocalDate> positivePlanDateSet = resolvePositiveDailyPlanDateSet(sku);
         for (LhShiftConfigVO shift : shifts) {
             LocalDate workDate = resolveShiftWorkDate(shift);
             if (workDate != null && positivePlanDateSet.contains(workDate)) {
@@ -326,6 +321,51 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
         }
         return defaultStartTime;
+    }
+
+    /**
+     * 判断续作首个有计划日是否晚于排程窗口首日。
+     *
+     * @param sku 续作SKU
+     * @param shifts 排程窗口班次
+     * @return true-首日无计划，后续日期才有计划
+     */
+    private boolean isFirstPositiveDailyPlanLaterThanWindowFirstDate(SkuScheduleDTO sku, List<LhShiftConfigVO> shifts) {
+        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
+            return false;
+        }
+        LocalDate firstWindowDate = resolveShiftWorkDate(shifts.get(0));
+        if (firstWindowDate == null) {
+            return false;
+        }
+        Set<LocalDate> positivePlanDateSet = resolvePositiveDailyPlanDateSet(sku);
+        for (LhShiftConfigVO shift : shifts) {
+            LocalDate workDate = resolveShiftWorkDate(shift);
+            if (workDate != null && positivePlanDateSet.contains(workDate)) {
+                return workDate.isAfter(firstWindowDate);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析续作SKU窗口内仍有剩余额度的业务日期集合。
+     *
+     * @param sku 续作SKU
+     * @return 有剩余额度的业务日期集合
+     */
+    private Set<LocalDate> resolvePositiveDailyPlanDateSet(SkuScheduleDTO sku) {
+        Set<LocalDate> positivePlanDateSet = new LinkedHashSet<LocalDate>(4);
+        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return positivePlanDateSet;
+        }
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sku.getDailyPlanQuotaMap().entrySet()) {
+            SkuDailyPlanQuotaDTO quota = entry.getValue();
+            if (quota != null && quota.getRemainingQty() > 0) {
+                positivePlanDateSet.add(entry.getKey());
+            }
+        }
+        return positivePlanDateSet;
     }
 
     /**
@@ -3015,6 +3055,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             result.setTdaySpecEndTime(null);
             zeroPlanResults.add(result);
             SkuScheduleDTO sourceSku = requireContinuousPhaseSourceSku(context, result);
+            registerReleasedContinuousMachine(context, result.getLhMachineCode(), sourceSku.getMaterialCode(),
+                    "零计划续作结果移除");
             String groupKey = resolveContinuationGroupKey(context, result);
             if (sourceSku == null || StringUtils.isEmpty(groupKey) || !processedGroupKeySet.add(groupKey)) {
                 continue;
@@ -3180,15 +3222,34 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private int resolveContinuousCompensationQty(LhScheduleContext context, SkuScheduleDTO sourceSku) {
         int scheduledQty = resolveScheduledQtyBySourceSku(context, sourceSku);
         int targetRemainingQty = Math.max(0, sourceSku.resolveTargetScheduleQty() - scheduledQty);
-        if (targetRemainingQty <= 0) {
-            return 0;
-        }
         if (!CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
             int quotaRemainingQty = Math.max(0,
                     SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
-            return Math.min(targetRemainingQty, quotaRemainingQty);
+            if (quotaRemainingQty <= 0) {
+                return 0;
+            }
+            if (targetRemainingQty > 0) {
+                return Math.min(targetRemainingQty, quotaRemainingQty);
+            }
+            // 正式/量试非收尾续作可能已把原续作机台排满，但日计划账本仍有缺口，需要转S4.5新增链路补机台。
+            if (shouldCompensateRemainingDailyQuota(sourceSku)) {
+                return quotaRemainingQty;
+            }
+            return 0;
         }
         return targetRemainingQty;
+    }
+
+    /**
+     * 判断是否允许按日计划账本剩余额度生成续作补偿SKU。
+     *
+     * @param sourceSku 来源续作SKU
+     * @return true-允许补偿剩余日计划额度，false-不允许
+     */
+    private boolean shouldCompensateRemainingDailyQuota(SkuScheduleDTO sourceSku) {
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku,
+                sourceSku != null && sourceSku.isStrictTargetQty());
+        return policy.isAllowFillStartedShift() && !policy.isStrictUpperLimit();
     }
 
     /**
@@ -3251,6 +3312,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty());
         compensationSku.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
         compensationSku.setContinuousMachineCode(null);
+        compensationSku.setContinuousCompensationSku(true);
         compensationSku.setTargetScheduleQty(remainingQty);
         compensationSku.setPendingQty(remainingQty);
         compensationSku.setRemainingScheduleQty(remainingQty);
@@ -3904,6 +3966,26 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         context.getMachineAssignmentMap()
                 .computeIfAbsent(machineCode, k -> new ArrayList<>())
                 .add(result);
+    }
+
+    /**
+     * 登记续作阶段释放的机台，供S4.5新增选机降低优先级使用。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param materialCode 续作SKU物料编码
+     * @param reason 释放原因
+     */
+    private void registerReleasedContinuousMachine(LhScheduleContext context, String machineCode,
+                                                   String materialCode, String reason) {
+        if (context == null || StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        boolean added = context.getReleasedContinuousMachineCodeSet().add(machineCode);
+        if (added) {
+            log.info("登记续作释放机台, materialCode: {}, machineCode: {}, reason: {}, effect: S4.5新增选机仅降优先级",
+                    materialCode, machineCode, reason);
+        }
     }
 
     /**

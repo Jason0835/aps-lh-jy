@@ -325,6 +325,58 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
+    void sortByPriority_shouldPreferContinuousCompensationSkuWithinSameNewSpecGroup() {
+        SkuScheduleDTO normalFormal = sku("3302001724");
+        normalFormal.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        normalFormal.setHighPriorityPendingQty(999);
+
+        SkuScheduleDTO compensationFormal = sku("3302002654");
+        compensationFormal.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        compensationFormal.setHighPriorityPendingQty(1);
+        compensationFormal.setContinuousCompensationSku(true);
+
+        LhScheduleContext context = contextWithNewSpec(normalFormal, compensationFormal);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("3302002654", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "续作欠产补偿SKU在同施工阶段组内应优先进入新增链路");
+        assertEquals("3302001724", context.getNewSpecSkuList().get(1).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldKeepConstructionGroupBeforeContinuousCompensationSku() {
+        SkuScheduleDTO trialSku = sku("3302002216");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setTargetScheduleQty(1);
+
+        SkuScheduleDTO massTrialSku = sku("3302002637");
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSku.setTargetScheduleQty(1);
+
+        SkuScheduleDTO compensationFormal = sku("3302002654");
+        compensationFormal.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        compensationFormal.setContinuousCompensationSku(true);
+        compensationFormal.setHighPriorityPendingQty(999);
+
+        SkuScheduleDTO normalFormal = sku("3302001724");
+        normalFormal.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        normalFormal.setHighPriorityPendingQty(1);
+
+        LhScheduleContext context = contextWithNewSpec(normalFormal, compensationFormal, massTrialSku, trialSku);
+
+        strategy.sortByPriority(context);
+
+        assertEquals("3302002216", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "续作补偿SKU不能越过试制施工阶段组");
+        assertEquals("3302002637", context.getNewSpecSkuList().get(1).getMaterialCode(),
+                "续作补偿SKU不能越过量试施工阶段组");
+        assertEquals("3302002654", context.getNewSpecSkuList().get(2).getMaterialCode(),
+                "续作补偿SKU只在正规组内置顶");
+        assertEquals("3302001724", context.getNewSpecSkuList().get(3).getMaterialCode());
+    }
+
+    @Test
     void sortByPriority_shouldKeepDeliveryLockAndDelayPriorityBeforeStructureAllEndingRule() {
         SkuScheduleDTO locked = sku("MAT-L");
         locked.setStructureName("S2");

@@ -194,6 +194,8 @@ public class LhScheduleContext {
     private Map<SkuScheduleDTO, Boolean> newSpecSingleControlStructureEndingLayerMap = new IdentityHashMap<>();
     /** 续作结果日额度账本是否已完成最终同步，防止同一上下文重复扣账 */
     private boolean continuousDailyQuotaSynced;
+    /** 续作首日/窗口无计划释放的机台集合，仅用于S4.5选机降优先级，不代表禁止生产 */
+    private Set<String> releasedContinuousMachineCodeSet = new LinkedHashSet<>();
     /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中，供后置校验回到原始日计划账本 */
     private Map<LhScheduleResult, SkuScheduleDTO> scheduleResultSourceSkuMap = new IdentityHashMap<>();
 

@@ -75,6 +75,8 @@ public class SkuScheduleDTO {
     private String skuTag;
     /** 排程类型: 01-续作, 02-新增, 03-换活字块 */
     private String scheduleType;
+    /** 是否续作欠产转入S4.5的补偿SKU，仅用于新增SKU组内排序识别，不落库 */
+    private boolean continuousCompensationSku;
     /** 是否试制量试 */
     private boolean trial;
     /** 施工阶段 */
