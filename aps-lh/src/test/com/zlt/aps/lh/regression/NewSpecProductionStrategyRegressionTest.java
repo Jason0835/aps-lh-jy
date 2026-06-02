@@ -1129,6 +1129,135 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldBypassBalanceQuotaWhenChangeoverBalanceDisabled() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildChangeoverBalanceScheduleConfig("0"));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        String workDateKey = LhScheduleTimeUtil.formatDate(firstShift.getWorkDate());
+        context.getDailyMouldChangeCountMap().put(workDateKey, new int[]{8, 7});
+
+        MachineScheduleDTO machine = buildMachine("K1201", firstShift.getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302009001");
+        sku.setMaterialDesc("关闭换模均衡");
+        sku.setShiftCapacity(1);
+        sku.setTargetScheduleQty(1);
+        sku.setSurplusQty(1);
+        sku.setEmbryoStock(1);
+        sku.setDailyPlanQuotaMap(buildSingleDayQuotaMap(firstShift, sku.getMaterialCode(), 1));
+        context.getNewSpecSkuList().add(sku);
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), new DefaultMouldChangeBalanceStrategy(),
+                (ctx, machineCode, mouldChangeTime) -> mouldChangeTime, new DefaultCapacityCalculateStrategy());
+
+        assertEquals(1, context.getScheduleResultList().size(), "关闭换模均衡后，新增排产应仍可生成结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(firstShift.getShiftStartDateTime(), result.getMouldChangeStartTime(),
+                "关闭换模均衡后，应直接从机台可换模时间开始扣减换模耗时");
+        assertEquals(1, result.getDailyPlanQty().intValue(), "关闭换模均衡后，基础换模后应继续正常排产");
+        assertEquals(8, context.getDailyMouldChangeCountMap().get(workDateKey)[0],
+                "关闭换模均衡后，不应再占用早班换模配额");
+        assertEquals(7, context.getDailyMouldChangeCountMap().get(workDateKey)[1],
+                "关闭换模均衡后，不应再改写中班换模配额");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldKeepOriginalBalanceQuotaWhenChangeoverBalanceEnabled() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildChangeoverBalanceScheduleConfig("1"));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayMorningShift = shifts.get(3);
+        String workDateKey = LhScheduleTimeUtil.formatDate(firstShift.getWorkDate());
+        String nextWorkDateKey = LhScheduleTimeUtil.formatDate(nextDayMorningShift.getWorkDate());
+        context.getDailyMouldChangeCountMap().put(workDateKey, new int[]{8, 7});
+
+        MachineScheduleDTO machine = buildMachine("K1202", firstShift.getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302009002");
+        sku.setMaterialDesc("开启换模均衡");
+        sku.setShiftCapacity(1);
+        sku.setTargetScheduleQty(1);
+        sku.setSurplusQty(1);
+        sku.setEmbryoStock(1);
+        sku.setDailyPlanQuotaMap(buildSingleDayQuotaMap(nextDayMorningShift, sku.getMaterialCode(), 1));
+        context.getNewSpecSkuList().add(sku);
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), new DefaultMouldChangeBalanceStrategy(),
+                (ctx, machineCode, mouldChangeTime) -> mouldChangeTime, new DefaultCapacityCalculateStrategy());
+
+        assertEquals(1, context.getScheduleResultList().size(), "开启换模均衡后，仍应在顺延后的班次生成结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(nextDayMorningShift.getShiftStartDateTime(), result.getMouldChangeStartTime(),
+                "开启换模均衡后，应继续受早/中班和日累计换模配额约束");
+        assertEquals(1, context.getDailyMouldChangeCountMap().get(nextWorkDateKey)[0],
+                "开启换模均衡后，应继续登记次日早班换模占用");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldNotCallBalanceStrategyWhenChangeoverBalanceDisabled() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildChangeoverBalanceScheduleConfig("0"));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        MachineScheduleDTO machine = buildMachine("K1203", firstShift.getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302009003");
+        sku.setMaterialDesc("关闭换模均衡不调用策略");
+        sku.setShiftCapacity(1);
+        sku.setTargetScheduleQty(1);
+        sku.setSurplusQty(1);
+        sku.setEmbryoStock(1);
+        sku.setDailyPlanQuotaMap(buildSingleDayQuotaMap(firstShift, sku.getMaterialCode(), 1));
+        context.getNewSpecSkuList().add(sku);
+
+        IMouldChangeBalanceStrategy forbiddenBalanceStrategy = new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                throw new AssertionError("关闭换模均衡时不应查询换模均衡配额");
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                throw new AssertionError("关闭换模均衡时不应调用换模均衡分配");
+            }
+
+            @Override
+            public void rollbackMouldChange(LhScheduleContext ctx, Date allocatedTime) {
+                throw new AssertionError("关闭换模均衡时不应回滚换模均衡配额");
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                throw new AssertionError("关闭换模均衡时不应读取剩余换模均衡能力");
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), forbiddenBalanceStrategy,
+                (ctx, machineCode, mouldChangeTime) -> mouldChangeTime, new DefaultCapacityCalculateStrategy());
+
+        assertEquals(1, context.getScheduleResultList().size(), "关闭换模均衡后，局部搜索和主流程都不应触碰均衡策略");
+        assertEquals(firstShift.getShiftStartDateTime(), context.getScheduleResultList().get(0).getMouldChangeStartTime());
+    }
+
+    @Test
     void scheduleNewSpecs_shouldIgnoreSandBlastAndStillRespectNoMouldChangeWindow() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
@@ -3854,6 +3983,12 @@ class NewSpecProductionStrategyRegressionTest {
     private LhScheduleConfig buildSingleControlScheduleConfig() {
         Map<String, String> paramMap = new HashMap<String, String>(4);
         paramMap.put(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES, "K1501");
+        return new LhScheduleConfig(paramMap);
+    }
+
+    private LhScheduleConfig buildChangeoverBalanceScheduleConfig(String enabledValue) {
+        Map<String, String> paramMap = new HashMap<String, String>(2);
+        paramMap.put(LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE, enabledValue);
         return new LhScheduleConfig(paramMap);
     }
 

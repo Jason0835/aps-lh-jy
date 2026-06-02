@@ -22,7 +22,7 @@ import javax.annotation.Resource;
  * <p>业务定位：</p>
  * <ul>
  *   <li>处理 S4.4 未消费的新增 SKU，按排序结果逐个尝试上机；</li>
- *   <li>串联 SKU 排序、机台匹配、换模均衡、首检均衡、开产时间计算和新增策略落地；</li>
+     *   <li>串联 SKU 排序、机台匹配、基础换模时间分配、可选换模均衡、首检均衡、开产时间计算和新增策略落地；</li>
  *   <li>新增排产会同时写入排程结果、机台运行态、未排原因、日计划账本和同胎胚换模占用。</li>
  * </ul>
  *
@@ -56,7 +56,7 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
         // S4.5.3 遍历新增SKU, 匹配机台
         IMachineMatchStrategy machineMatchStrategy = strategyFactory.getMachineMatchStrategy();
 
-        // S4.5.4 换模均衡校验
+        // S4.5.4 换模时间分配（开关开启时附带换模均衡）
         IMouldChangeBalanceStrategy mouldChangeStrategy = strategyFactory.getMouldChangeBalanceStrategy();
 
         // S4.5.5 首检均衡分配
@@ -68,7 +68,7 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
         /** 对每个新增SKU执行以下流程:
          * 1. 按优先级排序
          * 2. 匹配可用硫化机台
-         * 3. 换模次数均衡校验(早<=8, 中<=7, 总<=15)
+         * 3. 基础换模时间分配（可选换模均衡：早<=8, 中<=7, 总<=15）
          * 4. 首检均衡分配(早/中班操作数均衡)
          * 5. 计算开产时间(考虑保养/维修/清洗重叠)
          * 6. 分配班次计划量

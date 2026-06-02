@@ -104,6 +104,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
+    private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
     @Resource
     private OrderNoGenerator orderNoGenerator;
     @Resource
@@ -401,7 +402,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
                 switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
 
-                // 4. 分配换模窗口；模具清洗即便重叠，也不再顺延换模起点。
+                // 4. 分配换模窗口；基础换模时间永远执行，换模均衡仅在开关开启时介入。
                 Date mouldChangeStartTime = null;
                 Date mouldChangeCompleteTime = null;
                 Date inspectionTime = null;
@@ -410,11 +411,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 int switchDurationHours = maintenanceOverlapSwitch
                         ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                         : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
-//                // 分配同胎胚错峰后的换模时间
-//                mouldChangeStartTime = allocateGreenTireAwareMouldChange(
-//                        context, sku, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
-                mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(
-                        context, machineCode, switchReadyTime, switchDurationHours);
+                mouldChangeStartTime = allocateNewSpecMouldChangeStartTime(
+                        context, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
                 if (mouldChangeStartTime == null) {
                     log.debug("新增SKU换模窗口分配失败, materialCode: {}, 机台: {}, 机台就绪: {}, 目标量: {}",
                             sku.getMaterialCode(), machineCode,
@@ -1072,8 +1070,57 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (CollectionUtils.isEmpty(windowSkuList)) {
             return null;
         }
+        IMouldChangeBalanceStrategy localSearchMouldChangeBalance =
+                resolveLocalSearchMouldChangeBalance(context, mouldChangeBalance);
         return localSearchMachineAllocator.selectBestMachine(
-                context, windowSkuList, candidates, shifts, machineMatch, mouldChangeBalance, inspectionBalance, capacityCalculate);
+                context, windowSkuList, candidates, shifts, machineMatch, localSearchMouldChangeBalance,
+                inspectionBalance, capacityCalculate);
+    }
+
+    /**
+     * 解析局部搜索使用的换模分配策略。
+     * <p>关闭换模均衡时，评估链路也必须使用基础换模口径，避免机台评估被配额均衡影响。</p>
+     *
+     * @param context 排程上下文
+     * @param mouldChangeBalance 原换模均衡策略
+     * @return 局部搜索使用的换模分配策略
+     */
+    private IMouldChangeBalanceStrategy resolveLocalSearchMouldChangeBalance(
+            LhScheduleContext context,
+            IMouldChangeBalanceStrategy mouldChangeBalance) {
+        if (isChangeoverBalanceEnabled(context)) {
+            return mouldChangeBalance;
+        }
+        return new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                return allocateBasicMouldChangeStartTime(
+                        ctx, machineCode, endingTime, LhScheduleTimeUtil.getMouldChangeTotalHours(ctx));
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx,
+                                            String machineCode,
+                                            Date endingTime,
+                                            int switchDurationHours) {
+                return allocateBasicMouldChangeStartTime(ctx, machineCode, endingTime, switchDurationHours);
+            }
+
+            @Override
+            public void rollbackMouldChange(LhScheduleContext ctx, Date allocatedTime) {
+                // 基础换模分配不占用均衡配额，无需回滚。
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                return Integer.MAX_VALUE;
+            }
+        };
     }
 
     private MachineScheduleDTO selectCandidateMachine(LhScheduleContext context,
@@ -4866,8 +4913,123 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                SkuScheduleDTO sku,
                                                IMouldChangeBalanceStrategy mouldChangeBalance,
                                                Date mouldChangeStartTime) {
-        mouldChangeBalance.rollbackMouldChange(context, mouldChangeStartTime);
+        if (isChangeoverBalanceEnabled(context) && mouldChangeBalance != null) {
+            mouldChangeBalance.rollbackMouldChange(context, mouldChangeStartTime);
+        }
         rollbackGreenTireChangeoverShift(context, sku, mouldChangeStartTime);
+    }
+
+    /**
+     * 解析新增排产的换模开始时间。
+     * <p>基础换模耗时、停机重叠和晚班不可换模永远保留；换模均衡配额仅在开关开启时生效。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param switchReadyTime 机台可切换时间
+     * @param switchDurationHours 换模耗时
+     * @param mouldChangeBalance 换模均衡策略
+     * @return 实际换模开始时间；无法安排时返回 null
+     */
+    private Date allocateNewSpecMouldChangeStartTime(LhScheduleContext context,
+                                                     String machineCode,
+                                                     Date switchReadyTime,
+                                                     int switchDurationHours,
+                                                     IMouldChangeBalanceStrategy mouldChangeBalance) {
+        if (isChangeoverBalanceEnabled(context)) {
+            return mouldChangeBalance.allocateMouldChange(
+                    context, machineCode, switchReadyTime, switchDurationHours);
+        }
+        return allocateBasicMouldChangeStartTime(context, machineCode, switchReadyTime, switchDurationHours);
+    }
+
+    /**
+     * 基础换模时间分配。
+     * <p>关闭换模均衡时，只保留停机重叠与晚班不可换模约束，不再校验早/中班及日累计换模配额。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param switchReadyTime 机台可切换时间
+     * @param switchDurationHours 换模耗时
+     * @return 实际换模开始时间；无法安排时返回 null
+     */
+    private Date allocateBasicMouldChangeStartTime(LhScheduleContext context,
+                                                   String machineCode,
+                                                   Date switchReadyTime,
+                                                   int switchDurationHours) {
+        if (switchReadyTime == null) {
+            return null;
+        }
+        Date adjustedTime = switchReadyTime;
+        for (int attempt = 0; attempt < NEW_SPEC_CHANGEOVER_PROBE_LIMIT; attempt++) {
+            Date downtimeAdjustedTime = resolveDowntimeAdjustedMouldChangeStartTime(
+                    context, machineCode, adjustedTime, switchDurationHours);
+            if (downtimeAdjustedTime != null && downtimeAdjustedTime.after(adjustedTime)) {
+                adjustedTime = downtimeAdjustedTime;
+                continue;
+            }
+            if (LhScheduleTimeUtil.isNoMouldChangeTime(context, adjustedTime)) {
+                adjustedTime = LhScheduleTimeUtil.resolveNextMorningAfterNoMouldChangeWindow(context, adjustedTime);
+                continue;
+            }
+            return adjustedTime;
+        }
+        log.warn("新增排产基础换模时间分配失败, machineCode: {}, switchReadyTime: {}, switchDurationHours: {}",
+                machineCode, LhScheduleTimeUtil.formatDateTime(switchReadyTime), switchDurationHours);
+        return null;
+    }
+
+    /**
+     * 扣除设备停机后的最早换模开始时间。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param candidateStartTime 候选换模开始时间
+     * @param switchDurationHours 换模耗时
+     * @return 停机顺延后的开始时间
+     */
+    private Date resolveDowntimeAdjustedMouldChangeStartTime(LhScheduleContext context,
+                                                             String machineCode,
+                                                             Date candidateStartTime,
+                                                             int switchDurationHours) {
+        if (context == null
+                || StringUtils.isEmpty(machineCode)
+                || candidateStartTime == null
+                || CollectionUtils.isEmpty(context.getDevicePlanShutList())) {
+            return candidateStartTime;
+        }
+        Date candidateEndTime = LhScheduleTimeUtil.addHours(candidateStartTime, switchDurationHours);
+        Date latestOverlapEndTime = null;
+        for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
+            if (planShut == null
+                    || !StringUtils.equals(machineCode, planShut.getMachineCode())
+                    || planShut.getBeginDate() == null
+                    || planShut.getEndDate() == null
+                    || !planShut.getBeginDate().before(planShut.getEndDate())) {
+                continue;
+            }
+            if (!candidateStartTime.before(planShut.getEndDate())
+                    || !planShut.getBeginDate().before(candidateEndTime)) {
+                continue;
+            }
+            if (latestOverlapEndTime == null || planShut.getEndDate().after(latestOverlapEndTime)) {
+                latestOverlapEndTime = planShut.getEndDate();
+            }
+        }
+        return latestOverlapEndTime != null ? latestOverlapEndTime : candidateStartTime;
+    }
+
+    /**
+     * 判断新增排产是否启用换模均衡。
+     *
+     * @param context 排程上下文
+     * @return true-启用；false-关闭
+     */
+    private boolean isChangeoverBalanceEnabled(LhScheduleContext context) {
+        LhScheduleConfig scheduleConfig = context != null ? context.getScheduleConfig() : null;
+        if (scheduleConfig == null) {
+            return LhScheduleConstant.ENABLE_CHANGEOVER_BALANCE == 1;
+        }
+        return scheduleConfig.isChangeoverBalanceEnabled();
     }
 
     /**

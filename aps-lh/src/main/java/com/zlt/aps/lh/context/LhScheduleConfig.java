@@ -469,6 +469,16 @@ public class LhScheduleConfig {
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS));
     }
 
+    /**
+     * 判断新增排产是否启用换模均衡。
+     *
+     * @return true-启用；false-关闭
+     */
+    public boolean isChangeoverBalanceEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE,
+                LhScheduleConstant.ENABLE_CHANGEOVER_BALANCE) == 1;
+    }
+
     public int getContinuousShortageLookAheadDays() {
         return Math.max(0, getParamIntValue(LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS,
                 LhScheduleConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS));

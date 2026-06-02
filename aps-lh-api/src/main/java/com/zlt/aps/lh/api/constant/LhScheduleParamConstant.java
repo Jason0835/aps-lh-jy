@@ -190,6 +190,8 @@ public final class LhScheduleParamConstant {
     public static final String ENABLE_PRIORITY_TRACE_LOG = "SYS0304014";
     /** 新增排产欠产追补判断天数 */
     public static final String NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = "SYS0304015";
+    /** 是否开启换模均衡（0-关闭，1-开启） */
+    public static final String ENABLE_CHANGEOVER_BALANCE = "SYS0304021";
     /** 续作欠产追补判断天数 */
     public static final String CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS = "SYS0304019";
     /** 是否追加本月历史欠产量（0-关闭，1-开启） */

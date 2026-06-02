@@ -90,6 +90,20 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：新增排产换模均衡开关默认关闭，配置为1时才启用。
+     */
+    @Test
+    public void shouldReadChangeoverBalanceSwitchConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertFalse(defaultConfig.isChangeoverBalanceEnabled());
+
+        Map<String, String> enabledParamMap = new HashMap<String, String>(1);
+        enabledParamMap.put(LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE, "1");
+        LhScheduleConfig enabledConfig = new LhScheduleConfig(enabledParamMap);
+        Assertions.assertTrue(enabledConfig.isChangeoverBalanceEnabled());
+    }
+
+    /**
      * 用例说明：续作欠产追补判断天数使用独立参数，默认1天，允许配置为0。
      */
     @Test
