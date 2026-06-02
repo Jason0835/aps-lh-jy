@@ -46,7 +46,7 @@ import java.util.Objects;
  *
  * <p>主要职责：</p>
  * <ul>
- *   <li>将前批次/前日排程与实际完成量对比，形成欠产或超产向本窗口传导的净值；</li>
+ *   <li>按当前排程月份累计历史欠产，只将本月已发生日期的欠产向本窗口传导，忽略上月欠产和超产；</li>
  *   <li>从月计划结果构建 {@link SkuScheduleDTO}，映射物料、结构、胎胚、dayN、余量、库存和产能；</li>
  *   <li>按产品结构归集 SKU，标记 SKU 收尾、结构收尾、续作和新增；</li>
  *   <li>初始化日计划额度账本，供后续 S4.4/S4.5 按班次消费。</li>
@@ -114,47 +114,45 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 对前日排程结果做欠/超产量调整（原地修改列表）。
+     * 归集当前排程月份的历史欠产。
      * <p>
-     * 欠产（夜班计划 > 实际完成）：将差额追加到T日早班的计划量中<br/>
-     * 超产（实际完成 > 计划）：可冲抵后续班次计划<br/>
-     * 已收尾的SKU从续作列表中去除
+     * 只统计当前排程月份内、且日期早于 T 日的日欠产：
+     * 欠产 = max(日计划量 - 日完成量, 0)<br/>
+     * 上月欠产不参与当前月追补；本月超产只记日志，不允许抵扣后续计划。
      * </p>
      *
      * @param context 排程上下文
      */
     private void adjustPreviousSchedule(LhScheduleContext context) {
-        List<LhScheduleResult> previousScheduleList = context.getPreviousScheduleResultList();
-        if (previousScheduleList == null || previousScheduleList.isEmpty()) {
-            log.warn("前日排程结果为空，跳过欠产/超产传导, 工厂: {}, T日: {}",
+        if (CollectionUtils.isEmpty(context.getMonthPlanList()) || Objects.isNull(context.getScheduleDate())) {
+            log.warn("月计划或排程日期为空，跳过本月历史欠产归集, 工厂: {}, T日: {}",
                     context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()));
             return;
         }
-        Date previousScheduleDate = resolvePreviousScheduleDate(context);
-        Map<String, Integer> materialPlannedQtyMap = new LinkedHashMap<>();
-        for (LhScheduleResult result : previousScheduleList) {
-            if (StringUtils.isEmpty(result.getMaterialCode())) {
+        Map<String, Integer> carryForwardQtyMap = new LinkedHashMap<>();
+        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
+        LocalDate historyEndDate = scheduleDate.minusDays(1);
+        LocalDate monthStartDate = scheduleDate.withDayOfMonth(MIN_DAY_OF_MONTH);
+        logIgnoredPreviousMonthCarryForward(context, monthStartDate);
+        if (historyEndDate.isBefore(monthStartDate)) {
+            context.setCarryForwardQtyMap(carryForwardQtyMap);
+            log.info("本月历史欠产归集完成, 当前为月初首日, factoryCode: {}, scheduleDate: {}, historyShortageSkuCount: 0",
+                    context.getFactoryCode(), scheduleDate);
+            return;
+        }
+        for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
+            if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())) {
                 continue;
             }
-            // 滚动衔接时只结转继承窗口之前的班次量，避免与继承量重复
-            int plannedQty = resolveCarryForwardPlanQty(context, result);
-            materialPlannedQtyMap.merge(result.getMaterialCode(), plannedQty, Integer::sum);
-        }
-        Map<String, Integer> carryForwardQtyMap = new LinkedHashMap<>();
-        for (Map.Entry<String, Integer> entry : materialPlannedQtyMap.entrySet()) {
-            String materialCode = entry.getKey();
-            int plannedQty = entry.getValue();
-            int finishedQty = resolveMaterialDayFinishedQty(context, materialCode, previousScheduleDate);
-            int diffQty = plannedQty - finishedQty;
-            if (diffQty != 0) {
-                carryForwardQtyMap.put(materialCode, diffQty);
-                log.debug("欠产/超产传导: 日期[{}] SKU[{}] 前日计划总量[{}] 日完成量[{}] 净值[{}]",
-                        LhScheduleTimeUtil.formatDate(previousScheduleDate), materialCode, plannedQty, finishedQty, diffQty);
+            MonthlyShortageSummary shortageSummary = calculateCurrentMonthShortageSummary(
+                    context, plan, monthStartDate, historyEndDate);
+            if (shortageSummary.getShortageQty() > 0) {
+                carryForwardQtyMap.put(plan.getMaterialCode(), shortageSummary.getShortageQty());
             }
         }
         context.setCarryForwardQtyMap(carryForwardQtyMap);
-        log.info("前日排程欠产/超产净值归集完成, 记录数: {}, 影响SKU数: {}",
-                previousScheduleList.size(), carryForwardQtyMap.size());
+        log.info("本月历史欠产归集完成, factoryCode: {}, scheduleDate: {}, historyRange: {}~{}, historyShortageSkuCount: {}",
+                context.getFactoryCode(), scheduleDate, monthStartDate, historyEndDate, carryForwardQtyMap.size());
     }
 
     /**
@@ -224,10 +222,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * @return 硫化余量
      */
     private SurplusCalculation calculateSurplusQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
-        // 统一按月计划总量减已完成量计算余量，不再使用月余量表兜底。
         int totalPlanQty = plan.getTotalQty() != null ? plan.getTotalQty() : 0;
-        int finishedQty = calculateFinishedQty(context, plan);
-        return new SurplusCalculation(Math.max(0, totalPlanQty - finishedQty));
+        int actualFinishedQty = calculateFinishedQty(context, plan);
+        int ignoredOverProductionQty = calculateIgnoredOverProductionQty(context, plan);
+        int remainingDemandQty = Math.max(0, totalPlanQty - actualFinishedQty + ignoredOverProductionQty);
+        return new SurplusCalculation(remainingDemandQty, actualFinishedQty, ignoredOverProductionQty);
     }
 
     /**
@@ -262,6 +261,39 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             }
         }
         return 0;
+    }
+
+    /**
+     * 计算本月已发生日期和 T 日晚班中的被忽略超产量。
+     * <p>超产不允许抵扣后续计划，因此需要把“超过当日计划量”的部分加回本月剩余需求。</p>
+     *
+     * @param context 排程上下文
+     * @param plan 月生产计划记录
+     * @return 被忽略的超产量
+     */
+    private int calculateIgnoredOverProductionQty(LhScheduleContext context,
+                                                  FactoryMonthPlanProductionFinalResult plan) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleDate()) || Objects.isNull(plan)) {
+            return 0;
+        }
+        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
+        LocalDate historyEndDate = scheduleDate.minusDays(1);
+        LocalDate monthStartDate = scheduleDate.withDayOfMonth(MIN_DAY_OF_MONTH);
+        int ignoredOverProductionQty = 0;
+        if (!historyEndDate.isBefore(monthStartDate)) {
+            MonthlyShortageSummary shortageSummary = calculateCurrentMonthShortageSummary(
+                    context, plan, monthStartDate, historyEndDate);
+            ignoredOverProductionQty += shortageSummary.getIgnoredOverProductionQty();
+        }
+        int currentDayPlanQty = MonthPlanDayQtyUtil.resolveDayQty(plan, scheduleDate.getDayOfMonth());
+        int scheDayFinishQty = resolveScheDayFinishQty(context, plan.getMaterialCode());
+        int currentDayIgnoredOverQty = Math.max(0, scheDayFinishQty - currentDayPlanQty);
+        if (currentDayIgnoredOverQty > 0) {
+            ignoredOverProductionQty += currentDayIgnoredOverQty;
+            log.info("T日晚班超产忽略抵扣, materialCode: {}, scheduleDate: {}, dayPlanQty: {}, scheDayFinishQty: {}, ignoredOverQty: {}",
+                    plan.getMaterialCode(), scheduleDate, currentDayPlanQty, scheDayFinishQty, currentDayIgnoredOverQty);
+        }
+        return ignoredOverProductionQty;
     }
 
     /**
@@ -322,7 +354,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // 计划量信息
         dto.setMonthPlanQty(plan.getTotalQty() != null ? plan.getTotalQty() : 0);
-        dto.setFinishedQty(Math.max(0, dto.getMonthPlanQty() - surplus.getSurplusQty()));
+        dto.setFinishedQty(surplus.getActualFinishedQty());
         int rawCarryForwardQty = context.getCarryForwardQtyMap().getOrDefault(plan.getMaterialCode(), 0);
         int carryForwardQty = resolveEffectiveCarryForwardQty(context, plan.getMaterialCode(), rawCarryForwardQty);
         int windowPlanQty = MonthPlanDayQtyUtil.resolveWindowPlanQty(
@@ -338,7 +370,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         deductInheritedFromDailyQuota(dailyPlanQuotaMap, inheritedPlanQty);
         deductScheDayFinishFromDailyQuota(context, dailyPlanQuotaMap, dto.getMaterialCode());
 
-        // 将欠/超产净值写入日计划账本：欠产叠加首日，超产从首日起顺序抵扣。
+        // 只把“本月历史欠产”叠加到首日日计划账本，不处理上月欠产和超产抵扣。
         applyCarryForwardToDailyQuota(dailyPlanQuotaMap, carryForwardQty, dto.getMaterialCode());
         dto.setDailyPlanQuotaMap(dailyPlanQuotaMap);
 
@@ -348,10 +380,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         dto.setSurplusQty(surplus.getSurplusQty());
         dto.setEmbryoStock(resolveAllocatedEmbryoStock(context, plan, embryoStandardCapacitySumMap));
-        // 待排量保持“需求口径”：月计划余量扣除已继承量，再按开关决定是否叠加/抵扣T-1欠产超产净值；
-        // 日计划账本仅用于结果消费约束，不在 DTO 初始化阶段压缩需求。
-        int basePendingQty = resolveBasePendingQty(surplus.getSurplusQty(), inheritedPlanQty,
-                carryForwardQty, dto.getEmbryoStock());
+        // 待排量保持“需求口径”：使用已忽略超产抵扣后的本月剩余需求，再扣减滚动继承量。
+        // 本月历史欠产已经体现在剩余需求和首日日计划账本中，不能再次重复叠加。
+        int basePendingQty = resolveBasePendingQty(surplus.getSurplusQty(), inheritedPlanQty, dto.getEmbryoStock());
         if (context.isStopProductionMode()) {
             // 停产收尾按"停产日含损耗计划量"和"胎胚库存"取大，优先把停锅前可收的量拉齐。
             basePendingQty = resolveStopProductionDemandQty(context, plan, dto.getEmbryoStock());
@@ -377,12 +408,13 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         fillDailyCapacity(dto, capacity);
         dto.setTargetScheduleQty(getTargetScheduleQtyResolver().resolveInitialTargetQty(context, dto));
         appendOpenProductionShortageIfNecessary(context, dto);
-        log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 窗口剩余: {}, 已完成: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
+        log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 窗口剩余: {}, 已完成: {}, 忽略超产: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
                 dto.getMaterialCode(), dto.getStructureName(), dto.getMonthPlanQty(), dto.getWindowPlanQty(),
-                dto.getWindowRemainingPlanQty(), dto.getFinishedQty(), dto.getSurplusQty(), dto.getPendingQty(),
+                dto.getWindowRemainingPlanQty(), dto.getFinishedQty(), surplus.getIgnoredOverProductionQty(),
+                dto.getSurplusQty(), dto.getPendingQty(),
                 dto.getTargetScheduleQty(), dto.getShiftCapacity());
         if (context.isRollingScheduleHandoff() || inheritedPlanQty > 0) {
-            log.info("滚动待排量拆解, 物料: {}, 窗口计划量: {}, 已继承量: {}, 欠产传导量: {}, 待排量: {}, 余量: {}, 目标量: {}",
+            log.info("滚动待排量拆解, 物料: {}, 窗口计划量: {}, 已继承量: {}, 本月历史欠产量: {}, 待排量: {}, 余量: {}, 目标量: {}",
                     dto.getMaterialCode(), windowPlanQty, inheritedPlanQty, carryForwardQty,
                     dto.getPendingQty(), dto.getSurplusQty(), dto.getTargetScheduleQty());
         }
@@ -656,51 +688,45 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 将T-1欠产/超产净值写入日计划额度账本。
-     * <p>正值表示欠产，追加到首日优先追补；负值表示超产，从首日起顺序抵扣。</p>
+     * 将本月历史欠产写入首日日计划额度账本。
+     * <p>只处理当前排程月份内、早于 T 日的历史欠产；上月欠产和超产都不参与当前窗口。</p>
      *
      * @param dailyPlanQuotaMap 日计划额度账本
-     * @param carryForwardQty T-1欠产/超产净值
+     * @param carryForwardQty 本月历史欠产量
      * @param materialCode 物料编码
      */
     private void applyCarryForwardToDailyQuota(Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap,
                                                int carryForwardQty,
                                                String materialCode) {
-        if (carryForwardQty == 0 || CollectionUtils.isEmpty(dailyPlanQuotaMap)) {
+        if (carryForwardQty <= 0 || CollectionUtils.isEmpty(dailyPlanQuotaMap)) {
             return;
         }
-        if (carryForwardQty > 0) {
-            SkuDailyPlanQuotaDTO firstDayQuota = dailyPlanQuotaMap.values().iterator().next();
-            firstDayQuota.setRemainingQty(firstDayQuota.getRemainingQty() + carryForwardQty);
-            SkuDailyPlanQuotaUtil.refreshRollingFields(dailyPlanQuotaMap);
-            log.info("T-1欠产追加到首日日计划账本, materialCode: {}, carryForwardQty: {}, firstDate: {}, windowRemainingQty: {}",
-                    materialCode, carryForwardQty, firstDayQuota.getProductionDate(),
-                    SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap));
-            return;
-        }
-        int overProductionQty = Math.abs(carryForwardQty);
-        int deductedQty = deductQuotaByDateOrder(dailyPlanQuotaMap, overProductionQty);
-        log.info("T-1超产抵扣日计划账本, materialCode: {}, overProductionQty: {}, deductedQty: {}, windowRemainingQty: {}",
-                materialCode, overProductionQty, deductedQty, SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap));
+        SkuDailyPlanQuotaDTO firstDayQuota = dailyPlanQuotaMap.values().iterator().next();
+        firstDayQuota.setRemainingQty(firstDayQuota.getRemainingQty() + carryForwardQty);
+        SkuDailyPlanQuotaUtil.refreshRollingFields(dailyPlanQuotaMap);
+        log.info("本月历史欠产追加到首日日计划账本, materialCode: {}, historyShortageQty: {}, firstDate: {}, windowRemainingQty: {}",
+                materialCode, carryForwardQty, firstDayQuota.getProductionDate(),
+                SkuDailyPlanQuotaUtil.sumRemainingQty(dailyPlanQuotaMap));
     }
 
     /**
-     * 解析当前窗口实际生效的T-1欠产/超产净值。
-     * <p>净值始终归集到上下文，是否进入当前窗口需求由硫化参数开关控制。</p>
+     * 解析当前窗口实际生效的本月历史欠产量。
+     * <p>只允许正向欠产进入当前窗口；超产和上月欠产已经在归集阶段被过滤。</p>
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
-     * @param rawCarryForwardQty 原始T-1欠产/超产净值
+     * @param rawCarryForwardQty 原始本月历史欠产量
      * @return 生效净值
      */
     private int resolveEffectiveCarryForwardQty(LhScheduleContext context,
                                                 String materialCode,
                                                 int rawCarryForwardQty) {
-        if (rawCarryForwardQty == 0 || isCarryForwardQtyEnabled(context)) {
-            return rawCarryForwardQty;
+        int positiveCarryForwardQty = Math.max(0, rawCarryForwardQty);
+        if (positiveCarryForwardQty == 0 || isCarryForwardQtyEnabled(context)) {
+            return positiveCarryForwardQty;
         }
-        log.debug("T-1欠产/超产追加开关关闭，净值不进入当前窗口需求, materialCode: {}, carryForwardQty: {}",
-                materialCode, rawCarryForwardQty);
+        log.debug("本月历史欠产追加开关关闭，净值不进入当前窗口需求, materialCode: {}, carryForwardQty: {}",
+                materialCode, positiveCarryForwardQty);
         return 0;
     }
 
@@ -769,19 +795,17 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
     /**
      * 解析常规待排需求量。
-     * <p>待排需求 = 月计划余量 - 已继承量 + T-1欠产/超产净值；负向超产用于抵扣当前窗口需求。</p>
+     * <p>待排需求 = 已按“只处理本月欠产、不处理超产抵扣”修正后的月计划余量 - 已继承量。</p>
      *
      * @param surplusQty 月计划余量
      * @param inheritedPlanQty 已继承量
-     * @param carryForwardQty 欠产/超产净值
      * @param embryoStock 胎胚库存
      * @return 待排需求量
      */
     private int resolveBasePendingQty(int surplusQty,
                                       int inheritedPlanQty,
-                                      int carryForwardQty,
                                       int embryoStock) {
-        int surplusDemandQty = Math.max(0, surplusQty - Math.max(0, inheritedPlanQty) + carryForwardQty);
+        int surplusDemandQty = Math.max(0, surplusQty - Math.max(0, inheritedPlanQty));
         int effectiveEmbryoStock = Math.max(0, embryoStock);
         return Math.max(surplusDemandQty, effectiveEmbryoStock);
     }
@@ -995,6 +1019,90 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
+     * 统计当前排程月份内、且早于 T 日的历史欠产摘要。
+     *
+     * @param context 排程上下文
+     * @param plan 月计划
+     * @param monthStartDate 当前排程月份起始日
+     * @param historyEndDate 历史统计截止日（T-1）
+     * @return 历史欠产摘要
+     */
+    private MonthlyShortageSummary calculateCurrentMonthShortageSummary(LhScheduleContext context,
+                                                                       FactoryMonthPlanProductionFinalResult plan,
+                                                                       LocalDate monthStartDate,
+                                                                       LocalDate historyEndDate) {
+        if (Objects.isNull(context) || Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())
+                || Objects.isNull(monthStartDate) || Objects.isNull(historyEndDate)
+                || historyEndDate.isBefore(monthStartDate)) {
+            return MonthlyShortageSummary.empty();
+        }
+        int shortageQty = 0;
+        int ignoredOverProductionQty = 0;
+        StringBuilder detailBuilder = new StringBuilder(128);
+        LocalDate cursor = monthStartDate;
+        while (!cursor.isAfter(historyEndDate)) {
+            int dayPlanQty = MonthPlanDayQtyUtil.resolveDayQty(plan, cursor.getDayOfMonth());
+            int finishedQty = resolveMonthDailyFinishedQty(context, plan.getMaterialCode(), cursor);
+            int dayShortageQty = Math.max(dayPlanQty - finishedQty, 0);
+            int dayIgnoredOverQty = Math.max(finishedQty - dayPlanQty, 0);
+            shortageQty += dayShortageQty;
+            ignoredOverProductionQty += dayIgnoredOverQty;
+            if (detailBuilder.length() > 0) {
+                detailBuilder.append("; ");
+            }
+            detailBuilder.append(cursor)
+                    .append("[计划=").append(dayPlanQty)
+                    .append(", 完成=").append(finishedQty)
+                    .append(", 欠产=").append(dayShortageQty)
+                    .append(", 忽略超产=").append(dayIgnoredOverQty)
+                    .append("]");
+            cursor = cursor.plusDays(1);
+        }
+        log.info("本月历史欠产统计, materialCode: {}, scheduleMonth: {}, historyRange: {}~{}, shortageQty: {}, ignoredOverProductionQty: {}, detail: {}",
+                plan.getMaterialCode(), monthStartDate.getMonthValue(), monthStartDate, historyEndDate,
+                shortageQty, ignoredOverProductionQty, detailBuilder.toString());
+        return new MonthlyShortageSummary(shortageQty, ignoredOverProductionQty);
+    }
+
+    /**
+     * 记录被忽略的上月欠产边界，便于核对月初不跨月追补。
+     *
+     * @param context 排程上下文
+     * @param monthStartDate 当前排程月份起始日
+     */
+    private void logIgnoredPreviousMonthCarryForward(LhScheduleContext context, LocalDate monthStartDate) {
+        Date previousScheduleDate = resolvePreviousScheduleDate(context);
+        if (Objects.isNull(previousScheduleDate)) {
+            return;
+        }
+        LocalDate previousDate = toLocalDate(previousScheduleDate);
+        if (!previousDate.isBefore(monthStartDate)) {
+            return;
+        }
+        log.info("上月欠产边界已忽略, factoryCode: {}, ignoredDate: {}, currentMonthStart: {}",
+                context.getFactoryCode(), previousDate, monthStartDate);
+    }
+
+    /**
+     * 获取当前排程月份内某个物料在指定自然日的完成量。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param productionDate 自然日
+     * @return 日完成量
+     */
+    private int resolveMonthDailyFinishedQty(LhScheduleContext context,
+                                             String materialCode,
+                                             LocalDate productionDate) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(materialCode) || Objects.isNull(productionDate)) {
+            return 0;
+        }
+        Integer finishedQty = context.getMaterialMonthDailyFinishedQtyMap()
+                .get(materialCode + "_" + productionDate);
+        return Objects.nonNull(finishedQty) ? Math.max(finishedQty, 0) : 0;
+    }
+
+    /**
      * 构建"物料+日期"聚合Key。
      *
      * @param materialCode 物料编码
@@ -1003,6 +1111,17 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      */
     private String buildMaterialDayKey(String materialCode, Date date) {
         return materialCode + "_" + LhScheduleTimeUtil.formatDate(LhScheduleTimeUtil.clearTime(date));
+    }
+
+    /**
+     * Date 转 LocalDate。
+     *
+     * @param date 日期
+     * @return LocalDate
+     */
+    private LocalDate toLocalDate(Date date) {
+        return LhScheduleTimeUtil.clearTime(date).toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     /**
@@ -1453,13 +1572,51 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private static class SurplusCalculation {
 
         private final int surplusQty;
+        private final int actualFinishedQty;
+        private final int ignoredOverProductionQty;
 
-        private SurplusCalculation(int surplusQty) {
+        private SurplusCalculation(int surplusQty, int actualFinishedQty, int ignoredOverProductionQty) {
             this.surplusQty = surplusQty;
+            this.actualFinishedQty = Math.max(0, actualFinishedQty);
+            this.ignoredOverProductionQty = Math.max(0, ignoredOverProductionQty);
         }
 
         public int getSurplusQty() {
             return surplusQty;
+        }
+
+        public int getActualFinishedQty() {
+            return actualFinishedQty;
+        }
+
+        public int getIgnoredOverProductionQty() {
+            return ignoredOverProductionQty;
+        }
+    }
+
+    /**
+     * 本月历史欠产摘要。
+     */
+    private static class MonthlyShortageSummary {
+
+        private final int shortageQty;
+        private final int ignoredOverProductionQty;
+
+        private MonthlyShortageSummary(int shortageQty, int ignoredOverProductionQty) {
+            this.shortageQty = Math.max(0, shortageQty);
+            this.ignoredOverProductionQty = Math.max(0, ignoredOverProductionQty);
+        }
+
+        private static MonthlyShortageSummary empty() {
+            return new MonthlyShortageSummary(0, 0);
+        }
+
+        public int getShortageQty() {
+            return shortageQty;
+        }
+
+        public int getIgnoredOverProductionQty() {
+            return ignoredOverProductionQty;
         }
     }
 

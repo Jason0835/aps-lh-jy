@@ -1102,8 +1102,10 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
 
         Map<String, Integer> materialMonthFinishedQtyMap = buildMonthPlanMaterialFinishedQtyMap(context);
+        Map<String, Integer> materialMonthDailyFinishedQtyMap = new HashMap<>(128);
         if (!queryEndDate.after(monthStart)) {
             context.setMaterialMonthFinishedQtyMap(materialMonthFinishedQtyMap);
+            context.setMaterialMonthDailyFinishedQtyMap(materialMonthDailyFinishedQtyMap);
             log.debug("月累计完成量加载完成, 数量: {}, 月计划月份: {}-{}, 起始日: {}, 截止日: {}, 实际查询结束日: {}",
                     materialMonthFinishedQtyMap.size(), year, month, LhScheduleTimeUtil.formatDate(monthStart),
                     LhScheduleTimeUtil.formatDate(cutoffDay), LhScheduleTimeUtil.formatDate(queryEndDate));
@@ -1128,10 +1130,16 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         finishQty.getMaterialCode(),
                         resolveDayFinishedQty(finishQty),
                         Integer::sum);
+                materialMonthDailyFinishedQtyMap.merge(
+                        buildMaterialDayKey(finishQty.getMaterialCode(),
+                                LhScheduleTimeUtil.clearTime(finishQty.getFinishDate())),
+                        resolveDayFinishedQty(finishQty),
+                        Integer::sum);
             }
         }
 
         context.setMaterialMonthFinishedQtyMap(materialMonthFinishedQtyMap);
+        context.setMaterialMonthDailyFinishedQtyMap(materialMonthDailyFinishedQtyMap);
         log.debug("月累计完成量加载完成, 数量: {}, 月计划月份: {}-{}, 起始日: {}, 截止日: {}, 实际查询结束日: {}",
                 materialMonthFinishedQtyMap.size(),
                 year, month, LhScheduleTimeUtil.formatDate(monthStart),
