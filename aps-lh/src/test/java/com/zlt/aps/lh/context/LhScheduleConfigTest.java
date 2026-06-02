@@ -109,7 +109,7 @@ public class LhScheduleConfigTest {
     }
 
     /**
-     * 用例说明：T-1欠产/超产追加默认关闭，配置为1时才启用。
+     * 用例说明：本月历史欠产追加默认关闭，配置为1时才启用。
      */
     @Test
     public void shouldReadCarryForwardQtySwitchConfig() {

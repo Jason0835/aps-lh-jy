@@ -731,7 +731,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 判断是否启用T-1欠产/超产追加。
+     * 判断是否启用本月历史欠产追加。
      *
      * @param context 排程上下文
      * @return true-启用；false-关闭

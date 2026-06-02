@@ -475,7 +475,7 @@ public class LhScheduleConfig {
     }
 
     /**
-     * 判断是否将T-1欠产/超产净值追加到当前排程窗口。
+     * 判断是否将本月历史欠产追加到当前排程窗口。
      *
      * @return true-追加；false-不追加
      */
