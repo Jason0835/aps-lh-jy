@@ -136,6 +136,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
         Map<String, Integer> continuationGroupMachineCountMap = buildContinuationGroupMachineCountMap(
                 context.getContinuousSkuList());
+        preRegisterReleasedContinuousMachines(context, shifts);
 
         for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
             String machineCode = sku.getContinuousMachineCode();
@@ -162,7 +163,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             // 滚动衔接时沿用机台继承后的可用时间；普通续作从首个有日计划剩余额度的班次起排。
             Date startTime = resolveContinuousStartTime(context, sku, machine, shifts);
             if (isFirstPositiveDailyPlanLaterThanWindowFirstDate(sku, shifts)) {
-                registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(), "续作首日无计划");
+                registerReleasedFirstDayNoPlanContinuousMachine(context, machineCode, sku.getMaterialCode());
             }
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine);
@@ -3137,7 +3138,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return;
         }
         Map<String, List<LhScheduleResult>> machineResultMap = context.getScheduleResultList().stream()
-                .filter(this::isEffectiveContinuousResult)
+                .filter(result -> isEffectiveContinuousResult(context, result))
                 .collect(Collectors.groupingBy(LhScheduleResult::getLhMachineCode));
         for (Map.Entry<String, MachineScheduleDTO> entry : context.getMachineScheduleMap().entrySet()) {
             String machineCode = entry.getKey();
@@ -3439,12 +3440,31 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param result 排程结果
      * @return true-有效结果；false-非有效结果
      */
-    private boolean isEffectiveContinuousResult(LhScheduleResult result) {
+    private boolean isEffectiveContinuousResult(LhScheduleContext context, LhScheduleResult result) {
         return isContinuousPhaseResult(result)
                 && result.getDailyPlanQty() != null
                 && result.getDailyPlanQty() > 0
                 && result.getSpecEndTime() != null
+                && !isReleasedFirstDayNoPlanPlaceholderResult(context, result)
                 && StringUtils.isNotEmpty(result.getLhMachineCode());
+    }
+
+    /**
+     * 判断结果是否属于“首日无计划但后续有计划”的释放续作占位结果。
+     * <p>这类结果仍需保留在续作结果集里参与账本扣减和后续补偿判断，
+     * 但不能在 S4.4 收口后继续把机台运行态锁定在原续作机台上。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return true-释放续作占位结果
+     */
+    private boolean isReleasedFirstDayNoPlanPlaceholderResult(LhScheduleContext context, LhScheduleResult result) {
+        if (context == null || result == null || !isPureContinuousResult(result)
+                || StringUtils.isEmpty(result.getLhMachineCode())
+                || CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())) {
+            return false;
+        }
+        return context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains(result.getLhMachineCode());
     }
 
     /**
@@ -3969,6 +3989,34 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 预登记续作释放机台。
+     * <p>S4.4 续作主循环中可能先为其他 SKU 做新增换模预判选机，释放机台必须在这些预判前完成降级标记。</p>
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     */
+    private void preRegisterReleasedContinuousMachines(LhScheduleContext context, List<LhShiftConfigVO> shifts) {
+        if (context == null || CollectionUtils.isEmpty(context.getContinuousSkuList())
+                || CollectionUtils.isEmpty(shifts)) {
+            return;
+        }
+        for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
+            if (sku == null || StringUtils.isEmpty(sku.getContinuousMachineCode())) {
+                continue;
+            }
+            if (isContinuousWindowNoDailyPlan(sku)) {
+                registerReleasedContinuousMachine(context, sku.getContinuousMachineCode(),
+                        sku.getMaterialCode(), "窗口内无日计划");
+                continue;
+            }
+            if (isFirstPositiveDailyPlanLaterThanWindowFirstDate(sku, shifts)) {
+                registerReleasedFirstDayNoPlanContinuousMachine(context,
+                        sku.getContinuousMachineCode(), sku.getMaterialCode());
+            }
+        }
+    }
+
+    /**
      * 登记续作阶段释放的机台，供S4.5新增选机降低优先级使用。
      *
      * @param context 排程上下文
@@ -3986,6 +4034,24 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             log.info("登记续作释放机台, materialCode: {}, machineCode: {}, reason: {}, effect: S4.5新增选机仅降优先级",
                     materialCode, machineCode, reason);
         }
+    }
+
+    /**
+     * 登记首日无计划但后续仍有计划的续作释放机台。
+     * <p>该标记属于初始化阶段业务事实，后续识别占位结果时不能再依赖会被账本扣减改写的 remainingQty。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param materialCode 续作SKU物料编码
+     */
+    private void registerReleasedFirstDayNoPlanContinuousMachine(LhScheduleContext context,
+                                                                 String machineCode,
+                                                                 String materialCode) {
+        registerReleasedContinuousMachine(context, machineCode, materialCode, "续作首日无计划");
+        if (context == null || StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add(machineCode);
     }
 
     /**

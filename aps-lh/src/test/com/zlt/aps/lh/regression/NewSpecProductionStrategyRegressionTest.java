@@ -154,6 +154,243 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldReplaceReleasedContinuousPlaceholderWhenMachineIsTaken() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO secondDayShift = shifts.get(3);
+        LhShiftConfigVO thirdDayShift = shifts.get(6);
+
+        MachineScheduleDTO releasedMachine = buildMachine("K1105", firstShift.getShiftStartDateTime());
+        releasedMachine.setPreviousMaterialCode("3302002546");
+        MachineScheduleDTO fallbackMachine = buildMachine("K1110", firstShift.getShiftStartDateTime());
+        context.getMachineScheduleMap().put(releasedMachine.getMachineCode(), releasedMachine);
+        context.getMachineScheduleMap().put(fallbackMachine.getMachineCode(), fallbackMachine);
+
+        SkuScheduleDTO sourceContinuousSku = buildSku();
+        sourceContinuousSku.setMaterialCode("3302002546");
+        sourceContinuousSku.setMaterialDesc("3302002546");
+        sourceContinuousSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sourceContinuousSku.setContinuousMachineCode("K1105");
+        sourceContinuousSku.setShiftCapacity(17);
+        sourceContinuousSku.setPendingQty(102);
+        sourceContinuousSku.setDailyPlanQty(102);
+        sourceContinuousSku.setTargetScheduleQty(102);
+        sourceContinuousSku.setSurplusQty(102);
+        sourceContinuousSku.setEmbryoStock(102);
+        sourceContinuousSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302002546", 0, 32, 50));
+        context.getContinuousSkuList().add(sourceContinuousSku);
+        context.getReleasedContinuousMachineCodeSet().add("K1105");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("K1105");
+
+        LhScheduleResult placeholderResult = new LhScheduleResult();
+        placeholderResult.setFactoryCode(context.getFactoryCode());
+        placeholderResult.setBatchNo(context.getBatchNo());
+        placeholderResult.setLhMachineCode("K1105");
+        placeholderResult.setLhMachineName("K1105");
+        placeholderResult.setMaterialCode("3302002546");
+        placeholderResult.setMaterialDesc("3302002546");
+        placeholderResult.setScheduleType("01");
+        placeholderResult.setIsTypeBlock("0");
+        placeholderResult.setIsChangeMould("0");
+        placeholderResult.setDailyPlanQty(102);
+        placeholderResult.setSpecEndTime(dateTime(2026, 4, 19, 21, 12));
+        context.getScheduleResultList().add(placeholderResult);
+        context.getScheduleResultSourceSkuMap().put(placeholderResult, sourceContinuousSku);
+        context.getMachineAssignmentMap().put("K1105",
+                new java.util.ArrayList<LhScheduleResult>(Collections.singletonList(placeholderResult)));
+
+        SkuScheduleDTO takeoverSku = buildSku();
+        takeoverSku.setMaterialCode("3302001512");
+        takeoverSku.setMaterialDesc("3302001512");
+        takeoverSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        takeoverSku.setShiftCapacity(17);
+        takeoverSku.setPendingQty(102);
+        takeoverSku.setDailyPlanQty(102);
+        takeoverSku.setTargetScheduleQty(102);
+        takeoverSku.setSurplusQty(102);
+        takeoverSku.setEmbryoStock(102);
+        takeoverSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302001512", 32, 32, 38));
+        context.getNewSpecSkuList().add(takeoverSku);
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                if (StringUtils.equals("3302001512", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(releasedMachine);
+                }
+                if (StringUtils.equals("3302002546", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(fallbackMachine);
+                }
+                return Collections.emptyList();
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (candidate != null && !excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertTrue(context.getScheduleResultList().stream().anyMatch(result ->
+                        StringUtils.equals("3302001512", result.getMaterialCode())
+                                && StringUtils.equals("K1105", result.getLhMachineCode())),
+                "释放续作机台被新增SKU抢占后，应保留新增SKU在原机台的实际排产结果");
+        assertTrue(context.getScheduleResultList().stream().anyMatch(result ->
+                        StringUtils.equals("3302002546", result.getMaterialCode())
+                                && StringUtils.equals("K1110", result.getLhMachineCode())),
+                "原续作SKU应转新增换模链，在其他机台继续排产");
+        assertFalse(context.getScheduleResultList().stream().anyMatch(result ->
+                        StringUtils.equals("3302002546", result.getMaterialCode())
+                                && StringUtils.equals("K1105", result.getLhMachineCode())),
+                "释放机台一旦被其他SKU实际占用，原续作占位结果必须从最终结果集中移除");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldScheduleCompensationBeforeRemainingNewSpecs() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        MachineScheduleDTO releasedMachine = buildMachine("K1105", firstShift.getShiftStartDateTime());
+        releasedMachine.setPreviousMaterialCode("3302002546");
+        MachineScheduleDTO fallbackMachine = buildMachine("K1110", firstShift.getShiftStartDateTime());
+        context.getMachineScheduleMap().put(releasedMachine.getMachineCode(), releasedMachine);
+        context.getMachineScheduleMap().put(fallbackMachine.getMachineCode(), fallbackMachine);
+
+        SkuScheduleDTO sourceContinuousSku = buildSku();
+        sourceContinuousSku.setMaterialCode("3302002546");
+        sourceContinuousSku.setMaterialDesc("3302002546");
+        sourceContinuousSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sourceContinuousSku.setContinuousMachineCode("K1105");
+        sourceContinuousSku.setShiftCapacity(17);
+        sourceContinuousSku.setPendingQty(102);
+        sourceContinuousSku.setDailyPlanQty(102);
+        sourceContinuousSku.setTargetScheduleQty(102);
+        sourceContinuousSku.setSurplusQty(102);
+        sourceContinuousSku.setEmbryoStock(102);
+        sourceContinuousSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302002546", 0, 32, 50));
+        context.getContinuousSkuList().add(sourceContinuousSku);
+        context.getReleasedContinuousMachineCodeSet().add("K1105");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("K1105");
+
+        LhScheduleResult placeholderResult = new LhScheduleResult();
+        placeholderResult.setFactoryCode(context.getFactoryCode());
+        placeholderResult.setBatchNo(context.getBatchNo());
+        placeholderResult.setLhMachineCode("K1105");
+        placeholderResult.setLhMachineName("K1105");
+        placeholderResult.setMaterialCode("3302002546");
+        placeholderResult.setMaterialDesc("3302002546");
+        placeholderResult.setScheduleType("01");
+        placeholderResult.setIsTypeBlock("0");
+        placeholderResult.setIsChangeMould("0");
+        placeholderResult.setDailyPlanQty(102);
+        placeholderResult.setSpecEndTime(dateTime(2026, 4, 19, 21, 12));
+        context.getScheduleResultList().add(placeholderResult);
+        context.getScheduleResultSourceSkuMap().put(placeholderResult, sourceContinuousSku);
+        context.getMachineAssignmentMap().put("K1105",
+                new java.util.ArrayList<LhScheduleResult>(Collections.singletonList(placeholderResult)));
+
+        SkuScheduleDTO takeoverSku = buildSku();
+        takeoverSku.setMaterialCode("3302001512");
+        takeoverSku.setMaterialDesc("3302001512");
+        takeoverSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        takeoverSku.setShiftCapacity(17);
+        takeoverSku.setPendingQty(102);
+        takeoverSku.setDailyPlanQty(102);
+        takeoverSku.setTargetScheduleQty(102);
+        takeoverSku.setSurplusQty(102);
+        takeoverSku.setEmbryoStock(102);
+        takeoverSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302001512", 32, 32, 38));
+        context.getNewSpecSkuList().add(takeoverSku);
+
+        SkuScheduleDTO competingSku = buildSku();
+        competingSku.setMaterialCode("3302001888");
+        competingSku.setMaterialDesc("3302001888");
+        competingSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        competingSku.setShiftCapacity(17);
+        competingSku.setPendingQty(102);
+        competingSku.setDailyPlanQty(102);
+        competingSku.setTargetScheduleQty(102);
+        competingSku.setSurplusQty(102);
+        competingSku.setEmbryoStock(102);
+        competingSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302001888", 32, 32, 38));
+        context.getNewSpecSkuList().add(competingSku);
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                if (StringUtils.equals("3302001512", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(releasedMachine);
+                }
+                if (StringUtils.equals("3302002546", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(fallbackMachine);
+                }
+                if (StringUtils.equals("3302001888", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(fallbackMachine);
+                }
+                return Collections.emptyList();
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (candidate != null && !excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertTrue(context.getScheduleResultList().stream().anyMatch(result ->
+                        StringUtils.equals("3302001512", result.getMaterialCode())
+                                && StringUtils.equals("K1105", result.getLhMachineCode())),
+                "释放续作机台应先被新增SKU占用");
+        LhScheduleResult compensationResult = context.getScheduleResultList().stream()
+                .filter(result -> StringUtils.equals("3302002546", result.getMaterialCode())
+                        && StringUtils.equals("K1110", result.getLhMachineCode()))
+                .findFirst()
+                .orElse(null);
+        assertTrue(Objects.nonNull(compensationResult),
+                "被抢占后的续作SKU应先于剩余新增SKU参与下一轮补排");
+        LhScheduleResult competingResult = context.getScheduleResultList().stream()
+                .filter(result -> StringUtils.equals("3302001888", result.getMaterialCode())
+                        && StringUtils.equals("K1110", result.getLhMachineCode()))
+                .findFirst()
+                .orElse(null);
+        if (Objects.nonNull(competingResult)) {
+            assertTrue(competingResult.getDailyPlanQty() < compensationResult.getDailyPlanQty(),
+                    "补偿SKU应先占用候补机台主容量，后续普通新增SKU只能承接剩余零头产能");
+        }
+    }
+
+    @Test
     void scheduleNewSpecs_shouldSetIsEndOneWhenEndingJudgmentTrue() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);

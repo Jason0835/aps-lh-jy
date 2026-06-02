@@ -33,6 +33,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
@@ -463,6 +464,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         Set<String> occupied = new HashSet<>();
         for (Map.Entry<String, List<LhScheduleResult>> entry : context.getMachineAssignmentMap().entrySet()) {
             for (LhScheduleResult result : entry.getValue()) {
+                if (shouldIgnoreReleasedContinuousPlaceholder(context, result)) {
+                    continue;
+                }
                 if (result.getMouldCode() != null) {
                     occupied.add(result.getMouldCode());
                 }
@@ -593,6 +597,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @return 待排起点
      */
     private Date resolveCandidateReferenceTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        Date releasedMachineReferenceTime = resolveReleasedContinuousMachineReferenceTime(context, machine);
+        if (releasedMachineReferenceTime != null) {
+            return releasedMachineReferenceTime;
+        }
         if (machine.getEstimatedEndTime() != null) {
             return machine.getEstimatedEndTime();
         }
@@ -1332,6 +1340,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return 0;
         }
         for (LhScheduleResult assignedResult : assignedResults) {
+            if (shouldIgnoreReleasedContinuousPlaceholder(context, assignedResult)) {
+                continue;
+            }
             if (assignedResult == null) {
                 return 1;
             }
@@ -1343,6 +1354,52 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
         return 0;
+    }
+
+    /**
+     * 解析续作释放机台在新增选机画像中的参考时间。
+     * <p>首日无计划但后续仍有计划的续作结果会保留在结果集中做账，
+     * 新增选机时必须回退到机台初始就绪时刻，避免被这条占位结果误判成已被续作占满。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @return 释放机台的初始参考时间；非此场景返回 null
+     */
+    private Date resolveReleasedContinuousMachineReferenceTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (context == null || machine == null || StringUtils.isEmpty(machine.getMachineCode())) {
+            return null;
+        }
+        List<LhScheduleResult> assignedResults = context.getMachineAssignmentMap().get(machine.getMachineCode());
+        if (CollectionUtils.isEmpty(assignedResults)) {
+            return null;
+        }
+        for (LhScheduleResult assignedResult : assignedResults) {
+            if (!shouldIgnoreReleasedContinuousPlaceholder(context, assignedResult)) {
+                continue;
+            }
+            MachineScheduleDTO initialMachine = context.getInitialMachineScheduleMap().get(machine.getMachineCode());
+            if (initialMachine != null && initialMachine.getEstimatedEndTime() != null) {
+                return initialMachine.getEstimatedEndTime();
+            }
+            return context.getScheduleDate() != null ? context.getScheduleDate() : context.getScheduleTargetDate();
+        }
+        return null;
+    }
+
+    /**
+     * 判断已分配结果是否属于“首日无计划、后续有计划”的释放续作占位结果。
+     *
+     * @param context 排程上下文
+     * @param result 已分配结果
+     * @return true-应在新增选机阶段忽略
+     */
+    private boolean shouldIgnoreReleasedContinuousPlaceholder(LhScheduleContext context, LhScheduleResult result) {
+        if (context == null || result == null || StringUtils.isEmpty(result.getLhMachineCode())
+                || !"01".equals(result.getScheduleType())
+                || CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())) {
+            return false;
+        }
+        return context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains(result.getLhMachineCode());
     }
 
     /**

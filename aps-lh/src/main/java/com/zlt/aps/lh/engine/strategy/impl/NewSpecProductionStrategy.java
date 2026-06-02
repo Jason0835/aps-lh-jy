@@ -3,6 +3,7 @@
  */
 package com.zlt.aps.lh.engine.strategy.impl;
 
+import cn.hutool.core.bean.BeanUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
@@ -261,9 +262,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                         List<LhShiftConfigVO> shifts,
                                         Map<String, Integer> unscheduledReasonCountMap) {
         // TODO 后续建议把新增排产主循环拆为“候选生成、窗口分配、结果构建、账本消费”四个私有阶段，降低单方法维护成本。
-        RoundScheduleSummary roundSummary = schedulePendingNewSpecsRound(context, machineMatch, mouldChangeBalance,
-                inspectionBalance, capacityCalculate, shifts, unscheduledReasonCountMap);
-        return roundSummary.getScheduledCount();
+        int scheduledCount = 0;
+        List<SkuScheduleDTO> deferredCompensationSkuList = new ArrayList<SkuScheduleDTO>(2);
+        while (true) {
+            RoundScheduleSummary roundSummary = schedulePendingNewSpecsRound(
+                    context, machineMatch, mouldChangeBalance, inspectionBalance, capacityCalculate,
+                    shifts, unscheduledReasonCountMap, deferredCompensationSkuList);
+            scheduledCount += roundSummary.getScheduledCount();
+            if (CollectionUtils.isEmpty(deferredCompensationSkuList)) {
+                return scheduledCount;
+            }
+            appendDeferredCompensationSkuList(context, deferredCompensationSkuList);
+            deferredCompensationSkuList.clear();
+        }
     }
 
     private RoundScheduleSummary schedulePendingNewSpecsRound(LhScheduleContext context,
@@ -272,7 +283,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                               IFirstInspectionBalanceStrategy inspectionBalance,
                                                               ICapacityCalculateStrategy capacityCalculate,
                                                               List<LhShiftConfigVO> shifts,
-                                                              Map<String, Integer> unscheduledReasonCountMap) {
+                                                              Map<String, Integer> unscheduledReasonCountMap,
+                                                              List<SkuScheduleDTO> deferredCompensationSkuList) {
         int scheduledCount = 0;
         boolean progressed = false;
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
@@ -522,6 +534,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
                 dynamicTargetQty = candidateTargetQty;
                 sku.setTargetScheduleQty(machinePlanQty);
+                takeoverReleasedContinuousPlaceholderIfNeeded(
+                        context, machineCode, shifts, deferredCompensationSkuList);
                 LhScheduleResult result = buildNewSpecScheduleResult(
                         context, candidateMachine, sku, firstProductionStartTime, mouldChangeStartTime,
                         mouldChangeCompleteTime, shifts, machineMouldQty, isEnding);
@@ -657,9 +671,222 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 traceNewSpecMachineDecision(context, sku, candidates, localSearchSuggestedMachine, finalMachine,
                         excludedMachineCodes, excludedMachineReasonMap, null, true,
                         PriorityTraceLogHelper.formatDateTime(finalProductionStartTime));
+                if (!CollectionUtils.isEmpty(deferredCompensationSkuList)) {
+                    return new RoundScheduleSummary(scheduledCount, true);
+                }
             }
         }
         return new RoundScheduleSummary(scheduledCount, progressed);
+    }
+
+    /**
+     * 新增SKU抢占首日无计划释放机台时，撤销原续作占位结果并转补偿SKU到后续新增轮次。
+     * <p>这类续作结果只是“若机台未被占用时的回退占位”，一旦本轮新增真正占机，就必须把占位结果撤销，
+     * 否则最终结果会同时保留“原续作继续在原机台”与“新增SKU换模占用原机台”两条互斥结果。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 当前被新增SKU占用的机台编码
+     * @param shifts 排程窗口班次
+     * @param deferredCompensationSkuList 延后到下一轮补排的补偿SKU集合
+     */
+    private void takeoverReleasedContinuousPlaceholderIfNeeded(LhScheduleContext context,
+                                                               String machineCode,
+                                                               List<LhShiftConfigVO> shifts,
+                                                               List<SkuScheduleDTO> deferredCompensationSkuList) {
+        if (context == null || StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())
+                || !context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains(machineCode)
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        List<LhScheduleResult> placeholderResults = new ArrayList<LhScheduleResult>(2);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (result == null || !StringUtils.equals(machineCode, result.getLhMachineCode())) {
+                continue;
+            }
+            if (isReleasedFirstDayNoPlanPlaceholderResult(context, result)) {
+                placeholderResults.add(result);
+            }
+        }
+        if (CollectionUtils.isEmpty(placeholderResults)) {
+            return;
+        }
+        for (LhScheduleResult placeholderResult : placeholderResults) {
+            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, placeholderResult);
+            if (sourceSku == null) {
+                continue;
+            }
+            restoreContinuousPlaceholderQuota(sourceSku);
+            appendDeferredContinuousCompensationSku(
+                    context, sourceSku, placeholderResult, deferredCompensationSkuList);
+            context.getScheduleResultSourceSkuMap().remove(placeholderResult);
+            context.getScheduleResultList().remove(placeholderResult);
+        }
+        removeResultsFromMachineAssignments(context, placeholderResults);
+    }
+
+    /**
+     * 恢复首日无计划续作占位结果提前消费的共享日计划账本。
+     * <p>占位结果被新增SKU抢占后，相应额度必须先回滚，再交给补偿SKU重新按新增换模链路消费。</p>
+     *
+     * @param sourceSku 原续作SKU
+     */
+    private void restoreContinuousPlaceholderQuota(SkuScheduleDTO sourceSku) {
+        if (sourceSku == null || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
+            return;
+        }
+        for (SkuDailyPlanQuotaDTO quota : sourceSku.getDailyPlanQuotaMap().values()) {
+            if (quota == null) {
+                continue;
+            }
+            quota.setScheduledQty(0);
+            quota.setRemainingQty(Math.max(0, quota.getDayPlanQty()));
+            quota.setShiftFillOverQty(0);
+            quota.setCarryLossQty(0);
+            quota.setFutureBorrowQty(0);
+            quota.setActualQty(0);
+            quota.setCumulativeQty(0);
+            quota.setFinalLossQty(0);
+            quota.setCompleted(false);
+        }
+        SkuDailyPlanQuotaUtil.refreshRollingFields(sourceSku.getDailyPlanQuotaMap());
+    }
+
+    /**
+     * 为被抢占机台的原续作SKU生成补偿SKU，留待下一轮新增链路重新选机。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 原续作SKU
+     * @param placeholderResult 被撤销的占位结果
+     * @param deferredCompensationSkuList 延后补排集合
+     */
+    private void appendDeferredContinuousCompensationSku(LhScheduleContext context,
+                                                         SkuScheduleDTO sourceSku,
+                                                         LhScheduleResult placeholderResult,
+                                                         List<SkuScheduleDTO> deferredCompensationSkuList) {
+        if (sourceSku == null || placeholderResult == null || deferredCompensationSkuList == null) {
+            return;
+        }
+        if (hasDeferredContinuousCompensationSku(context, sourceSku, deferredCompensationSkuList)) {
+            return;
+        }
+        int compensationQty = placeholderResult.getDailyPlanQty() != null
+                ? placeholderResult.getDailyPlanQty() : 0;
+        if (compensationQty <= 0) {
+            compensationQty = Math.max(0, sourceSku.resolveTargetScheduleQty());
+        }
+        if (compensationQty <= 0) {
+            return;
+        }
+        SkuScheduleDTO compensationSku = new SkuScheduleDTO();
+        BeanUtil.copyProperties(sourceSku, compensationSku);
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty());
+        compensationSku.setScheduleType(NEW_SPEC_SCHEDULE_TYPE);
+        compensationSku.setContinuousMachineCode(null);
+        compensationSku.setContinuousCompensationSku(true);
+        compensationSku.setTargetScheduleQty(compensationQty);
+        compensationSku.setPendingQty(compensationQty);
+        compensationSku.setRemainingScheduleQty(compensationQty);
+        compensationSku.setStrictTargetQty(policy.isStrictUpperLimit());
+        compensationSku.setDailyPlanQuotaMap(sourceSku.getDailyPlanQuotaMap());
+        deferredCompensationSkuList.add(compensationSku);
+    }
+
+    private boolean hasDeferredContinuousCompensationSku(LhScheduleContext context,
+                                                         SkuScheduleDTO sourceSku,
+                                                         List<SkuScheduleDTO> deferredCompensationSkuList) {
+        if (sourceSku == null) {
+            return true;
+        }
+        if (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
+            for (SkuScheduleDTO pendingSku : context.getNewSpecSkuList()) {
+                if (pendingSku != null
+                        && StringUtils.equals(sourceSku.getMaterialCode(), pendingSku.getMaterialCode())
+                        && pendingSku.getDailyPlanQuotaMap() == sourceSku.getDailyPlanQuotaMap()) {
+                    return true;
+                }
+            }
+        }
+        if (!CollectionUtils.isEmpty(deferredCompensationSkuList)) {
+            for (SkuScheduleDTO pendingSku : deferredCompensationSkuList) {
+                if (pendingSku != null
+                        && StringUtils.equals(sourceSku.getMaterialCode(), pendingSku.getMaterialCode())
+                        && pendingSku.getDailyPlanQuotaMap() == sourceSku.getDailyPlanQuotaMap()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 将补偿SKU追加到待排列表，并同步更新本轮待排SKU类型计数。
+     *
+     * @param context 排程上下文
+     * @param deferredCompensationSkuList 延后补排集合
+     */
+    private void appendDeferredCompensationSkuList(LhScheduleContext context,
+                                                   List<SkuScheduleDTO> deferredCompensationSkuList) {
+        if (context == null || CollectionUtils.isEmpty(deferredCompensationSkuList)) {
+            return;
+        }
+        for (int i = deferredCompensationSkuList.size() - 1; i >= 0; i--) {
+            SkuScheduleDTO compensationSku = deferredCompensationSkuList.get(i);
+            if (compensationSku == null) {
+                continue;
+            }
+            context.getNewSpecSkuList().add(0, compensationSku);
+            if (isTrialConstructionStage(compensationSku)) {
+                context.setPendingTrialNewSpecSkuCount(context.getPendingTrialNewSpecSkuCount() + 1);
+                continue;
+            }
+            if (isMassTrialSku(compensationSku)) {
+                context.setPendingMassTrialNewSpecSkuCount(context.getPendingMassTrialNewSpecSkuCount() + 1);
+                continue;
+            }
+            if (isSmallBatchSku(compensationSku)) {
+                context.setPendingSmallBatchNewSpecSkuCount(context.getPendingSmallBatchNewSpecSkuCount() + 1);
+                continue;
+            }
+            context.setPendingFormalNewSpecSkuCount(context.getPendingFormalNewSpecSkuCount() + 1);
+        }
+    }
+
+    /**
+     * 判断结果是否属于“首日无计划但后续有计划”的释放续作占位结果。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return true-释放续作占位结果
+     */
+    private boolean isReleasedFirstDayNoPlanPlaceholderResult(LhScheduleContext context, LhScheduleResult result) {
+        if (context == null || result == null
+                || !StringUtils.equals("01", result.getScheduleType())
+                || !StringUtils.equals("0", result.getIsTypeBlock())
+                || StringUtils.isEmpty(result.getLhMachineCode())
+                || CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())) {
+            return false;
+        }
+        return context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains(result.getLhMachineCode());
+    }
+
+    /**
+     * 解析排程结果对应的来源SKU。
+     * <p>优先命中运行态映射；未注册时回退到物料编码查找，兼容旧测试夹具。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return 来源SKU
+     */
+    private SkuScheduleDTO resolveResultSourceSku(LhScheduleContext context, LhScheduleResult result) {
+        if (context == null || result == null) {
+            return null;
+        }
+        SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
+        if (sourceSku != null) {
+            return sourceSku;
+        }
+        return findSkuDto(context, result.getMaterialCode());
     }
 
     /**

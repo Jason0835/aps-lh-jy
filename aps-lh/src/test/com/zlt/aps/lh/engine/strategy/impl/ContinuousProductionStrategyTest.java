@@ -1311,6 +1311,44 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void scheduleContinuousEnding_shouldKeepMachineStateReleasedWhenFirstDayHasNoPlan()
+            throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+
+        LhScheduleContext context = buildSingleMachineDayOneNoPlanContinuousContext();
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get("K1501L");
+        machine.setCurrentMaterialCode("3302001075");
+        machine.setCurrentMaterialDesc("3302001075");
+        machine.setEstimatedEndTime(null);
+
+        strategy.scheduleContinuousEnding(context);
+
+        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1501L"),
+                "首日无计划的续作机台应进入释放集合");
+        assertNull(machine.getEstimatedEndTime(),
+                "首日无计划但后续仍有计划时，S4.4 收口后不应把续作结果终态继续占在机台运行态上");
+    }
+
+    @Test
+    public void scheduleContinuousEnding_shouldPreRegisterFirstDayNoPlanMachineBeforeProcessingOtherContinuousSku()
+            throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new AssertReleasedMachineRegisteredBeforeFirstSkuStrategy());
+
+        LhScheduleContext context = buildPreRegisterReleasedMachineContext();
+
+        strategy.scheduleContinuousEnding(context);
+
+        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
+                "首日无计划释放机台应在续作主循环开始前完成预登记，供S4.4内新增预判选机降优先级");
+    }
+
+    @Test
     public void scheduleContinuousEnding_shouldReleaseMachineWhenWindowHasNoDailyPlan() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
@@ -1382,6 +1420,34 @@ public class ContinuousProductionStrategyTest {
                 "3302001075", ConstructionStageEnum.FORMAL.getCode(), false, 78, quotaMap);
         sku.setContinuousMachineCode("K1501L");
         context.setContinuousSkuList(Collections.singletonList(sku));
+        return context;
+    }
+
+    private LhScheduleContext buildPreRegisterReleasedMachineContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-TEST-PRE-REGISTER");
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, "1")));
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        addMachine(context, "K1002", 1);
+        addMachine(context, "K1105", 1);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> normalQuotaMap = buildQuotaMap(
+                shifts.get(0), shifts.get(2), shifts.get(5), 32, 0, 0);
+        SkuScheduleDTO normalSku = buildContinuationSku(
+                "MAT-FIRST", ConstructionStageEnum.FORMAL.getCode(), false, 32, normalQuotaMap);
+        normalSku.setContinuousMachineCode("K1002");
+
+        Map<LocalDate, SkuDailyPlanQuotaDTO> releasedQuotaMap = buildQuotaMap(
+                shifts.get(0), shifts.get(2), shifts.get(5), 0, 32, 46);
+        SkuScheduleDTO releasedSku = buildContinuationSku(
+                "3302002546", ConstructionStageEnum.FORMAL.getCode(), false, 78, releasedQuotaMap);
+        releasedSku.setContinuousMachineCode("K1105");
+        context.setContinuousSkuList(Arrays.asList(normalSku, releasedSku));
         return context;
     }
 
@@ -2033,6 +2099,21 @@ public class ContinuousProductionStrategyTest {
         @Override
         public int calculateEndingDays(LhScheduleContext context, SkuScheduleDTO sku) {
             return 0;
+        }
+    }
+
+    /**
+     * 校验续作主循环处理首条SKU前，后续首日无计划机台已完成释放预登记。
+     */
+    private static class AssertReleasedMachineRegisteredBeforeFirstSkuStrategy extends StubEndingJudgmentStrategy {
+
+        @Override
+        public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+            if (sku != null && StringUtils.equals("MAT-FIRST", sku.getMaterialCode())) {
+                assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
+                        "处理其他续作SKU前，应先登记K1105为首日无计划释放机台");
+            }
+            return false;
         }
     }
 }

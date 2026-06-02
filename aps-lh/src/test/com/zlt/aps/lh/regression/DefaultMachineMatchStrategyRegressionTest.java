@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.JobTypeEnum;
@@ -16,7 +17,9 @@ import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.LocalDate;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -149,6 +152,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         context.getReleasedContinuousMachineCodeSet().add("M-RELEASED");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("M-RELEASED");
 
         MachineScheduleDTO releasedMachine = machine("M-RELEASED", dateTime(2026, 4, 21, 7, 0),
                 "SPEC-A", "22.5", "MAT-OLD");
@@ -179,6 +183,154 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         assertEquals(1, candidates.size(), "续作释放机台是唯一候选时仍允许承接新增SKU");
         assertEquals("M-ONLY", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void resolveCandidateReferenceTime_shouldIgnoreTentativeContinuousEndTimeForReleasedMachine() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.getReleasedContinuousMachineCodeSet().add("M-RELEASED");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("M-RELEASED");
+
+        MachineScheduleDTO initialMachine = machine("M-RELEASED", dateTime(2026, 4, 21, 6, 0),
+                "SPEC-A", "22.5", "3302002546");
+        MachineScheduleDTO runtimeMachine = machine("M-RELEASED", dateTime(2026, 4, 23, 21, 12),
+                "SPEC-A", "22.5", "3302002546");
+        context.getInitialMachineScheduleMap().put(initialMachine.getMachineCode(), initialMachine);
+        context.getMachineScheduleMap().put(runtimeMachine.getMachineCode(), runtimeMachine);
+
+        LhShiftConfigVO morningShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO nextDayShift = context.getScheduleWindowShifts().get(2);
+        Map<LocalDate, com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
+        quotaMap.put(toLocalDate(morningShift), quota("3302002546", toLocalDate(morningShift), 0));
+        quotaMap.put(toLocalDate(nextDayShift), quota("3302002546", toLocalDate(nextDayShift), 32));
+        SkuScheduleDTO sourceSku = sku("3302002546", "SPEC-A", "22.5");
+        sourceSku.setDailyPlanQuotaMap(quotaMap);
+
+        com.zlt.aps.lh.api.domain.entity.LhScheduleResult assignedResult =
+                new com.zlt.aps.lh.api.domain.entity.LhScheduleResult();
+        assignedResult.setLhMachineCode("M-RELEASED");
+        assignedResult.setMaterialCode("3302002546");
+        assignedResult.setScheduleType("01");
+        context.getMachineAssignmentMap().put("M-RELEASED", Collections.singletonList(assignedResult));
+        context.getScheduleResultSourceSkuMap().put(assignedResult, sourceSku);
+
+        Date referenceTime = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveCandidateReferenceTime", context, runtimeMachine);
+
+        assertEquals(initialMachine.getEstimatedEndTime(), referenceTime,
+                "首日无计划释放的续作机台在新增选机画像中应回退到初始机台就绪时刻，不应沿用续作结果的晚收尾时间");
+    }
+
+    @Test
+    void resolveOtherSkuOccupiedScore_shouldIgnoreTentativeContinuousAssignmentForReleasedMachine() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.getReleasedContinuousMachineCodeSet().add("M-RELEASED");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("M-RELEASED");
+
+        MachineScheduleDTO machine = machine("M-RELEASED", dateTime(2026, 4, 23, 21, 12),
+                "SPEC-A", "22.5", "3302002546");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        LhShiftConfigVO morningShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO nextDayShift = context.getScheduleWindowShifts().get(2);
+        Map<LocalDate, com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
+        quotaMap.put(toLocalDate(morningShift), quota("3302002546", toLocalDate(morningShift), 0));
+        quotaMap.put(toLocalDate(nextDayShift), quota("3302002546", toLocalDate(nextDayShift), 32));
+        SkuScheduleDTO sourceSku = sku("3302002546", "SPEC-A", "22.5");
+        sourceSku.setDailyPlanQuotaMap(quotaMap);
+
+        com.zlt.aps.lh.api.domain.entity.LhScheduleResult assignedResult =
+                new com.zlt.aps.lh.api.domain.entity.LhScheduleResult();
+        assignedResult.setLhMachineCode("M-RELEASED");
+        assignedResult.setMaterialCode("3302002546");
+        assignedResult.setScheduleType("01");
+        context.getMachineAssignmentMap().put("M-RELEASED", Collections.singletonList(assignedResult));
+        context.getScheduleResultSourceSkuMap().put(assignedResult, sourceSku);
+
+        Integer occupiedScore = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveOtherSkuOccupiedScore", context, sku("MAT-001", "SPEC-A", "22.5"), machine);
+
+        assertEquals(Integer.valueOf(0), occupiedScore,
+                "首日无计划释放的续作占位结果不应再把机台标记成被其他SKU占用");
+    }
+
+    @Test
+    void resolveCandidateReferenceTime_shouldIgnoreReleasedPlaceholderAfterQuotaConsumed() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.getReleasedContinuousMachineCodeSet().add("M-RELEASED");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("M-RELEASED");
+
+        MachineScheduleDTO initialMachine = machine("M-RELEASED", dateTime(2026, 4, 21, 6, 0),
+                "SPEC-A", "22.5", "3302002546");
+        MachineScheduleDTO runtimeMachine = machine("M-RELEASED", dateTime(2026, 4, 23, 21, 12),
+                "SPEC-A", "22.5", "3302002546");
+        context.getInitialMachineScheduleMap().put(initialMachine.getMachineCode(), initialMachine);
+        context.getMachineScheduleMap().put(runtimeMachine.getMachineCode(), runtimeMachine);
+
+        LhShiftConfigVO morningShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO nextDayShift = context.getScheduleWindowShifts().get(2);
+        Map<LocalDate, com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
+        quotaMap.put(toLocalDate(morningShift), quota("3302002546", toLocalDate(morningShift), 0));
+        com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO nextDayQuota =
+                quota("3302002546", toLocalDate(nextDayShift), 32);
+        nextDayQuota.setRemainingQty(0);
+        quotaMap.put(toLocalDate(nextDayShift), nextDayQuota);
+        SkuScheduleDTO sourceSku = sku("3302002546", "SPEC-A", "22.5");
+        sourceSku.setDailyPlanQuotaMap(quotaMap);
+
+        com.zlt.aps.lh.api.domain.entity.LhScheduleResult assignedResult =
+                new com.zlt.aps.lh.api.domain.entity.LhScheduleResult();
+        assignedResult.setLhMachineCode("M-RELEASED");
+        assignedResult.setMaterialCode("3302002546");
+        assignedResult.setScheduleType("01");
+        context.getMachineAssignmentMap().put("M-RELEASED", Collections.singletonList(assignedResult));
+        context.getScheduleResultSourceSkuMap().put(assignedResult, sourceSku);
+
+        Date referenceTime = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveCandidateReferenceTime", context, runtimeMachine);
+
+        assertEquals(initialMachine.getEstimatedEndTime(), referenceTime,
+                "即使后续日计划额度已被这条占位结果扣成0，释放续作机台的选机参考时间仍应回退到初始机台时刻");
+    }
+
+    @Test
+    void resolveOtherSkuOccupiedScore_shouldIgnoreReleasedPlaceholderAfterQuotaConsumed() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.getReleasedContinuousMachineCodeSet().add("M-RELEASED");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("M-RELEASED");
+
+        MachineScheduleDTO machine = machine("M-RELEASED", dateTime(2026, 4, 23, 21, 12),
+                "SPEC-A", "22.5", "3302002546");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        LhShiftConfigVO morningShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO nextDayShift = context.getScheduleWindowShifts().get(2);
+        Map<LocalDate, com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
+        quotaMap.put(toLocalDate(morningShift), quota("3302002546", toLocalDate(morningShift), 0));
+        com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO nextDayQuota =
+                quota("3302002546", toLocalDate(nextDayShift), 32);
+        nextDayQuota.setRemainingQty(0);
+        quotaMap.put(toLocalDate(nextDayShift), nextDayQuota);
+        SkuScheduleDTO sourceSku = sku("3302002546", "SPEC-A", "22.5");
+        sourceSku.setDailyPlanQuotaMap(quotaMap);
+
+        com.zlt.aps.lh.api.domain.entity.LhScheduleResult assignedResult =
+                new com.zlt.aps.lh.api.domain.entity.LhScheduleResult();
+        assignedResult.setLhMachineCode("M-RELEASED");
+        assignedResult.setMaterialCode("3302002546");
+        assignedResult.setScheduleType("01");
+        context.getMachineAssignmentMap().put("M-RELEASED", Collections.singletonList(assignedResult));
+        context.getScheduleResultSourceSkuMap().put(assignedResult, sourceSku);
+
+        Integer occupiedScore = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveOtherSkuOccupiedScore", context, sku("MAT-001", "SPEC-A", "22.5"), machine);
+
+        assertEquals(Integer.valueOf(0), occupiedScore,
+                "即使后续日计划额度已被占位结果扣完，释放续作机台也不应重新被判成已被其他SKU占用");
     }
 
     @Test
@@ -1214,6 +1366,22 @@ class DefaultMachineMatchStrategyRegressionTest {
         sku.setSpecCode(specCode);
         sku.setProSize(proSize);
         return sku;
+    }
+
+    private com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO quota(String materialCode,
+                                                                      LocalDate productionDate,
+                                                                      int dayPlanQty) {
+        com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO quota =
+                new com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO();
+        quota.setMaterialCode(materialCode);
+        quota.setProductionDate(productionDate);
+        quota.setDayPlanQty(dayPlanQty);
+        quota.setRemainingQty(dayPlanQty);
+        return quota;
+    }
+
+    private LocalDate toLocalDate(LhShiftConfigVO shift) {
+        return shift.getWorkDate().toInstant().atZone(java.time.ZoneId.of("Asia/Shanghai")).toLocalDate();
     }
 
     private Set<String> categorySet(String... categories) {
