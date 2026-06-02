@@ -469,6 +469,11 @@ public class LhScheduleConfig {
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS));
     }
 
+    public int getNewSpecShortageAddMachineThreshold() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD,
+                LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD));
+    }
+
     /**
      * 判断新增排产是否启用换模均衡。
      *

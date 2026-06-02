@@ -330,6 +330,9 @@ public final class LhScheduleConstant {
     /** 新增排产欠产追补判断天数默认值（当前天发生欠产后，额外向后观察2天） */
     public static final int NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = 2;
 
+    /** 新增排产欠产增机台阈值默认值 */
+    public static final int NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD = 150;
+
     /** 新增排产换模均衡开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_CHANGEOVER_BALANCE = 0;
 

@@ -130,6 +130,55 @@ public class ScheduleAdjustHandlerTest {
         Assertions.assertEquals(50, context.getCarryForwardQtyMap().get("3302001575"));
     }
 
+    /**
+     * 用例说明：窗口跨月时，“月底后续计划量”只统计当前排程月份内窗口结束后的剩余日计划。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldResolveFutureMonthPlanQtyWithinCurrentMonthWhenWindowCrossesMonthEnd() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 1, 30)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 2, 1)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 300, 0, 99, 0);
+        plan.setDay30(10);
+        plan.setDay31(20);
+
+        int futurePlanQty = invokeResolveFutureMonthPlanQtyAfterWindow(handler, context, plan);
+
+        Assertions.assertEquals(0, futurePlanQty);
+    }
+
+    /**
+     * 用例说明：续作多机台副本进入新增排产时，必须继承 S4.5 欠产决策字段，避免丢失增机台判断上下文。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldCopyNewSpecShortageFieldsForContinuousMachineClone() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        SkuScheduleDTO source = new SkuScheduleDTO();
+        source.setMaterialCode("3302001575");
+        source.setWindowPlanQty(144);
+        source.setWindowRemainingPlanQty(244);
+        source.setMonthlyHistoryShortageQty(100);
+        source.setEffectiveCarryForwardQty(60);
+        source.setScheduleDayFinishQty(20);
+        source.setFutureMonthPlanQtyAfterWindow(48);
+        source.setStrictNewSpecShortageOnly(true);
+
+        SkuScheduleDTO copy = invokeCopySkuForContinuousMachine(handler, source, "K1115");
+
+        Assertions.assertEquals(100, copy.getMonthlyHistoryShortageQty());
+        Assertions.assertEquals(60, copy.getEffectiveCarryForwardQty());
+        Assertions.assertEquals(20, copy.getScheduleDayFinishQty());
+        Assertions.assertEquals(48, copy.getFutureMonthPlanQtyAfterWindow());
+        Assertions.assertTrue(copy.isStrictNewSpecShortageOnly());
+        Assertions.assertEquals("K1115", copy.getContinuousMachineCode());
+    }
+
     private Map<String, Integer> invokeBuildEmbryoStandardCapacitySumMap(ScheduleAdjustHandler handler,
                                                                          LhScheduleContext context) throws Exception {
         Method method = ScheduleAdjustHandler.class.getDeclaredMethod(
@@ -165,6 +214,25 @@ public class ScheduleAdjustHandlerTest {
                 "gatherSkuByStructure", LhScheduleContext.class);
         method.setAccessible(true);
         method.invoke(handler, context);
+    }
+
+    private int invokeResolveFutureMonthPlanQtyAfterWindow(ScheduleAdjustHandler handler,
+                                                           LhScheduleContext context,
+                                                           FactoryMonthPlanProductionFinalResult plan) throws Exception {
+        Method method = ScheduleAdjustHandler.class.getDeclaredMethod(
+                "resolveFutureMonthPlanQtyAfterWindow", LhScheduleContext.class,
+                FactoryMonthPlanProductionFinalResult.class);
+        method.setAccessible(true);
+        return (Integer) method.invoke(handler, context, plan);
+    }
+
+    private SkuScheduleDTO invokeCopySkuForContinuousMachine(ScheduleAdjustHandler handler,
+                                                             SkuScheduleDTO source,
+                                                             String machineCode) throws Exception {
+        Method method = ScheduleAdjustHandler.class.getDeclaredMethod(
+                "copySkuForContinuousMachine", SkuScheduleDTO.class, String.class);
+        method.setAccessible(true);
+        return (SkuScheduleDTO) method.invoke(handler, source, machineCode);
     }
 
     private SkuScheduleDTO getFirstGatheredSku(LhScheduleContext context) {

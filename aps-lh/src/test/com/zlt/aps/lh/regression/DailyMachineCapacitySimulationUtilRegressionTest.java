@@ -100,6 +100,82 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         assertEquals(0, result.getTotalUnmetQty());
     }
 
+    @Test
+    void simulateExpansion_shouldAddMachineByShortageThresholdWindowDemand() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = quotaMap(day1, day2, day3, 48, 48, 48);
+        quotaMap.get(day1).setRemainingQty(240);
+        request.setDailyPlanQuotaMap(quotaMap);
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 32, 48, 48, 3));
+        request.setInitialActiveMachines(1);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(192);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(3, result.getFinalActiveMachines(), "大欠产超过阈值时应按窗口需消化量动态扩到三台机台");
+        assertEquals(2, result.getTotalAddedMachineCount(), "缺口需要两台机台时不能写死只加一台");
+    }
+
+    @Test
+    void simulateExpansion_shouldOnlyLookNextDayWhenShortageWithinThreshold() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = quotaMap(day1, day2, day3, 48, 48, 48);
+        quotaMap.get(day1).setRemainingQty(148);
+        request.setDailyPlanQuotaMap(quotaMap);
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 32, 48, 48, 2));
+        request.setInitialActiveMachines(1);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(100);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(1, result.getFinalActiveMachines(), "小欠产未超阈值且当前机台能满足后续日计划时不应增机台");
+        assertEquals(0, result.getTotalAddedMachineCount());
+    }
+
+    @Test
+    void simulateExpansion_shouldKeepSmallShortageModeWhenRollingShortageExceedsThreshold() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = quotaMap(day1, day2, day3, 48, 48, 48);
+        quotaMap.get(day1).setRemainingQty(198);
+        request.setDailyPlanQuotaMap(quotaMap);
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 0, 48, 48, 2));
+        request.setInitialActiveMachines(1);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(150);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(1, result.getFinalActiveMachines(),
+                "历史欠产未超阈值时，即使滚动欠产放大，也应继续按小欠产逐日后看，不应切到窗口扩机");
+        assertEquals(0, result.getTotalAddedMachineCount());
+    }
+
     private Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap(LocalDate day1,
                                                           LocalDate day2,
                                                           LocalDate day3,

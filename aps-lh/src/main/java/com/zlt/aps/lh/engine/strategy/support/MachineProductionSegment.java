@@ -36,4 +36,6 @@ public class MachineProductionSegment implements Serializable {
     private boolean needChangeover;
     /** 机台排产角色 */
     private MachineScheduleRole role;
+    /** 小额欠产允许滚动时，本机台完成后不再继续追加机台 */
+    private boolean stopAfterCurrentForSmallShortage;
 }

@@ -137,9 +137,24 @@ public class SkuScheduleDTO {
     /** 满班补齐导致的窗口内超排量（因班次需排满而超出日计划的累计量） */
     private int shiftFillOverQty;
 
+    /** 当前排程月份内、早于T日的历史欠产量，仅正向欠产进入新增排产判断 */
+    private int monthlyHistoryShortageQty;
+
+    /** 已在初始化阶段实际追加到账本的本月历史欠产量 */
+    private int effectiveCarryForwardQty;
+
+    /** T日排程晚班完成量，用于新增排产首日需求扣减 */
+    private int scheduleDayFinishQty;
+
+    /** T+3到月底仍存在的月计划日计划量 */
+    private int futureMonthPlanQtyAfterWindow;
+
     // ========== 目标量控制字段 ==========
     /** 是否严格限制目标量（试制/收尾=true，正式/量试=false）。为true时禁止超出dayN补满班次 */
     private boolean strictTargetQty;
+
+    /** 是否仅补本月欠产量，非收尾但必须严格目标量、不允许满班超排 */
+    private boolean strictNewSpecShortageOnly;
 
     // ========== 月计划版本信息 ==========
     /** 月计划需求版本 */

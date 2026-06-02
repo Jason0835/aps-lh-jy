@@ -357,11 +357,16 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setFinishedQty(surplus.getActualFinishedQty());
         int rawCarryForwardQty = context.getCarryForwardQtyMap().getOrDefault(plan.getMaterialCode(), 0);
         int carryForwardQty = resolveEffectiveCarryForwardQty(context, plan.getMaterialCode(), rawCarryForwardQty);
+        int scheDayFinishQty = resolveScheDayFinishQty(context, plan.getMaterialCode());
         int windowPlanQty = MonthPlanDayQtyUtil.resolveWindowPlanQty(
                 plan, context.getScheduleDate(), context.getScheduleTargetDate());
         // 继承量已由滚动衔接占用，需从窗口待排量中扣减，防止重复排产
         int inheritedPlanQty = Math.max(0, context.getInheritedPlanQtyMap().getOrDefault(plan.getMaterialCode(), 0));
         dto.setWindowPlanQty(windowPlanQty);
+        dto.setMonthlyHistoryShortageQty(Math.max(0, rawCarryForwardQty));
+        dto.setEffectiveCarryForwardQty(Math.max(0, carryForwardQty));
+        dto.setScheduleDayFinishQty(Math.max(0, scheDayFinishQty));
+        dto.setFutureMonthPlanQtyAfterWindow(resolveFutureMonthPlanQtyAfterWindow(context, plan));
 
         // 初始化日计划额度账本：按排程窗口日期读取月计划 dayN，扣减继承量。
         // day1/day2/day3 的业务日期由窗口 T日～目标日决定，不能按字段名固定绑定自然日。
@@ -824,6 +829,35 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         Calendar calendar = Calendar.getInstance();
         calendar.setTime(context.getCuringStopPotTime());
         return MonthPlanDayQtyUtil.resolveDayQty(plan, calendar.get(Calendar.DAY_OF_MONTH));
+    }
+
+    /**
+     * 汇总排程窗口结束后到月底的后续月计划日量。
+     * <p>仅用于 S4.5 新增排产区分“本月整体收尾”和“当前窗口仅补欠产”，不参与 S4.4 续作。</p>
+     *
+     * @param context 排程上下文
+     * @param plan 月计划记录
+     * @return T+3 到月底后续日计划汇总
+     */
+    private int resolveFutureMonthPlanQtyAfterWindow(LhScheduleContext context,
+                                                     FactoryMonthPlanProductionFinalResult plan) {
+        if (Objects.isNull(context) || Objects.isNull(plan)
+                || Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getScheduleTargetDate())) {
+            return 0;
+        }
+        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
+        LocalDate targetDate = toLocalDate(context.getScheduleTargetDate());
+        LocalDate monthEndDate = scheduleDate.withDayOfMonth(scheduleDate.lengthOfMonth());
+        LocalDate effectiveWindowEndDate = targetDate.isAfter(monthEndDate) ? monthEndDate : targetDate;
+        if (!effectiveWindowEndDate.isBefore(monthEndDate)) {
+            return 0;
+        }
+        int futurePlanQty = 0;
+        for (int dayOfMonth = effectiveWindowEndDate.getDayOfMonth() + 1;
+             dayOfMonth <= monthEndDate.getDayOfMonth(); dayOfMonth++) {
+            futurePlanQty += MonthPlanDayQtyUtil.resolveDayQty(plan, dayOfMonth);
+        }
+        return Math.max(0, futurePlanQty);
     }
 
     /**
@@ -1465,8 +1499,14 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         copy.setDailyPlanQuotaMap(source.getDailyPlanQuotaMap());
         copy.setWindowRemainingPlanQty(source.getWindowRemainingPlanQty());
         copy.setShiftFillOverQty(source.getShiftFillOverQty());
+        copy.setMonthlyHistoryShortageQty(source.getMonthlyHistoryShortageQty());
+        copy.setEffectiveCarryForwardQty(source.getEffectiveCarryForwardQty());
+        copy.setScheduleDayFinishQty(source.getScheduleDayFinishQty());
+        copy.setFutureMonthPlanQtyAfterWindow(source.getFutureMonthPlanQtyAfterWindow());
         // 收尾信息
         copy.setEndingDaysRemaining(source.getEndingDaysRemaining());
+        // 新增排产目标量控制
+        copy.setStrictNewSpecShortageOnly(source.isStrictNewSpecShortageOnly());
         // 版本信息
         copy.setMonthPlanVersion(source.getMonthPlanVersion());
         copy.setProductionVersion(source.getProductionVersion());

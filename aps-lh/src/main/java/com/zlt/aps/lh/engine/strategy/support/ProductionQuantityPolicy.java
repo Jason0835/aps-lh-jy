@@ -49,6 +49,12 @@ public class ProductionQuantityPolicy implements Serializable {
         policy.setTrialProduction(trialProduction);
         policy.setTrialRun(trialRun);
         policy.setNormalProduction(!trialProduction);
+        if (sku != null && sku.isStrictNewSpecShortageOnly() && !ending) {
+            policy.setAllowFillStartedShift(false);
+            policy.setStrictUpperLimit(true);
+            policy.setFullRunForNonTailMachine(false);
+            return policy;
+        }
         if (ending || trialProduction) {
             policy.setAllowFillStartedShift(false);
             policy.setStrictUpperLimit(true);

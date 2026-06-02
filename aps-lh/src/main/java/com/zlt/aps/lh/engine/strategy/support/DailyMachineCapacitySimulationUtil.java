@@ -86,10 +86,8 @@ public final class DailyMachineCapacitySimulationUtil {
         int todayRequiredQty = decision.getCarryShortageQty() + decision.getTodayPlanQty();
         int todayCapacityQty = sumCapacityQty(request, decision.getProductionDate(),
                 decision.getProductionDate(), activeMachines);
-        int demandQty = todayRequiredQty + sumFutureDemandQty(request.getDailyPlanQuotaMap(),
-                decision.getProductionDate(), decision.getLookAheadEndDate());
-        int capacityQty = sumCapacityQty(request, decision.getProductionDate(),
-                decision.getLookAheadEndDate(), activeMachines);
+        int demandQty = resolveDemandQty(request, decision, todayRequiredQty);
+        int capacityQty = resolveCapacityQty(request, decision, activeMachines);
         decision.setTodayRequiredQty(todayRequiredQty);
         decision.setTodayCapacityQty(todayCapacityQty);
         decision.setDayShortageQty(Math.max(0, todayRequiredQty - todayCapacityQty));
@@ -97,6 +95,52 @@ public final class DailyMachineCapacitySimulationUtil {
         decision.setCapacityQty(capacityQty);
         decision.setUnmetQty(Math.max(0, demandQty - capacityQty));
         return decision;
+    }
+
+    /**
+     * 按新增排产欠产阈值解析当前判断需求量。
+     *
+     * @param request 模拟请求
+     * @param decision 当前业务日决策
+     * @param todayRequiredQty 当日计划量与历史欠产合计
+     * @return 当前判断需求量
+     */
+    private static int resolveDemandQty(DailyMachineCapacitySimulationRequest request,
+                                        DailyMachineCapacityDayDecision decision,
+                                        int todayRequiredQty) {
+        if (shouldUseWindowDemandMode(request)) {
+            return todayRequiredQty + sumFutureDemandQty(request.getDailyPlanQuotaMap(),
+                    decision.getProductionDate(), decision.getLookAheadEndDate());
+        }
+        LocalDate nextProductionDate = resolveNextProductionDate(
+                request.getDailyPlanQuotaMap(), decision.getProductionDate(), request.getWindowEndDate());
+        if (Objects.isNull(nextProductionDate)) {
+            return 0;
+        }
+        return resolveTodayPlanQty(request.getDailyPlanQuotaMap().get(nextProductionDate));
+    }
+
+    /**
+     * 按新增排产欠产阈值解析当前判断产能。
+     *
+     * @param request 模拟请求
+     * @param decision 当前业务日决策
+     * @param activeMachines 当前启用机台数
+     * @return 当前判断产能
+     */
+    private static int resolveCapacityQty(DailyMachineCapacitySimulationRequest request,
+                                          DailyMachineCapacityDayDecision decision,
+                                          int activeMachines) {
+        if (shouldUseWindowDemandMode(request)) {
+            return sumCapacityQty(request, decision.getProductionDate(),
+                    decision.getLookAheadEndDate(), activeMachines);
+        }
+        LocalDate nextProductionDate = resolveNextProductionDate(
+                request.getDailyPlanQuotaMap(), decision.getProductionDate(), request.getWindowEndDate());
+        if (Objects.isNull(nextProductionDate)) {
+            return 0;
+        }
+        return sumCapacityQty(request, nextProductionDate, nextProductionDate, activeMachines);
     }
 
     private static int sumFutureDemandQty(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
@@ -123,6 +167,37 @@ public final class DailyMachineCapacitySimulationUtil {
             return 0;
         }
         return Math.max(0, quota.getRemainingQty() - Math.max(0, quota.getDayPlanQty()));
+    }
+
+    private static boolean isShortageThresholdEnabled(DailyMachineCapacitySimulationRequest request) {
+        return request != null && request.getShortageAddMachineThreshold() > 0;
+    }
+
+    /**
+     * 判断当前是否使用“窗口需消化量”扩机口径。
+     * <p>阈值判断必须固定使用 T 日之前的历史欠产量，不能随着 dayN 滚动欠产放大。</p>
+     *
+     * @param request 模拟请求
+     * @return true-按窗口需消化量判断；false-按小欠产逐日后看判断
+     */
+    private static boolean shouldUseWindowDemandMode(DailyMachineCapacitySimulationRequest request) {
+        return !isShortageThresholdEnabled(request)
+                || Math.max(0, request.getMonthlyHistoryShortageQty()) > request.getShortageAddMachineThreshold();
+    }
+
+    private static LocalDate resolveNextProductionDate(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+                                                       LocalDate productionDate,
+                                                       LocalDate windowEndDate) {
+        if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(productionDate)) {
+            return null;
+        }
+        for (LocalDate date : quotaMap.keySet()) {
+            if (Objects.isNull(date) || !date.isAfter(productionDate) || isAfterWindowEnd(date, windowEndDate)) {
+                continue;
+            }
+            return date;
+        }
+        return null;
     }
 
     private static LocalDate resolveFirstProductionDate(DailyMachineCapacitySimulationRequest request) {

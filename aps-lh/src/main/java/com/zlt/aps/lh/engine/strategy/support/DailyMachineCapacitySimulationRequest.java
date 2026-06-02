@@ -31,6 +31,12 @@ public class DailyMachineCapacitySimulationRequest implements Serializable {
     /** 向后观察天数，不含当天 */
     private int shortageLookAheadDays;
 
+    /** 新增排产欠产增机台阈值 */
+    private int shortageAddMachineThreshold;
+
+    /** 当前排程月份内、早于T日的历史欠产量 */
+    private int monthlyHistoryShortageQty;
+
     /** 排程窗口结束日期 */
     private LocalDate windowEndDate;
 
