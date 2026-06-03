@@ -30,6 +30,7 @@
             CLASS1_LH_NO, CLASS1_LH_TYPE, CLASS2_LH_NO, CLASS2_LH_TYPE, CLASS3_LH_NO, CLASS3_LH_TYPE, CLASS4_LH_NO, CLASS4_LH_TYPE,
             CLASS5_LH_NO, CLASS5_LH_TYPE, CLASS6_LH_NO, CLASS6_LH_TYPE, CLASS7_LH_NO, CLASS7_LH_TYPE, CLASS8_LH_NO, CLASS8_LH_TYPE,
             MOULD_CHANGE_START_TIME,
+            DAY_N_RANGE,
             CREATE_BY, CREATE_TIME, UPDATE_BY, UPDATE_TIME, REMARK, IS_DELETE
         ) VALUES
         <foreach collection="list" item="item" separator=",">
@@ -58,6 +59,7 @@
                 #{item.class1LhNo}, #{item.class1LhType}, #{item.class2LhNo}, #{item.class2LhType}, #{item.class3LhNo}, #{item.class3LhType}, #{item.class4LhNo}, #{item.class4LhType},
                 #{item.class5LhNo}, #{item.class5LhType}, #{item.class6LhNo}, #{item.class6LhType}, #{item.class7LhNo}, #{item.class7LhType}, #{item.class8LhNo}, #{item.class8LhType},
                 #{item.mouldChangeStartTime},
+                #{item.dayNRange},
                 #{item.createBy}, #{item.createTime}, #{item.updateBy}, #{item.updateTime}, #{item.remark}, #{item.isDelete}
             )
         </foreach>

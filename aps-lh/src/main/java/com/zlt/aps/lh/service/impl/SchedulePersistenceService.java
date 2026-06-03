@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -19,6 +20,7 @@ import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
 import com.zlt.aps.lh.mapper.LhUnscheduledResultMapper;
 import com.zlt.aps.lh.service.ILhScheduleResultService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -28,8 +30,10 @@ import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -148,6 +152,7 @@ public class SchedulePersistenceService {
             // 为排程结果补齐审计字段和班次收尾标记；不改变已生成的班次计划量。
             fillScheduleResultAuditInfo(context, context.getScheduleResultList());
             fillClassEndFlags(context, context.getScheduleResultList());
+            fillDayNRange(context, context.getScheduleResultList());
             scheduleResultMapper.insertBatch(context.getScheduleResultList());
         }
         if (!context.getUnscheduledResultList().isEmpty()) {
@@ -463,5 +468,67 @@ public class SchedulePersistenceService {
             return context.getOperator();
         }
         return DEFAULT_OPERATOR;
+    }
+
+    /**
+     * 为排程结果填充 T~T+2 日计划量（来自月计划 dayN）。
+     * <p>按 materialCode 匹配月计划，取 scheduleDate 对应日以及后两天的月计划量，逗号分隔。</p>
+     *
+     * @param context 排程上下文
+     * @param scheduleResults 排程结果列表
+     */
+    private void fillDayNRange(LhScheduleContext context, List<LhScheduleResult> scheduleResults) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(scheduleResults)) {
+            return;
+        }
+        List<FactoryMonthPlanProductionFinalResult> monthPlanList = context.getMonthPlanList();
+        if (CollectionUtils.isEmpty(monthPlanList)) {
+            return;
+        }
+        // 按 materialCode 构建月计划映射
+        Map<String, FactoryMonthPlanProductionFinalResult> planByMaterialMap = new HashMap<>(monthPlanList.size());
+        for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
+            if (Objects.nonNull(plan) && StringUtils.isNotEmpty(plan.getMaterialCode())) {
+                planByMaterialMap.putIfAbsent(plan.getMaterialCode(), plan);
+            }
+        }
+        if (planByMaterialMap.isEmpty()) {
+            return;
+        }
+        for (LhScheduleResult result : scheduleResults) {
+            if (Objects.isNull(result) || StringUtils.isEmpty(result.getMaterialCode())
+                    || Objects.isNull(result.getScheduleDate())) {
+                continue;
+            }
+            FactoryMonthPlanProductionFinalResult plan = planByMaterialMap.get(result.getMaterialCode());
+            if (Objects.isNull(plan)) {
+                continue;
+            }
+            String dayNRange = resolveDayNRange(plan, result.getScheduleDate());
+            result.setDayNRange(dayNRange);
+        }
+    }
+
+    /**
+     * 根据月计划和排程日期，返回 T~T+2 的日计划量逗号分隔字符串。
+     *
+     * @param plan 月计划
+     * @param scheduleDate 排程日期 T
+     * @return 日计划量逗号分隔，如 "100,120,110"
+     */
+    private String resolveDayNRange(FactoryMonthPlanProductionFinalResult plan, Date scheduleDate) {
+        Calendar cal = Calendar.getInstance();
+        cal.setTime(scheduleDate);
+        StringBuilder sb = new StringBuilder(16);
+        for (int offset = 0; offset < 3; offset++) {
+            if (offset > 0) {
+                sb.append(",");
+            }
+            int dayOfMonth = cal.get(Calendar.DAY_OF_MONTH);
+            int qty = MonthPlanDayQtyUtil.resolveDayQty(plan, dayOfMonth);
+            sb.append(qty);
+            cal.add(Calendar.DAY_OF_MONTH, 1);
+        }
+        return sb.toString();
     }
 }

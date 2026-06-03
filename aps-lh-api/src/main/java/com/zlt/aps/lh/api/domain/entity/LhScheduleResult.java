@@ -1009,6 +1009,14 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Date mouldChangeStartTime;
 
     /**
+     * T~T+2日计划量，多个以逗号分隔，来源于月计划 dayN
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.dayNRange")
+    @ApiModelProperty(value = "T~T+2日计划量，多个以逗号分隔", name = "dayNRange")
+    @TableField(value = "DAY_N_RANGE")
+    private String dayNRange;
+
+    /**
      * 是否为滚动排程继承结果，仅用于本次排程运行期识别，不落库。
      */
     @TableField(exist = false)
