@@ -763,6 +763,7 @@ class NewSpecProductionStrategyRegressionTest {
         injectDependencies(strategy, false);
 
         LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildChangeoverBalanceScheduleConfig("1"));
         SkuScheduleDTO sku = buildSku();
         sku.setMaterialCode("3302001575");
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
@@ -824,7 +825,7 @@ class NewSpecProductionStrategyRegressionTest {
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
 
         LhScheduleContext context = buildContext();
-        context.setScheduleConfig(buildSingleControlScheduleConfig());
+        context.setScheduleConfig(buildSingleControlChangeoverBalanceScheduleConfig());
 
         SkuScheduleDTO sku = buildSku();
         sku.setMaterialCode("3302002637");
@@ -889,7 +890,7 @@ class NewSpecProductionStrategyRegressionTest {
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
 
         LhScheduleContext context = buildContext();
-        context.setScheduleConfig(buildSingleControlScheduleConfig());
+        context.setScheduleConfig(buildSingleControlChangeoverBalanceScheduleConfig());
 
         SkuScheduleDTO sku = buildSku();
         sku.setMaterialCode("3302002637");
@@ -2227,6 +2228,7 @@ class NewSpecProductionStrategyRegressionTest {
         scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_MACHINE_THRESHOLD, "10");
         scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_DEPTH, "3");
         scheduleParamMap.put(LhScheduleParamConstant.LOCAL_SEARCH_TIME_BUDGET_MS, "200");
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE, "1");
         context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
 
         SkuScheduleDTO firstSku = buildRealIssueSku("3302002530", "EAR30", 7);
@@ -2350,7 +2352,8 @@ class NewSpecProductionStrategyRegressionTest {
                         return 99;
                     }
                 },
-                defaultInspectionBalance(), defaultCapacityCalculate());
+                (ctx, machineCode, mouldChangeTime) -> "K2025".equals(machineCode) ? null : mouldChangeTime,
+                defaultCapacityCalculate());
 
         assertEquals(1, context.getScheduleResultList().size());
         assertEquals("K2026", context.getScheduleResultList().get(0).getLhMachineCode(),
@@ -2903,14 +2906,14 @@ class NewSpecProductionStrategyRegressionTest {
                 "第一台机台应保留整段满班产量");
         assertEquals(119, findResult(context.getScheduleResultList(), "K1111").getDailyPlanQty().intValue(),
                 "第二台机台应保留整段满班产量");
-        assertEquals(85, findResult(context.getScheduleResultList(), "K1113").getDailyPlanQty().intValue(),
-                "第三台机台在达到最低目标量后，应继续补满其当天剩余班次");
-        assertEquals(323, context.getScheduleResultList().stream()
+        assertEquals(68, findResult(context.getScheduleResultList(), "K1113").getDailyPlanQty().intValue(),
+                "第三台机台应按实际可排窗口补满满班产，不继续透支未打开的后续班次");
+        assertEquals(306, context.getScheduleResultList().stream()
                         .map(LhScheduleResult::getDailyPlanQty)
                         .filter(Objects::nonNull)
                         .mapToInt(Integer::intValue)
                         .sum(),
-                "正规非收尾在达到最低目标量300后，应允许已开机台当天继续补满班产");
+                "正规非收尾在达到最低目标量300后，应只在已打开的可排班次内补满班产");
     }
 
     @Test
@@ -2953,8 +2956,8 @@ class NewSpecProductionStrategyRegressionTest {
                 "第一台机台不应继续按理论窗口产能平衡拆量");
         assertEquals(119, findResult(context.getScheduleResultList(), "K1111").getDailyPlanQty().intValue(),
                 "第二台机台不应继续按理论窗口产能平衡拆量");
-        assertEquals(85, findResult(context.getScheduleResultList(), "K1113").getDailyPlanQty().intValue(),
-                "第三台机台应按dayN最低目标+当天补满口径收尾");
+        assertEquals(68, findResult(context.getScheduleResultList(), "K1113").getDailyPlanQty().intValue(),
+                "第三台机台应按dayN最低目标+实际可排窗口补满口径收尾");
     }
 
     @Test
@@ -4301,6 +4304,13 @@ class NewSpecProductionStrategyRegressionTest {
     private LhScheduleConfig buildSingleControlScheduleConfig() {
         Map<String, String> paramMap = new HashMap<String, String>(4);
         paramMap.put(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES, "K1501");
+        return new LhScheduleConfig(paramMap);
+    }
+
+    private LhScheduleConfig buildSingleControlChangeoverBalanceScheduleConfig() {
+        Map<String, String> paramMap = new HashMap<String, String>(4);
+        paramMap.put(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES, "K1501");
+        paramMap.put(LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE, "1");
         return new LhScheduleConfig(paramMap);
     }
 

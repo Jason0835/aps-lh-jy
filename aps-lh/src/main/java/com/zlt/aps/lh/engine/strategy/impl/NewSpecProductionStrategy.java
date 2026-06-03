@@ -35,6 +35,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacityDayDecision;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationRequest;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationResult;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationUtil;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
@@ -71,7 +72,6 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -688,175 +688,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 准备新增排产欠产账本。
-     * <p>S4.3 的本月历史欠产开关仍保持原全局语义；S4.5 新增排产固定识别本月前日欠产，
-     * 只把尚未进入日计划账本的差额追加到首日，避免影响续作和换活字块。</p>
+     * <p>委托公共增机台协作器处理本月欠产入账和窗口无计划判断，保证 S4.4 续作补偿与 S4.5 新增排产口径一致。</p>
      *
      * @param context 排程上下文
      * @param sku 新增排产SKU
      * @return true-当前窗口和月底均无计划，需要按收尾处理
      */
     private boolean prepareNewSpecShortageQuota(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (context == null || sku == null) {
-            return false;
-        }
-        sku.setStrictNewSpecShortageOnly(false);
-        int windowDayPlanQty = sumDayPlanQty(sku);
-        int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
-        int effectiveCarryForwardQty = Math.max(0, sku.getEffectiveCarryForwardQty());
-        int additionalShortageQty = Math.max(0, historyShortageQty - effectiveCarryForwardQty);
-        if (additionalShortageQty > 0) {
-            appendShortageToFirstQuota(sku, additionalShortageQty);
-            sku.setEffectiveCarryForwardQty(effectiveCarryForwardQty + additionalShortageQty);
-            syncSharedQuotaEffectiveCarryForwardQty(context, sku, sku.getEffectiveCarryForwardQty());
-        }
-        boolean noWindowPlan = windowDayPlanQty <= 0;
-        int quotaRemainingQty = SkuDailyPlanQuotaUtil.sumRemainingQty(sku.getDailyPlanQuotaMap());
-        if (historyShortageQty <= 0) {
-            return false;
-        }
-        if (noWindowPlan) {
-            int strictTargetQty = Math.min(resolvePositiveDemandQty(sku), Math.max(historyShortageQty, quotaRemainingQty));
-            if (strictTargetQty <= 0) {
-                strictTargetQty = Math.max(0, sku.resolveTargetScheduleQty());
-            }
-            if (Math.max(0, sku.getFutureMonthPlanQtyAfterWindow()) > 0) {
-                sku.setStrictNewSpecShortageOnly(true);
-                sku.setTargetScheduleQty(strictTargetQty);
-                sku.setWindowPlanQty(strictTargetQty);
-                sku.setWindowRemainingPlanQty(Math.max(strictTargetQty, quotaRemainingQty));
-                log.info("新增排产窗口无日计划但月底仍有计划，仅补本月欠产, materialCode: {}, "
-                                + "historyShortageQty: {}, futurePlanQtyAfterWindow: {}, strictTargetQty: {}",
-                        sku.getMaterialCode(), historyShortageQty, sku.getFutureMonthPlanQtyAfterWindow(),
-                        strictTargetQty);
-                return false;
-            }
-            if (strictTargetQty > 0) {
-                sku.setTargetScheduleQty(Math.max(sku.resolveTargetScheduleQty(), strictTargetQty));
-            }
-            log.info("新增排产窗口及月底均无日计划，按收尾清量处理, materialCode: {}, "
-                            + "historyShortageQty: {}, targetQty: {}",
-                    sku.getMaterialCode(), historyShortageQty, sku.resolveTargetScheduleQty());
-            return true;
-        }
-        if (historyShortageQty > 0) {
-            int syntheticWindowPlanQty = Math.max(0, windowDayPlanQty) + historyShortageQty;
-            sku.setWindowPlanQty(syntheticWindowPlanQty);
-            sku.setWindowRemainingPlanQty(quotaRemainingQty > 0 ? quotaRemainingQty : syntheticWindowPlanQty);
-            sku.setTargetScheduleQty(Math.max(sku.resolveTargetScheduleQty(), sku.getWindowRemainingPlanQty()));
-        }
-        log.info("新增排产欠产增机台判断准备完成, materialCode: {}, scheduleDate: {}, "
-                        + "historyShortageQty: {}, threshold: {}, scheduleDayFinishQty: {}, "
-                        + "windowPlanQty: {}, windowRemainingQty: {}, futurePlanQtyAfterWindow: {}",
-                sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
-                historyShortageQty, resolveNewSpecShortageAddMachineThreshold(context),
-                sku.getScheduleDayFinishQty(), sku.getWindowPlanQty(), sku.getWindowRemainingPlanQty(),
-                sku.getFutureMonthPlanQtyAfterWindow());
-        return false;
-    }
-
-    /**
-     * 将 S4.5 专用的历史欠产差额追加到首日日计划账本。
-     *
-     * @param sku 新增排产SKU
-     * @param shortageQty 欠产差额
-     */
-    private void appendShortageToFirstQuota(SkuScheduleDTO sku, int shortageQty) {
-        if (sku == null || shortageQty <= 0 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
-            return;
-        }
-        SkuDailyPlanQuotaDTO firstQuota = sku.getDailyPlanQuotaMap().values().iterator().next();
-        if (firstQuota == null) {
-            return;
-        }
-        firstQuota.setRemainingQty(Math.max(0, firstQuota.getRemainingQty()) + shortageQty);
-        SkuDailyPlanQuotaUtil.refreshRollingFields(sku.getDailyPlanQuotaMap());
-        log.info("新增排产本月历史欠产差额追加到首日账本, materialCode: {}, shortageQty: {}, firstDate: {}, "
-                        + "windowRemainingQty: {}",
-                sku.getMaterialCode(), shortageQty, firstQuota.getProductionDate(),
-                SkuDailyPlanQuotaUtil.sumRemainingQty(sku.getDailyPlanQuotaMap()));
-    }
-
-    /**
-     * 同步共享日计划账本的历史欠产入账状态。
-     * <p>续作副本和补偿SKU会共享同一份账本，入账状态必须跟随账本一起变化，避免重复追加或回滚后漏补。</p>
-     *
-     * @param context 排程上下文
-     * @param sourceSku 当前SKU
-     * @param effectiveCarryForwardQty 已入账历史欠产量
-     */
-    private void syncSharedQuotaEffectiveCarryForwardQty(LhScheduleContext context,
-                                                         SkuScheduleDTO sourceSku,
-                                                         int effectiveCarryForwardQty) {
-        if (sourceSku == null || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
-            return;
-        }
-        sourceSku.setEffectiveCarryForwardQty(Math.max(0, effectiveCarryForwardQty));
-        if (context == null) {
-            return;
-        }
-        Set<SkuScheduleDTO> visitedSkuSet = java.util.Collections.newSetFromMap(
-                new IdentityHashMap<SkuScheduleDTO, Boolean>(8));
-        syncSharedQuotaEffectiveCarryForwardQty(context.getNewSpecSkuList(), sourceSku,
-                effectiveCarryForwardQty, visitedSkuSet);
-        syncSharedQuotaEffectiveCarryForwardQty(context.getContinuousSkuList(), sourceSku,
-                effectiveCarryForwardQty, visitedSkuSet);
-        if (!CollectionUtils.isEmpty(context.getStructureSkuMap())) {
-            for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
-                syncSharedQuotaEffectiveCarryForwardQty(skuList, sourceSku,
-                        effectiveCarryForwardQty, visitedSkuSet);
-            }
-        }
-    }
-
-    /**
-     * 同步同账本SKU的历史欠产入账状态。
-     *
-     * @param skuList 待检查SKU集合
-     * @param sourceSku 当前SKU
-     * @param effectiveCarryForwardQty 已入账历史欠产量
-     * @param visitedSkuSet 已处理SKU集合
-     */
-    private void syncSharedQuotaEffectiveCarryForwardQty(List<SkuScheduleDTO> skuList,
-                                                         SkuScheduleDTO sourceSku,
-                                                         int effectiveCarryForwardQty,
-                                                         Set<SkuScheduleDTO> visitedSkuSet) {
-        if (CollectionUtils.isEmpty(skuList) || sourceSku == null || visitedSkuSet == null) {
-            return;
-        }
-        for (SkuScheduleDTO sku : skuList) {
-            if (sku == null || visitedSkuSet.contains(sku)
-                    || sku.getDailyPlanQuotaMap() != sourceSku.getDailyPlanQuotaMap()) {
-                continue;
-            }
-            visitedSkuSet.add(sku);
-            sku.setEffectiveCarryForwardQty(Math.max(0, effectiveCarryForwardQty));
-        }
-    }
-
-    private int sumDayPlanQty(SkuScheduleDTO sku) {
-        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
-            return 0;
-        }
-        int totalQty = 0;
-        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
-            if (quota == null) {
-                continue;
-            }
-            totalQty += Math.max(0, quota.getDayPlanQty());
-        }
-        return Math.max(0, totalQty);
-    }
-
-    private int resolvePositiveDemandQty(SkuScheduleDTO sku) {
-        if (sku == null) {
-            return 0;
-        }
-        int targetQty = Math.max(0, sku.resolveTargetScheduleQty());
-        int surplusQty = Math.max(0, sku.getSurplusQty());
-        if (surplusQty > 0) {
-            return targetQty > 0 ? Math.min(targetQty, surplusQty) : surplusQty;
-        }
-        return targetQty;
+        return DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "新增排产")
+                .isForceEndingByNoFuturePlan();
     }
 
     /**
@@ -930,7 +770,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             quota.setCompleted(false);
         }
         SkuDailyPlanQuotaUtil.refreshRollingFields(sourceSku.getDailyPlanQuotaMap());
-        syncSharedQuotaEffectiveCarryForwardQty(context, sourceSku, 0);
+        DailyMachineExpansionPlanner.syncSharedQuotaEffectiveCarryForwardQty(context, sourceSku, 0);
     }
 
     /**
@@ -2064,30 +1904,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private Map<LocalDate, SkuDailyPlanQuotaDTO> buildSimulationQuotaMap(
             Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
             int remainingTargetQty) {
-        Map<LocalDate, SkuDailyPlanQuotaDTO> simulationQuotaMap =
-                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(Math.max(4, quotaMap.size() * 2));
-        int remainingLimitQty = Math.max(0, remainingTargetQty);
-        boolean hasTargetLimit = remainingTargetQty > 0;
-        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
-            SkuDailyPlanQuotaDTO sourceQuota = entry.getValue();
-            if (sourceQuota == null) {
-                continue;
-            }
-            SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
-            quota.setMaterialCode(sourceQuota.getMaterialCode());
-            quota.setProductionDate(sourceQuota.getProductionDate());
-            int remainingQty = Math.max(0, sourceQuota.getRemainingQty());
-            int dayPlanQty = Math.max(0, sourceQuota.getDayPlanQty());
-            if (hasTargetLimit) {
-                remainingQty = Math.min(remainingQty, remainingLimitQty);
-                dayPlanQty = Math.min(dayPlanQty, remainingQty);
-                remainingLimitQty -= remainingQty;
-            }
-            quota.setDayPlanQty(dayPlanQty);
-            quota.setRemainingQty(remainingQty);
-            simulationQuotaMap.put(entry.getKey(), quota);
-        }
-        return simulationQuotaMap;
+        return DailyMachineExpansionPlanner.buildSimulationQuotaMap(quotaMap, remainingTargetQty);
     }
 
     /**
@@ -2406,11 +2223,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return 欠产阈值
      */
     private int resolveNewSpecShortageAddMachineThreshold(LhScheduleContext context) {
-        LhScheduleConfig scheduleConfig = context == null ? null : context.getScheduleConfig();
-        if (scheduleConfig == null) {
-            return LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD;
-        }
-        return scheduleConfig.getNewSpecShortageAddMachineThreshold();
+        return DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context);
     }
 
     /**
@@ -5732,17 +5545,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return true-需要继续多机台排产，false-已满足
      */
     private boolean needMoreMachine(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (isSmallShortageRollingSatisfied(context, sku)) {
-            return false;
-        }
-        if (sku.getRemainingScheduleQty() > 0) {
-            return true;
-        }
-        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
-        if (quotaMap == null || quotaMap.isEmpty()) {
-            return false;
-        }
-        return quotaMap.values().stream().anyMatch(day -> day.getRemainingQty() > 0);
+        return DailyMachineExpansionPlanner.needMoreMachine(context, sku);
     }
 
     /**
@@ -5753,7 +5556,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return true-后续日计划已满足，可停止扩机台
      */
     private boolean isSmallShortageRollingSatisfied(LhScheduleContext context, SkuScheduleDTO sku) {
-        return shouldAllowSmallShortageRolling(context, sku) && isFutureQuotaSatisfied(sku);
+        return DailyMachineExpansionPlanner.isSmallShortageRollingSatisfied(context, sku);
     }
 
     /**
@@ -5764,11 +5567,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return true-小额欠产允许后续滚动；false-仍按原有目标量扩机台
      */
     private boolean shouldAllowSmallShortageRolling(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (sku == null || sku.isStrictNewSpecShortageOnly() || Math.max(0, sku.getWindowPlanQty()) <= 0) {
-            return false;
-        }
-        int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
-        return historyShortageQty > 0 && historyShortageQty <= resolveNewSpecShortageAddMachineThreshold(context);
+        return DailyMachineExpansionPlanner.shouldAllowSmallShortageRolling(context, sku);
     }
 
     /**
@@ -5778,23 +5577,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return true-后续日期无剩余额度；false-仍有后续日计划未满足
      */
     private boolean isFutureQuotaSatisfied(SkuScheduleDTO sku) {
-        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
-            return false;
-        }
-        boolean first = true;
-        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
-            if (quota == null) {
-                continue;
-            }
-            if (first) {
-                first = false;
-                continue;
-            }
-            if (Math.max(0, quota.getRemainingQty()) > 0) {
-                return false;
-            }
-        }
-        return true;
+        return DailyMachineExpansionPlanner.isFutureQuotaSatisfied(sku);
     }
 
     /**

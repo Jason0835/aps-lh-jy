@@ -90,12 +90,12 @@ public class LhScheduleConfigTest {
     }
 
     /**
-     * 用例说明：新增排产欠产增机台阈值默认150，配置后按配置值读取。
+     * 用例说明：新增排产欠产增机台阈值默认200，配置后按配置值读取。
      */
     @Test
     public void shouldReadNewSpecShortageAddMachineThresholdConfig() {
         LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
-        Assertions.assertEquals(150, defaultConfig.getNewSpecShortageAddMachineThreshold());
+        Assertions.assertEquals(200, defaultConfig.getNewSpecShortageAddMachineThreshold());
 
         Map<String, String> paramMap = new HashMap<>(1);
         paramMap.put(LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, "200");

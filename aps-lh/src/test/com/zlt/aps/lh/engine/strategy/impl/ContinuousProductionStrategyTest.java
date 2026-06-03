@@ -13,6 +13,7 @@ import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
@@ -470,6 +471,145 @@ public class ContinuousProductionStrategyTest {
         Assertions.assertEquals(14, compensationSku.resolveTargetScheduleQty());
         Assertions.assertEquals(14, compensationSku.getRemainingScheduleQty());
         Assertions.assertNull(compensationSku.getContinuousMachineCode(), "补偿SKU不能固定续作原机台，应交由新增链路重新选机");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldNotAppendCompensationForSmallShortageWhenFuturePlanSatisfied() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayShift = resolveNextWorkDateShift(shifts, firstShift);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(
+                firstShift, nextDayShift, 48, 48);
+        quotaMap.get(toLocalDate(firstShift)).setRemainingQty(148);
+        SkuScheduleDTO sku = buildContinuationSku(
+                "MAT-SMALL-SHORTAGE", ConstructionStageEnum.FORMAL.getCode(), false, 196, quotaMap);
+        sku.setMonthlyHistoryShortageQty(100);
+        sku.setEffectiveCarryForwardQty(100);
+        sku.setWindowPlanQty(196);
+        sku.setWindowRemainingPlanQty(196);
+        sku.setContinuousMachineCode("K2026");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result = baseContinuationResult("MAT-SMALL-SHORTAGE", "K2026", false);
+        result.setEmbryoCode("EMB-MAT-SMALL-SHORTAGE");
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        result.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 48,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, nextDayShift.getShiftIndex(), 48,
+                nextDayShift.getShiftStartDateTime(), nextDayShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(0, context.getNewSpecSkuList().size(),
+                "小额历史欠产未超阈值且后续日计划已满足时，不应只为首日历史欠产余额生成补偿SKU");
+        Assertions.assertEquals(100, SkuDailyPlanQuotaUtil.sumRemainingQty(sku.getDailyPlanQuotaMap()),
+                "首日历史欠产余额允许继续滚动，不应被续作补偿强制清完");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldIgnoreTypeBlockResultWhenCheckingSmallShortageFuturePlan() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayShift = resolveNextWorkDateShift(shifts, firstShift);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(firstShift, nextDayShift, 48, 48);
+        quotaMap.get(toLocalDate(firstShift)).setRemainingQty(148);
+        SkuScheduleDTO sku = buildContinuationSku(
+                "MAT-SMALL-TYPEBLOCK", ConstructionStageEnum.FORMAL.getCode(), false, 196, quotaMap);
+        sku.setMonthlyHistoryShortageQty(100);
+        sku.setEffectiveCarryForwardQty(100);
+        sku.setWindowPlanQty(196);
+        sku.setWindowRemainingPlanQty(196);
+        sku.setContinuousMachineCode("K2027");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult continuousResult = baseContinuationResult("MAT-SMALL-TYPEBLOCK", "K2027", false);
+        ShiftFieldUtil.setShiftPlanQty(continuousResult, firstShift.getShiftIndex(), 48,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(continuousResult);
+        context.getScheduleResultList().add(continuousResult);
+        context.getScheduleResultSourceSkuMap().put(continuousResult, sku);
+
+        LhScheduleResult typeBlockResult = baseContinuationResult("MAT-SMALL-TYPEBLOCK", "K2028", false);
+        typeBlockResult.setIsTypeBlock("1");
+        ShiftFieldUtil.setShiftPlanQty(typeBlockResult, nextDayShift.getShiftIndex(), 48,
+                nextDayShift.getShiftStartDateTime(), nextDayShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(typeBlockResult);
+        context.getScheduleResultList().add(typeBlockResult);
+        context.getScheduleResultSourceSkuMap().put(typeBlockResult, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getNewSpecSkuList().size(),
+                "换活字块结果不能作为纯续作覆盖后续日计划，否则会漏生成S4.5补偿SKU");
+        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
+        Assertions.assertEquals(100, compensationSku.resolveTargetScheduleQty(),
+                "补偿量应按纯续作未覆盖的动态目标缺口计算");
+        Assertions.assertSame(sku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap(),
+                "补偿SKU必须继续共享来源续作账本");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldAppendDynamicCompensationForLargeHistoryShortage() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 5, 3, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayShift = resolveNextWorkDateShift(shifts, firstShift);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(firstShift, nextDayShift, 48, 48);
+        SkuScheduleDTO sku = buildContinuationSku(
+                "MAT-LARGE-SHORTAGE", ConstructionStageEnum.FORMAL.getCode(), false, 296, quotaMap);
+        sku.setMonthlyHistoryShortageQty(200);
+        sku.setWindowPlanQty(296);
+        sku.setWindowRemainingPlanQty(296);
+        sku.setContinuousMachineCode("K2028");
+        context.setContinuousSkuList(Collections.singletonList(sku));
+
+        LhScheduleResult result = baseContinuationResult("MAT-LARGE-SHORTAGE", "K2028", false);
+        result.setEmbryoCode("EMB-MAT-LARGE-SHORTAGE");
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        result.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 48,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getNewSpecSkuList().size(),
+                "本月历史欠产超过阈值且续作窗口产能不足时，应生成补偿SKU进入S4.5重新选机");
+        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
+        Assertions.assertEquals(248, compensationSku.resolveTargetScheduleQty(),
+                "补偿量应按窗口剩余缺口动态计算，不能退化为固定单班或单机台补量");
+        Assertions.assertEquals(248, compensationSku.getRemainingScheduleQty(),
+                "补偿SKU剩余量应与窗口缺口保持一致");
+        Assertions.assertSame(sku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap(),
+                "大欠产补偿SKU也必须共享原续作账本，避免重复消费");
     }
 
     @Test
@@ -1362,6 +1502,76 @@ public class ContinuousProductionStrategyTest {
                 .contains("当前排程窗口内无日计划量"));
         assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1712"),
                 "窗口全无日计划时，应释放续作机台给新增排产，但只作为降优先级标识");
+    }
+
+    @Test
+    public void scheduleContinuousEnding_shouldScheduleEndingWhenWindowAndFuturePlanEmptyButHistoryShortageExists()
+            throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildWindowNoPlanContinuousContext();
+        SkuScheduleDTO sku = context.getContinuousSkuList().get(0);
+        sku.setTargetScheduleQty(40);
+        sku.setPendingQty(40);
+        sku.setSurplusQty(40);
+        sku.setMonthlyHistoryShortageQty(40);
+
+        strategy.scheduleContinuousEnding(context);
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "窗口和月底均无计划但存在本月历史欠产时，续作应按收尾清量而不是直接释放");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals("1", result.getIsEnd(), "窗口和月底均无计划时应按收尾口径落结果");
+        assertTrue(result.getDailyPlanQty() > 0, "历史欠产清量必须真实落产量，不能只生成0量结果");
+        assertTrue(result.getDailyPlanQty() <= 40, "收尾清量不允许超出目标量");
+        assertTrue(!context.getReleasedContinuousMachineCodeSet().contains("K1712"),
+                "存在本月历史欠产时不应把续作机台登记为窗口无计划释放机台");
+        assertEquals(40, sku.getEffectiveCarryForwardQty(), "历史欠产真实入账后应同步已入账状态");
+        assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    @Test
+    public void scheduleContinuousEnding_shouldStrictlyScheduleShortageWhenWindowNoPlanButFuturePlanExists()
+            throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildWindowNoPlanContinuousContext();
+        SkuScheduleDTO sku = context.getContinuousSkuList().get(0);
+        sku.setTargetScheduleQty(120);
+        sku.setPendingQty(120);
+        sku.setSurplusQty(120);
+        sku.setMonthlyHistoryShortageQty(40);
+        sku.setFutureMonthPlanQtyAfterWindow(200);
+
+        strategy.scheduleContinuousEnding(context);
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "窗口无计划但月底仍有计划时，续作本窗口应仅补本月历史欠产");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals("0", result.getIsEnd(), "月底仍有后续计划时不能把SKU判定为整体收尾");
+        assertTrue(sku.isStrictNewSpecShortageOnly(), "仅补历史欠产场景必须启用严格目标量");
+        assertTrue(result.getDailyPlanQty() <= 40, "仅补本月欠产时不允许提前消耗T+3以后计划");
+    }
+
+    @Test
+    public void prepareShortageQuota_shouldNotMarkCarryForwardWhenQuotaMapEmpty() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+
+        SkuScheduleDTO sku = buildContinuationSku(
+                "MAT-EMPTY-QUOTA", ConstructionStageEnum.FORMAL.getCode(), false,
+                40, new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(0));
+        sku.setMonthlyHistoryShortageQty(40);
+
+        DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "续作排产测试");
+
+        assertEquals(0, sku.getEffectiveCarryForwardQty(),
+                "日计划账本为空时不能把未实际追加的历史欠产标记为已入账");
+        assertTrue(sku.getDailyPlanQuotaMap().isEmpty(), "空账本场景不能通过兜底造账本");
     }
 
     private LhScheduleContext buildExcelContinuationContext(String materialCode,

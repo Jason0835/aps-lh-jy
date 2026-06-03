@@ -1,6 +1,6 @@
 -- ============================================
 -- SYS0304022 迁移脚本
--- 目标：为现有工厂补齐“新增排产欠产增机台阈值”参数，默认值为 150
+-- 目标：为现有工厂补齐“新增排产欠产增机台阈值”参数，默认值为 200
 -- ============================================
 
 INSERT INTO T_LH_PARAMS (
@@ -17,7 +17,7 @@ INSERT INTO T_LH_PARAMS (
 )
 SELECT t.FACTORY_CODE,
        'SYS0304022',
-       '150',
+       '200',
        '新增排产欠产增机台阈值',
        '本月前日累计欠产超过该阈值时，新增排产按窗口需消化量判断是否增机台',
        'system',
@@ -39,7 +39,7 @@ LEFT JOIN T_LH_PARAMS p
 WHERE p.ID IS NULL;
 
 UPDATE T_LH_PARAMS
-SET PARAM_VALUE = '150',
+SET PARAM_VALUE = '200',
     PARAM_NAME = '新增排产欠产增机台阈值',
     REMARK = '本月前日累计欠产超过该阈值时，新增排产按窗口需消化量判断是否增机台',
     UPDATE_BY = 'system',
