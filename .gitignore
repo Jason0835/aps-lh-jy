@@ -12,3 +12,5 @@
 /.kiro/
 /.claude/
 /.trae/
+# 日志目录
+log/
