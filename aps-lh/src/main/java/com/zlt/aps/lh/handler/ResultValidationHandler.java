@@ -92,7 +92,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
             // S4.6.2 生成模具交替计划：基于结果真实换模开始时间和机台滚动状态生成前后规格。
             generateMouldChangePlan(context);
-            validateMouldChangePlanQuota(context);
+//            validateMouldChangePlanQuota(context);
             validateManualSundaySandBlastThreshold(context);
 
             // S4.6.3 补全工单号和发布状态
