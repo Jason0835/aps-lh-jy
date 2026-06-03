@@ -505,7 +505,8 @@ public class SchedulePersistenceService {
             if (Objects.isNull(plan)) {
                 continue;
             }
-            String dayNRange = resolveDayNRange(plan, result.getScheduleDate());
+            // 使用全局窗口起点 T 日计算 DAY_N_RANGE，而非 result 上的目标日
+            String dayNRange = resolveDayNRange(plan, context.getScheduleDate());
             result.setDayNRange(dayNRange);
         }
     }
