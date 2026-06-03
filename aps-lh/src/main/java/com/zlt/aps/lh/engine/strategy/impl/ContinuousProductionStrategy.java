@@ -3495,6 +3495,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty());
         compensationSku.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
         compensationSku.setContinuousMachineCode(null);
+        compensationSku.setPreferredContinuousMachineCode(sourceSku.getContinuousMachineCode());
         compensationSku.setContinuousCompensationSku(true);
         compensationSku.setTargetScheduleQty(remainingQty);
         compensationSku.setPendingQty(remainingQty);

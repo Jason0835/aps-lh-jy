@@ -392,6 +392,46 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldPreferOriginalContinuousMachineWhenCompensationSkuTurnComes() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 5, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO compensationSku = buildSku();
+        compensationSku.setMaterialCode("3302002546");
+        compensationSku.setMaterialDesc("3302002546");
+        compensationSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        compensationSku.setContinuousCompensationSku(true);
+        compensationSku.setShiftCapacity(17);
+        compensationSku.setPendingQty(82);
+        compensationSku.setDailyPlanQty(82);
+        compensationSku.setTargetScheduleQty(82);
+        compensationSku.setWindowPlanQty(82);
+        compensationSku.setSurplusQty(82);
+        compensationSku.setEmbryoStock(82);
+        compensationSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302002546", 0, 32, 50));
+        ReflectionTestUtils.setField(compensationSku, "preferredContinuousMachineCode", "K1105");
+        context.getNewSpecSkuList().add(compensationSku);
+
+        MachineScheduleDTO fallbackMachine = buildMachine("K1110", dateTime(2026, 5, 1, 6, 0));
+        MachineScheduleDTO preferredMachine = buildMachine("K1105", dateTime(2026, 5, 1, 6, 0));
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(fallbackMachine, preferredMachine),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "补偿SKU应成功在新增阶段生成排产结果");
+        assertEquals("K1105", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "补偿SKU轮到自己选机时，原续作机台未被占走应优先锁回");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldSetIsEndOneWhenEndingJudgmentTrue() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);

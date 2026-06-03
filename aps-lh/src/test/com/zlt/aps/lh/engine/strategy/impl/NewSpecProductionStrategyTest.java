@@ -14,6 +14,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDate;
 import java.lang.reflect.Field;
@@ -141,6 +142,117 @@ public class NewSpecProductionStrategyTest {
 
         Assertions.assertNotNull(selected);
         Assertions.assertEquals("K1105", selected.getMachineCode());
+    }
+
+    /**
+     * 用例说明：续作补偿 SKU 进入新增阶段后，轮到自己选机时应优先锁回原续作机台，
+     * 不应继续沿用普通新增候选顺序。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldPreferPreferredContinuousMachineForCompensationSku() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002546");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setContinuousCompensationSku(true);
+        ReflectionTestUtils.setField(sku, "preferredContinuousMachineCode", "K1105");
+
+        MachineScheduleDTO firstMachine = buildMachine("K1110", 1);
+        MachineScheduleDTO preferredMachine = buildMachine("K1105", 1);
+        List<MachineScheduleDTO> candidates = Arrays.asList(firstMachine, preferredMachine);
+
+        MachineScheduleDTO selected = invokeSelectCandidateMachine(
+                strategy,
+                context,
+                sku,
+                candidates,
+                Collections.<String>emptySet(),
+                new FirstCandidateMachineMatchStrategy(),
+                null,
+                ProductionQuantityPolicy.from(sku, false));
+
+        Assertions.assertNotNull(selected);
+        Assertions.assertEquals("K1105", selected.getMachineCode(),
+                "补偿SKU轮到自己选机时，应优先锁回原续作机台");
+    }
+
+    /**
+     * 用例说明：若原续作机台已不可选，则补偿 SKU 应回退到现有新增选机逻辑。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldFallbackWhenPreferredContinuousMachineIsExcluded() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002546");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setContinuousCompensationSku(true);
+        ReflectionTestUtils.setField(sku, "preferredContinuousMachineCode", "K1105");
+
+        MachineScheduleDTO fallbackMachine = buildMachine("K1110", 1);
+        MachineScheduleDTO preferredMachine = buildMachine("K1105", 1);
+        List<MachineScheduleDTO> candidates = Arrays.asList(fallbackMachine, preferredMachine);
+
+        MachineScheduleDTO selected = invokeSelectCandidateMachine(
+                strategy,
+                context,
+                sku,
+                candidates,
+                Collections.singleton("K1105"),
+                new FirstCandidateMachineMatchStrategy(),
+                null,
+                ProductionQuantityPolicy.from(sku, false));
+
+        Assertions.assertNotNull(selected);
+        Assertions.assertEquals("K1110", selected.getMachineCode(),
+                "原续作机台不可选时，应回退到现有新增候选机台顺序");
+    }
+
+    /**
+     * 用例说明：首日无计划续作占位被新增SKU抢占后，生成的补偿SKU仍应保留原续作机台，
+     * 供后续新增补排轮到自己时优先锁回。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldKeepPreferredContinuousMachineWhenAppendingDeferredCompensationSku() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+
+        SkuScheduleDTO sourceSku = new SkuScheduleDTO();
+        sourceSku.setMaterialCode("3302002546");
+        sourceSku.setContinuousMachineCode("K1105");
+        sourceSku.setStrictTargetQty(true);
+        sourceSku.setDailyPlanQuotaMap(new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4));
+
+        LhScheduleResult placeholderResult = new LhScheduleResult();
+        placeholderResult.setDailyPlanQty(82);
+
+        List<SkuScheduleDTO> deferredCompensationSkuList = new java.util.ArrayList<SkuScheduleDTO>(1);
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "appendDeferredContinuousCompensationSku",
+                LhScheduleContext.class,
+                SkuScheduleDTO.class,
+                LhScheduleResult.class,
+                List.class);
+        method.setAccessible(true);
+
+        method.invoke(strategy, context, sourceSku, placeholderResult, deferredCompensationSkuList);
+
+        Assertions.assertEquals(1, deferredCompensationSkuList.size());
+        SkuScheduleDTO compensationSku = deferredCompensationSkuList.get(0);
+        Assertions.assertNull(compensationSku.getContinuousMachineCode(),
+                "补偿SKU应清空续作机台，交由新增链路重新选机");
+        Assertions.assertEquals("K1105",
+                ReflectionTestUtils.getField(compensationSku, "preferredContinuousMachineCode"),
+                "延后补排的补偿SKU应保留原续作机台，供轮到自己时优先锁回");
     }
 
     /**

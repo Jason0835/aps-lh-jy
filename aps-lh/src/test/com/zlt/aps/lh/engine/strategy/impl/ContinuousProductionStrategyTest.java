@@ -350,6 +350,9 @@ public class ContinuousProductionStrategyTest {
         Assertions.assertEquals(48, compensationSku.resolveTargetScheduleQty());
         Assertions.assertEquals(48, compensationSku.getRemainingScheduleQty());
         Assertions.assertNull(compensationSku.getContinuousMachineCode(), "补偿SKU应交由新增换模链路重新选机");
+        Assertions.assertEquals("K1107",
+                ReflectionTestUtils.getField(compensationSku, "preferredContinuousMachineCode"),
+                "补偿SKU应保留原续作机台，供轮到自己时优先锁回");
     }
 
     @Test
@@ -412,6 +415,9 @@ public class ContinuousProductionStrategyTest {
         Assertions.assertEquals(46, compensationSku.resolveTargetScheduleQty());
         Assertions.assertEquals(46, compensationSku.getRemainingScheduleQty());
         Assertions.assertNull(compensationSku.getContinuousMachineCode(), "补偿SKU应交由新增换模链路重新选机");
+        Assertions.assertEquals("K1105",
+                ReflectionTestUtils.getField(compensationSku, "preferredContinuousMachineCode"),
+                "续作补偿SKU应记住原续作机台，供新增阶段自己回合优先锁回");
     }
 
     @Test

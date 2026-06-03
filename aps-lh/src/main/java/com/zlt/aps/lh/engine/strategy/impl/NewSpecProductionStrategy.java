@@ -804,6 +804,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty());
         compensationSku.setScheduleType(NEW_SPEC_SCHEDULE_TYPE);
         compensationSku.setContinuousMachineCode(null);
+        compensationSku.setPreferredContinuousMachineCode(sourceSku.getContinuousMachineCode());
         compensationSku.setContinuousCompensationSku(true);
         compensationSku.setTargetScheduleQty(compensationQty);
         compensationSku.setPendingQty(compensationQty);
@@ -1208,6 +1209,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (CollectionUtils.isEmpty(scopedCandidates)) {
             return null;
         }
+        MachineScheduleDTO preferredContinuousMachine =
+                resolvePreferredContinuousCompensationMachine(sku, scopedCandidates);
+        if (preferredContinuousMachine != null) {
+            log.info("新增排产补偿SKU优先锁回原续作机台, materialCode: {}, machineCode: {}",
+                    sku.getMaterialCode(), preferredContinuousMachine.getMachineCode());
+            return preferredContinuousMachine;
+        }
         if (preferredTrialMachine != null && containsMachine(scopedCandidates, preferredTrialMachine.getMachineCode())) {
             log.info("新增排产优先尝试试制/小批量预选机台, materialCode: {}, machineCode: {}",
                     sku.getMaterialCode(), preferredTrialMachine.getMachineCode());
@@ -1233,6 +1241,31 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return tailConcentratedMachine;
         }
         return machineMatch.selectBestMachine(context, sku, scopedCandidates, new HashSet<String>(0));
+    }
+
+    /**
+     * 解析续作释放补偿 SKU 在当前选机回合的原续作优先机台。
+     *
+     * @param sku 当前待排 SKU
+     * @param scopedCandidates 当前作用域候选机台
+     * @return 可直接锁回的原续作机台；不存在时返回 null
+     */
+    private MachineScheduleDTO resolvePreferredContinuousCompensationMachine(SkuScheduleDTO sku,
+                                                                             List<MachineScheduleDTO> scopedCandidates) {
+        if (sku == null || !sku.isContinuousCompensationSku()
+                || StringUtils.isEmpty(sku.getPreferredContinuousMachineCode())
+                || CollectionUtils.isEmpty(scopedCandidates)) {
+            return null;
+        }
+        for (MachineScheduleDTO candidate : scopedCandidates) {
+            if (candidate == null) {
+                continue;
+            }
+            if (StringUtils.equals(candidate.getMachineCode(), sku.getPreferredContinuousMachineCode())) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     /**

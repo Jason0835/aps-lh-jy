@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.api.domain.dto;
 
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 
 import java.time.LocalDate;
 import java.util.Date;
@@ -111,6 +112,9 @@ public class SkuScheduleDTO {
     // ========== 机台信息(续作时使用) ==========
     /** 续作机台编号；来源于 MES 在机/前批次结果，S4.4 按该机台继续排产 */
     private String continuousMachineCode;
+    /** 续作释放后转新增补偿时保留的原续作优先机台，仅供 S4.5 轮到该 SKU 选机时优先锁回 */
+    @EqualsAndHashCode.Exclude
+    private String preferredContinuousMachineCode;
     /** 续作机台上的模具号列表 */
     private List<String> mouldCodeList;
     /** 预计收尾时间 */
