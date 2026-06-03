@@ -153,6 +153,7 @@ public class SchedulePersistenceService {
             fillScheduleResultAuditInfo(context, context.getScheduleResultList());
             fillClassEndFlags(context, context.getScheduleResultList());
             fillDayNRange(context, context.getScheduleResultList());
+            fillShortageQty(context, context.getScheduleResultList());
             scheduleResultMapper.insertBatch(context.getScheduleResultList());
         }
         if (!context.getUnscheduledResultList().isEmpty()) {
@@ -530,5 +531,31 @@ public class SchedulePersistenceService {
             cal.add(Calendar.DAY_OF_MONTH, 1);
         }
         return sb.toString();
+    }
+
+    /**
+     * 为排程结果填充月初至 T-1 日累计欠产量。
+     * <p>欠产数据来源于上下文 {@code carryForwardQtyMap}，由 ScheduleAdjustHandler 排程前归集。</p>
+     *
+     * @param context 排程上下文
+     * @param scheduleResults 排程结果列表
+     */
+    private void fillShortageQty(LhScheduleContext context, List<LhScheduleResult> scheduleResults) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(scheduleResults)) {
+            return;
+        }
+        Map<String, Integer> carryForwardQtyMap = context.getCarryForwardQtyMap();
+        if (CollectionUtils.isEmpty(carryForwardQtyMap)) {
+            return;
+        }
+        for (LhScheduleResult result : scheduleResults) {
+            if (Objects.isNull(result) || StringUtils.isEmpty(result.getMaterialCode())) {
+                continue;
+            }
+            Integer shortageQty = carryForwardQtyMap.get(result.getMaterialCode());
+            if (Objects.nonNull(shortageQty)) {
+                result.setShortageQty(shortageQty);
+            }
+        }
     }
 }

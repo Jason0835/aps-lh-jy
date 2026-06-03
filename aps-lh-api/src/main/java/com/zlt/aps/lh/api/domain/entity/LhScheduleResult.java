@@ -1017,6 +1017,14 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String dayNRange;
 
     /**
+     * 月初至 T-1 日累计欠产量
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.shortageQty")
+    @ApiModelProperty(value = "月初至 T-1 日累计欠产量", name = "shortageQty")
+    @TableField(value = "SHORTAGE_QTY")
+    private Integer shortageQty;
+
+    /**
      * 是否为滚动排程继承结果，仅用于本次排程运行期识别，不落库。
      */
     @TableField(exist = false)

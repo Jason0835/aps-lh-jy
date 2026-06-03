@@ -31,6 +31,7 @@
             CLASS5_LH_NO, CLASS5_LH_TYPE, CLASS6_LH_NO, CLASS6_LH_TYPE, CLASS7_LH_NO, CLASS7_LH_TYPE, CLASS8_LH_NO, CLASS8_LH_TYPE,
             MOULD_CHANGE_START_TIME,
             DAY_N_RANGE,
+            SHORTAGE_QTY,
             CREATE_BY, CREATE_TIME, UPDATE_BY, UPDATE_TIME, REMARK, IS_DELETE
         ) VALUES
         <foreach collection="list" item="item" separator=",">
@@ -60,6 +61,7 @@
                 #{item.class5LhNo}, #{item.class5LhType}, #{item.class6LhNo}, #{item.class6LhType}, #{item.class7LhNo}, #{item.class7LhType}, #{item.class8LhNo}, #{item.class8LhType},
                 #{item.mouldChangeStartTime},
                 #{item.dayNRange},
+                #{item.shortageQty},
                 #{item.createBy}, #{item.createTime}, #{item.updateBy}, #{item.updateTime}, #{item.remark}, #{item.isDelete}
             )
         </foreach>
