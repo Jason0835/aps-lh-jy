@@ -406,6 +406,66 @@ public class NewSpecProductionStrategyTest {
         Assertions.assertEquals(0, sku.getShiftFillOverQty());
     }
 
+    /**
+     * 用例说明：辅机是按后续 dayN 需求扩出来时，即使首日目标已满足，也不能把辅机首个承接班次释放掉。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldKeepAuxFirstShiftWhenFutureDayDemandStillNeedsAddedMachine() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        Date scheduleDate = toDate(2026, 6, 1, 0, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate);
+        context.setScheduleWindowShifts(shifts);
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>(4));
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002661");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setShiftCapacity(16);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>(4);
+        quotaMap.put(resolveWorkDate(shifts.get(0)), buildQuota(8, 8));
+        quotaMap.put(resolveWorkDate(shifts.get(3)), buildQuota(60, 60));
+        quotaMap.put(resolveWorkDate(shifts.get(6)), buildQuota(60, 60));
+        sku.setDailyPlanQuotaMap(quotaMap);
+
+        LhScheduleResult primaryResult = buildSameSkuResult("K1313", 16);
+        for (int shiftIndex = 2; shiftIndex <= 8; shiftIndex++) {
+            ShiftFieldUtil.setShiftPlanQty(primaryResult, shiftIndex, 16,
+                    shifts.get(shiftIndex - 1).getShiftStartDateTime(),
+                    shifts.get(shiftIndex - 1).getShiftEndDateTime());
+        }
+        ShiftFieldUtil.syncDailyPlanQty(primaryResult);
+
+        LhScheduleResult auxResult = buildSameSkuResult("K1405", 16);
+        ShiftFieldUtil.setShiftPlanQty(auxResult, 2, 16,
+                shifts.get(1).getShiftStartDateTime(), shifts.get(1).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(auxResult, 3, 16,
+                shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(auxResult);
+
+        context.getMachineScheduleMap().put("K1313", buildMachine("K1313", 1));
+        context.getMachineScheduleMap().put("K1405", buildMachine("K1405", 1));
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "releaseAuxiliaryMachineForNonEnding",
+                LhScheduleContext.class,
+                SkuScheduleDTO.class,
+                List.class,
+                ProductionQuantityPolicy.class,
+                List.class);
+        method.setAccessible(true);
+
+        boolean changed = (Boolean) method.invoke(strategy, context, sku, shifts,
+                buildFormalNonEndingPolicy(), Arrays.asList(primaryResult, auxResult));
+
+        Assertions.assertFalse(changed, "3302002661 这类为后续 dayN 扩出的辅机，不应触发首日辅助机台释放");
+        Assertions.assertEquals(16, ShiftFieldUtil.getShiftPlanQty(auxResult, 2).intValue());
+        Assertions.assertEquals(16, ShiftFieldUtil.getShiftPlanQty(auxResult, 3).intValue());
+    }
+
     private void injectTargetScheduleQtyResolver(NewSpecProductionStrategy strategy,
                                                  TargetScheduleQtyResolver resolver) throws Exception {
         Field field = NewSpecProductionStrategy.class.getDeclaredField("targetScheduleQtyResolver");
@@ -447,6 +507,39 @@ public class NewSpecProductionStrategyTest {
         SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
         quota.setRemainingQty(remainingQty);
         return quota;
+    }
+
+    private SkuDailyPlanQuotaDTO buildQuota(int dayPlanQty, int remainingQty) {
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setDayPlanQty(dayPlanQty);
+        quota.setRemainingQty(remainingQty);
+        return quota;
+    }
+
+    private LocalDate resolveWorkDate(LhShiftConfigVO shift) {
+        return shift.getWorkDate().toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+    }
+
+    private LhScheduleResult buildSameSkuResult(String machineCode, int singleMouldShiftQty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setLhMachineCode(machineCode);
+        result.setSingleMouldShiftQty(singleMouldShiftQty);
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        result.setIsEnd("0");
+        return result;
+    }
+
+    private ProductionQuantityPolicy buildFormalNonEndingPolicy() {
+        ProductionQuantityPolicy policy = new ProductionQuantityPolicy();
+        policy.setEnding(false);
+        policy.setTrialProduction(false);
+        policy.setTrialRun(false);
+        policy.setNormalProduction(true);
+        policy.setAllowFillStartedShift(true);
+        policy.setStrictUpperLimit(false);
+        policy.setFullRunForNonTailMachine(true);
+        return policy;
     }
 
     private Date toDate(int year, int month, int day, int hour, int minute, int second) {
