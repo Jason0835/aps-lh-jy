@@ -233,6 +233,12 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 () -> loadMaterialMonthFinishedQty(context, factoryCode,
                         year, month, LhScheduleTimeUtil.addDays(scheduleDate, -1)),
                 () -> sizeOf(context.getMaterialMonthFinishedQtyMap()));
+        CompletableFuture<Void> skuMouldRelFuture = runAfterDataInitTask(monthPlanFuture, "SKU与模具关系",
+                () -> loadSkuMouldRel(context, factoryCode),
+                () -> sizeOf(context.getSkuMouldRelMap()));
+        CompletableFuture<Void> modelInfoFuture = runAfterDataInitTask(skuMouldRelFuture, "模具台账",
+                () -> loadModelInfo(context, factoryCode),
+                () -> sizeOf(context.getModelInfoMap()));
         CompletableFuture<Void> machineInfoFuture = runDataInitTaskAsync("硫化机台信息",
                 () -> loadMachineInfo(context, factoryCode),
                 () -> sizeOf(context.getMachineInfoMap()));
@@ -261,12 +267,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 runDataInitTaskAsync("设备停机计划",
                         () -> loadDevicePlanShut(context, factoryCode, calendarControlStartDate, endDate),
                         () -> sizeOf(context.getDevicePlanShutList())),
-                runDataInitTaskAsync("SKU与模具关系",
-                        () -> loadSkuMouldRel(context, factoryCode),
-                        () -> sizeOf(context.getSkuMouldRelMap())),
-                runDataInitTaskAsync("模具台账",
-                        () -> loadModelInfo(context, factoryCode),
-                        () -> sizeOf(context.getModelInfoMap())),
+                skuMouldRelFuture,
+                modelInfoFuture,
                 machineInfoFuture,
                 cleaningPlanFuture,
                 runDataInitTaskAsync("月底计划余量",
@@ -921,15 +923,23 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param factoryCode 分厂编号
      */
     private void loadSkuMouldRel(LhScheduleContext context, String factoryCode) {
+        Set<String> materialCodeSet = collectMonthPlanMaterialCodes(context);
+        if (CollectionUtils.isEmpty(materialCodeSet)) {
+            context.setSkuMouldRelMap(new HashMap<String, List<MdmSkuMouldRel>>(0));
+            log.debug("SKU与模具关系加载跳过, 本次月计划SKU为空");
+            return;
+        }
         List<MdmSkuMouldRel> skuMouldRelList = skuMouldRelMapper.selectList(
                 new LambdaQueryWrapper<MdmSkuMouldRel>()
                         .eq(MdmSkuMouldRel::getFactoryCode, factoryCode)
+                        .in(MdmSkuMouldRel::getMaterialCode, materialCodeSet)
                         .eq(MdmSkuMouldRel::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         Map<String, List<MdmSkuMouldRel>> skuMouldRelMap = new HashMap<>(64);
         if (skuMouldRelList != null) {
             for (MdmSkuMouldRel rel : skuMouldRelList) {
-                if (rel.getMaterialCode() != null) {
-                    skuMouldRelMap.computeIfAbsent(rel.getMaterialCode(), k -> new ArrayList<>()).add(rel);
+                if (rel.getMaterialCode() != null && materialCodeSet.contains(rel.getMaterialCode())) {
+                    skuMouldRelMap.computeIfAbsent(rel.getMaterialCode(), k -> new ArrayList<MdmSkuMouldRel>())
+                            .add(rel);
                 }
             }
         }
@@ -944,20 +954,73 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param factoryCode 分厂编号
      */
     private void loadModelInfo(LhScheduleContext context, String factoryCode) {
+        Set<String> mouldCodeSet = collectSkuMouldCodes(context);
+        if (CollectionUtils.isEmpty(mouldCodeSet)) {
+            context.setModelInfoMap(new HashMap<String, MdmModelInfo>(0));
+            log.debug("模具台账加载跳过, 本次SKU关联模具号为空");
+            return;
+        }
         List<MdmModelInfo> modelInfoList = mdmModelInfoMapper.selectList(
                 new LambdaQueryWrapper<MdmModelInfo>()
                         .eq(MdmModelInfo::getFactoryCode, factoryCode)
+                        .in(MdmModelInfo::getMouldCode, mouldCodeSet)
                         .eq(MdmModelInfo::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         Map<String, MdmModelInfo> modelInfoMap = new HashMap<>(128);
         if (!CollectionUtils.isEmpty(modelInfoList)) {
             for (MdmModelInfo modelInfo : modelInfoList) {
-                if (StringUtils.isNotEmpty(modelInfo.getMouldCode())) {
-                    modelInfoMap.put(modelInfo.getMouldCode(), modelInfo);
+                if (StringUtils.isNotEmpty(modelInfo.getMouldCode())
+                        && mouldCodeSet.contains(StringUtils.trim(modelInfo.getMouldCode()))) {
+                    modelInfoMap.put(StringUtils.trim(modelInfo.getMouldCode()), modelInfo);
                 }
             }
         }
         context.setModelInfoMap(modelInfoMap);
         log.debug("模具台账加载完成, 模具数量: {}", modelInfoMap.size());
+    }
+
+    /**
+     * 收集本次月计划涉及的SKU编码。
+     *
+     * @param context 排程上下文
+     * @return SKU编码集合
+     */
+    private Set<String> collectMonthPlanMaterialCodes(LhScheduleContext context) {
+        Set<String> materialCodeSet = new LinkedHashSet<String>(64);
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getMonthPlanList())) {
+            return materialCodeSet;
+        }
+        for (FactoryMonthPlanProductionFinalResult monthPlan : context.getMonthPlanList()) {
+            if (Objects.isNull(monthPlan) || StringUtils.isEmpty(monthPlan.getMaterialCode())) {
+                continue;
+            }
+            materialCodeSet.add(StringUtils.trim(monthPlan.getMaterialCode()));
+        }
+        return materialCodeSet;
+    }
+
+    /**
+     * 收集本次SKU关系中涉及的模具号。
+     *
+     * @param context 排程上下文
+     * @return 模具号集合
+     */
+    private Set<String> collectSkuMouldCodes(LhScheduleContext context) {
+        Set<String> mouldCodeSet = new LinkedHashSet<String>(128);
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getSkuMouldRelMap())) {
+            return mouldCodeSet;
+        }
+        for (List<MdmSkuMouldRel> relList : context.getSkuMouldRelMap().values()) {
+            if (CollectionUtils.isEmpty(relList)) {
+                continue;
+            }
+            for (MdmSkuMouldRel rel : relList) {
+                if (Objects.isNull(rel) || StringUtils.isEmpty(rel.getMouldCode())) {
+                    continue;
+                }
+                mouldCodeSet.add(StringUtils.trim(rel.getMouldCode()));
+            }
+        }
+        return mouldCodeSet;
     }
 
     /**

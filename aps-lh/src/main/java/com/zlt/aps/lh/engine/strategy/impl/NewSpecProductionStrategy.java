@@ -38,6 +38,8 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationUtil
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
+import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
+import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
@@ -456,6 +458,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             Date finalProductionStartTime = null;
             // 多机台累计调度结果，用于最终按总量、日计划账本和满班超排口径确认排完与否。
             int totalScheduledQty = 0;
+            int originalAddMachineCount = countAvailableCandidateMachines(candidates, new HashSet<String>(0));
+            int actualAllowedAddMachineCount = 0;
             while (true) {
                 logNewSpecMachineCandidateSnapshot(context, sku, candidates, excludedMachineCodes, excludedMachineReasonMap);
                 MachineScheduleDTO candidateMachine = selectCandidateMachine(
@@ -471,6 +475,18 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     failReason = selectHigherPriorityFailReason(
                             failReason, NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED);
                     break;
+                }
+                // SKU新增机台必须先按候选机台模数预占可用模具；模具不足只跳过当前机台，不能中断排程主链。
+                MouldResourceAllocationResult mouldResourceAllocationResult = tryAllocateMouldResourceForAddMachine(
+                        context, sku, candidateMachine, originalAddMachineCount, actualAllowedAddMachineCount);
+                if (!mouldResourceAllocationResult.isAllowed()) {
+                    excludedMachineCodes.add(machineCode);
+                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                            mouldResourceAllocationResult.getSkipReason().getDescription(),
+                            null, null, null, null, null, null, null, null, null);
+                    failReason = selectHigherPriorityFailReason(
+                            failReason, NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED);
+                    continue;
                 }
 
                 // 3. 计算机台可开工时间（考虑机台当前预计完工和能力策略约束）
@@ -529,6 +545,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     }
                 }
                 if (mouldChangeStartTime == null) {
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     excludedMachineCodes.add(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             switchAllocateFailReason == NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED
@@ -563,6 +580,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             sku.getShiftCapacity(), sku.getLhTimeSeconds(), machineMouldQty);
                     inspectionBalance.rollbackInspection(context, inspectionTime);
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     excludedMachineCodes.add(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             "排程窗口内无可开产时间",
@@ -612,6 +630,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             LhScheduleTimeUtil.formatDateTime(firstProductionStartTime));
                     inspectionBalance.rollbackInspection(context, inspectionTime);
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     excludedMachineCodes.add(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             "动态分配后本机台计划量为0",
@@ -637,6 +656,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     // 无有效产能时回滚首检和换模占用，避免影响后续SKU排产
                     inspectionBalance.rollbackInspection(context, inspectionTime);
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     // 候选机台失败时恢复原目标量，避免把本次失败收敛值泄漏到后续候选机台。
                     sku.setTargetScheduleQty(baseTargetScheduleQty);
                     excludedMachineCodes.add(machineCode);
@@ -657,6 +677,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 if (machineScheduledQty <= 0) {
                     inspectionBalance.rollbackInspection(context, inspectionTime);
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     sku.setTargetScheduleQty(baseTargetScheduleQty);
                     remainingQty = resolveSchedulableRemainingQty(sku);
                     sku.setRemainingScheduleQty(remainingQty);
@@ -679,6 +700,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 registerMachineAssignment(context, machineCode, result);
                 clearSpecifyReservation(context, machineCode, sku.getMaterialCode());
                 scheduledCount++;
+                actualAllowedAddMachineCount++;
                 progressed = true;
                 scheduled = true;
                 finalMachine = candidateMachine;
@@ -1314,6 +1336,90 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         return selectCandidateMachineFromScopedList(
                 context, sku, singleControlCandidates, machineMatch, null, quantityPolicy);
+    }
+
+    /**
+     * 校验新增机台的模具资源并预占模具。
+     * <p>增机台会让同一SKU同时占用多台机台，必须按候选机台模数扣减可用模具数量。
+     * 如果模具不足，只能跳过当前候选机台继续尝试后续机台，不能强行生成不满足模具条件的排程结果。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param candidateMachine 候选机台
+     * @param originalAddMachineCount 原候选增机台数量
+     * @param actualAllowedAddMachineCount 已成功落地的增机台数量
+     * @return 模具资源分配结果
+     */
+    private MouldResourceAllocationResult tryAllocateMouldResourceForAddMachine(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            MachineScheduleDTO candidateMachine,
+            int originalAddMachineCount,
+            int actualAllowedAddMachineCount) {
+        MouldResourceContext mouldResourceContext = resolveMouldResourceContext(context);
+        MouldResourceAllocationResult allocationResult = mouldResourceContext.tryAllocate(
+                sku.getMaterialCode(), candidateMachine.getMachineCode());
+        String productionType = sku.isContinuousCompensationSku() ? "续作排产" : "新增排产";
+        if (allocationResult.isAllowed()) {
+            log.debug("SKU增机台模具资源校验通过, materialCode: {}, scheduleDate: {}, productionType: {}, "
+                            + "machineCode: {}, machineMouldType: {}, requiredMouldQty: {}, "
+                            + "availableMouldQty: {}, occupiedMouldQty: {}, remainingAvailableMouldQty: {}",
+                    sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), productionType,
+                    candidateMachine.getMachineCode(), resolveMachineMouldTypeText(allocationResult.getRequiredMouldQty()),
+                    allocationResult.getRequiredMouldQty(), allocationResult.getAvailableMouldQty(),
+                    allocationResult.getOccupiedMouldQty(), allocationResult.getRemainingAvailableMouldQty());
+            return allocationResult;
+        }
+        log.info("SKU增机台模具资源不足跳过候选机台, materialCode: {}, scheduleDate: {}, productionType: {}, "
+                        + "originalAddMachineCount: {}, actualAllowedAddMachineCount: {}, candidateMachineCode: {}, "
+                        + "machineMouldType: {}, requiredMouldQty: {}, availableMouldQty: {}, occupiedMouldQty: {}, "
+                        + "remainingAvailableMouldQty: {}, skipReason: {}",
+                sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), productionType,
+                originalAddMachineCount, actualAllowedAddMachineCount, candidateMachine.getMachineCode(),
+                resolveMachineMouldTypeText(allocationResult.getRequiredMouldQty()),
+                allocationResult.getRequiredMouldQty(), allocationResult.getAvailableMouldQty(),
+                allocationResult.getOccupiedMouldQty(), allocationResult.getRemainingAvailableMouldQty(),
+                allocationResult.getSkipReason().getDescription());
+        return allocationResult;
+    }
+
+    /**
+     * 获取新增链路模具资源上下文。
+     *
+     * @param context 排程上下文
+     * @return 模具资源上下文
+     */
+    private MouldResourceContext resolveMouldResourceContext(LhScheduleContext context) {
+        if (context.getMouldResourceContext() == null) {
+            context.setMouldResourceContext(MouldResourceContext.from(context));
+        }
+        return context.getMouldResourceContext();
+    }
+
+    /**
+     * 释放候选机台预占模具。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param allocationResult 模具资源分配结果
+     */
+    private void rollbackMouldResourceAllocation(LhScheduleContext context,
+                                                 SkuScheduleDTO sku,
+                                                 MouldResourceAllocationResult allocationResult) {
+        if (context == null || sku == null || allocationResult == null || !allocationResult.isAllowed()) {
+            return;
+        }
+        resolveMouldResourceContext(context).release(sku.getMaterialCode(), allocationResult);
+    }
+
+    /**
+     * 解析机台模数文本。
+     *
+     * @param requiredMouldQty 所需模具数量
+     * @return 单模/双模
+     */
+    private String resolveMachineMouldTypeText(int requiredMouldQty) {
+        return requiredMouldQty > 1 ? "双模" : "单模";
     }
 
     private MachineScheduleDTO selectCandidateMachineFromScopedList(LhScheduleContext context,

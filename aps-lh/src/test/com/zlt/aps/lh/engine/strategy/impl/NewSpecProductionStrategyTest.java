@@ -9,9 +9,12 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
+import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -19,6 +22,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.time.LocalDate;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -213,6 +217,53 @@ public class NewSpecProductionStrategyTest {
         Assertions.assertNotNull(selected);
         Assertions.assertEquals("K1110", selected.getMachineCode(),
                 "原续作机台不可选时，应回退到现有新增候选机台顺序");
+    }
+
+    /**
+     * 用例说明：新增候选机台模数大于SKU剩余可用模具数时，策略层应拒绝当前候选机台。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldRejectCandidateMachineWhenMouldResourceIsNotEnough() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildMouldResourceContext("SKU-001",
+                Collections.singletonList("M001"), Collections.singletonList(buildMachine("K1105", 2)));
+        context.setScheduleDate(toDate(2026, 6, 4, 0, 0, 0));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("SKU-001");
+
+        MouldResourceAllocationResult result = invokeTryAllocateMouldResourceForAddMachine(
+                strategy, context, sku, buildMachine("K1105", 2), 1, 0);
+
+        Assertions.assertFalse(result.isAllowed());
+        Assertions.assertEquals(1, result.getAvailableMouldQty());
+        Assertions.assertEquals(1, result.getRemainingAvailableMouldQty());
+    }
+
+    /**
+     * 用例说明：候选机台通过模具校验后，如果后续换模、首检或产能失败，应释放本次预占模具。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldReleaseAllocatedMouldWhenNewSpecCandidateRollback() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildMouldResourceContext("SKU-001",
+                Collections.singletonList("M001"), Arrays.asList(buildMachine("K1105", 1), buildMachine("K1110", 1)));
+        context.setScheduleDate(toDate(2026, 6, 4, 0, 0, 0));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("SKU-001");
+
+        MouldResourceAllocationResult first = invokeTryAllocateMouldResourceForAddMachine(
+                strategy, context, sku, buildMachine("K1105", 1), 2, 0);
+        invokeRollbackMouldResourceAllocation(strategy, context, sku, first);
+        MouldResourceAllocationResult second = invokeTryAllocateMouldResourceForAddMachine(
+                strategy, context, sku, buildMachine("K1110", 1), 2, 0);
+
+        Assertions.assertTrue(first.isAllowed());
+        Assertions.assertTrue(second.isAllowed());
+        Assertions.assertEquals(Collections.singletonList("M001"), second.getAllocatedMouldCodeList());
     }
 
     /**
@@ -494,6 +545,66 @@ public class NewSpecProductionStrategyTest {
         return (MachineScheduleDTO) method.invoke(
                 strategy, context, sku, candidates, new HashSet<String>(excludedMachineCodes),
                 machineMatch, preferredTrialMachine, quantityPolicy);
+    }
+
+    private MouldResourceAllocationResult invokeTryAllocateMouldResourceForAddMachine(
+            NewSpecProductionStrategy strategy,
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            MachineScheduleDTO candidateMachine,
+            int originalAddMachineCount,
+            int actualAllowedAddMachineCount) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "tryAllocateMouldResourceForAddMachine",
+                LhScheduleContext.class,
+                SkuScheduleDTO.class,
+                MachineScheduleDTO.class,
+                int.class,
+                int.class);
+        method.setAccessible(true);
+        return (MouldResourceAllocationResult) method.invoke(
+                strategy, context, sku, candidateMachine, originalAddMachineCount, actualAllowedAddMachineCount);
+    }
+
+    private void invokeRollbackMouldResourceAllocation(NewSpecProductionStrategy strategy,
+                                                       LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       MouldResourceAllocationResult allocationResult) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "rollbackMouldResourceAllocation",
+                LhScheduleContext.class,
+                SkuScheduleDTO.class,
+                MouldResourceAllocationResult.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, sku, allocationResult);
+    }
+
+    private LhScheduleContext buildMouldResourceContext(String materialCode,
+                                                        List<String> mouldCodeList,
+                                                        List<MachineScheduleDTO> machineList) {
+        LhScheduleContext context = new LhScheduleContext();
+        Map<String, List<MdmSkuMouldRel>> skuMouldRelMap = new LinkedHashMap<>(4);
+        List<MdmSkuMouldRel> relList = new ArrayList<MdmSkuMouldRel>(mouldCodeList.size());
+        Map<String, MdmModelInfo> modelInfoMap = new LinkedHashMap<>(4);
+        for (String mouldCode : mouldCodeList) {
+            MdmSkuMouldRel rel = new MdmSkuMouldRel();
+            rel.setMaterialCode(materialCode);
+            rel.setMouldCode(mouldCode);
+            relList.add(rel);
+            MdmModelInfo modelInfo = new MdmModelInfo();
+            modelInfo.setMouldCode(mouldCode);
+            modelInfo.setMouldStatus(1);
+            modelInfoMap.put(mouldCode, modelInfo);
+        }
+        skuMouldRelMap.put(materialCode, relList);
+        Map<String, MachineScheduleDTO> machineScheduleMap = new LinkedHashMap<>(4);
+        for (MachineScheduleDTO machine : machineList) {
+            machineScheduleMap.put(machine.getMachineCode(), machine);
+        }
+        context.setSkuMouldRelMap(skuMouldRelMap);
+        context.setModelInfoMap(modelInfoMap);
+        context.setMachineScheduleMap(machineScheduleMap);
+        return context;
     }
 
     private MachineScheduleDTO buildMachine(String machineCode, int maxMouldNum) {

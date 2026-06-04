@@ -30,6 +30,8 @@ import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
+import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import org.junit.jupiter.api.Assertions;
@@ -227,6 +229,60 @@ public class LhBaseDataServiceImplTest {
                 "测试数据需要保留T-1日完成量，防止月累计缺失时回退误判");
         Assertions.assertEquals(Integer.valueOf(0), context.getMaterialMonthFinishedQtyMap().get("3302001513"),
                 "6月月计划累计完成量应明确为0，不能带入5月完成量或缺失后触发历史回退");
+    }
+
+    /**
+     * 用例说明：SKU与模具关系应在月计划加载后按本次月计划SKU范围查询，模具台账应在关系加载后按关联模具号范围查询。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldLoadMouldDataByCurrentMonthPlanScope() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+
+        FactoryMonthPlanProductionFinalResult monthPlan = new FactoryMonthPlanProductionFinalResult();
+        monthPlan.setMaterialCode("SKU-001");
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper = mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any())).thenReturn(Collections.singletonList(monthPlan));
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        MdmSkuMouldRel rel = new MdmSkuMouldRel();
+        rel.setMaterialCode("SKU-001");
+        rel.setMouldCode("M001");
+        MdmSkuMouldRel unrelatedRel = new MdmSkuMouldRel();
+        unrelatedRel.setMaterialCode("SKU-999");
+        unrelatedRel.setMouldCode("M999");
+        MdmSkuMouldRelMapper skuMouldRelMapper = mockMapper(MdmSkuMouldRelMapper.class);
+        Mockito.when(skuMouldRelMapper.selectList(ArgumentMatchers.any())).thenAnswer(invocation -> {
+            Assertions.assertFalse(context.getMonthPlanList().isEmpty(), "SKU与模具关系必须在月计划加载后执行");
+            return Arrays.asList(rel, unrelatedRel);
+        });
+        injectField(service, "skuMouldRelMapper", skuMouldRelMapper);
+
+        MdmModelInfo modelInfo = new MdmModelInfo();
+        modelInfo.setMouldCode("M001");
+        modelInfo.setMouldStatus(1);
+        MdmModelInfo unrelatedModelInfo = new MdmModelInfo();
+        unrelatedModelInfo.setMouldCode("M999");
+        unrelatedModelInfo.setMouldStatus(1);
+        MdmModelInfoMapper modelInfoMapper = mockMapper(MdmModelInfoMapper.class);
+        Mockito.when(modelInfoMapper.selectList(ArgumentMatchers.any())).thenAnswer(invocation -> {
+            Assertions.assertTrue(context.getSkuMouldRelMap().containsKey("SKU-001"),
+                    "模具台账必须在SKU与模具关系加载后执行");
+            return Arrays.asList(modelInfo, unrelatedModelInfo);
+        });
+        injectField(service, "mdmModelInfoMapper", modelInfoMapper);
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertTrue(context.getSkuMouldRelMap().containsKey("SKU-001"));
+        Assertions.assertFalse(context.getSkuMouldRelMap().containsKey("SKU-999"),
+                "SKU与模具关系缓存只能保留本次月计划SKU");
+        Assertions.assertTrue(context.getModelInfoMap().containsKey("M001"));
+        Assertions.assertFalse(context.getModelInfoMap().containsKey("M999"),
+                "模具台账缓存只能保留本次SKU关联模具号");
     }
 
     private LhBaseDataServiceImpl buildServiceWithDefaultMocks() throws Exception {
