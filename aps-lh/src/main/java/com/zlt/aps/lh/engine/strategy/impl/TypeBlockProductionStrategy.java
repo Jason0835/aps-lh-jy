@@ -23,6 +23,7 @@ import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
@@ -1213,7 +1214,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
             appliedRule = "单机台收尾MAX(余量,胎胚库存)";
         } else if (isSingleMachine && getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
-            boolean newSpecExpansionAvailable = hasSchedulableNewSpecExpansionMachine(context, machine, sku, shifts);
+            boolean newSpecExpansionAvailable = !DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
+                    context, sku, 1) && hasSchedulableNewSpecExpansionMachine(context, machine, sku, shifts);
             int adoptedTargetQty = resolveSingleMachineTypeBlockTargetQty(
                     sku, windowCapacityQty, newSpecExpansionAvailable);
             sku.setTargetScheduleQty(adoptedTargetQty);

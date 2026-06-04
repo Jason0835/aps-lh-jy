@@ -3362,6 +3362,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (activeMachineCount <= 0) {
             return false;
         }
+        if (hasPureContinuousResultReachWindowEnd(context, sourceSku)
+                && DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(context, sourceSku, activeMachineCount)) {
+            return true;
+        }
         int windowPlanQty = sumDailyPlanQty(sourceSku.getDailyPlanQuotaMap());
         int pureContinuousScheduledQty = resolvePureContinuousScheduledWindowQty(context, sourceSku);
         if (pureContinuousScheduledQty < windowPlanQty) {
@@ -3402,6 +3406,47 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             first = false;
         }
         return true;
+    }
+
+    /**
+     * 判断纯续作结果是否已在当前窗口末班排产。
+     * <p>逐日后看只允许处理“续作机台已吃满窗口、仅剩残班尾量”的场景；
+     * 如果续作只排了首日或后续日期只被换活字块覆盖，仍需按原补偿规则转 S4.5。
+     * 这里按末班排产量判断，不按 {@code specEndTime} 判断，避免末班未排满到班次结束时误判。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作SKU
+     * @return true-纯续作结果已在窗口末班排产；false-仍存在续作窗口未覆盖风险
+     */
+    private boolean hasPureContinuousResultReachWindowEnd(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        if (context == null || sourceSku == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return false;
+        }
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        if (CollectionUtils.isEmpty(shifts)) {
+            shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
+        }
+        if (CollectionUtils.isEmpty(shifts)) {
+            return false;
+        }
+        Integer lastShiftIndex = shifts.get(shifts.size() - 1).getShiftIndex();
+        if (lastShiftIndex == null) {
+            return false;
+        }
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!isPureContinuousResult(result)) {
+                continue;
+            }
+            SkuScheduleDTO resultSourceSku = resolveResultSourceSku(context, result);
+            if (resultSourceSku == null || resultSourceSku.getDailyPlanQuotaMap() != sourceSku.getDailyPlanQuotaMap()) {
+                continue;
+            }
+            Integer lastShiftPlanQty = ShiftFieldUtil.getShiftPlanQty(result, lastShiftIndex);
+            if (lastShiftPlanQty != null && lastShiftPlanQty > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

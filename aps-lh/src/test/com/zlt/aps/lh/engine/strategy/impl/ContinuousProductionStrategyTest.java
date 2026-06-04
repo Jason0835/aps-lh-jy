@@ -422,7 +422,7 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void scheduleReduceMould_shouldAppendCompensationWhenDailyQuotaRemainsAfterFullContinuousMachine() {
+    public void scheduleReduceMould_shouldNotAppendCompensationWhenDailyLookAheadCapacitySatisfied() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
 
         LhScheduleContext context = new LhScheduleContext();
@@ -471,13 +471,10 @@ public class ContinuousProductionStrategyTest {
 
         strategy.scheduleReduceMould(context);
 
-        Assertions.assertEquals(1, context.getNewSpecSkuList().size(),
-                "续作机台已满排但日计划账本仍有缺口时，应生成补偿SKU进入S4.5重新选机");
-        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
-        Assertions.assertTrue(compensationSku.isContinuousCompensationSku());
-        Assertions.assertEquals(14, compensationSku.resolveTargetScheduleQty());
-        Assertions.assertEquals(14, compensationSku.getRemainingScheduleQty());
-        Assertions.assertNull(compensationSku.getContinuousMachineCode(), "补偿SKU不能固定续作原机台，应交由新增链路重新选机");
+        Assertions.assertTrue(context.getNewSpecSkuList().isEmpty(),
+                "欠产未超阈值且17*3已满足后续50日计划时，不应为了窗口剩余14生成补偿SKU");
+        Assertions.assertEquals(14, SkuDailyPlanQuotaUtil.sumRemainingQty(sku.getDailyPlanQuotaMap()),
+                "小额剩余额度允许滚动到后续窗口，不应强制转S4.5补齐");
     }
 
     @Test

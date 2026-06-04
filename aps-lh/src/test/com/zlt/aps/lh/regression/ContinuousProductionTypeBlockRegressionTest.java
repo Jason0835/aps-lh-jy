@@ -1169,6 +1169,60 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
+    void scheduleTypeBlockChange_shouldNotReturnRemainingQtyWhenDailyLookAheadCapacitySatisfied() {
+        LhScheduleContext context = newContext();
+        context.setScheduleDate(date(2026, 6, 1));
+        context.setScheduleTargetDate(date(2026, 6, 3));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        enableFullCapacityScheduling(context);
+
+        MachineScheduleDTO typeBlockMachine = buildMachine("K1105", "3302002546");
+        typeBlockMachine.setEstimatedEndTime(dateTime(2026, 6, 1, 6, 0, 0));
+        context.getMachineScheduleMap().put(typeBlockMachine.getMachineCode(), typeBlockMachine);
+        MachineScheduleDTO newSpecMachine = buildMachine("K1113", "3302000750");
+        newSpecMachine.setEstimatedEndTime(dateTime(2026, 6, 1, 6, 0, 0));
+        context.getMachineScheduleMap().put(newSpecMachine.getMachineCode(), newSpecMachine);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO continuousSku = buildContinuousSku(
+                "3302002546", "K1105", "EMB-K1105", "STRUCT-K1105", "SPEC-K1105", "PAT-K1105", 1);
+        continuousSku.setSurplusQty(1);
+        continuousSku.setEmbryoStock(1);
+        context.getContinuousSkuList().add(continuousSku);
+        SkuScheduleDTO newSku = buildNewSku("3302001513", "EMB-K1105", "STRUCT-A", "SPEC-A", "PAT-A", 136);
+        newSku.setSurplusQty(1500);
+        newSku.setEmbryoStock(15);
+        newSku.setShiftCapacity(17);
+        newSku.setWindowPlanQty(150);
+        newSku.setWindowRemainingPlanQty(150);
+        newSku.setDailyPlanQuotaMap(buildQuotaMap(shifts.get(0), shifts.get(2), shifts.get(5), 50, 50, 50));
+        context.getNewSpecSkuList().add(newSku);
+
+        putMaterialInfo(context, "3302002546", "胎胚-K1105", "SPEC-K1105", "PAT-K1105", "PAT-K1105");
+        putMaterialInfo(context, "3302001513", "胎胚-K1105", "SPEC-A", "PAT-A", "PAT-A");
+        putMouldRel(context, "3302002546", "MOULD-K1105");
+        putMouldRel(context, "3302001513", "MOULD-K1105");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO currentSku = invocation.getArgument(1);
+            return currentSku != null && "3302002546".equals(currentSku.getMaterialCode());
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(2, context.getScheduleResultList().size(),
+                "换活字块机台已满足逐日后看规则时，只应保留K1105一条结果");
+        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
+        assertEquals("3302001513", typeBlockResult.getMaterialCode());
+        assertEquals("K1105", typeBlockResult.getLhMachineCode());
+        assertTrue(typeBlockResult.getDailyPlanQty() > 0);
+        assertTrue(context.getNewSpecSkuList().isEmpty(),
+                "17*3已满足后续50日计划时，不应把剩余31回流S4.5新增排产");
+    }
+
+    @Test
     void scheduleTypeBlockChange_shouldFallbackWhenPreviousDayLatestSameMachineSkuEnded() {
         LhScheduleContext context = newContext();
         context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
