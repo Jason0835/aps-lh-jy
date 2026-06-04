@@ -1636,12 +1636,120 @@ class NewSpecProductionStrategyRegressionTest {
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
         assertEquals(1, context.getScheduleResultList().size());
-        assertEquals(1, context.getScheduleLogList().size());
-        LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
+        LhScheduleProcessLog processLog = context.getScheduleLogList().stream()
+                .filter(log -> StringUtils.equals("SKU选机台TOP5候选列表", log.getTitle()))
+                .findFirst()
+                .orElse(null);
+        assertEquals(2, context.getScheduleLogList().size());
+        assertTrue(processLog != null);
         assertEquals("SKU选机台TOP5候选列表", processLog.getTitle());
         assertTrue(processLog.getLogDetail().contains("MAT-1"));
         assertTrue(processLog.getLogDetail().contains("M-TRACE"));
         assertTrue(processLog.getLogDetail().contains("决策结果: 成功"));
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldWriteActualPendingQueueTraceForDeferredCompensationRound() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Map<String, String> scheduleParamMap = new HashMap<>(4);
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1");
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        MachineScheduleDTO releasedMachine = buildMachine("K1105", firstShift.getShiftStartDateTime());
+        releasedMachine.setPreviousMaterialCode("3302002546");
+        MachineScheduleDTO fallbackMachine = buildMachine("K1110", firstShift.getShiftStartDateTime());
+        context.getMachineScheduleMap().put(releasedMachine.getMachineCode(), releasedMachine);
+        context.getMachineScheduleMap().put(fallbackMachine.getMachineCode(), fallbackMachine);
+
+        SkuScheduleDTO sourceContinuousSku = buildSku();
+        sourceContinuousSku.setMaterialCode("3302002546");
+        sourceContinuousSku.setMaterialDesc("3302002546");
+        sourceContinuousSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sourceContinuousSku.setContinuousMachineCode("K1105");
+        sourceContinuousSku.setShiftCapacity(17);
+        sourceContinuousSku.setPendingQty(102);
+        sourceContinuousSku.setDailyPlanQty(102);
+        sourceContinuousSku.setTargetScheduleQty(102);
+        sourceContinuousSku.setSurplusQty(102);
+        sourceContinuousSku.setEmbryoStock(102);
+        sourceContinuousSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302002546", 0, 32, 50));
+        context.getContinuousSkuList().add(sourceContinuousSku);
+        context.getReleasedContinuousMachineCodeSet().add("K1105");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("K1105");
+
+        LhScheduleResult placeholderResult = new LhScheduleResult();
+        placeholderResult.setFactoryCode(context.getFactoryCode());
+        placeholderResult.setBatchNo(context.getBatchNo());
+        placeholderResult.setLhMachineCode("K1105");
+        placeholderResult.setLhMachineName("K1105");
+        placeholderResult.setMaterialCode("3302002546");
+        placeholderResult.setMaterialDesc("3302002546");
+        placeholderResult.setScheduleType("01");
+        placeholderResult.setIsTypeBlock("0");
+        placeholderResult.setIsChangeMould("0");
+        placeholderResult.setDailyPlanQty(102);
+        placeholderResult.setSpecEndTime(dateTime(2026, 4, 19, 21, 12));
+        context.getScheduleResultList().add(placeholderResult);
+        context.getScheduleResultSourceSkuMap().put(placeholderResult, sourceContinuousSku);
+        context.getMachineAssignmentMap().put("K1105",
+                new java.util.ArrayList<LhScheduleResult>(Collections.singletonList(placeholderResult)));
+
+        SkuScheduleDTO takeoverSku = buildSku();
+        takeoverSku.setMaterialCode("3302001512");
+        takeoverSku.setMaterialDesc("3302001512");
+        takeoverSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        takeoverSku.setShiftCapacity(17);
+        takeoverSku.setPendingQty(102);
+        takeoverSku.setDailyPlanQty(102);
+        takeoverSku.setTargetScheduleQty(102);
+        takeoverSku.setSurplusQty(102);
+        takeoverSku.setEmbryoStock(102);
+        takeoverSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, "3302001512", 32, 32, 38));
+        context.getNewSpecSkuList().add(takeoverSku);
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                if (StringUtils.equals("3302001512", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(releasedMachine);
+                }
+                if (StringUtils.equals("3302002546", scheduleSku.getMaterialCode())) {
+                    return Arrays.asList(fallbackMachine);
+                }
+                return Collections.emptyList();
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (candidate != null && !excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        List<LhScheduleProcessLog> queueLogs = context.getScheduleLogList().stream()
+                .filter(log -> StringUtils.equals("新增待排队列【实际执行】", log.getTitle()))
+                .collect(java.util.stream.Collectors.toList());
+        assertEquals(2, queueLogs.size(), "补偿SKU插入下一轮后，应输出两轮真实待排队列日志");
+        assertTrue(queueLogs.get(0).getLogDetail().contains("rank=1, sku=3302001512"),
+                "首轮真实待排队列应从抢占机台的新增SKU开始");
+        assertTrue(queueLogs.get(1).getLogDetail().contains("rank=1, sku=3302002546"),
+                "第二轮真实待排队列应显式展示延后补偿SKU");
     }
 
     @Test
@@ -2114,8 +2222,12 @@ class NewSpecProductionStrategyRegressionTest {
 
         assertEquals(0, context.getScheduleResultList().size());
         assertEquals(1, context.getUnscheduledResultList().size());
-        assertEquals(1, context.getScheduleLogList().size());
-        LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
+        LhScheduleProcessLog processLog = context.getScheduleLogList().stream()
+                .filter(log -> StringUtils.equals("SKU选机台TOP5候选列表", log.getTitle()))
+                .findFirst()
+                .orElse(null);
+        assertEquals(2, context.getScheduleLogList().size());
+        assertTrue(processLog != null);
         assertTrue(processLog.getLogDetail().contains("排除明细"));
         assertTrue(processLog.getLogDetail().contains("K2027"));
         assertTrue(processLog.getLogDetail().contains("排程窗口内无可开产时间"));
@@ -2193,7 +2305,7 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(2, candidateTraceLogCount,
                 "启用局部搜索后，候选机台日志应按真实SKU决策输出，不应写入DFS模拟分支日志");
         assertEquals(2, decisionTraceLogCount, "应为每个真实决策SKU输出一条机台决策日志");
-        assertEquals(4, context.getScheduleLogList().size(), "日志数量应受控在真实决策口径内");
+        assertEquals(5, context.getScheduleLogList().size(), "新增真实待排队列日志后，总日志数量应同步增加一条");
     }
 
     @Test

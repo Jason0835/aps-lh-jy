@@ -264,8 +264,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                         Map<String, Integer> unscheduledReasonCountMap) {
         // TODO 后续建议把新增排产主循环拆为“候选生成、窗口分配、结果构建、账本消费”四个私有阶段，降低单方法维护成本。
         int scheduledCount = 0;
+        int roundNo = 1;
         List<SkuScheduleDTO> deferredCompensationSkuList = new ArrayList<SkuScheduleDTO>(2);
         while (true) {
+            traceActualPendingNewSpecQueue(context, roundNo);
             RoundScheduleSummary roundSummary = schedulePendingNewSpecsRound(
                     context, machineMatch, mouldChangeBalance, inspectionBalance, capacityCalculate,
                     shifts, unscheduledReasonCountMap, deferredCompensationSkuList);
@@ -275,7 +277,54 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
             appendDeferredCompensationSkuList(context, deferredCompensationSkuList);
             deferredCompensationSkuList.clear();
+            roundNo++;
         }
+    }
+
+    /**
+     * 输出新增主循环真实待排队列。
+     * <p>SKU 排序汇总只记录某一时点的排序快照；当续作补偿 SKU 在新增链路中被延后插入下一轮时，
+     * 需要额外记录当前轮次真实待排顺序，避免过程日志与实际执行顺序不一致。</p>
+     *
+     * @param context 排程上下文
+     * @param roundNo 新增主循环轮次
+     */
+    private void traceActualPendingNewSpecQueue(LhScheduleContext context, int roundNo) {
+        if (!PriorityTraceLogHelper.isEnabled(context)) {
+            return;
+        }
+        String title = "新增待排队列【实际执行】";
+        List<SkuScheduleDTO> pendingSkuList = context.getNewSpecSkuList();
+        int skuCount = PriorityTraceLogHelper.sizeOf(pendingSkuList);
+        int outputCount = Math.min(LhScheduleConstant.SKU_SORT_TRACE_TOP_N, skuCount);
+
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
+        PriorityTraceLogHelper.appendLine(detailBuilder,
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("步骤", context.getCurrentStep())
+                        + ", " + PriorityTraceLogHelper.kv("轮次", roundNo)
+                        + ", " + PriorityTraceLogHelper.kv("待排SKU数量", skuCount)
+                        + ", " + PriorityTraceLogHelper.kv("输出范围", "TOP" + outputCount));
+        if (CollectionUtils.isEmpty(pendingSkuList)) {
+            PriorityTraceLogHelper.appendLine(detailBuilder, "无可输出的待排SKU");
+        } else {
+            for (int i = 0; i < outputCount; i++) {
+                SkuScheduleDTO sku = pendingSkuList.get(i);
+                PriorityTraceLogHelper.appendLine(detailBuilder,
+                        "[新增待排队列] rank=" + (i + 1)
+                                + ", sku=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())
+                                + ", 补偿SKU=" + PriorityTraceLogHelper.oneZero(sku.isContinuousCompensationSku())
+                                + ", 目标量=" + sku.resolveTargetScheduleQty()
+                                + ", 窗口量=" + PriorityTraceLogHelper.safeText(sku.getWindowPlanQty())
+                                + ", 班产=" + PriorityTraceLogHelper.safeText(sku.getShiftCapacity())
+                                + ", 阶段=" + resolveConstructionStageDesc(sku)
+                                + ", 施工组=" + resolveNewSpecDisplayType(sku)
+                                + ", 收尾=" + PriorityTraceLogHelper.oneZero(endingJudgmentStrategy.isEnding(context, sku)));
+            }
+        }
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detailBuilder.toString());
     }
 
     private RoundScheduleSummary schedulePendingNewSpecsRound(LhScheduleContext context,
@@ -2910,6 +2959,29 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      */
     private boolean isSmallBatchSku(SkuScheduleDTO sku) {
         return sku != null && sku.isSmallBatchValidation();
+    }
+
+    private String resolveConstructionStageDesc(SkuScheduleDTO sku) {
+        if (isTrialConstructionStage(sku)) {
+            return "试制";
+        }
+        if (isMassTrialSku(sku)) {
+            return "量试";
+        }
+        if (isSmallBatchSku(sku)) {
+            return "小批量";
+        }
+        return "正式";
+    }
+
+    private String resolveNewSpecDisplayType(SkuScheduleDTO sku) {
+        if (isTrialConstructionStage(sku)) {
+            return "试制组";
+        }
+        if (isMassTrialSku(sku)) {
+            return "量试组";
+        }
+        return "正规组";
     }
 
     /**
