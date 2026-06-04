@@ -28,6 +28,14 @@ public final class DailyMachineCapacitySimulationUtil {
     /**
      * 按最小增量模拟新增机台。
      *
+     * <p>模拟目的：</p>
+     * <ul>
+     *   <li>判断当前 SKU 是否需要从 1 台扩到多台，而不是直接按候选机台数全量铺开；</li>
+     *   <li>优先确认 8 班窗口总产能是否覆盖窗口计划，避免真实换模后残班不足导致过度扩机；</li>
+     *   <li>欠产超过阈值时改按后看窗口需消化量判断，欠产未超阈值时只检查当前日和后一天 3 班承接能力；</li>
+     *   <li>只读模拟，不修改排程结果、机台状态和 SKU 日计划账本。</li>
+     * </ul>
+     *
      * @param request 模拟请求
      * @return 模拟结果
      */
@@ -38,8 +46,10 @@ public final class DailyMachineCapacitySimulationUtil {
                 || CollectionUtils.isEmpty(request.getMachineDailyCapacityList())) {
             return result;
         }
+        // activeMachines 表示已启用机台数，从当前实际已排/当前候选起步，每次只增加 1 台验证是否足够。
         int activeMachines = Math.max(1, request.getInitialActiveMachines());
         int maxMachineCount = request.getMachineDailyCapacityList().size();
+        // carryShortage 是模拟滚动欠产，T 日取账本初始缺口，后续日期沿用上一日模拟后的欠产。
         int carryShortage = resolveInitialCarryShortage(request);
         LocalDate firstProductionDate = resolveFirstProductionDate(request);
         for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : request.getDailyPlanQuotaMap().entrySet()) {
@@ -54,6 +64,7 @@ public final class DailyMachineCapacitySimulationUtil {
                     request, productionDate, lookAheadEndDate, activeMachines, carryShortage,
                     firstProductionDate);
             while (decision.getUnmetQty() > 0 && activeMachines < maxMachineCount) {
+                // 只有当前启用机台无法覆盖本日决策口径时，才逐台扩展，避免小欠产场景下直接占满候选机台。
                 activeMachines++;
                 decision.setAddedMachineCount(decision.getAddedMachineCount() + 1);
                 decision = refreshDayDecision(request, decision, activeMachines, firstProductionDate);
@@ -94,11 +105,13 @@ public final class DailyMachineCapacitySimulationUtil {
             DailyMachineCapacityDayDecision decision,
             int activeMachines,
             LocalDate firstProductionDate) {
+        // todayRequiredQty 是当前日需要承接的量：当日计划量 + 前序模拟滚动下来的欠产量。
         int todayRequiredQty = decision.getCarryShortageQty() + decision.getTodayPlanQty();
         int todayCapacityQty = sumCapacityQty(request, decision.getProductionDate(),
                 decision.getProductionDate(), activeMachines);
         int currentShortageQty = resolveCurrentThresholdShortage(request, decision, firstProductionDate);
         boolean thresholdExceeded = shouldUseWindowDemandMode(request, currentShortageQty);
+        // windowTotalCapacityQty 使用“机台数 * 班产 * 8班”的理论窗口产能，专门防止真实换模残班不足导致误加机台。
         int windowPlanQty = sumWindowPlanQty(request.getDailyPlanQuotaMap(),
                 decision.getProductionDate(), request.getWindowEndDate());
         int windowTotalCapacityQty = resolveWindowTotalCapacityQty(request, activeMachines);
@@ -108,17 +121,20 @@ public final class DailyMachineCapacitySimulationUtil {
         int capacityQty;
         String decisionMode;
         if (thresholdExceeded) {
+            // 欠产超过阈值：按当前日到后看截止日的窗口需消化量判断，允许为追补缺口追加机台。
             demandQty = currentShortageQty + sumDemandQty(request.getDailyPlanQuotaMap(),
                     decision.getProductionDate(), decision.getLookAheadEndDate());
             capacityQty = sumCapacityQty(request, decision.getProductionDate(),
                     decision.getLookAheadEndDate(), activeMachines);
             decisionMode = MODE_WINDOW_DEMAND;
         } else if (windowTotalCapacityQty >= windowPlanQty) {
+            // 欠产未超阈值且 8 班理论产能可覆盖窗口计划：不因换模后当日残班不足继续加机台。
             demandQty = windowPlanQty;
             capacityQty = windowTotalCapacityQty;
             decisionMode = MODE_WINDOW_TOTAL_CAPACITY;
         } else if (shouldCheckTodayThreeShiftCapacity(request, decision, activeMachines)
                 && todayRequiredQty > todayCapacityQty) {
+            // 当前日计划已经超过当前机台真实可排能力时，才按当前日有效产能触发扩机。
             demandQty = todayRequiredQty;
             capacityQty = todayCapacityQty;
             decisionMode = MODE_TODAY_CAPACITY;
@@ -130,6 +146,7 @@ public final class DailyMachineCapacitySimulationUtil {
                 capacityQty = 0;
                 decisionMode = MODE_WINDOW_LAST_DAY;
             } else {
+                // 当前日可支撑时，再看后一天 3 班产能，防止今天勉强满足但明天计划被拖垮。
                 nextDayPlanQty = resolveTodayPlanQty(request.getDailyPlanQuotaMap().get(nextProductionDate));
                 nextDayThreeShiftCapacityQty = resolveNextDayThreeShiftCapacityQty(request, activeMachines);
                 demandQty = nextDayPlanQty;

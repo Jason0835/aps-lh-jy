@@ -120,6 +120,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
 
         // 基于续作收尾回写后的真实收尾时间，按机台收尾先后衔接换活字块。
+        // 只有已标记收尾且有预计完工时刻的机台，才代表当前活字块可切换到下一规格。
         List<MachineScheduleDTO> endingMachines = context.getMachineScheduleMap().values().stream()
                 .filter(m -> m.isEnding() && m.getEstimatedEndTime() != null)
                 .collect(Collectors.toList());
@@ -147,6 +148,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
 
         // completedMachineMap 记录本轮不再尝试的机台，避免同一机台在一轮中反复失败重试。
         Map<String, Boolean> completedMachineMap = new HashMap<>(Math.max(16, candidateMachines.size() * 2));
+        // 已回流 S4.5 的物料不再被 S4.4 二次抢回，避免换活字块和新增换模主链重复争抢同一 SKU。
         Set<String> returnedToNewSpecMaterialCodes = new LinkedHashSet<String>(16);
         int typeBlockScheduledCount = 0;
         while (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
@@ -183,6 +185,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 if (specifySku != null && appendSpecifyTypeBlockResult(
                         context, machine, specifySku, shifts, completedMachineMap, activeMachines)) {
                     clearSpecifyReservation(context, machineCode, specifySku.getMaterialCode());
+                    // 如果定点换活字块单台不足，剩余量仍保留在新增待排列表，后续统一交给 S4.5 补机台。
                     collectReturnedToNewSpecMaterial(returnedToNewSpecMaterialCodes, context, specifySku);
                     scheduledInCurrentRound = true;
                     typeBlockScheduledCount++;
@@ -190,6 +193,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 }
 
                 // 基于同胎胚、同模具、同主花纹等条件筛选可换活字块候选。
+                // 该阶段只允许不更换整套模具的轻量衔接，完整换模能力评估必须留给 S4.5 新增主链。
                 List<SkuScheduleDTO> typeBlockCandidates = filterTypeBlockCandidates(
                         context, machine, returnedToNewSpecMaterialCodes);
                 SkuScheduleDTO typeBlockSku = selectPreferredSkuFromCandidates(typeBlockCandidates);
@@ -220,6 +224,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
                         context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
                 int eligibleMachineCount = countEligibleTypeBlockMachines(context, typeBlockSku, activeMachines);
+                // 换活字块本阶段不主动扩多台；eligibleMachineCount 只用于单台目标量口径判断。
                 boolean success = appendTypeBlockResultWithRollback(
                         context, machine, typeBlockSku, typeBlockStartTime, typeBlockSwitchStartTime, shifts,
                         eligibleMachineCount == 1);
@@ -240,6 +245,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     completedMachineMap.put(machineCode, true);
                 }
                 // 每轮仅落一条结果，随后按更新后的机台收尾时间重新排序，避免旧排序继续影响后续衔接。
+                // 这样同一机台连续换活字块时，会按最新完工时刻重新参与下一轮竞争。
                 break;
             }
             if (!scheduledInCurrentRound) {
@@ -1018,6 +1024,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     machine.getMachineCode(), sku.getMaterialCode());
             return false;
         }
+        // 保存原目标量和严格目标量标识，换活字块单台试算失败时必须完整恢复，不能污染 S4.5 新增排产。
         Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
         int originalRemainingScheduleQty = sku.getRemainingScheduleQty();
         boolean originalStrictTargetQty = sku.isStrictTargetQty();
@@ -1053,7 +1060,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setTdaySpecEndTime(actualCompletionTime);
         applyTypeBlockCleaningAnalysis(context, result, shifts);
 
-        // 换活字块结果按日计划账本回裁，收尾严格截断，避免超产
+        // 换活字块结果按日计划账本回裁，收尾严格截断，避免超产。
+        // 非收尾正规/量试可保留满班补齐口径，剩余缺口继续留给 S4.5。
         int quotaTrimmedQty = applyTypeBlockToDailyQuota(context, sku, result, shifts);
         if (quotaTrimmedQty <= 0) {
             log.info("换活字块日计划账本回裁后为0, 跳过落地, machineCode: {}, materialCode: {}",
@@ -1071,6 +1079,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         int scheduledQty = result.getDailyPlanQty() == null ? 0 : result.getDailyPlanQty();
         int remainingQty = Math.max(0, adoptedTargetQty - scheduledQty);
         if (remainingQty > 0) {
+            // 换活字块只在当前衔接机台落一段产能；单台不足时，不在 S4.4 继续扩第二台，
+            // 而是把剩余量写回 SKU，交给 S4.5 新增排产重新选机、换模和扣账。
             sku.setTargetScheduleQty(remainingQty);
             sku.setRemainingScheduleQty(remainingQty);
             sku.setStrictTargetQty(originalStrictTargetQty);
@@ -2899,6 +2909,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 // 收尾结果必须严格截断，不再记录满班补齐超排；
                 // 试制等严格目标量场景仍需回裁，但保留超排账本用于追踪被截掉的补满量。
                 if (endingResult || sku.isStrictTargetQty()) {
+                    // 收尾/严格目标量场景不允许把换活字块后的满班补齐量落成有效计划量。
                     trimTypeBlockShiftPlanQty(result, shift.getShiftIndex(), consumed);
                     if (endingResult) {
                         continue;

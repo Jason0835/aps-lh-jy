@@ -134,6 +134,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
 
         // 单控/普通机台约束是类型规则：试制强约束单控，量试/小批量优先单控，正规优先普通。
+        // 该规则只处理候选集合，不在此消费机台；最终是否占用仍由 S4.5 换模、首检和产能结果决定。
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
         // 5. 按多维度排序：排序只改变候选顺序，不改变候选集合中的业务可排性。
@@ -160,6 +161,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * <p>试制只保留单控候选；量试/小批量优先单控、无单控时回落普通；
      * 正规优先普通，且仅在待排小批量SKU已全部排完后，才允许保留单控候选作为回落机台。</p>
      *
+     * <p>业务边界：这里不做新增排序重排，不让后续试制/量试反向抢占当前 SKU 的全局顺序；
+     * 只在当前 SKU 已轮到选机时，按类型决定单控和普通候选是否保留。</p>
+     *
      * @param context 排程上下文
      * @param sku 待排SKU
      * @param candidates 原候选机台
@@ -180,6 +184,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 continue;
             }
             if (isSingleControlMachine(context, candidate.getMachineCode())) {
+                // 单控基准机台已拆成 L/R 运行态机台，候选侧别和班产在后续产能阶段继续按运行态口径处理。
                 singleControlCandidates.add(candidate);
                 continue;
             }
@@ -244,6 +249,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         if (isMassTrialSku(sku) || isSmallBatchSku(sku)) {
             // 量试/小批量优先单控，但允许普通机台兜住可排性，具体顺序由后续排序控制。
+            // 这里保留普通机台是为了单控不足时仍可完成业务需求，不代表普通机台优先。
             List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
                     singleControlCandidates.size() + normalCandidates.size());
             retainedCandidates.addAll(singleControlCandidates);
@@ -256,6 +262,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         if (!CollectionUtils.isEmpty(normalCandidates)) {
             // 小批量已全部排完后，正规SKU优先普通机台，但仍可保留单控候选作为回落机台。
+            // 单控放在普通机台之后，避免正规 SKU 抢占后续特殊 SKU 可能需要的单控资源。
             List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
                     singleControlCandidates.size() + normalCandidates.size());
             retainedCandidates.addAll(normalCandidates);

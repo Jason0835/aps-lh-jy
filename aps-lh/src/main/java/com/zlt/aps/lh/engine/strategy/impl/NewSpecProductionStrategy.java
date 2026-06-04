@@ -328,6 +328,31 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         PriorityTraceLogHelper.logSortSummary(log, context, title, detailBuilder.toString());
     }
 
+    /**
+     * 执行一轮新增 SKU 主排产循环。
+     *
+     * <p>业务步骤：</p>
+     * <ul>
+     *   <li>步骤1：按当前待排队列逐个 SKU 处理，先完成收尾、欠产账本和严格目标量判定；</li>
+     *   <li>步骤2：调用机台匹配策略得到候选机台，候选只代表可承接，不代表最终一定排产；</li>
+     *   <li>步骤3：逐台尝试换模、首检、开产时间和班次产能，失败机台加入排除集合后继续下一台；</li>
+     *   <li>步骤4：按日计划账本回裁结果，当前机台不足时保留剩余量继续拆到下一台；</li>
+     *   <li>步骤5：排产成功后更新结果、机台状态、机台占用和结构待排视图。</li>
+     * </ul>
+     *
+     * <p>副作用：会修改 {@code context.newSpecSkuList}、{@code scheduleResultList}、
+     * {@code scheduleResultSourceSkuMap}、机台运行态、日计划额度账本和机台占用关系。</p>
+     *
+     * @param context 排程上下文
+     * @param machineMatch 机台匹配策略
+     * @param mouldChangeBalance 换模均衡策略
+     * @param inspectionBalance 首检均衡策略
+     * @param capacityCalculate 产能计算策略
+     * @param shifts 本次排程窗口班次，索引对应 class1～class8
+     * @param unscheduledReasonCountMap 未排原因统计
+     * @param deferredCompensationSkuList 被新增抢占的续作占位结果转出的补偿 SKU
+     * @return 本轮排产摘要
+     */
     private RoundScheduleSummary schedulePendingNewSpecsRound(LhScheduleContext context,
                                                               IMachineMatchStrategy machineMatch,
                                                               IMouldChangeBalanceStrategy mouldChangeBalance,
@@ -341,12 +366,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
         while (iterator.hasNext()) {
             SkuScheduleDTO sku = iterator.next();
-            // 续作阶段未命中的SKU在此继续参与新增排产兜底，不做提前拦截。
+            // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
             boolean forceEndingByNoFuturePlan = prepareNewSpecShortageQuota(context, sku);
             if (forceEndingByNoFuturePlan) {
+                // 窗口和月底均无未来计划时，新增按收尾清量处理，目标量允许结合胎胚库存上调。
                 isEnding = true;
             } else if (sku.isStrictNewSpecShortageOnly()) {
+                // 窗口无计划但月底仍有计划时，仅补本月历史欠产，不按收尾满清，也不触发满班超排。
                 isEnding = false;
             }
             // 收尾SKU在排产前上调目标量（考虑胎胚库存），非收尾SKU保持按余量计算的目标量
@@ -371,7 +398,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
 
-            // 1. 匹配候选机台
+            // 1. 匹配候选机台：只做硬性准入和候选排序，换模/首检/产能在后续逐台试算。
             context.getNewSpecTypeRuleBlockedMap().remove(sku);
             List<MachineScheduleDTO> candidates = machineMatch.matchMachines(context, sku);
             logNewSpecMachineCandidateSnapshot(context, sku, candidates, new HashSet<String>(0), null);
@@ -401,11 +428,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             NewSpecFailReasonEnum failReason = NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED;
             Set<String> excludedMachineCodes = new HashSet<>(candidates.size());
             Map<String, String> excludedMachineReasonMap = new LinkedHashMap<>(candidates.size());
+            // originalTargetScheduleQty 是进入本 SKU 前的业务目标量，用于所有候选失败后恢复原口径。
             Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
             int minimumTargetScheduleQty = resolveFormalNonEndingMinimumTargetQty(context, sku, quantityPolicy);
             if (minimumTargetScheduleQty > 0) {
+                // 正规/量试非收尾在满排口径下可临时抬高目标，避免单机台只按 dayN 小目标提前结束。
                 sku.setTargetScheduleQty(minimumTargetScheduleQty);
             }
+            // baseTargetScheduleQty 是本轮多机台拆量的业务基准，单台失败或继续下一台时按它恢复。
             Integer baseTargetScheduleQty = sku.getTargetScheduleQty();
             Integer finalTargetScheduleQty = baseTargetScheduleQty;
             // 初始化多机台拆量剩余量：需求目标保留月计划口径，实际拆机按日计划账本剩余额度收敛。
@@ -418,11 +448,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     remainingQty = Math.max(remainingQty, shiftCapacity);
                 }
             }
+            // dynamicTargetQty 会随着 dayN 扩机台判断动态收敛，表示当前多机台组还需要消化的窗口目标。
             int dynamicTargetQty = remainingQty;
             sku.setRemainingScheduleQty(remainingQty);
             MachineScheduleDTO finalMachine = null;
             Date finalProductionStartTime = null;
-            // 多机台累计调度结果，用于最终按总量确认排完与否
+            // 多机台累计调度结果，用于最终按总量、日计划账本和满班超排口径确认排完与否。
             int totalScheduledQty = 0;
             while (true) {
                 logNewSpecMachineCandidateSnapshot(context, sku, candidates, excludedMachineCodes, excludedMachineReasonMap);
@@ -460,7 +491,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
                 switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
 
-                // 4. 分配换模窗口；基础换模时间永远执行，换模均衡仅在开关开启时介入。
+                // 4. 分配换模窗口；晚班不可换模、换模上限和维保重叠都在分配器中统一收口。
+                // 基础换模时间永远执行，换模均衡仅在开关开启时介入。
                 Date mouldChangeStartTime = null;
                 Date mouldChangeCompleteTime = null;
                 Date inspectionTime = null;
@@ -588,6 +620,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
                     continue;
                 }
+                // 从这里开始 targetScheduleQty 临时改为“本机台计划量”，仅用于结果构建和班次分配。
+                // 后续失败、继续下一台或本 SKU 结束时必须恢复到业务目标，避免污染后续候选机台。
                 dynamicTargetQty = candidateTargetQty;
                 sku.setTargetScheduleQty(machinePlanQty);
                 takeoverReleasedContinuousPlaceholderIfNeeded(
@@ -617,6 +651,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 sku.setMouldQty(machineMouldQty);
                 applyNightNoMouldChangeContinuationFill(context, sku, result, shifts, quantityPolicy);
                 // 7. 先按账本硬约束回裁结果，再落地结果与刷新机台状态，避免窗口总量被结果行放大。
+                // 收尾/试制等严格目标量会被截断；正规/量试非收尾允许记录满班补齐超排。
                 int machineScheduledQty = applyBlockToDailyQuota(context, sku, result, shifts);
                 if (machineScheduledQty <= 0) {
                     inspectionBalance.rollbackInspection(context, inspectionTime);
@@ -647,9 +682,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 scheduled = true;
                 finalMachine = candidateMachine;
                 finalProductionStartTime = firstProductionStartTime;
-                // 累计本机台实际排产量，递减多机台剩余量
+                // 累计本机台实际排产量，递减多机台剩余量；剩余量仍需结合 dayN 账本判断是否继续加机台。
                 totalScheduledQty += machineScheduledQty;
                 if (segment.isStopAfterCurrentForSmallShortage()) {
+                    // 小额欠产允许滚动时，当前机台已覆盖后续日计划，不再为了首日欠产余额继续扩机。
                     dynamicTargetQty = totalScheduledQty;
                 }
                 remainingQty = Math.max(0, dynamicTargetQty - totalScheduledQty);
@@ -679,7 +715,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     }
                     break;
                 }
-                // 一台排不完，保留原业务目标量，下一台机台按剩余缺口动态计算本机台计划量
+                // 一台排不完，保留原业务目标量，下一台机台按剩余缺口动态计算本机台计划量。
+                // 已成功排产的机台加入排除集合，表示本 SKU 后续拆量不再回头重复尝试同一机台。
                 sku.setTargetScheduleQty(baseTargetScheduleQty);
                 excludedMachineCodes.add(machineCode);
                 recordExcludedMachineReason(excludedMachineReasonMap, machineCode,

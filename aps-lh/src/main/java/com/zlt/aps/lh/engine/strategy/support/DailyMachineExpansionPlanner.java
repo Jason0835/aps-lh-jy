@@ -35,6 +35,17 @@ public final class DailyMachineExpansionPlanner {
      * 准备本月历史欠产账本。
      * <p>只补充本月前日累计欠产差额，已入账部分不重复追加；窗口无计划时同步识别收尾清量或仅补欠产。</p>
      *
+     * <p>业务口径：</p>
+     * <ul>
+     *   <li>仅处理当前排程月份内 T 日之前的正向欠产，超产不抵扣后续日计划；</li>
+     *   <li>历史欠产只追加到首日日计划账本一次，共享同一账本的续作/新增/补偿 SKU 不重复入账；</li>
+     *   <li>窗口无计划但月底仍有计划时，只补本月欠产并保持非收尾，避免盲目满班超排；</li>
+     *   <li>窗口和月底均无计划时，按收尾清量处理，允许结合余量/胎胚库存严格收口。</li>
+     * </ul>
+     *
+     * <p>副作用：可能更新 SKU 的 {@code windowPlanQty}、{@code windowRemainingPlanQty}、
+     * {@code targetScheduleQty}、{@code strictNewSpecShortageOnly} 和共享日计划账本。</p>
+     *
      * @param context 排程上下文
      * @param sku SKU
      * @param sceneName 场景名称
@@ -52,6 +63,7 @@ public final class DailyMachineExpansionPlanner {
         int windowDayPlanQty = sumDayPlanQty(sku);
         int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         int effectiveCarryForwardQty = Math.max(0, sku.getEffectiveCarryForwardQty());
+        // additionalShortageQty 表示“本月历史欠产尚未追加到账本的差额”，用于避免同账本多 SKU 重复追补。
         int additionalShortageQty = Math.max(0, historyShortageQty - effectiveCarryForwardQty);
         if (additionalShortageQty > 0) {
             int actualAppendShortageQty = appendShortageToFirstQuota(sku, additionalShortageQty, sceneName);
@@ -61,6 +73,7 @@ public final class DailyMachineExpansionPlanner {
             syncSharedQuotaEffectiveCarryForwardQty(context, sku, sku.getEffectiveCarryForwardQty());
         }
         boolean noWindowPlan = !CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) && windowDayPlanQty <= 0;
+        // quotaRemainingQty 是账本维度剩余额度，已包含继承扣减、历史欠产追加和滚动借用后的结果。
         int quotaRemainingQty = SkuDailyPlanQuotaUtil.sumRemainingQty(sku.getDailyPlanQuotaMap());
         plan.setNoWindowPlan(noWindowPlan);
         plan.setWindowDayPlanQty(windowDayPlanQty);
@@ -72,6 +85,7 @@ public final class DailyMachineExpansionPlanner {
             return plan;
         }
         if (noWindowPlan) {
+            // 无窗口计划时不能按普通新增满产扩机：先计算严格补欠产目标，再根据月底是否仍有计划决定收尾/非收尾。
             int strictTargetQty = Math.min(resolvePositiveDemandQty(sku),
                     Math.max(historyShortageQty, quotaRemainingQty));
             if (strictTargetQty <= 0) {
@@ -115,12 +129,16 @@ public final class DailyMachineExpansionPlanner {
      * 判断SKU是否需要继续尝试下一台机台。
      * <p>小额历史欠产未超阈值时，如果后续日计划已满足，则不再为了首日历史欠产余额扩机台。</p>
      *
+     * <p>该方法只回答“是否继续加机台”，不代表当前 SKU 是否还有月计划剩余；
+     * 月计划剩余可能继续留到后续窗口滚动处理。</p>
+     *
      * @param context 排程上下文
      * @param sku SKU
      * @return true-需要继续增机台；false-当前机台已满足规则
      */
     public static boolean needMoreMachine(LhScheduleContext context, SkuScheduleDTO sku) {
         if (isSmallShortageRollingSatisfied(context, sku)) {
+            // 欠产未超过阈值且后续日计划已被当前产能覆盖时，停止继续追加机台。
             return false;
         }
         if (Objects.nonNull(sku) && sku.getRemainingScheduleQty() > 0) {
@@ -140,6 +158,8 @@ public final class DailyMachineExpansionPlanner {
 
     /**
      * 判断小额历史欠产是否已满足后续日计划支撑要求。
+     * <p>用于“不要仅因小额欠产盲目加机台”的公共口径：首日历史欠产可以滚动，
+     * 但后续 dayN 计划不能被当前机台产能拖垮。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -172,6 +192,8 @@ public final class DailyMachineExpansionPlanner {
 
     /**
      * 判断除首日以外的后续日计划额度是否已经满足。
+     * <p>首日通常承接历史欠产，不能单独作为是否继续扩机台的决定项；
+     * 这里从第二个业务日开始检查，确认后续 dayN 已无剩余额度。</p>
      *
      * @param sku SKU
      * @return true-后续日期无剩余额度；false-仍有后续日计划未满足

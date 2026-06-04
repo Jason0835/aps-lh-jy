@@ -15,6 +15,14 @@ import java.util.Objects;
 /**
  * 通过 Hutool BeanUtil 统一读写 {@link LhScheduleResult} 的 class1～class8 班次字段（与 shiftIndex 对应）。
  *
+ * <p>业务说明：</p>
+ * <ul>
+ *   <li>class1～class8 是本次排程窗口内的班次槽位，不固定等同自然日早/中/晚；</li>
+ *   <li>班次真实含义由 {@code LhShiftConfigVO.shiftIndex}、工作日和班次类型共同决定；</li>
+ *   <li>classNPlanQty、classNStartTime、classNEndTime 必须成组维护，否则落库后会出现有量无时间或空班带时间；</li>
+ *   <li>classNIsEnd 表示该结果行在该班次是否收尾，由 S4.6 按最终班次量统一回填。</li>
+ * </ul>
+ *
  * @author APS
  */
 @Slf4j
@@ -29,6 +37,7 @@ public final class ShiftFieldUtil {
 
     /**
      * 设置班次计划量及起止时间
+     * <p>该方法是班次字段成组写入入口，排产策略应通过它同步维护计划量和起止时间。</p>
      *
      * @param result     排程结果
      * @param shiftIndex 班次索引 1～8
@@ -65,6 +74,7 @@ public final class ShiftFieldUtil {
 
     /**
      * 清空无计划量班次的硫化示方号和类型。
+     * <p>无计划量班次不展示硫化示方，避免空班携带上一轮排程或历史保护留下的示方信息。</p>
      *
      * @param result 排程结果
      */
@@ -209,6 +219,7 @@ public final class ShiftFieldUtil {
 
     /**
      * 根据结果行最后一个有计划量的班次设置收尾标记。
+     * <p>先把所有有计划量班次标记为正常，再仅在机台/SKU 收尾时标记最后一个有量班次为收尾。</p>
      *
      * @param result 排程结果
      * @param endMachine 是否收尾机台
@@ -240,6 +251,7 @@ public final class ShiftFieldUtil {
 
     /**
      * 仅给有计划量班次设置正常收尾标记。
+     * <p>无计划量班次保持空值，落库后表示该班次没有排产，不参与收尾判断。</p>
      *
      * @param result 排程结果
      */
@@ -382,6 +394,7 @@ public final class ShiftFieldUtil {
 
     /**
      * 按比例缩放一组结果的班次计划量，并保证组内总量与结果内总量都不丢尾差。
+     * <p>续作降模、同 SKU 多机台收口等场景会调用该方法，把多条结果按原班次量比例裁到目标总量。</p>
      *
      * @param results 结果列表
      * @param shifts 班次列表
@@ -444,6 +457,7 @@ public final class ShiftFieldUtil {
 
     /**
      * 按权重比例分配目标总量，先取整再按最大余数补尾差，保证合计严格等于目标值。
+     * <p>班产为奇数或多机台比例裁减时可能出现小数尾差，统一补给余数最大的班次，避免结果总量漂移。</p>
      *
      * @param weights 权重列表
      * @param targetTotal 目标总量

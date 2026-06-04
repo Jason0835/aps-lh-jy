@@ -136,8 +136,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         log.info("续作排产 - 续作收尾判定, 续作SKU数: {}", context.getContinuousSkuList().size());
 
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
+        // continuationGroupMachineCountMap 用于区分同一物料/账本是否多机台续作，决定单机满排还是交给降模分摊。
         Map<String, Integer> continuationGroupMachineCountMap = buildContinuationGroupMachineCountMap(
                 context.getContinuousSkuList());
+        // 提前登记释放机台，让 S4.4 中的换活字块预判和 S4.5 新增选机都能使用一致的机台优先级视图。
         preRegisterReleasedContinuousMachines(context, shifts);
 
         for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
@@ -151,6 +153,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             DailyMachineShortageQuotaPlan shortageQuotaPlan =
                     DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "续作排产");
             if (shouldReleaseWindowNoPlanContinuousSku(shortageQuotaPlan)) {
+                // 当前窗口没有日计划时不强行续作占机，释放机台给换活字块/新增；后续有计划的情况会登记为占位/补偿。
                 appendWindowNoPlanContinuousUnscheduledResult(context, sku);
                 registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(), "窗口内无日计划");
                 log.info("续作SKU当前窗口无日计划量，释放续作机台给换模/新增排产, materialCode: {}, machineCode: {}, targetQty: {}",
@@ -172,6 +175,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             // 滚动衔接时沿用机台继承后的可用时间；普通续作从首个有日计划剩余额度的班次起排。
             Date startTime = resolveContinuousStartTime(context, sku, machine, shifts);
             if (isFirstPositiveDailyPlanLaterThanWindowFirstDate(sku, shifts)) {
+                // 首日无计划但后续有计划的续作机台，只降 S4.5 选机优先级，不视为禁止生产。
                 registerReleasedFirstDayNoPlanContinuousMachine(context, machineCode, sku.getMaterialCode());
             }
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
@@ -184,6 +188,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
             sku.setMouldQty(machineMouldQty);
             // 滚动继承结果可直接追加班次量，避免同一机台同一SKU拆成两条连续结果。
+            // 若当前窗口需要为定点新增物料挤出换模时间，只使用切换前的有效班次构造结果。
             LhScheduleResult inheritedResult = findMergeableRollingInheritedResult(context, machineCode, sku.getMaterialCode());
             LhScheduleResult result = inheritedResult != null
                     ? appendScheduleToInheritedResult(context, inheritedResult, machine, sku,
@@ -210,6 +215,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     traceContinuousEndingUpdate(context, machine, sku, result, actualCompletionTime);
                 } else if (specifySwitchStartTime != null && result.getDailyPlanQty() != null
                         && result.getDailyPlanQty() > 0) {
+                    // 非收尾续作让出指定切换起点，后续换活字块/新增按该时刻识别机台已经可切换。
                     machine.setEnding(true);
                     machine.setEstimatedEndTime(specifySwitchStartTime);
                     context.getSpecifyMachineReservedSwitchStartTimeMap().put(machineCode, specifySwitchStartTime);
@@ -650,6 +656,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     keptResults, machineDailyCapacityMap, targetQty, shifts);
         }
         // 日额度账本必须在最终结果收口后再同步，并以回裁后的结果驱动零计划与机台状态。
+        // 降模、同 SKU 尾量错峰和多机台分摊都会改变最终班次量，不能提前扣账。
         syncContinuousDailyPlanQuota(context, shifts);
         appendContinuousCompensationSkuList(context);
         // S4.4 收口：零计划续作结果语义统一，并按最终结果同步机台状态。
@@ -3211,6 +3218,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     /**
      * 续作机台无法满足窗口目标量时，生成新增规格补偿SKU交给S4.5继续换模补量。
      *
+     * <p>补偿只处理同一日计划账本仍有剩余额度的 SKU。它不是新增业务需求，
+     * 而是原续作机台产能不足或被释放后，转入 S4.5 重新选机/换模的补量入口。</p>
+     *
+     * <p>副作用：可能向 {@code context.newSpecSkuList} 追加补偿 SKU，并共享来源续作 SKU 的日计划账本。</p>
+     *
      * @param context 排程上下文
      */
     private void appendContinuousCompensationSkuList(LhScheduleContext context) {
@@ -3225,12 +3237,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             DailyMachineShortageQuotaPlan shortageQuotaPlan =
                     DailyMachineExpansionPlanner.prepareShortageQuota(context, sourceSku, "续作排产补偿");
+            // remainingQty 是 S4.4 结果扣账后仍需由 S4.5 新增链路补齐的缺口。
             int remainingQty = resolveContinuousCompensationQty(context, sourceSku);
             logContinuousExpansionDecision(context, sourceSku, shortageQuotaPlan, remainingQty);
             if (remainingQty <= 0 || hasContinuousCompensationSku(context, sourceSku)) {
                 continue;
             }
             if (isContinuousDailyCapacitySatisfied(context, sourceSku)) {
+                // 理论 8 班/3 班产能已经满足窗口日计划时，不因真实残班缺口生成额外新增机台补偿。
                 log.info("续作补偿增机台跳过，当前续作机台已满足理论日计划增机台规则, materialCode: {}, "
                         + "continuousMachines: {}, shiftCapacity: {}, windowPlanQty: {}",
                         sourceSku.getMaterialCode(), resolveContinuousMachineCodes(context, sourceSku),
@@ -3238,6 +3252,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
             SkuScheduleDTO compensationSku = copyContinuousCompensationSku(sourceSku, remainingQty);
+            // 补偿 SKU 保留同一日计划账本，S4.5 排到后会继续消费剩余额度，避免重复扩大日计划。
             context.getNewSpecSkuList().add(compensationSku);
             log.info("续作目标量未满足，转新增规格链路补量, materialCode: {}, 已排: {}, 补偿量: {}, "
                             + "窗口日计划剩余: {}",
@@ -3255,6 +3270,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      */
     private int resolveContinuousCompensationQty(LhScheduleContext context, SkuScheduleDTO sourceSku) {
         int scheduledQty = resolveScheduledQtyBySourceSku(context, sourceSku);
+        // targetRemainingQty 是目标量口径缺口；quotaRemainingQty 是 dayN 账本口径缺口，两者都要满足才可补偿。
         int targetRemainingQty = Math.max(0, sourceSku.resolveTargetScheduleQty() - scheduledQty);
         if (!CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
             int quotaRemainingQty = Math.max(0,
