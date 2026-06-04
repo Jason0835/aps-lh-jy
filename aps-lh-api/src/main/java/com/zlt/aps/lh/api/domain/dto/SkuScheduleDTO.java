@@ -70,6 +70,8 @@ public class SkuScheduleDTO {
     private int dailyCapacity;
     /** 使用模数 */
     private int mouldQty;
+    /** 月计划模具使用变化信息，格式如 4-2-2；S4.5 窗口无日计划历史欠产补排时取第一段判断计划使用模数 */
+    private String mouldChangeInfo;
 
     // ========== 状态标记 ==========
     /** SKU标记: 01-常规, 02-收尾；由收尾判断策略写入，影响严格目标量和结果收尾标识 */

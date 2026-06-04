@@ -1860,6 +1860,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
             return false;
         }
+        if (isNoWindowHistoryShortageMouldMachineCountEnabled(sku)) {
+            // 窗口无日计划但存在历史欠产时，机台数以 mould_change_info 为准，不能被单机台窗口产能短路。
+            return false;
+        }
         if (candidateTargetQty <= 0 || maxQtyToWindowEnd < candidateTargetQty) {
             return false;
         }
@@ -2117,7 +2121,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (sku == null || policy == null || segment == null) {
             return false;
         }
-        if (policy.isStrictUpperLimit() && !policy.isEnding()) {
+        if (policy.isStrictUpperLimit() && !policy.isEnding()
+                && !isNoWindowHistoryShortageMouldMachineCountEnabled(sku)) {
             return false;
         }
         if (CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(candidates)) {
@@ -2173,8 +2178,132 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         DailyMachineCapacitySimulationResult simulationResult =
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
         logDailyMachineCapacitySimulation(sku, segment, simulationResult);
-        return resolveRequiredNewSpecMachineCount(simulationResult.getFinalActiveMachines(),
-                existingMachineCapacityMaps.size());
+        int requiredMachineCountByDailyCapacity = resolveRequiredNewSpecMachineCount(
+                simulationResult.getFinalActiveMachines(), existingMachineCapacityMaps.size());
+        int requiredMachineCountByMouldInfo = resolveRequiredShortageOnlyMachineCountByMouldInfo(
+                sku, candidateMachine, existingMachineCapacityMaps.size(), availableMachineCount);
+        return Math.max(requiredMachineCountByDailyCapacity, requiredMachineCountByMouldInfo);
+    }
+
+    /**
+     * 判断是否启用“窗口无日计划 + 本月历史欠产”的计划模数机台数约束。
+     * <p>该约束只要求窗口 dayN 原计划为 0 且本月历史欠产大于 0：
+     * 月底仍有计划时，当前窗口只补历史欠产，不能提前消耗未来计划；
+     * 月底无后续计划时，SKU 按整体收尾清量，但增机台数量仍要尊重月计划指定的使用模数。</p>
+     *
+     * @param sku SKU
+     * @return true-启用计划模数机台数约束
+     */
+    private boolean isNoWindowHistoryShortageMouldMachineCountEnabled(SkuScheduleDTO sku) {
+        return resolvePlannedMouldCountForNoWindowHistoryShortage(sku, true) > 0;
+    }
+
+    /**
+     * 按月计划 mould_change_info 推导当前新增阶段还需要启用的机台数。
+     * <p>mould_change_info 形如 4-2-2，仅取第一段作为计划使用模数；
+     * 再按当前候选机台单模/双模模台数计算 ceil(计划使用模数 / 单台机台模数)。
+     * 已经落地的同 SKU 机台会从总需求机台数中扣除，避免第二台以后重复按总机台数拆分。</p>
+     *
+     * @param sku SKU
+     * @param candidateMachine 当前候选机台
+     * @param existingMachineCount 已经启用的同 SKU 机台数
+     * @param availableMachineCount 当前仍可尝试的候选机台数
+     * @return 当前新增阶段还需要启用的机台数；0 表示不启用该约束
+     */
+    private int resolveRequiredShortageOnlyMachineCountByMouldInfo(SkuScheduleDTO sku,
+                                                                   MachineScheduleDTO candidateMachine,
+                                                                   int existingMachineCount,
+                                                                   int availableMachineCount) {
+        int plannedMouldCount = resolvePlannedMouldCountForNoWindowHistoryShortage(sku, true);
+        if (plannedMouldCount <= 0 || Objects.isNull(candidateMachine) || availableMachineCount <= 0) {
+            return 0;
+        }
+        int machineMouldCount = ShiftCapacityResolverUtil.resolveMachineMouldQty(candidateMachine);
+        if (machineMouldCount <= 0) {
+            log.warn("窗口无日计划历史欠产模数约束跳过，机台模数异常, materialCode: {}, machineCode: {}, machineMouldCount: {}",
+                    sku.getMaterialCode(), candidateMachine.getMachineCode(), machineMouldCount);
+            return 0;
+        }
+        int requiredTotalMachineCount = divideCeiling(plannedMouldCount, machineMouldCount);
+        int requiredCurrentMachineCount = requiredTotalMachineCount - Math.max(0, existingMachineCount);
+        if (requiredCurrentMachineCount <= 0) {
+            return 0;
+        }
+        requiredCurrentMachineCount = Math.min(requiredCurrentMachineCount, availableMachineCount);
+        log.info("窗口无日计划历史欠产按计划模数计算机台数, materialCode: {}, mouldChangeInfo: {}, "
+                        + "计划使用模数: {}, 当前机台: {}, 单台机台模数: {}, 已启用机台数: {}, 仍需机台数: {}",
+                sku.getMaterialCode(), sku.getMouldChangeInfo(), plannedMouldCount,
+                candidateMachine.getMachineCode(), machineMouldCount, existingMachineCount,
+                requiredCurrentMachineCount);
+        return requiredCurrentMachineCount;
+    }
+
+    /**
+     * 解析窗口无日计划且存在历史欠产场景的计划使用模数。
+     * <p>异常数据只记录日志并跳过该约束，不强行默认单模或双模，避免无业务依据地改变原有排程结果。</p>
+     *
+     * @param sku SKU
+     * @param logWarning 是否打印异常日志
+     * @return 计划使用模数；0 表示不启用该约束
+     */
+    private int resolvePlannedMouldCountForNoWindowHistoryShortage(SkuScheduleDTO sku, boolean logWarning) {
+        if (!isNoWindowPlanHistoryShortageSku(sku)) {
+            return 0;
+        }
+        String mouldChangeInfo = sku.getMouldChangeInfo();
+        if (StringUtils.isEmpty(mouldChangeInfo)) {
+            logInvalidMouldChangeInfo(logWarning, sku, mouldChangeInfo, "为空");
+            return 0;
+        }
+        String[] parts = mouldChangeInfo.split("-");
+        String firstPart = parts.length > 0 ? parts[0].trim() : StringUtils.EMPTY;
+        if (StringUtils.isEmpty(firstPart)) {
+            logInvalidMouldChangeInfo(logWarning, sku, mouldChangeInfo, "第一段为空");
+            return 0;
+        }
+        try {
+            int plannedMouldCount = Integer.parseInt(firstPart);
+            if (plannedMouldCount <= 0) {
+                logInvalidMouldChangeInfo(logWarning, sku, mouldChangeInfo, "第一段小于等于0");
+                return 0;
+            }
+            return plannedMouldCount;
+        } catch (NumberFormatException ex) {
+            logInvalidMouldChangeInfo(logWarning, sku, mouldChangeInfo, "第一段无法解析为数字");
+            return 0;
+        }
+    }
+
+    /**
+     * 判断 SKU 是否为“窗口无日计划 + 本月历史欠产”场景。
+     * <p>历史欠产是启用该规则的硬前提；若历史欠产小于等于 0，即使窗口无日计划，
+     * 也不能为了收尾或满产而额外按 mould_change_info 扩机。</p>
+     *
+     * @param sku SKU
+     * @return true-窗口无日计划且存在历史欠产
+     */
+    private boolean isNoWindowPlanHistoryShortageSku(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || Math.max(0, sku.getMonthlyHistoryShortageQty()) <= 0
+                || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
+            if (Objects.nonNull(quota) && Math.max(0, quota.getDayPlanQty()) > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void logInvalidMouldChangeInfo(boolean logWarning,
+                                           SkuScheduleDTO sku,
+                                           String mouldChangeInfo,
+                                           String reason) {
+        if (!logWarning || Objects.isNull(sku)) {
+            return;
+        }
+        log.warn("窗口无日计划历史欠产模数约束跳过，mouldChangeInfo异常, materialCode: {}, mouldChangeInfo: {}, reason: {}",
+                sku.getMaterialCode(), mouldChangeInfo, reason);
     }
 
     /**

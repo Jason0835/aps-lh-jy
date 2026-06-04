@@ -437,6 +437,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setConstructionStage(plan.getConstructionStage());
         dto.setTrialDemandQty(safeInt(plan.getTrialQty()));
         dto.setBeginDay(plan.getBeginDay());
+        // 月计划模具变化信息只在 S4.5 窗口无日计划历史欠产补排时用于判断计划使用模数。
+        dto.setMouldChangeInfo(plan.getMouldChangeInfo());
         dto.setTrial(isTrialStage(plan.getConstructionStage()));
         // 正规SKU余量小于阈值时标记为小批量，供选机阶段在单控/普通机台之间应用类型约束
         int smallBatchThreshold = resolveSmallBatchSkuThreshold(context);
@@ -1472,6 +1474,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         copy.setShiftCapacity(source.getShiftCapacity());
         copy.setDailyCapacity(source.getDailyCapacity());
         copy.setMouldQty(source.getMouldQty());
+        copy.setMouldChangeInfo(source.getMouldChangeInfo());
         // 状态标记
         copy.setSkuTag(source.getSkuTag());
         copy.setTrial(source.isTrial());

@@ -168,6 +168,7 @@ public class ScheduleAdjustHandlerTest {
         source.setScheduleDayFinishQty(20);
         source.setFutureMonthPlanQtyAfterWindow(48);
         source.setStrictNewSpecShortageOnly(true);
+        source.setMouldChangeInfo("4-2-2");
 
         SkuScheduleDTO copy = invokeCopySkuForContinuousMachine(handler, source, "K1115");
 
@@ -176,6 +177,7 @@ public class ScheduleAdjustHandlerTest {
         Assertions.assertEquals(20, copy.getScheduleDayFinishQty());
         Assertions.assertEquals(48, copy.getFutureMonthPlanQtyAfterWindow());
         Assertions.assertTrue(copy.isStrictNewSpecShortageOnly());
+        Assertions.assertEquals("4-2-2", copy.getMouldChangeInfo());
         Assertions.assertEquals("K1115", copy.getContinuousMachineCode());
     }
 

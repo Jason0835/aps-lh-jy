@@ -53,6 +53,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -3424,6 +3425,126 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void prepareNewSpecShortageQuota_shouldUseHistoryShortageAsStrictTargetWhenWindowNoPlanButFuturePlanExists() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 9, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 5, 11, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001512");
+        sku.setTargetScheduleQty(220);
+        sku.setSurplusQty(220);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(220);
+        sku.setMonthlyHistoryShortageQty(100);
+        sku.setEffectiveCarryForwardQty(100);
+        sku.setFutureMonthPlanQtyAfterWindow(48);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0);
+        quotaMap.values().iterator().next().setRemainingQty(220);
+        sku.setDailyPlanQuotaMap(quotaMap);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "prepareNewSpecShortageQuota", LhScheduleContext.class, SkuScheduleDTO.class);
+        method.setAccessible(true);
+
+        assertFalse((Boolean) method.invoke(strategy, context, sku));
+        assertTrue(sku.isStrictNewSpecShortageOnly(), "月底仍有计划时应进入仅补历史欠产口径");
+        assertEquals(100, sku.resolveTargetScheduleQty(), "窗口无计划但月底有计划时，目标量只能等于本月历史欠产");
+        assertEquals(100, sku.getWindowPlanQty());
+        assertEquals(100, sku.getWindowRemainingPlanQty());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldLimitShortageOnlyMachineCountByMouldChangeInfoForTwoMouldPlan() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002661");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setPendingQty(96);
+        sku.setTargetScheduleQty(96);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(96);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(96);
+        sku.setFutureMonthPlanQtyAfterWindow(48);
+        sku.setMouldChangeInfo("2-2");
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO k1313 = buildMachine("K1313", dateTime(2026, 6, 1, 6, 0));
+        MachineScheduleDTO k1405 = buildMachine("K1405", dateTime(2026, 6, 1, 6, 0));
+        k1313.setMaxMoldNum(2);
+        k1405.setMaxMoldNum(2);
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k1313, k1405),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "仅补历史欠产且计划使用2模、双模机台时，只需要1台机台");
+        assertEquals(96, context.getScheduleResultList().get(0).getDailyPlanQty().intValue());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldExpandShortageOnlyMachineCountByMouldChangeInfoForFourMouldPlan() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001512");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setPendingQty(96);
+        sku.setTargetScheduleQty(96);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(96);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(96);
+        sku.setFutureMonthPlanQtyAfterWindow(48);
+        sku.setMouldChangeInfo("4-2-2");
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO k1313 = buildMachine("K1313", dateTime(2026, 6, 1, 6, 0));
+        MachineScheduleDTO k1405 = buildMachine("K1405", dateTime(2026, 6, 1, 6, 0));
+        k1313.setMaxMoldNum(2);
+        k1405.setMaxMoldNum(2);
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k1313, k1405),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(2, context.getScheduleResultList().size(),
+                "仅补历史欠产且计划使用4模、双模机台时，需要拆到2台机台");
+        assertEquals(96, sumResultQty(context.getScheduleResultList()), "仅补欠产总量不能超过本月历史欠产");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldTreatNoWindowAndNoFuturePlanAsEnding() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
@@ -3461,6 +3582,89 @@ class NewSpecProductionStrategyRegressionTest {
         LhScheduleResult result = context.getScheduleResultList().get(0);
         assertEquals(100, result.getDailyPlanQty().intValue(), "收尾清量必须严格按目标量排产");
         assertEquals("1", result.getIsEnd(), "月底无后续计划时应按整体收尾标记");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldExpandEndingNoWindowPlanByMouldChangeInfoWhenHistoryShortageExists() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 4, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 6, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001512");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(17);
+        sku.setPendingQty(194);
+        sku.setTargetScheduleQty(194);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(194);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(194);
+        sku.setFutureMonthPlanQtyAfterWindow(0);
+        sku.setMouldChangeInfo("4-2-0");
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO k2025 = buildMachine("K2025", dateTime(2026, 6, 4, 6, 0));
+        MachineScheduleDTO k1002 = buildMachine("K1002", dateTime(2026, 6, 4, 6, 0));
+        k2025.setMaxMoldNum(2);
+        k1002.setMaxMoldNum(2);
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k2025, k1002),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(2, context.getScheduleResultList().size(),
+                "窗口和月底均无计划但存在历史欠产时，计划使用4模、双模机台也应扩到2台");
+        assertEquals(194, sumResultQty(context.getScheduleResultList()), "收尾目标量仍需严格按历史欠产/余量口径清量，不允许超排");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldNotExpandNoWindowPlanByMouldChangeInfoWhenHistoryShortageMissing() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 4, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 6, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001512");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(17);
+        sku.setPendingQty(194);
+        sku.setTargetScheduleQty(194);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(194);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setFutureMonthPlanQtyAfterWindow(0);
+        sku.setMouldChangeInfo("4-2-0");
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO k2025 = buildMachine("K2025", dateTime(2026, 6, 4, 6, 0));
+        MachineScheduleDTO k1002 = buildMachine("K1002", dateTime(2026, 6, 4, 6, 0));
+        k2025.setMaxMoldNum(2);
+        k1002.setMaxMoldNum(2);
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k2025, k1002),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(),
+                "本月历史欠产为0时，不进入窗口无日计划补排，也不能仅凭mouldChangeInfo强制扩机台");
     }
 
     @Test
@@ -4465,6 +4669,32 @@ class NewSpecProductionStrategyRegressionTest {
             totalQty += qty == null ? 0 : qty;
         }
         return totalQty;
+    }
+
+    private int sumResultQty(List<LhScheduleResult> resultList) {
+        int totalQty = 0;
+        if (resultList == null) {
+            return totalQty;
+        }
+        for (LhScheduleResult result : resultList) {
+            if (result == null || result.getDailyPlanQty() == null) {
+                continue;
+            }
+            totalQty += result.getDailyPlanQty();
+        }
+        return totalQty;
+    }
+
+    private LhScheduleResult findScheduleResultByMaterialCode(List<LhScheduleResult> resultList, String materialCode) {
+        if (resultList == null) {
+            return null;
+        }
+        for (LhScheduleResult result : resultList) {
+            if (result != null && StringUtils.equals(materialCode, result.getMaterialCode())) {
+                return result;
+            }
+        }
+        return null;
     }
 
     private LocalDate toLocalDate(LhShiftConfigVO shift) {
