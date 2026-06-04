@@ -705,13 +705,59 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (releasedMachineReferenceTime != null) {
             return releasedMachineReferenceTime;
         }
-        if (machine.getEstimatedEndTime() != null) {
-            return machine.getEstimatedEndTime();
+        Date occupiedEndTime = resolveMachineOccupiedEndTime(context, machine);
+        if (occupiedEndTime != null) {
+            return occupiedEndTime;
         }
         if (context.getScheduleDate() != null) {
             return context.getScheduleDate();
         }
         return context.getScheduleTargetDate();
+    }
+
+    /**
+     * 解析机台已占用结束时间。
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @return 已占用结束时间
+     */
+    private Date resolveMachineOccupiedEndTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        Date machineEndTime = Objects.nonNull(machine) ? machine.getEstimatedEndTime() : null;
+        Date assignedEndTime = Objects.nonNull(machine)
+                ? resolveLatestAssignedEndTime(context, machine.getMachineCode()) : null;
+        if (Objects.isNull(machineEndTime)) {
+            return assignedEndTime;
+        }
+        if (Objects.isNull(assignedEndTime)) {
+            return machineEndTime;
+        }
+        return machineEndTime.after(assignedEndTime) ? machineEndTime : assignedEndTime;
+    }
+
+    /**
+     * 获取同一机台已登记有效结果的最新结束时间。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return 最新有效结果结束时间
+     */
+    private Date resolveLatestAssignedEndTime(LhScheduleContext context, String machineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)) {
+            return null;
+        }
+        List<LhScheduleResult> assignedResults = context.getMachineAssignmentMap().get(machineCode);
+        if (CollectionUtils.isEmpty(assignedResults)) {
+            return null;
+        }
+        return assignedResults.stream()
+                .filter(result -> Objects.nonNull(result)
+                        && Objects.nonNull(result.getDailyPlanQty())
+                        && result.getDailyPlanQty() > 0
+                        && Objects.nonNull(result.getSpecEndTime()))
+                .map(LhScheduleResult::getSpecEndTime)
+                .max(Date::compareTo)
+                .orElse(null);
     }
 
     /**

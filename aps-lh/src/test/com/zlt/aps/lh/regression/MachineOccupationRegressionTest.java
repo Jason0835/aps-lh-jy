@@ -11,8 +11,10 @@ import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
+import com.zlt.aps.lh.util.MouldStatusUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -20,8 +22,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Calendar;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Collections;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -70,8 +74,8 @@ class MachineOccupationRegressionTest {
 
         context.getNewSpecSkuList().add(newSku("MAT-A", "SPEC-A", "17"));
         context.getNewSpecSkuList().add(newSku("MAT-B", "SPEC-B", "18"));
-        context.getSkuMouldRelMap().put("MAT-A", Collections.singletonList(mould("MOULD-A")));
-        context.getSkuMouldRelMap().put("MAT-B", Collections.singletonList(mould("MOULD-B")));
+        enableMoulds(context, "MAT-A", "MOULD-A1", "MOULD-A2");
+        enableMoulds(context, "MAT-B", "MOULD-B1", "MOULD-B2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD-1", "LHGD-2");
         when(machineMatchStrategy.matchMachines(any(), any())).thenReturn(Collections.singletonList(machine));
@@ -91,8 +95,6 @@ class MachineOccupationRegressionTest {
                 });
         when(capacityCalculateStrategy.calculateStartTime(any(), anyString(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(2));
-        when(mouldChangeBalanceStrategy.allocateMouldChange(any(), anyString(), any()))
-                .thenAnswer(invocation -> invocation.getArgument(2));
         when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(2));
         when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
@@ -104,6 +106,49 @@ class MachineOccupationRegressionTest {
         LhScheduleResult second = context.getScheduleResultList().get(1);
         assertTrue(earliestStart(second).compareTo(first.getSpecEndTime()) >= 0);
         assertEquals(second.getSpecEndTime(), machine.getEstimatedEndTime());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldUseAssignedResultEndTimeWhenRuntimeMachineEndTimeMissing() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("M1");
+        machine.setMachineName("M1");
+        machine.setStatus("0");
+        machine.setMaxMoldNum(2);
+        machine.setCurrentMaterialCode("MAT-A");
+        machine.setCurrentMaterialDesc("MAT-A-DESC");
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.getMachineScheduleMap().put("M1", machine);
+
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setLhMachineCode("M1");
+        previousResult.setMaterialCode("MAT-A");
+        previousResult.setMaterialDesc("MAT-A-DESC");
+        previousResult.setDailyPlanQty(2);
+        previousResult.setSpecEndTime(dateTime(2026, 4, 12, 6, 0));
+        context.getMachineAssignmentMap().put("M1", new ArrayList<>(Collections.singletonList(previousResult)));
+
+        context.getNewSpecSkuList().add(newSku("MAT-B", "SPEC-B", "18"));
+        enableMoulds(context, "MAT-B", "MOULD-B1", "MOULD-B2");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD-1");
+        when(machineMatchStrategy.matchMachines(any(), any())).thenReturn(Collections.singletonList(machine));
+        when(machineMatchStrategy.selectBestMachine(any(), any(), any(), any()))
+                .thenReturn(machine);
+        when(capacityCalculateStrategy.calculateStartTime(any(), anyString(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(2));
+        when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
+                .thenAnswer(invocation -> invocation.getArgument(2));
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
+                inspectionBalanceStrategy, capacityCalculateStrategy);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult nextResult = context.getScheduleResultList().get(0);
+        assertTrue(earliestStart(nextResult).compareTo(previousResult.getSpecEndTime()) >= 0,
+                "同一机台已有其他SKU有效结果时，后续SKU必须从上一结果结束后换模衔接");
     }
 
     private LhScheduleContext newContext() {
@@ -135,6 +180,20 @@ class MachineOccupationRegressionTest {
         MdmSkuMouldRel rel = new MdmSkuMouldRel();
         rel.setMouldCode(mouldCode);
         return rel;
+    }
+
+    private void enableMoulds(LhScheduleContext context, String materialCode, String... mouldCodes) {
+        List<MdmSkuMouldRel> relList = new ArrayList<>(mouldCodes.length);
+        for (String mouldCode : mouldCodes) {
+            MdmSkuMouldRel rel = mould(mouldCode);
+            rel.setMaterialCode(materialCode);
+            relList.add(rel);
+            MdmModelInfo modelInfo = new MdmModelInfo();
+            modelInfo.setMouldCode(mouldCode);
+            modelInfo.setMouldStatus(MouldStatusUtil.STATUS_ENABLED);
+            context.getModelInfoMap().put(mouldCode, modelInfo);
+        }
+        context.getSkuMouldRelMap().put(materialCode, relList);
     }
 
     private java.util.Date earliestStart(LhScheduleResult result) {

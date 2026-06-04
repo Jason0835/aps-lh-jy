@@ -297,6 +297,28 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void resolveCandidateReferenceTime_shouldUseAssignedEndTimeWhenMachineEndTimeMissing() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        MachineScheduleDTO runtimeMachine = machine("M-OCCUPIED", null, "SPEC-A", "22.5", "MAT-A");
+        context.getMachineScheduleMap().put(runtimeMachine.getMachineCode(), runtimeMachine);
+
+        com.zlt.aps.lh.api.domain.entity.LhScheduleResult assignedResult =
+                new com.zlt.aps.lh.api.domain.entity.LhScheduleResult();
+        assignedResult.setLhMachineCode("M-OCCUPIED");
+        assignedResult.setMaterialCode("MAT-A");
+        assignedResult.setDailyPlanQty(2);
+        assignedResult.setSpecEndTime(dateTime(2026, 4, 22, 6, 0));
+        context.getMachineAssignmentMap().put("M-OCCUPIED", Collections.singletonList(assignedResult));
+
+        Date referenceTime = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveCandidateReferenceTime", context, runtimeMachine);
+
+        assertEquals(assignedResult.getSpecEndTime(), referenceTime,
+                "机台运行态结束时间缺失时，新增选机画像应使用同机台已登记有效结果的结束时间");
+    }
+
+    @Test
     void resolveOtherSkuOccupiedScore_shouldIgnoreReleasedPlaceholderAfterQuotaConsumed() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();

@@ -490,8 +490,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
 
                 // 3. 计算机台可开工时间（考虑机台当前预计完工和能力策略约束）
-                Date endingTime = candidateMachine.getEstimatedEndTime() != null
-                        ? candidateMachine.getEstimatedEndTime() : resolveDefaultMachineEndTime(context, shifts);
+                Date endingTime = resolveMachineOccupationEndTime(context, candidateMachine, shifts);
                 getMaintenanceScheduleService().tryAttachLongOnlineMaintenance(context, candidateMachine);
                 if (isEnding) {
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
@@ -4807,7 +4806,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (machine == null) {
             return;
         }
-        machine.setEstimatedEndTime(result.getSpecEndTime());
+        List<LhScheduleResult> assignedResults = context.getMachineAssignmentMap().get(result.getLhMachineCode());
+        LhScheduleResult latestResult = resolveLatestAssignedResult(assignedResults);
+        if (latestResult != null) {
+            LhScheduleResult previousResult = resolvePreviousAssignedResult(assignedResults, latestResult);
+            applyMachineStateFromResult(context, machine, latestResult, previousResult);
+            return;
+        }
+        restoreMachineStateFromInitial(context, result.getLhMachineCode(), machine);
     }
 
     /**
@@ -5919,6 +5925,60 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             context.getSpecifyMachineReservedMaterialMap().remove(machineCode);
             context.getSpecifyMachineReservedSwitchStartTimeMap().remove(machineCode);
         }
+    }
+
+    /**
+     * 解析机台新增换模接续起点。
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @param shifts 排程窗口班次
+     * @return 机台已占用结束时间
+     */
+    private Date resolveMachineOccupationEndTime(LhScheduleContext context,
+                                                 MachineScheduleDTO machine,
+                                                 List<LhShiftConfigVO> shifts) {
+        Date machineEndTime = Objects.nonNull(machine) ? machine.getEstimatedEndTime() : null;
+        Date assignedEndTime = Objects.nonNull(machine)
+                ? resolveLatestAssignedEndTime(context, machine.getMachineCode()) : null;
+        Date occupationEndTime = resolveLaterTime(machineEndTime, assignedEndTime);
+        if (Objects.nonNull(occupationEndTime)) {
+            return occupationEndTime;
+        }
+        return resolveDefaultMachineEndTime(context, shifts);
+    }
+
+    /**
+     * 获取同一机台已登记有效结果的最新结束时间。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return 最新有效结果结束时间
+     */
+    private Date resolveLatestAssignedEndTime(LhScheduleContext context, String machineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)) {
+            return null;
+        }
+        LhScheduleResult latestResult = resolveLatestAssignedResult(
+                context.getMachineAssignmentMap().get(machineCode));
+        return Objects.nonNull(latestResult) ? latestResult.getSpecEndTime() : null;
+    }
+
+    /**
+     * 获取两个时间中较晚的一个。
+     *
+     * @param first 第一个时间
+     * @param second 第二个时间
+     * @return 较晚时间
+     */
+    private Date resolveLaterTime(Date first, Date second) {
+        if (Objects.isNull(first)) {
+            return second;
+        }
+        if (Objects.isNull(second)) {
+            return first;
+        }
+        return first.after(second) ? first : second;
     }
 
     private void updateMachineState(LhScheduleContext context, MachineScheduleDTO machine, SkuScheduleDTO sku, LhScheduleResult result) {
