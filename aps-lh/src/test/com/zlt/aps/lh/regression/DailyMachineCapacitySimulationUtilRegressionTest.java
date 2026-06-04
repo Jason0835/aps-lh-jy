@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * dayN 机台产能模拟回归。
@@ -112,6 +113,7 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         request.setDailyPlanQuotaMap(quotaMap);
         request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 32, 48, 48, 3));
         request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
         request.setShortageLookAheadDays(2);
         request.setShortageAddMachineThreshold(150);
         request.setMonthlyHistoryShortageQty(192);
@@ -137,6 +139,7 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         request.setDailyPlanQuotaMap(quotaMap);
         request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 32, 48, 48, 2));
         request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
         request.setShortageLookAheadDays(2);
         request.setShortageAddMachineThreshold(150);
         request.setMonthlyHistoryShortageQty(100);
@@ -151,7 +154,144 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
     }
 
     @Test
-    void simulateExpansion_shouldKeepSmallShortageModeWhenRollingShortageExceedsThreshold() {
+    void simulateExpansion_shouldNotAddMachineWhenEightShiftWindowCapacityCoversPlan() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = quotaMap(day1, day2, day3, 8, 60, 60);
+        quotaMap.get(day1).setRemainingQty(108);
+        request.setDailyPlanQuotaMap(quotaMap);
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 16, 48, 48, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(100);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(1, result.getFinalActiveMachines(),
+                "小欠产未超阈值且1台机台8班总产能覆盖窗口日计划总和时，不应增机台");
+        assertEquals(0, result.getTotalAddedMachineCount());
+        assertEquals(128, result.getDayDecisionList().get(0).getWindowTotalCapacityQty());
+        assertEquals(128, result.getDayDecisionList().get(0).getWindowPlanQty());
+    }
+
+    @Test
+    void simulateExpansion_shouldKeepSmallShortageModeWhenHistoryShortageIsZero() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = quotaMap(day1, day2, day3, 8, 60, 60);
+        request.setDailyPlanQuotaMap(quotaMap);
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 16, 48, 48, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(1, result.getFinalActiveMachines(),
+                "历史欠产为0时仍应进入小欠产口径，不能退回窗口需消化量强制补机");
+        assertEquals(0, result.getTotalAddedMachineCount());
+        assertEquals("8班窗口总产能", result.getDayDecisionList().get(0).getDecisionMode());
+        assertFalse(result.getDayDecisionList().get(0).isShortageThresholdExceeded());
+    }
+
+    @Test
+    void simulateExpansion_shouldUseRemainingWindowPlanQtyAfterFirstDay() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        request.setDailyPlanQuotaMap(quotaMap(day1, day2, day3, 31, 30, 40));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 31, 30, 40, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(10);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(100);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(1, result.getFinalActiveMachines(),
+                "T+1 应按剩余窗口总量判断，不能继续拿首窗总量触发补机");
+        assertEquals("8班窗口总产能", result.getDayDecisionList().get(1).getDecisionMode());
+        assertEquals(70, result.getDayDecisionList().get(1).getWindowPlanQty());
+    }
+
+    @Test
+    void simulateExpansion_shouldAddMachineWhenNextDayThreeShiftCapacityIsInsufficient() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = quotaMap(day1, day2, day3, 48, 60, 60);
+        quotaMap.get(day1).setRemainingQty(148);
+        request.setDailyPlanQuotaMap(quotaMap);
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 48, 48, 48, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(100);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(2, result.getFinalActiveMachines(),
+                "小欠产未超阈值且窗口8班总产能不足、后一天3班产能不足时，应增机台");
+        assertEquals(1, result.getTotalAddedMachineCount());
+        assertEquals(1, result.getDayDecisionList().get(0).getAddedMachineCount());
+    }
+
+    @Test
+    void simulateExpansion_shouldAddMachineWhenTodayPlanExceedsTodayCapacityEvenNextDayCanCover() {
+        LocalDate day1 = LocalDate.of(2026, 6, 1);
+        LocalDate day2 = LocalDate.of(2026, 6, 2);
+        LocalDate day3 = LocalDate.of(2026, 6, 3);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001512");
+        request.setDailyPlanQuotaMap(quotaMap(day1, day2, day3, 100, 50, 44));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 0, 17, 51, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(17);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(200);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(2, result.getFinalActiveMachines(),
+                "窗口8班理论产能不足且当前日计划大于当前日有效产能时，即使后一天3班理论产能满足也应增机台");
+        assertEquals(1, result.getTotalAddedMachineCount());
+        assertEquals(1, result.getDayDecisionList().get(0).getAddedMachineCount());
+    }
+
+    @Test
+    void simulateExpansion_shouldSwitchToWindowDemandWhenRollingShortageExceedsThreshold() {
         LocalDate day1 = LocalDate.of(2026, 5, 9);
         LocalDate day2 = LocalDate.of(2026, 5, 10);
         LocalDate day3 = LocalDate.of(2026, 5, 11);
@@ -162,6 +302,7 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         request.setDailyPlanQuotaMap(quotaMap);
         request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 0, 48, 48, 2));
         request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
         request.setShortageLookAheadDays(2);
         request.setShortageAddMachineThreshold(150);
         request.setMonthlyHistoryShortageQty(150);
@@ -171,9 +312,10 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         DailyMachineCapacitySimulationResult result =
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
 
-        assertEquals(1, result.getFinalActiveMachines(),
-                "历史欠产未超阈值时，即使滚动欠产放大，也应继续按小欠产逐日后看，不应切到窗口扩机");
-        assertEquals(0, result.getTotalAddedMachineCount());
+        assertEquals(2, result.getFinalActiveMachines(),
+                "滚动到T+1时累计欠产超过阈值，应切换为窗口需消化量强制增机台");
+        assertEquals(1, result.getTotalAddedMachineCount());
+        assertEquals("窗口需消化量", result.getDayDecisionList().get(1).getDecisionMode());
     }
 
     private Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap(LocalDate day1,

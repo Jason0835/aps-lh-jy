@@ -3,6 +3,7 @@ package com.zlt.aps.lh.context;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
 import java.math.BigDecimal;
@@ -16,6 +17,7 @@ import java.util.Map;
  *
  * @author APS
  */
+@Slf4j
 public class LhScheduleConfig {
 
     /** 已解析的参数快照（值均为字符串，按需转换） */
@@ -470,8 +472,28 @@ public class LhScheduleConfig {
     }
 
     public int getNewSpecShortageAddMachineThreshold() {
-        return Math.max(0, getParamIntValue(LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD,
-                LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD));
+        String value = resolvedParamMap.get(LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD);
+        if (StringUtils.isEmpty(value)) {
+            log.warn("新增排产/续作补偿欠产增机台阈值缺失, paramCode: {}, 使用默认值: {}",
+                    LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD,
+                    LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD);
+            return LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD;
+        }
+        try {
+            int threshold = Integer.parseInt(value.trim());
+            if (threshold > 0) {
+                return threshold;
+            }
+            log.warn("新增排产/续作补偿欠产增机台阈值配置异常, paramCode: {}, value: {}, 使用默认值: {}",
+                    LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, value,
+                    LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD);
+            return LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD;
+        } catch (NumberFormatException e) {
+            log.warn("新增排产/续作补偿欠产增机台阈值解析失败, paramCode: {}, value: {}, 使用默认值: {}",
+                    LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, value,
+                    LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD);
+            return LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD;
+        }
     }
 
     /**

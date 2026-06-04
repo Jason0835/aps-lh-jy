@@ -3230,6 +3230,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (remainingQty <= 0 || hasContinuousCompensationSku(context, sourceSku)) {
                 continue;
             }
+            if (isContinuousDailyCapacitySatisfied(context, sourceSku)) {
+                log.info("续作补偿增机台跳过，当前续作机台已满足理论日计划增机台规则, materialCode: {}, "
+                        + "continuousMachines: {}, shiftCapacity: {}, windowPlanQty: {}",
+                        sourceSku.getMaterialCode(), resolveContinuousMachineCodes(context, sourceSku),
+                        sourceSku.getShiftCapacity(), sumDailyPlanQty(sourceSku.getDailyPlanQuotaMap()));
+                continue;
+            }
             SkuScheduleDTO compensationSku = copyContinuousCompensationSku(sourceSku, remainingQty);
             context.getNewSpecSkuList().add(compensationSku);
             log.info("续作目标量未满足，转新增规格链路补量, materialCode: {}, 已排: {}, 补偿量: {}, "
@@ -3271,6 +3278,129 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return 0;
         }
         return targetRemainingQty;
+    }
+
+    /**
+     * 判断续作最终机台是否已经满足本次增机台理论规则。
+     * <p>续作补偿进入 S4.5 前先按同一套 8班窗口总产能、当前日3班、后一天3班和滚动阈值判断，
+     * 避免续作机台已足够时仅因真实窗口剩余缺口继续补机台。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作SKU
+     * @return true-当前续作机台已满足，不需要生成补偿SKU；false-仍需进入S4.5补偿
+     */
+    private boolean isContinuousDailyCapacitySatisfied(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        if (context == null || sourceSku == null || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())
+                || sourceSku.getShiftCapacity() <= 0) {
+            return false;
+        }
+        int activeMachineCount = resolveContinuousMachineCount(context, sourceSku);
+        if (activeMachineCount <= 0) {
+            return false;
+        }
+        int windowPlanQty = sumDailyPlanQty(sourceSku.getDailyPlanQuotaMap());
+        int eightShiftCapacityQty = activeMachineCount * sourceSku.getShiftCapacity() * 8;
+        if (eightShiftCapacityQty >= windowPlanQty) {
+            return true;
+        }
+        int threeShiftCapacityQty = activeMachineCount * sourceSku.getShiftCapacity() * 3;
+        int threshold = Math.max(0, DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context));
+        int carryShortageQty = 0;
+        boolean first = true;
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sourceSku.getDailyPlanQuotaMap().entrySet()) {
+            if (entry == null || entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            int currentShortageQty = first
+                    ? Math.max(carryShortageQty, Math.max(0, sourceSku.getMonthlyHistoryShortageQty()))
+                    : carryShortageQty;
+            if (threshold <= 0 || currentShortageQty > threshold) {
+                return false;
+            }
+            int todayPlanQty = Math.max(0, entry.getValue().getDayPlanQty());
+            int todayScheduledQty = resolveContinuousScheduledQtyByProductionDate(context, sourceSku, entry.getKey());
+            if (todayPlanQty > threeShiftCapacityQty && todayScheduledQty < todayPlanQty) {
+                return false;
+            }
+            LocalDate nextProductionDate = resolveNextProductionDate(sourceSku.getDailyPlanQuotaMap(), entry.getKey());
+            if (nextProductionDate != null) {
+                SkuDailyPlanQuotaDTO nextQuota = sourceSku.getDailyPlanQuotaMap().get(nextProductionDate);
+                int nextDayPlanQty = nextQuota == null ? 0 : Math.max(0, nextQuota.getDayPlanQty());
+                if (nextDayPlanQty > threeShiftCapacityQty) {
+                    return false;
+                }
+            }
+            carryShortageQty = Math.max(0, carryShortageQty + todayPlanQty - todayScheduledQty);
+            first = false;
+        }
+        return true;
+    }
+
+    /**
+     * 汇总窗口日计划量。
+     *
+     * @param quotaMap 日计划账本
+     * @return 日计划总量
+     */
+    private int sumDailyPlanQty(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
+        if (CollectionUtils.isEmpty(quotaMap)) {
+            return 0;
+        }
+        int totalQty = 0;
+        for (SkuDailyPlanQuotaDTO quota : quotaMap.values()) {
+            if (quota == null) {
+                continue;
+            }
+            totalQty += Math.max(0, quota.getDayPlanQty());
+        }
+        return totalQty;
+    }
+
+    /**
+     * 统计当前来源SKU的续作结果机台数。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作SKU
+     * @return 续作机台数
+     */
+    private int resolveContinuousMachineCount(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        if (context == null || sourceSku == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return 0;
+        }
+        Set<String> machineCodeSet = new LinkedHashSet<String>(4);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!isPureContinuousResult(result)) {
+                continue;
+            }
+            SkuScheduleDTO resultSourceSku = resolveResultSourceSku(context, result);
+            if (resultSourceSku == null || resultSourceSku.getDailyPlanQuotaMap() != sourceSku.getDailyPlanQuotaMap()) {
+                continue;
+            }
+            if (StringUtils.isNotEmpty(result.getLhMachineCode())) {
+                machineCodeSet.add(result.getLhMachineCode());
+            }
+        }
+        return machineCodeSet.size();
+    }
+
+    /**
+     * 解析当前业务日后的下一业务日。
+     *
+     * @param quotaMap 日计划账本
+     * @param productionDate 当前业务日
+     * @return 下一业务日
+     */
+    private LocalDate resolveNextProductionDate(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+                                                LocalDate productionDate) {
+        if (CollectionUtils.isEmpty(quotaMap) || productionDate == null) {
+            return null;
+        }
+        for (LocalDate date : quotaMap.keySet()) {
+            if (date != null && date.isAfter(productionDate)) {
+                return date;
+            }
+        }
+        return null;
     }
 
     /**

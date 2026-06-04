@@ -1739,8 +1739,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         int requiredMachineCountByDailyCapacity = resolveRequiredMachineCountByDailyCapacity(
                 context, sku, candidates, excludedMachineCodes, policy, segment, candidateMachine,
                 shifts, capacityCalculate, remainingTargetQty, availableMachineCount);
-        boolean suppressTotalExpansion = shouldAllowSmallShortageRolling(context, sku)
-                && requiredMachineCountByDailyCapacity <= 1;
+        boolean suppressTotalExpansion = isDailyCapacitySimulationSatisfied(
+                sku, requiredMachineCountByDailyCapacity);
         if (MachineScheduleRole.FULL_RUN_MACHINE == segment.getRole()
                 && shouldUseFormalNonEndingMinimumTarget(context, sku, policy)
                 && hasMultiplePositiveQuotaDays(sku)
@@ -1785,6 +1785,23 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 sku.getMaterialCode(), segment.getMachineCode(), scheduledQty, targetQty, defaultPlanQty,
                 balancedPlanQty, availableMachineCount, requiredMachineCount, requiredMachineCountByDailyCapacity);
         return balancedPlanQty;
+    }
+
+    /**
+     * 判断 dayN 理论产能模拟是否已经确认当前启用机台满足增机台规则。
+     * <p>小欠产模式下，8班窗口总产能和后一天3班产能均按理论班产判断；
+     * 该结果用于阻断后续按真实换模后窗口缺口继续扩机台。</p>
+     *
+     * @param sku SKU
+     * @param requiredMachineCountByDailyCapacity dayN 模拟推导的当前新增阶段所需机台数
+     * @return true-当前机台已满足增机台规则；false-仍允许按缺口继续尝试后续机台
+     */
+    private boolean isDailyCapacitySimulationSatisfied(SkuScheduleDTO sku,
+                                                       int requiredMachineCountByDailyCapacity) {
+        return requiredMachineCountByDailyCapacity == 1
+                && sku != null
+                && sku.getShiftCapacity() > 0
+                && !CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap());
     }
 
     /**
@@ -1912,12 +1929,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, sku, candidates, excludedMachineCodes, policy, segment, candidateMachine,
                 shifts, capacityCalculate, request.getDailyPlanQuotaMap(), existingMachineCapacityMaps));
         request.setInitialActiveMachines(Math.max(1, existingMachineCapacityMaps.size() + 1));
+        request.setShiftCapacity(Math.max(0, sku.getShiftCapacity()));
         request.setShortageLookAheadDays(resolveNewSpecShortageLookAheadDays(context));
         int monthlyHistoryShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         request.setMonthlyHistoryShortageQty(monthlyHistoryShortageQty);
-        if (monthlyHistoryShortageQty > 0) {
-            request.setShortageAddMachineThreshold(resolveNewSpecShortageAddMachineThreshold(context));
-        }
+        request.setShortageAddMachineThreshold(resolveNewSpecShortageAddMachineThreshold(context));
         request.setWindowEndDate(resolveScheduleTargetLocalDate(context));
         request.setSceneType("newSpec");
         DailyMachineCapacitySimulationResult simulationResult =
@@ -2223,11 +2239,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         for (DailyMachineCapacityDayDecision decision : simulationResult.getDayDecisionList()) {
             log.info("新增SKU dayN机台模拟, materialCode: {}, 当前机台: {}, 日期: {}, 追补截止: {}, "
                             + "dayN计划: {}, carryShortage: {}, 当日需求: {}, 当日产能: {}, "
-                            + "当日欠产: {}, 累计需求: {}, 累计产能: {}, 启用机台: {}, 新增机台: {}, "
-                            + "未满足: {}, 原因: {}",
+                            + "当日欠产: {}, 决策模式: {}, 是否超过阈值: {}, 窗口8班产能: {}, "
+                            + "窗口计划总量: {}, 后一天计划: {}, 后一天3班产能: {}, 累计需求: {}, "
+                            + "累计产能: {}, 启用机台: {}, 新增机台: {}, 未满足: {}, 原因: {}",
                     sku.getMaterialCode(), segment.getMachineCode(), decision.getProductionDate(),
                     decision.getLookAheadEndDate(), decision.getTodayPlanQty(), decision.getCarryShortageQty(),
                     decision.getTodayRequiredQty(), decision.getTodayCapacityQty(), decision.getDayShortageQty(),
+                    decision.getDecisionMode(), decision.isShortageThresholdExceeded(),
+                    decision.getWindowTotalCapacityQty(), decision.getWindowPlanQty(),
+                    decision.getNextDayPlanQty(), decision.getNextDayThreeShiftCapacityQty(),
                     decision.getDemandQty(), decision.getCapacityQty(),
                     decision.getActiveMachineCount(), decision.getAddedMachineCount(),
                     decision.getUnmetQty(), decision.getReason());

@@ -19,7 +19,7 @@ SELECT t.FACTORY_CODE,
        'SYS0304022',
        '200',
        '新增排产欠产增机台阈值',
-       '本月前日累计欠产超过该阈值时，新增排产按窗口需消化量判断是否增机台',
+       '新增排产和续作补偿共用；本月前日累计欠产超过该阈值时，按窗口需消化量判断是否增机台',
        'system',
        NOW(),
        'system',
@@ -41,7 +41,7 @@ WHERE p.ID IS NULL;
 UPDATE T_LH_PARAMS
 SET PARAM_VALUE = '200',
     PARAM_NAME = '新增排产欠产增机台阈值',
-    REMARK = '本月前日累计欠产超过该阈值时，新增排产按窗口需消化量判断是否增机台',
+    REMARK = '新增排产和续作补偿共用；本月前日累计欠产超过该阈值时，按窗口需消化量判断是否增机台',
     UPDATE_BY = 'system',
     UPDATE_TIME = NOW()
 WHERE PARAM_CODE = 'SYS0304022'

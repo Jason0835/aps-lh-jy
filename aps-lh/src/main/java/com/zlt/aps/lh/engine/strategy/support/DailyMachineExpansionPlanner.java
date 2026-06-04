@@ -151,6 +151,8 @@ public final class DailyMachineExpansionPlanner {
 
     /**
      * 判断是否属于欠产未超阈值的小欠产滚动场景。
+     * <p>历史欠产为 0 时，仅在“本轮目标量高于窗口计划量、且后续日计划仍需承接”的 spillover 场景下沿用该口径，
+     * 避免退回窗口需消化量强制补机，同时不影响正式新增的正常扩机。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -162,7 +164,10 @@ public final class DailyMachineExpansionPlanner {
             return false;
         }
         int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
-        return historyShortageQty > 0 && historyShortageQty <= resolveShortageAddMachineThreshold(context);
+        if (historyShortageQty > 0) {
+            return historyShortageQty <= resolveShortageAddMachineThreshold(context);
+        }
+        return isZeroHistoryWindowSpilloverScenario(sku);
     }
 
     /**
@@ -189,6 +194,33 @@ public final class DailyMachineExpansionPlanner {
             }
         }
         return true;
+    }
+
+    private static boolean isZeroHistoryWindowSpilloverScenario(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        int windowPlanQty = Math.max(0, sku.getWindowPlanQty());
+        int currentTargetQty = Math.max(0, sku.resolveTargetScheduleQty());
+        int shiftFillOverQty = Math.max(0, sku.getShiftFillOverQty());
+        // 新增主循环会临时把 targetScheduleQty 改成本机台计划量，不能据此丢失“窗口计划外补满尾量”的场景标识。
+        if (currentTargetQty <= windowPlanQty && shiftFillOverQty <= 0) {
+            return false;
+        }
+        boolean first = true;
+        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
+            if (Objects.isNull(quota)) {
+                continue;
+            }
+            if (first) {
+                first = false;
+                continue;
+            }
+            if (Math.max(0, quota.getDayPlanQty()) > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

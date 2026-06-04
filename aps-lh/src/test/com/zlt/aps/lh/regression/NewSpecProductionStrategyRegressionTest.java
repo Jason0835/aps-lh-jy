@@ -2681,7 +2681,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldAllocateDocumentCaseByDailyCapacityAcrossMachines() throws Exception {
+    void scheduleNewSpecs_shouldExpandDocumentCaseWhenTodayPlanExceedsThreeShiftCapacity() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
 
@@ -2713,7 +2713,8 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, orderedMachineMatch(k1105, k1110),
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "文档案例应动态扩到两台机台");
+        assertEquals(2, context.getScheduleResultList().size(),
+                "当前日计划96已超过一台3班理论产能48时，应扩到两台机台");
         LhScheduleResult k1105Result = findResult(context.getScheduleResultList(), "K1105");
         LhScheduleResult k1110Result = findResult(context.getScheduleResultList(), "K1110");
         assertEquals(80, k1105Result.getDailyPlanQty().intValue(), "K1105应按dayN节奏只排到C6");
@@ -2726,7 +2727,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldAllowSameSkuGreenTireMultiMachineChangeoverInSameShift() throws Exception {
+    void scheduleNewSpecs_shouldExpandSameSkuGreenTireWhenTodayPlanExceedsThreeShiftCapacity() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
 
@@ -2759,7 +2760,8 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, orderedMachineMatch(k1105, k1110),
                 new DefaultMouldChangeBalanceStrategy(), defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "文档案例应动态扩到两台机台");
+        assertEquals(2, context.getScheduleResultList().size(),
+                "当前日计划96已超过一台3班理论产能48时，同胎胚场景也应扩第二台机台");
         LhScheduleResult k1105Result = findResult(context.getScheduleResultList(), "K1105");
         LhScheduleResult k1110Result = findResult(context.getScheduleResultList(), "K1110");
         assertEquals(2, resolveFirstPlannedShiftIndex(k1105Result), "K1105 应从 C2 开始生产");
@@ -2802,11 +2804,12 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, orderedMachineMatch(k1105, k1110),
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(2, context.getScheduleResultList().size(), "单台窗口产能不足时应扩到第二台机台");
-        LhScheduleResult k1110Result = findResult(context.getScheduleResultList(), "K1110");
-        assertEquals(48, k1110Result.getDailyPlanQty().intValue(), "首台机台已命中晚班不可换模补满时，尾机台只承接剩余满班量");
-        assertEquals(2, context.getSkuShiftFillOverQtyMap().get(sku.getMaterialCode()).intValue(),
-                "尾机台补满超出窗口目标量的2条应记入满班补齐超排");
+        assertEquals(1, context.getScheduleResultList().size(),
+                "1台*16班产*8班已覆盖窗口计划126时，不应再因真实换模窗口不足扩到第二台机台");
+        LhScheduleResult k1105Result = findResult(context.getScheduleResultList(), "K1105");
+        assertEquals(112, k1105Result.getDailyPlanQty().intValue(), "当前机台只按真实可排窗口落地");
+        assertFalse(context.getSkuShiftFillOverQtyMap().containsKey(sku.getMaterialCode()),
+                "未启用尾机台补满时不应产生满班补齐超排");
     }
 
     @Test
@@ -2865,24 +2868,22 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, machineMatchStrategy,
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(3, context.getScheduleResultList().size(),
-                "本轮窗口目标仅136时，不应按滚动dayN总量300继续扩到五台机台");
+        assertEquals(1, context.getScheduleResultList().size(),
+                "本轮窗口目标136已被1台*17班产*8班覆盖时，不应按真实窗口缺口继续扩机台");
         assertEquals(51, findResult(context.getScheduleResultList(), "K2024").getDailyPlanQty().intValue(),
                 "首台机台应保留整段满班产量");
-        assertEquals(51, findResult(context.getScheduleResultList(), "K1111").getDailyPlanQty().intValue(),
-                "第二台机台应保留整段满班产量");
-        assertEquals(51, findResult(context.getScheduleResultList(), "K1113").getDailyPlanQty().intValue(),
-                "正规非收尾第三台机台已上机后也应补满后续班次");
         assertFalse(context.getScheduleResultList().stream()
                         .anyMatch(result -> "K1206".equals(result.getLhMachineCode())
-                                || "K1313".equals(result.getLhMachineCode())),
-                "滚动dayN总量大于本轮窗口目标时，不应再扩出K1206、K1313这类浅排机台");
-        assertEquals(153, context.getScheduleResultList().stream()
+                                || "K1313".equals(result.getLhMachineCode())
+                                || "K1111".equals(result.getLhMachineCode())
+                                || "K1113".equals(result.getLhMachineCode())),
+                "滚动dayN总量大于本轮窗口目标时，不应再扩出浅排机台");
+        assertEquals(51, context.getScheduleResultList().stream()
                         .map(LhScheduleResult::getDailyPlanQty)
                         .filter(Objects::nonNull)
                         .mapToInt(Integer::intValue)
                         .sum(),
-                "三台机台补满后，应按滚动dayN账本继续吃掉后续日期额度");
+                "理论规则满足后，只落地当前机台真实窗口产量");
     }
 
     @Test
@@ -2940,20 +2941,21 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, machineMatchStrategy,
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(3, context.getScheduleResultList().size(),
-                "正式非收尾dayN累计目标量为300时，应由三台机台共同承接");
+        assertEquals(2, context.getScheduleResultList().size(),
+                "两台机台后一天3班理论产能已覆盖后一天计划时，不应继续扩第三台");
         assertEquals(119, findResult(context.getScheduleResultList(), "K2024").getDailyPlanQty().intValue(),
                 "第一台机台应保留整段满班产量");
         assertEquals(119, findResult(context.getScheduleResultList(), "K1111").getDailyPlanQty().intValue(),
                 "第二台机台应保留整段满班产量");
-        assertEquals(68, findResult(context.getScheduleResultList(), "K1113").getDailyPlanQty().intValue(),
-                "第三台机台应按实际可排窗口补满满班产，不继续透支未打开的后续班次");
-        assertEquals(306, context.getScheduleResultList().stream()
+        assertFalse(context.getScheduleResultList().stream()
+                        .anyMatch(result -> "K1113".equals(result.getLhMachineCode())),
+                "理论规则满足后不应继续启用第三台机台");
+        assertEquals(238, context.getScheduleResultList().stream()
                         .map(LhScheduleResult::getDailyPlanQty)
                         .filter(Objects::nonNull)
                         .mapToInt(Integer::intValue)
                         .sum(),
-                "正规非收尾在达到最低目标量300后，应只在已打开的可排班次内补满班产");
+                "理论规则满足后只保留已启用机台真实窗口产量");
     }
 
     @Test
@@ -2996,8 +2998,9 @@ class NewSpecProductionStrategyRegressionTest {
                 "第一台机台不应继续按理论窗口产能平衡拆量");
         assertEquals(119, findResult(context.getScheduleResultList(), "K1111").getDailyPlanQty().intValue(),
                 "第二台机台不应继续按理论窗口产能平衡拆量");
-        assertEquals(68, findResult(context.getScheduleResultList(), "K1113").getDailyPlanQty().intValue(),
-                "第三台机台应按dayN最低目标+实际可排窗口补满口径收尾");
+        assertFalse(context.getScheduleResultList().stream()
+                        .anyMatch(result -> "K1113".equals(result.getLhMachineCode())),
+                "两台机台满足后一天3班理论产能后，不应继续扩第三台");
     }
 
     @Test
@@ -3041,6 +3044,88 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldNotAddMachineWhenTheoryWindowCapacityCoversPlanEvenActualWindowIsInsufficient()
+            throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 9, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 5, 11, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001592");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(1256);
+        sku.setTargetScheduleQty(148);
+        sku.setWindowPlanQty(144);
+        sku.setWindowRemainingPlanQty(144);
+        sku.setSurplusQty(1256);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setScheduleDayFinishQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 48, 48, 48));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO k1115 = buildMachine("K1115", dateTime(2026, 5, 9, 6, 0));
+        MachineScheduleDTO k1116 = buildMachine("K1116", dateTime(2026, 5, 9, 6, 0));
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k1115, k1116),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "历史欠产为0且理论产能满足小欠产规则时，不应因首台真实换模后窗口不足继续补第二台");
+        assertEquals("K1115", context.getScheduleResultList().get(0).getLhMachineCode());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldNotAddMachineWhenEightShiftCapacityExactlyCoversWindowPlan() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002661");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(972);
+        sku.setTargetScheduleQty(128);
+        sku.setWindowPlanQty(128);
+        sku.setWindowRemainingPlanQty(128);
+        sku.setSurplusQty(972);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setScheduleDayFinishQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 8, 60, 60));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO k1313 = buildMachine("K1313", dateTime(2026, 6, 1, 6, 0));
+        MachineScheduleDTO k1405 = buildMachine("K1405", dateTime(2026, 6, 1, 6, 0));
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k1313, k1405),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "1台*16班产*8班=128 已覆盖 8+60+60 时，不应因真实换模后只剩112继续加机台");
+        assertEquals("K1313", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals(112, context.getScheduleResultList().get(0).getDailyPlanQty().intValue());
+    }
+
+    @Test
     void scheduleNewSpecs_shouldAddMachineForLargeShortageByWindowDemand() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
@@ -3063,7 +3148,7 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setWindowRemainingPlanQty(144);
         sku.setSurplusQty(1256);
         sku.setEmbryoStock(-1);
-        sku.setMonthlyHistoryShortageQty(192);
+        sku.setMonthlyHistoryShortageQty(240);
         sku.setScheduleDayFinishQty(0);
         sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
                 context.getScheduleWindowShifts(), sku.getMaterialCode(), 48, 48, 48));

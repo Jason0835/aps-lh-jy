@@ -28,6 +28,9 @@ public class DailyMachineCapacitySimulationRequest implements Serializable {
     /** 初始启用机台数 */
     private int initialActiveMachines;
 
+    /** 单台机台班产，仅用于8班窗口总产能和后一天3班理论产能判断 */
+    private int shiftCapacity;
+
     /** 向后观察天数，不含当天 */
     private int shortageLookAheadDays;
 

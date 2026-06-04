@@ -40,6 +40,24 @@ public class DailyMachineCapacityDayDecision implements Serializable {
     /** 当前启用机台在追补窗口内的产能 */
     private int capacityQty;
 
+    /** 决策模式 */
+    private String decisionMode;
+
+    /** 当前启用机台8班窗口总产能 */
+    private int windowTotalCapacityQty;
+
+    /** T日到T+2窗口日计划总量 */
+    private int windowPlanQty;
+
+    /** 是否超过欠产增机台阈值 */
+    private boolean shortageThresholdExceeded;
+
+    /** 后一天日月计划量 */
+    private int nextDayPlanQty;
+
+    /** 当前启用机台后一天3班理论产能 */
+    private int nextDayThreeShiftCapacityQty;
+
     /** 当天模拟后的启用机台数 */
     private int activeMachineCount;
 
