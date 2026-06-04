@@ -77,6 +77,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -373,6 +374,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // 1. 匹配候选机台
             context.getNewSpecTypeRuleBlockedMap().remove(sku);
             List<MachineScheduleDTO> candidates = machineMatch.matchMachines(context, sku);
+            logNewSpecMachineCandidateSnapshot(context, sku, candidates, new HashSet<String>(0), null);
             if (candidates.isEmpty()) {
                 String noCandidateReason = resolveNoCandidateMachineReason(context, sku);
                 log.warn("新增SKU无候选机台, materialCode: {}, 结构: {}, 规格: {}, 寸口: {}, 目标量: {}, 原因: {}",
@@ -423,6 +425,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // 多机台累计调度结果，用于最终按总量确认排完与否
             int totalScheduledQty = 0;
             while (true) {
+                logNewSpecMachineCandidateSnapshot(context, sku, candidates, excludedMachineCodes, excludedMachineReasonMap);
                 MachineScheduleDTO candidateMachine = selectCandidateMachine(
                         context, sku, candidates, excludedMachineCodes, machineMatch, preferredTrialMachine,
                         quantityPolicy);
@@ -1046,6 +1049,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (isTypeRuleBlocked(context, sku) && isTrialConstructionStage(sku)) {
             return "试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产";
         }
+        if (isTypeRuleBlocked(context, sku)
+                && !isTrialConstructionStage(sku)
+                && !isMassTrialSku(sku)
+                && context != null
+                && context.getPendingSmallBatchNewSpecSkuCount() > 0) {
+            return "待排小批量SKU未完成，单控机台优先保留给小批量SKU，当前正规SKU无法使用单控机台";
+        }
         if (isSpecialMaterialSupportBlocked(context, sku)) {
             return "特殊材料SKU无匹配特殊支持机台，无法排产";
         }
@@ -1207,6 +1217,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, candidates, excludedMachineCodes, true);
         List<MachineScheduleDTO> normalCandidates = filterAvailableCandidatesByMachineType(
                 context, candidates, excludedMachineCodes, false);
+        logNewSpecMachineTypeSplit(context, sku, singleControlCandidates, normalCandidates, excludedMachineCodes);
         if (shouldOnlyUseSingleControlCandidate(sku)) {
             MachineScheduleDTO singleControlMachine = selectCandidateMachineFromScopedList(
                     context, sku, singleControlCandidates, machineMatch, preferredTrialMachine, quantityPolicy);
@@ -1352,6 +1363,124 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return true;
         }
         return false;
+    }
+
+    private void logNewSpecMachineCandidateSnapshot(LhScheduleContext context,
+                                                    SkuScheduleDTO sku,
+                                                    List<MachineScheduleDTO> candidates,
+                                                    Set<String> excludedMachineCodes,
+                                                    Map<String, String> excludedMachineReasonMap) {
+        if (sku == null) {
+            return;
+        }
+        boolean needLog = sku.isSmallBatchValidation()
+                || isMassTrialSku(sku)
+                || isTrialConstructionStage(sku)
+                || containsMachineCode(candidates, "K1501L")
+                || containsMachineCode(candidates, "K1501R");
+        if (!needLog) {
+            return;
+        }
+        log.info("新增SKU候选快照, materialCode: {}, skuType: {}, surplusQty: {}, remainingQty: {}, threshold: {}, isSmallBatch: {}, "
+                        + "待排小批量SKU数: {}, 候选机台: {}, 排除机台: {}, K1501L候选: {}, K1501R候选: {}, 已有排除原因: {}",
+                sku.getMaterialCode(), resolveNewSpecSkuType(sku), sku.getSurplusQty(),
+                sku.getRemainingScheduleQty(), resolveSmallBatchThreshold(context), sku.isSmallBatchValidation(),
+                context == null ? 0 : context.getPendingSmallBatchNewSpecSkuCount(),
+                joinMachineCodes(candidates), CollectionUtils.isEmpty(excludedMachineCodes) ? "-" : String.join(",", excludedMachineCodes),
+                containsMachineCode(candidates, "K1501L"), containsMachineCode(candidates, "K1501R"),
+                CollectionUtils.isEmpty(excludedMachineReasonMap) ? "-" : excludedMachineReasonMap.values());
+    }
+
+    private void logNewSpecMachineTypeSplit(LhScheduleContext context,
+                                            SkuScheduleDTO sku,
+                                            List<MachineScheduleDTO> singleControlCandidates,
+                                            List<MachineScheduleDTO> normalCandidates,
+                                            Set<String> excludedMachineCodes) {
+        if (sku == null) {
+            return;
+        }
+        boolean needLog = sku.isSmallBatchValidation()
+                || isMassTrialSku(sku)
+                || isTrialConstructionStage(sku)
+                || containsMachineCode(singleControlCandidates, "K1501L")
+                || containsMachineCode(singleControlCandidates, "K1501R")
+                || containsMachineCode(normalCandidates, "K1501L")
+                || containsMachineCode(normalCandidates, "K1501R");
+        if (!needLog) {
+            return;
+        }
+        log.info("新增SKU选机分组, materialCode: {}, skuType: {}, 待排小批量SKU数: {}, 单控候选: {}, 普通候选: {}, "
+                        + "单控剩余产能: {}, K1501L单控: {}, K1501R单控: {}, K1501L普通: {}, K1501R普通: {}, 已排除机台: {}",
+                sku.getMaterialCode(), resolveNewSpecSkuType(sku),
+                context == null ? 0 : context.getPendingSmallBatchNewSpecSkuCount(),
+                joinMachineCodes(singleControlCandidates), joinMachineCodes(normalCandidates),
+                resolveMachineCapacitySummary(context, sku, singleControlCandidates),
+                containsMachineCode(singleControlCandidates, "K1501L"),
+                containsMachineCode(singleControlCandidates, "K1501R"),
+                containsMachineCode(normalCandidates, "K1501L"),
+                containsMachineCode(normalCandidates, "K1501R"),
+                CollectionUtils.isEmpty(excludedMachineCodes) ? "-" : String.join(",", excludedMachineCodes));
+    }
+
+    private boolean containsMachineCode(List<MachineScheduleDTO> candidates, String machineCode) {
+        if (CollectionUtils.isEmpty(candidates) || StringUtils.isEmpty(machineCode)) {
+            return false;
+        }
+        for (MachineScheduleDTO candidate : candidates) {
+            if (candidate != null && StringUtils.equalsIgnoreCase(machineCode, candidate.getMachineCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String joinMachineCodes(List<MachineScheduleDTO> candidates) {
+        if (CollectionUtils.isEmpty(candidates)) {
+            return "-";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (MachineScheduleDTO candidate : candidates) {
+            if (candidate == null || StringUtils.isEmpty(candidate.getMachineCode())) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append(",");
+            }
+            builder.append(candidate.getMachineCode());
+        }
+        return builder.length() == 0 ? "-" : builder.toString();
+    }
+
+    private String resolveMachineCapacitySummary(LhScheduleContext context,
+                                                 SkuScheduleDTO sku,
+                                                 List<MachineScheduleDTO> candidates) {
+        if (context == null || sku == null || CollectionUtils.isEmpty(candidates)) {
+            return "-";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (MachineScheduleDTO candidate : candidates) {
+            if (candidate == null || StringUtils.isEmpty(candidate.getMachineCode())) {
+                continue;
+            }
+            int availableCapacity = getTargetScheduleQtyResolver()
+                    .calcMachineAvailableCapacityInWindow(context, sku, candidate);
+            if (builder.length() > 0) {
+                builder.append(", ");
+            }
+            builder.append(candidate.getMachineCode()).append("=").append(availableCapacity);
+        }
+        return builder.length() == 0 ? "-" : builder.toString();
+    }
+
+    private int resolveSmallBatchThreshold(LhScheduleContext context) {
+        if (context != null && Objects.nonNull(context.getScheduleConfig())) {
+            return context.getScheduleConfig().getSmallBatchSkuThreshold();
+        }
+        if (context == null) {
+            return LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD;
+        }
+        return context.getParamIntValue(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
+                LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD);
     }
 
     private List<MachineScheduleDTO> filterAvailableCandidatesByMachineType(LhScheduleContext context,

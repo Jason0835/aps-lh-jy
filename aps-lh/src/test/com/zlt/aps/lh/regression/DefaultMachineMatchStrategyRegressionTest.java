@@ -571,6 +571,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
+        context.setPendingSmallBatchNewSpecSkuCount(1);
 
         MachineScheduleDTO singleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-SINGLE");
@@ -583,14 +584,15 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         assertEquals(1, candidates.size());
         assertEquals("K1401", candidates.get(0).getMachineCode(),
-                "普通新增 SKU 存在其它候选时不应抢占单控拆分机台");
+                "待排小批量SKU未完成时，正规新增 SKU 不允许保留单控候选");
     }
 
     @Test
-    void matchMachines_shouldExcludeSingleControlCandidatesForNormalSku() {
+    void matchMachines_shouldKeepSingleControlCandidatesForNormalSkuAsFallback() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
+        context.setPendingSmallBatchNewSpecSkuCount(0);
 
         MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-SINGLE");
@@ -601,8 +603,26 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
-        assertEquals(1, candidates.size(), "普通物料不应继续保留单控拆分机台候选，避免最终回落占机");
+        assertEquals(2, candidates.size(), "正规物料存在普通候选时，也应保留单控候选作为后续回落机台");
         assertEquals("K1111", candidates.get(0).getMachineCode());
+        assertEquals("K1501R", candidates.get(1).getMachineCode(),
+                "单控机台应作为正规 SKU 的回落候选，而不是在选机阶段提前剔除");
+    }
+
+    @Test
+    void matchMachines_shouldBlockFormalSkuFromSingleControlWhenSmallBatchStillPending() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+        context.setPendingSmallBatchNewSpecSkuCount(2);
+
+        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+
+        assertTrue(candidates.isEmpty(), "待排小批量SKU未完成时，正规SKU即使只剩单控机台，也不能抢占单控资源");
     }
 
     @Test

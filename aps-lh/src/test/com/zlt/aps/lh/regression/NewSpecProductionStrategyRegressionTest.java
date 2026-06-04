@@ -2167,6 +2167,38 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldReserveSingleControlForPendingSmallBatchBeforeFormalSku() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO formalSku = buildSku();
+        formalSku.setMaterialCode("3302001513");
+        formalSku.setConstructionStage("03");
+
+        SkuScheduleDTO smallBatchSku = buildSku();
+        smallBatchSku.setMaterialCode("3302002601");
+        smallBatchSku.setConstructionStage("03");
+        smallBatchSku.setSmallBatchValidation(true);
+
+        context.getNewSpecSkuList().add(formalSku);
+        context.getNewSpecSkuList().add(smallBatchSku);
+
+        MachineScheduleDTO singleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+
+        strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals("待排小批量SKU未完成，单控机台优先保留给小批量SKU，当前正规SKU无法使用单控机台",
+                findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001513").getUnscheduledReason(),
+                "正规SKU前面命中唯一单控时，应先把单控资源保留给后续待排小批量SKU");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldUseSpecialMaterialReasonWhenBaseMachineLacksSupportCapability() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
