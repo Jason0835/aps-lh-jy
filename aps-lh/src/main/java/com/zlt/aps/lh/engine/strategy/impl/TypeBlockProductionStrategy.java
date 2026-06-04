@@ -83,6 +83,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private static final String CONTINUOUS_SCHEDULE_TYPE = ScheduleTypeEnum.CONTINUOUS.getCode();
     private static final String TYPE_BLOCK_CLEANING_ANALYSIS = "模具清洗+换活字块";
     private static final String TYPE_BLOCK_TRIGGER_ENDING = "收尾触发";
+    private static final String TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE =
+            "续作首日无计划释放触发";
     private static final String TYPE_BLOCK_TRIGGER_FALLBACK = "在机前规格兜底触发";
     private static final String TYPE_BLOCK_SKIP_REASON_T1_NOT_END =
             "T-1 最新记录未收尾，跳过兜底反查";
@@ -131,6 +133,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             machineTriggerSourceMap.put(endingMachine.getMachineCode(), TYPE_BLOCK_TRIGGER_ENDING);
         }
 
+        List<MachineScheduleDTO> releasedMachines = resolveFirstDayNoPlanReleasedTypeBlockMachines(context);
+        releasedMachines.sort(Comparator.comparing(
+                MachineScheduleDTO::getEstimatedEndTime, Comparator.nullsLast(Comparator.naturalOrder())));
+        for (MachineScheduleDTO releasedMachine : releasedMachines) {
+            String machineCode = releasedMachine.getMachineCode();
+            if (StringUtils.isEmpty(machineCode) || machineTriggerSourceMap.containsKey(machineCode)) {
+                continue;
+            }
+            candidateMachines.add(releasedMachine);
+            machineTriggerSourceMap.put(machineCode, TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE);
+            log.info("续作首日无计划释放机台进入换活字块匹配, machineCode: {}, currentMaterialCode: {}",
+                    machineCode, releasedMachine.getCurrentMaterialCode());
+        }
+
         List<MachineScheduleDTO> fallbackMachines = resolveTypeBlockFallbackMachines(context);
         fallbackMachines.sort(Comparator.comparing(MachineScheduleDTO::getEstimatedEndTime));
         for (MachineScheduleDTO fallbackMachine : fallbackMachines) {
@@ -142,8 +158,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             machineTriggerSourceMap.put(machineCode, TYPE_BLOCK_TRIGGER_FALLBACK);
         }
         traceEndingMachineOrder(context, candidateMachines, machineTriggerSourceMap);
-        log.info("换活字块候选机台准备完成, 收尾机台: {}, 兜底机台: {}, 候选机台: {}, 待排新增SKU: {}",
-                endingMachines.size(), fallbackMachines.size(), candidateMachines.size(),
+        log.info("换活字块候选机台准备完成, 收尾机台: {}, 首日无计划释放机台: {}, 兜底机台: {}, 候选机台: {}, 待排新增SKU: {}",
+                endingMachines.size(), releasedMachines.size(), fallbackMachines.size(), candidateMachines.size(),
                 context.getNewSpecSkuList().size());
 
         // completedMachineMap 记录本轮不再尝试的机台，避免同一机台在一轮中反复失败重试。
@@ -196,6 +212,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 // 该阶段只允许不更换整套模具的轻量衔接，完整换模能力评估必须留给 S4.5 新增主链。
                 List<SkuScheduleDTO> typeBlockCandidates = filterTypeBlockCandidates(
                         context, machine, returnedToNewSpecMaterialCodes);
+                if (StringUtils.equals(TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE,
+                        machineTriggerSourceMap.get(machineCode))) {
+                    log.info("释放机台换活字块候选SKU列表, machineCode: {}, currentMaterialCode: {}, candidates: {}",
+                            machineCode, machine.getCurrentMaterialCode(), buildSkuCodeSummary(typeBlockCandidates));
+                }
                 SkuScheduleDTO typeBlockSku = selectPreferredSkuFromCandidates(typeBlockCandidates);
                 String matchedLayer = !CollectionUtils.isEmpty(typeBlockCandidates) ? "同胎胚+同模具" : "未命中";
                 if (typeBlockSku == null) {
@@ -237,6 +258,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                             LhScheduleTimeUtil.formatDateTime(typeBlockStartTime), matchedLayer);
                     completedMachineMap.put(machineCode, true);
                     continue;
+                }
+                if (StringUtils.equals(TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE,
+                        machineTriggerSourceMap.get(machineCode))) {
+                    log.info("释放机台换活字块最终选中SKU, machineCode: {}, sourceMaterialCode: {}, selectedMaterialCode: {}",
+                            machineCode, machine.getPreviousMaterialCode(), typeBlockSku.getMaterialCode());
                 }
                 scheduledInCurrentRound = true;
                 typeBlockScheduledCount++;
@@ -390,10 +416,13 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (StringUtils.equals(TYPE_BLOCK_TRIGGER_ENDING, triggerSource)) {
             return 0;
         }
-        if (StringUtils.equals(TYPE_BLOCK_TRIGGER_FALLBACK, triggerSource)) {
+        if (StringUtils.equals(TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE, triggerSource)) {
             return 1;
         }
-        return 2;
+        if (StringUtils.equals(TYPE_BLOCK_TRIGGER_FALLBACK, triggerSource)) {
+            return 2;
+        }
+        return 3;
     }
 
     /**
@@ -1573,8 +1602,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 Date readyTime = resolveTypeBlockSortReadyTime(context, machine);
                 String triggerSource = machineTriggerSourceMap != null
                         ? machineTriggerSourceMap.get(machine.getMachineCode()) : null;
-                int triggerOrder = StringUtils.equals(TYPE_BLOCK_TRIGGER_ENDING, triggerSource) ? 0
-                        : (StringUtils.equals(TYPE_BLOCK_TRIGGER_FALLBACK, triggerSource) ? 1 : 2);
+                int triggerOrder = resolveTypeBlockTriggerOrder(triggerSource);
                 String triggerDesc = triggerOrder == 0 ? "收尾触发" : (triggerOrder == 1 ? "兜底触发" : "其他");
                 boolean canChangeLetter = Boolean.TRUE.equals(canChangeLetterCache.get(machine.getMachineCode()));
                 String machineEmbryoDesc = resolveMachineEmbryoDesc(context, machine);
@@ -1831,6 +1859,39 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             materialCodes.add(PriorityTraceLogHelper.safeText(sku.getMaterialCode()));
         }
         return String.join(",", materialCodes);
+    }
+
+    /**
+     * 识别首日无计划释放后可参与换活字块的续作机台。
+     *
+     * @param context 排程上下文
+     * @return 释放机台列表
+     */
+    private List<MachineScheduleDTO> resolveFirstDayNoPlanReleasedTypeBlockMachines(LhScheduleContext context) {
+        List<MachineScheduleDTO> releasedMachineList = new ArrayList<>();
+        if (context == null
+                || CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())
+                || CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
+            return releasedMachineList;
+        }
+        for (String machineCode : context.getFirstDayNoPlanReleasedContinuousMachineCodeSet()) {
+            if (StringUtils.isEmpty(machineCode)) {
+                continue;
+            }
+            MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+            if (machine == null
+                    || StringUtils.isEmpty(machine.getCurrentMaterialCode())
+                    || machine.getEstimatedEndTime() == null) {
+                continue;
+            }
+            if (isMachineAssignedContinuousResult(context, machineCode)) {
+                log.info("续作首日无计划释放机台已有续作分配，跳过换活字块接管, machineCode: {}, currentMaterialCode: {}",
+                        machineCode, machine.getCurrentMaterialCode());
+                continue;
+            }
+            releasedMachineList.add(machine);
+        }
+        return releasedMachineList;
     }
 
     /**

@@ -5,12 +5,14 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.JobTypeEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -34,6 +36,7 @@ import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -1116,6 +1119,56 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
+    void scheduleTypeBlockChange_shouldUseFirstDayNoPlanReleasedMachineAndKeepSkuOrder() {
+        LhScheduleContext context = newContext();
+        context.setScheduleDate(date(2026, 6, 3));
+        context.setScheduleTargetDate(date(2026, 6, 5));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.getMachineScheduleMap().put("K1105", buildMachine("K1105", "3302002546"));
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO continuousSku = buildContinuousSku(
+                "3302002546", "K1105", "EMB-K1105", "STRUCT-K1105", "SPEC-K1105", "PAT-K1105", 82);
+        continuousSku.setDailyPlanQuotaMap(buildQuotaMap(shifts.get(0), shifts.get(2), shifts.get(5), 0, 32, 50));
+        continuousSku.setWindowRemainingPlanQty(82);
+        context.getContinuousSkuList().add(continuousSku);
+
+        context.getNewSpecSkuList().add(buildNewSku(
+                "3302001513", "EMB-K1105", "STRUCT-A", "SPEC-A", "PAT-A", 8));
+        context.getNewSpecSkuList().add(buildNewSku(
+                "3302001512", "EMB-K1105", "STRUCT-B", "SPEC-B", "PAT-B", 8));
+        context.getNewSpecSkuList().add(buildNewSku(
+                "3302002601", "EMB-K1105", "STRUCT-C", "SPEC-C", "PAT-C", 8));
+        putMaterialInfo(context, "3302002546", "胎胚-K1105", "SPEC-K1105", "PAT-K1105", "PAT-K1105");
+        putMaterialInfo(context, "3302001513", "胎胚-K1105", "SPEC-A", "PAT-A", "PAT-A");
+        putMaterialInfo(context, "3302001512", "胎胚-K1105", "SPEC-B", "PAT-B", "PAT-B");
+        putMaterialInfo(context, "3302002601", "胎胚-K1105", "SPEC-C", "PAT-C", "PAT-C");
+        putMouldRel(context, "3302002546", "MOULD-K1105");
+        putMouldRel(context, "3302001513", "MOULD-K1105");
+        putMouldRel(context, "3302001512", "MOULD-K1105");
+        putMouldRel(context, "3302002601", "MOULD-K1105");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
+        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "day1无计划释放机台不应残留原续作结果，只应生成换活字块接管结果");
+        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(0);
+        assertEquals("3302001513", typeBlockResult.getMaterialCode(),
+                "多个候选都满足换活字块时，应沿用新增SKU已有排序选择首位");
+        assertEquals("K1105", typeBlockResult.getLhMachineCode());
+        assertEquals("03", typeBlockResult.getScheduleType());
+        assertEquals("1", typeBlockResult.getIsTypeBlock());
+        assertEquals("3302001512", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "排序靠后的候选不应优先占用K1105");
+        assertEquals("3302002601", context.getNewSpecSkuList().get(1).getMaterialCode(),
+                "排序靠后的候选应继续保留在新增待排队列");
+    }
+
+    @Test
     void scheduleTypeBlockChange_shouldFallbackWhenPreviousDayLatestSameMachineSkuEnded() {
         LhScheduleContext context = newContext();
         context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
@@ -1729,6 +1782,32 @@ class ContinuousProductionTypeBlockRegressionTest {
         sku.setLhTimeSeconds(3600);
         sku.setScheduleType("02");
         return sku;
+    }
+
+    private LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO> buildQuotaMap(LhShiftConfigVO firstShift,
+                                                                         LhShiftConfigVO nextDayShift,
+                                                                         LhShiftConfigVO thirdDayShift,
+                                                                         int firstDayQty,
+                                                                         int nextDayQty,
+                                                                         int thirdDayQty) {
+        LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO> quotaMap =
+                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(toLocalDate(firstShift), quota(toLocalDate(firstShift), firstDayQty));
+        quotaMap.put(toLocalDate(nextDayShift), quota(toLocalDate(nextDayShift), nextDayQty));
+        quotaMap.put(toLocalDate(thirdDayShift), quota(toLocalDate(thirdDayShift), thirdDayQty));
+        return quotaMap;
+    }
+
+    private SkuDailyPlanQuotaDTO quota(LocalDate productionDate, int dayPlanQty) {
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setProductionDate(productionDate);
+        quota.setDayPlanQty(dayPlanQty);
+        quota.setRemainingQty(dayPlanQty);
+        return quota;
+    }
+
+    private LocalDate toLocalDate(LhShiftConfigVO shift) {
+        return shift.getWorkDate().toInstant().atZone(java.time.ZoneId.systemDefault()).toLocalDate();
     }
 
     private void putMachineOnlineInfo(LhScheduleContext context, String machineCode, String materialCode) {

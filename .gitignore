@@ -14,3 +14,5 @@
 /.trae/
 # 日志目录
 log/
+# 启动日志
+aps-lh-start.log

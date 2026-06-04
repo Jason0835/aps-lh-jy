@@ -39,6 +39,7 @@ import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -1434,7 +1435,7 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void scheduleContinuousEnding_shouldStartSingleMachineFromFirstPlannedDayWhenFirstDayHasNoPlan()
+    public void scheduleContinuousEnding_shouldReleaseSingleMachineWhenFirstDayHasNoPlan()
             throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
@@ -1445,15 +1446,12 @@ public class ContinuousProductionStrategyTest {
 
         strategy.scheduleContinuousEnding(context);
 
-        assertEquals(1, context.getScheduleResultList().size());
-        LhScheduleResult result = context.getScheduleResultList().get(0);
-        assertNull(ShiftFieldUtil.getShiftPlanQty(result, 1), "day1无计划时不应占用T日早班");
-        assertNull(ShiftFieldUtil.getShiftPlanQty(result, 2), "day1无计划时不应占用T日中班");
-        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, 3));
-        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, 8));
-        assertEquals(48, result.getDailyPlanQty().intValue(), "单机台非收尾应从首个有计划日开始排满后续窗口");
+        assertEquals(0, context.getScheduleResultList().size(),
+                "day1无计划但后续仍有计划时，原续作机台不应继续从day2起排续作");
         assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1501L"),
-                "续作首日无计划时，应记录原续作机台，新增排产可用但排序靠后");
+                "续作首日无计划时，应记录原续作机台，供换活字块和新增排产消费");
+        assertTrue(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains("K1501L"),
+                "首日无计划但后续有计划的释放机台应写入稳定识别集合");
     }
 
     @Test
@@ -1536,6 +1534,35 @@ public class ContinuousProductionStrategyTest {
                 "存在本月历史欠产时不应把续作机台登记为窗口无计划释放机台");
         assertEquals(40, sku.getEffectiveCarryForwardQty(), "历史欠产真实入账后应同步已入账状态");
         assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldAppendCompensationAfterFirstDayNoPlanRelease()
+            throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+
+        LhScheduleContext context = buildSingleMachineDayOneNoPlanContinuousContext();
+
+        strategy.scheduleContinuousEnding(context);
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(0, context.getScheduleResultList().size(),
+                "首日无计划释放后不应残留原续作排产结果");
+        assertEquals(1, context.getNewSpecSkuList().size(),
+                "day2/day3仍有计划量时，原续作SKU应转入新增排产补偿");
+        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
+        SkuScheduleDTO sourceSku = context.getContinuousSkuList().get(0);
+        assertEquals("3302001075", compensationSku.getMaterialCode());
+        assertSame(sourceSku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap(),
+                "补偿SKU必须共享原续作SKU日计划账本，避免day2/day3计划量丢失");
+        assertNull(compensationSku.getContinuousMachineCode(),
+                "补偿SKU应交由新增换模链路重新选机");
+        assertEquals("K1501L",
+                ReflectionTestUtils.getField(compensationSku, "preferredContinuousMachineCode"),
+                "补偿SKU应保留原续作机台，供新增阶段轮到自己时优先识别");
     }
 
     @Test
