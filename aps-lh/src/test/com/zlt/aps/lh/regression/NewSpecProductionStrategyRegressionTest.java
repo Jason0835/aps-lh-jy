@@ -2199,6 +2199,40 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldAllowFormalSkuUseSingleControlWhenPendingSmallBatchHasNoWindowQuota() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
+
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO formalSku = buildSku();
+        formalSku.setMaterialCode("3302001513");
+        formalSku.setConstructionStage("03");
+
+        SkuScheduleDTO smallBatchSku = buildSku();
+        smallBatchSku.setMaterialCode("3302002601");
+        smallBatchSku.setConstructionStage("03");
+        smallBatchSku.setSmallBatchValidation(true);
+        smallBatchSku.setWindowPlanQty(0);
+        smallBatchSku.setWindowRemainingPlanQty(0);
+        smallBatchSku.setDailyPlanQuotaMap(new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>());
+
+        context.getNewSpecSkuList().add(formalSku);
+        context.getNewSpecSkuList().add(smallBatchSku);
+
+        MachineScheduleDTO singleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+
+        strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertNotNull(findScheduleResultByMaterialCode(context.getScheduleResultList(), "3302001513"),
+                "当后续小批量窗口内已无可排额度时，前面的正规SKU应允许使用单控机台");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldUseSpecialMaterialReasonWhenBaseMachineLacksSupportCapability() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

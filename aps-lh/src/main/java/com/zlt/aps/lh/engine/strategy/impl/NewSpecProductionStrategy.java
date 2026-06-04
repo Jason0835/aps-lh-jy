@@ -365,6 +365,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         boolean progressed = false;
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
         while (iterator.hasNext()) {
+            refreshPendingNewSpecSkuTypeCounts(context);
             SkuScheduleDTO sku = iterator.next();
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
@@ -947,20 +948,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             context.getNewSpecSkuList().add(0, compensationSku);
-            if (isTrialConstructionStage(compensationSku)) {
-                context.setPendingTrialNewSpecSkuCount(context.getPendingTrialNewSpecSkuCount() + 1);
-                continue;
-            }
-            if (isMassTrialSku(compensationSku)) {
-                context.setPendingMassTrialNewSpecSkuCount(context.getPendingMassTrialNewSpecSkuCount() + 1);
-                continue;
-            }
-            if (isSmallBatchSku(compensationSku)) {
-                context.setPendingSmallBatchNewSpecSkuCount(context.getPendingSmallBatchNewSpecSkuCount() + 1);
-                continue;
-            }
-            context.setPendingFormalNewSpecSkuCount(context.getPendingFormalNewSpecSkuCount() + 1);
         }
+        refreshPendingNewSpecSkuTypeCounts(context);
     }
 
     /**
@@ -1006,6 +995,28 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @param context 排程上下文
      */
     private void initializePendingNewSpecSkuTypeCounts(LhScheduleContext context) {
+        refreshPendingNewSpecSkuTypeCounts(context);
+        if (context == null) {
+            return;
+        }
+        log.info("新增待排SKU类型计数初始化, 试制SKU: {}, 量试SKU: {}, 小批量SKU: {}, 正规SKU: {}",
+                context.getPendingTrialNewSpecSkuCount(),
+                context.getPendingMassTrialNewSpecSkuCount(),
+                context.getPendingSmallBatchNewSpecSkuCount(),
+                context.getPendingFormalNewSpecSkuCount());
+    }
+
+    /**
+     * 刷新新增待排SKU类型计数。
+     * <p>小批量单控保留只统计“当前窗口内仍有dayN剩余额度”的小批量SKU，
+     * 避免窗口额度已为0的小批量继续冻结单控机台。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void refreshPendingNewSpecSkuTypeCounts(LhScheduleContext context) {
+        if (context == null) {
+            return;
+        }
         int formalCount = 0;
         int trialCount = 0;
         int massTrialCount = 0;
@@ -1020,7 +1031,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             if (isSmallBatchSku(pendingSku)) {
-                smallBatchCount++;
+                if (hasPendingWindowQuotaSmallBatchDemand(pendingSku)) {
+                    smallBatchCount++;
+                }
                 continue;
             }
             formalCount++;
@@ -1029,8 +1042,28 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         context.setPendingTrialNewSpecSkuCount(trialCount);
         context.setPendingMassTrialNewSpecSkuCount(massTrialCount);
         context.setPendingSmallBatchNewSpecSkuCount(smallBatchCount);
-        log.info("新增待排SKU类型计数初始化, 试制SKU: {}, 量试SKU: {}, 小批量SKU: {}, 正规SKU: {}",
-                trialCount, massTrialCount, smallBatchCount, formalCount);
+    }
+
+    /**
+     * 判断小批量SKU在当前窗口内是否仍有待排日计划额度。
+     * <p>只要窗口内 dayN 全为0，即使SKU类型上属于小批量，也不再继续占用单控保留名额。</p>
+     *
+     * @param sku SKU
+     * @return true-窗口内仍有待排额度
+     */
+    private boolean hasPendingWindowQuotaSmallBatchDemand(SkuScheduleDTO sku) {
+        if (!isSmallBatchSku(sku) || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
+            if (quota == null) {
+                continue;
+            }
+            if (Math.max(0, quota.getDayPlanQty()) > 0 && Math.max(0, quota.getRemainingQty()) > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1058,21 +1091,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                          SkuScheduleDTO sku) {
         iterator.remove();
         context.getNewSpecTypeRuleBlockedMap().remove(sku);
-        if (isTrialConstructionStage(sku)) {
-            context.setPendingTrialNewSpecSkuCount(Math.max(0, context.getPendingTrialNewSpecSkuCount() - 1));
-            return;
-        }
-        if (isMassTrialSku(sku)) {
-            context.setPendingMassTrialNewSpecSkuCount(
-                    Math.max(0, context.getPendingMassTrialNewSpecSkuCount() - 1));
-            return;
-        }
-        if (isSmallBatchSku(sku)) {
-            context.setPendingSmallBatchNewSpecSkuCount(
-                    Math.max(0, context.getPendingSmallBatchNewSpecSkuCount() - 1));
-            return;
-        }
-        context.setPendingFormalNewSpecSkuCount(Math.max(0, context.getPendingFormalNewSpecSkuCount() - 1));
+        refreshPendingNewSpecSkuTypeCounts(context);
     }
 
     /**
