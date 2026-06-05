@@ -19,7 +19,7 @@ SELECT t.FACTORY_CODE,
        'SYS0304021',
        '0',
        '是否开启换模均衡',
-       '0-关闭，1-开启；关闭后新增排产只保留基础换模耗时与晚班不可换模约束，不再校验换模均衡配额',
+       '0-关闭，1-开启；开启后新增换模与换活字块按每日总次数硬限制、共用胎胚早中班均衡控制',
        'system',
        NOW(),
        'system',
@@ -41,7 +41,7 @@ WHERE p.ID IS NULL;
 UPDATE T_LH_PARAMS
 SET PARAM_VALUE = '0',
     PARAM_NAME = '是否开启换模均衡',
-    REMARK = '0-关闭，1-开启；关闭后新增排产只保留基础换模耗时与晚班不可换模约束，不再校验换模均衡配额',
+    REMARK = '0-关闭，1-开启；开启后新增换模与换活字块按每日总次数硬限制、共用胎胚早中班均衡控制',
     UPDATE_BY = 'system',
     UPDATE_TIME = NOW()
 WHERE PARAM_CODE = 'SYS0304021'

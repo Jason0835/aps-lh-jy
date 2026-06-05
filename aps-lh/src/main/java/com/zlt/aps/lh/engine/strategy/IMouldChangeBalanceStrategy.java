@@ -3,6 +3,7 @@
  */
 package com.zlt.aps.lh.engine.strategy;
 
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import java.util.Date;
 
@@ -14,9 +15,18 @@ import java.util.Date;
  */
 public interface IMouldChangeBalanceStrategy {
 
+    /** 正规新增换模动作 */
+    String ACTION_NEW_SPEC_MOULD_CHANGE = "新增换模";
+
+    /** 换活字块动作 */
+    String ACTION_TYPE_BLOCK_CHANGE = "换活字块";
+
+    /** 未区分动作类型的换模/换活字块动作 */
+    String ACTION_CHANGEOVER = "换模/换活字块";
+
     /**
      * 检查指定日期的换模能力是否充足
-     * <p>约束: 每日最多15台, 早班最多8台, 中班最多7台, 夜班不换模</p>
+     * <p>启用换模均衡后每日总次数是硬限制，早班/中班次数只作为均衡参考；夜班不换模。</p>
      *
      * @param context    排程上下文
      * @param targetDate 目标日期
@@ -48,6 +58,27 @@ public interface IMouldChangeBalanceStrategy {
                                      Date endingTime,
                                      int switchDurationHours) {
         return allocateMouldChange(context, machineCode, endingTime);
+    }
+
+    /**
+     * 指定SKU和动作类型的分配入口。
+     * <p>用于判断当前物料是否属于本月共用胎胚，并在日志与未排原因中区分正规换模/换活字块。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编号
+     * @param endingTime 前SKU收尾时间
+     * @param switchDurationHours 切换时长（小时）
+     * @param sku 当前待排SKU
+     * @param actionType 切换动作类型
+     * @return 换模分配的班次和时间
+     */
+    default Date allocateMouldChange(LhScheduleContext context,
+                                     String machineCode,
+                                     Date endingTime,
+                                     int switchDurationHours,
+                                     SkuScheduleDTO sku,
+                                     String actionType) {
+        return allocateMouldChange(context, machineCode, endingTime, switchDurationHours);
     }
 
     /**

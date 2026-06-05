@@ -2546,8 +2546,16 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine)
                 : machineReadyTime;
         switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+        int switchDurationHours = maintenanceOverlapSwitch
+                ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
+                : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
         Date mouldChangeStartTime = getMouldChangeBalanceStrategy().allocateMouldChange(
-                context, machine.getMachineCode(), switchReadyTime);
+                context,
+                machine.getMachineCode(),
+                switchReadyTime,
+                switchDurationHours,
+                specifySku,
+                IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
         if (mouldChangeStartTime == null) {
             log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 无可用换模窗口",
                     machine.getMachineCode(), specifySku.getMaterialCode());
@@ -2555,9 +2563,6 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         Date inspectionTime = null;
         try {
-            int switchDurationHours = maintenanceOverlapSwitch
-                    ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
-                    : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
             Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
             inspectionTime = getFirstInspectionBalanceStrategy().allocateInspection(
                     context, machine.getMachineCode(), mouldChangeCompleteTime);

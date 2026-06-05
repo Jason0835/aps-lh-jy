@@ -242,7 +242,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 }
                 // 换活字块切换起点需要避开晚班不可换模、保养、停机等窗口。
                 Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(
-                        context, machine, machine.getEstimatedEndTime());
+                        context, machine, typeBlockSku, machine.getEstimatedEndTime());
                 Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
                         context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
                 int eligibleMachineCount = countEligibleTypeBlockMachines(context, typeBlockSku, activeMachines);
@@ -386,7 +386,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                  Map<String, Boolean> completedMachineMap,
                                                  List<MachineScheduleDTO> activeMachines) {
         Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(
-                context, machine, machine.getEstimatedEndTime());
+                context, machine, specifySku, machine.getEstimatedEndTime());
         Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
                 context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
         int eligibleMachineCount = countEligibleTypeBlockMachines(context, specifySku, activeMachines);
@@ -832,6 +832,22 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private Date allocateTypeBlockSwitchStartTime(LhScheduleContext context,
                                                   MachineScheduleDTO machine,
                                                   Date estimatedEndTime) {
+        return allocateTypeBlockSwitchStartTime(context, machine, null, estimatedEndTime);
+    }
+
+    /**
+     * 基于指定收尾时间分配换活字块开始时间。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param sku 当前换活字块SKU
+     * @param estimatedEndTime 预计收尾时间
+     * @return 换活字块开始时间
+     */
+    private Date allocateTypeBlockSwitchStartTime(LhScheduleContext context,
+                                                  MachineScheduleDTO machine,
+                                                  SkuScheduleDTO sku,
+                                                  Date estimatedEndTime) {
         if (machine == null || estimatedEndTime == null) {
             return null;
         }
@@ -845,7 +861,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 context,
                 machine.getMachineCode(),
                 switchReadyTime,
-                switchDurationHours);
+                switchDurationHours,
+                sku,
+                IMouldChangeBalanceStrategy.ACTION_TYPE_BLOCK_CHANGE);
     }
 
     /**
@@ -1394,7 +1412,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             return false;
         }
         if (isTypeBlockCandidate(context, machine, specifySku)) {
-            Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(context, machine, endingTime);
+            Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(context, machine, specifySku, endingTime);
             Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
                     context, machine, endingTime, typeBlockSwitchStartTime);
             if (typeBlockStartTime == null || typeBlockSwitchStartTime == null) {
@@ -1476,8 +1494,16 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine)
                 : machineReadyTime;
         switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+        int switchDurationHours = maintenanceOverlapSwitch
+                ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
+                : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
         Date mouldChangeStartTime = getMouldChangeBalanceStrategy().allocateMouldChange(
-                context, machine.getMachineCode(), switchReadyTime);
+                context,
+                machine.getMachineCode(),
+                switchReadyTime,
+                switchDurationHours,
+                specifySku,
+                IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
         if (mouldChangeStartTime == null) {
             log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 无可用换模窗口",
                     machine.getMachineCode(), specifySku.getMaterialCode());
@@ -1485,9 +1511,6 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         Date inspectionTime = null;
         try {
-            int switchDurationHours = maintenanceOverlapSwitch
-                    ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
-                    : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
             Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
             inspectionTime = getFirstInspectionBalanceStrategy().allocateInspection(
                     context, machine.getMachineCode(), mouldChangeCompleteTime);

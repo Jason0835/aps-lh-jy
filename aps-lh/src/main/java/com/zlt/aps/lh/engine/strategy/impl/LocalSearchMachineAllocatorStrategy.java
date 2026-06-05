@@ -314,7 +314,13 @@ public class LocalSearchMachineAllocatorStrategy {
                 context, machineReadyTime);
         int maxDelayRetryCount = resolveMaxSwitchDelayRetryCount(machine);
         for (int retry = 0; retry < maxDelayRetryCount; retry++) {
-            mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(context, machineCode, candidateSwitchStartTime);
+            mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(
+                    context,
+                    machineCode,
+                    candidateSwitchStartTime,
+                    LhScheduleTimeUtil.getMouldChangeTotalHours(context),
+                    sku,
+                    IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
             if (mouldChangeStartTime == null) {
                 return null;
             }

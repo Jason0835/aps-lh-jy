@@ -36,10 +36,12 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * S4.3 排程调整与SKU归集处理器。
@@ -173,6 +175,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 按结构归集SKU（key=结构名称，value=该结构下的SKU排程DTO列表）
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
         Map<String, Integer> embryoStandardCapacitySumMap = buildEmbryoStandardCapacitySumMap(context);
+        List<SkuScheduleDTO> validScheduleSkuList = new ArrayList<>(monthPlanList.size());
 
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
             // 计算硫化余量：当前代码统一使用月计划总量减完成量，不再读取月余量表作为兜底。
@@ -204,11 +207,45 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             }
 
             structureSkuMap.computeIfAbsent(plan.getStructureName(), k -> new ArrayList<>()).add(dto);
+            validScheduleSkuList.add(dto);
         }
 
+        context.setMaterialSharedEmbryoMap(buildMaterialSharedEmbryoMap(validScheduleSkuList));
         context.setStructureSkuMap(structureSkuMap);
         int totalSkuCount = structureSkuMap.values().stream().mapToInt(List::size).sum();
         log.info("SKU按结构归集完成, 结构数量: {}, SKU总数: {}", structureSkuMap.size(), totalSkuCount);
+    }
+
+    /**
+     * 构建本月待排物料胎胚共用关系。
+     * <p>只统计已具备排产目标量且进入结构分组的SKU，避免无目标量或基础字段异常物料影响换模均衡判断。</p>
+     *
+     * @param skuList 有效待排SKU列表
+     * @return 物料胎胚共用关系Map
+     */
+    private Map<String, Boolean> buildMaterialSharedEmbryoMap(List<SkuScheduleDTO> skuList) {
+        Map<String, Set<String>> embryoMaterialSetMap = new LinkedHashMap<>();
+        if (CollectionUtils.isEmpty(skuList)) {
+            return new LinkedHashMap<>(0);
+        }
+        for (SkuScheduleDTO sku : skuList) {
+            if (sku == null || StringUtils.isEmpty(sku.getMaterialCode())
+                    || StringUtils.isEmpty(sku.getEmbryoCode())) {
+                continue;
+            }
+            embryoMaterialSetMap.computeIfAbsent(sku.getEmbryoCode(), key -> new HashSet<String>(4))
+                    .add(sku.getMaterialCode());
+        }
+        Map<String, Boolean> materialSharedEmbryoMap = new LinkedHashMap<>(skuList.size());
+        for (SkuScheduleDTO sku : skuList) {
+            if (sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+                continue;
+            }
+            Set<String> materialSet = embryoMaterialSetMap.get(sku.getEmbryoCode());
+            materialSharedEmbryoMap.put(sku.getMaterialCode(),
+                    !CollectionUtils.isEmpty(materialSet) && materialSet.size() > 1);
+        }
+        return materialSharedEmbryoMap;
     }
 
     /**

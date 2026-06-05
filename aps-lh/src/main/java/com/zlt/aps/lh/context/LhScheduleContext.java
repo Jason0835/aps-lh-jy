@@ -230,6 +230,10 @@ public class LhScheduleContext {
     private Map<String, int[]> dailyMouldChangeCountMap = new LinkedHashMap<>();
     /** 同胎胚换模班次占用, key=胎胚编码, value=已安排换模班次索引集合 */
     private Map<String, Set<Integer>> greenTireChangeoverShiftMap = new LinkedHashMap<>();
+    /** 本月待排物料胎胚共用关系, key=materialCode, value=true表示与其他待排物料共用胎胚 */
+    private Map<String, Boolean> materialSharedEmbryoMap = new LinkedHashMap<>();
+    /** 换模/换活字块日上限阻塞原因, key=materialCode, value=未排原因 */
+    private Map<String, String> mouldChangeLimitBlockedReasonMap = new LinkedHashMap<>();
     /** 每日首检计数, key=dateString, value=[早班首检数, 中班首检数] */
     private Map<String, int[]> dailyFirstInspectionCountMap = new LinkedHashMap<>();
     /** 每日精度保养计数, key=dateString, value=已安排保养机台数 */

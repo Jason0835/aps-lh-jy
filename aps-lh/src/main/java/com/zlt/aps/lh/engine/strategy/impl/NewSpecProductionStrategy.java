@@ -518,7 +518,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                         : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
                 mouldChangeStartTime = allocateNewSpecMouldChangeStartTime(
-                        context, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
+                        context, sku, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
                 if (mouldChangeStartTime == null) {
                     log.debug("新增SKU换模窗口分配失败, materialCode: {}, 机台: {}, 机台就绪: {}, 目标量: {}",
                             sku.getMaterialCode(), machineCode,
@@ -762,7 +762,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         failReason.getDescription());
                 traceNewSpecMachineDecision(context, sku, candidates, localSearchSuggestedMachine, null,
                         excludedMachineCodes, excludedMachineReasonMap, failReason, false, null);
-                addUnscheduledResult(context, sku, resolveScheduleFailureReason(sku, failReason),
+                addUnscheduledResult(context, sku, resolveScheduleFailureReason(context, sku, failReason),
                         unscheduledReasonCountMap);
                 removeCurrentNewSpecSku(context, iterator, sku);
                 progressed = true;
@@ -1123,6 +1123,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return 未排原因
      */
     private String resolveNoCandidateMachineReason(LhScheduleContext context, SkuScheduleDTO sku) {
+        String mouldChangeLimitBlockedReason = resolveMouldChangeLimitBlockedReason(context, sku);
+        if (StringUtils.isNotEmpty(mouldChangeLimitBlockedReason)) {
+            return mouldChangeLimitBlockedReason;
+        }
         if (isTypeRuleBlocked(context, sku) && isTrialConstructionStage(sku)) {
             return "试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产";
         }
@@ -1142,16 +1146,36 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     /**
      * 解析候选机台尝试失败后的未排原因。
      *
+     * @param context 排程上下文
      * @param sku SKU
      * @param failReason 失败原因
      * @return 未排原因
      */
-    private String resolveScheduleFailureReason(SkuScheduleDTO sku, NewSpecFailReasonEnum failReason) {
+    private String resolveScheduleFailureReason(LhScheduleContext context, SkuScheduleDTO sku,
+                                                NewSpecFailReasonEnum failReason) {
+        String mouldChangeLimitBlockedReason = resolveMouldChangeLimitBlockedReason(context, sku);
+        if (StringUtils.isNotEmpty(mouldChangeLimitBlockedReason)) {
+            return mouldChangeLimitBlockedReason;
+        }
         if (isTrialConstructionStage(sku)
                 && NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW == failReason) {
             return "试制SKU只能使用单控机台，但单控机台已被全局排序更靠前的SKU占用，或当前单控机台产能不足，无法排产";
         }
         return failReason.getDescription();
+    }
+
+    /**
+     * 解析换模/换活字块日上限阻塞原因。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 阻塞原因，无则返回null
+     */
+    private String resolveMouldChangeLimitBlockedReason(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return null;
+        }
+        return context.getMouldChangeLimitBlockedReasonMap().get(sku.getMaterialCode());
     }
 
     /**
@@ -5512,14 +5536,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 log.debug("SKU胎胚编码为空，跳过同胎胚换模错开判断, materialCode: {}, machineCode: {}",
                         sku.getMaterialCode(), machineCode);
             }
-            return mouldChangeBalance.allocateMouldChange(context, machineCode, switchReadyTime, switchDurationHours);
+            return mouldChangeBalance.allocateMouldChange(
+                    context, machineCode, switchReadyTime, switchDurationHours,
+                    sku, IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
         }
         // 先把已有结果和滚动继承结果里的同胎胚换模班次回填到占用表，避免新增规格只感知本轮登记的占用。
         preloadGreenTireChangeoverOccupancy(context);
         Date cursorTime = switchReadyTime;
         for (int attempt = 0; attempt < LhScheduleConstant.MAX_SHIFT_SLOT_COUNT * 2; attempt++) {
             Date allocatedTime = mouldChangeBalance.allocateMouldChange(
-                    context, machineCode, cursorTime, switchDurationHours);
+                    context, machineCode, cursorTime, switchDurationHours,
+                    sku, IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
             if (allocatedTime == null) {
                 return null;
             }
@@ -5685,13 +5712,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return 实际换模开始时间；无法安排时返回 null
      */
     private Date allocateNewSpecMouldChangeStartTime(LhScheduleContext context,
+                                                     SkuScheduleDTO sku,
                                                      String machineCode,
                                                      Date switchReadyTime,
                                                      int switchDurationHours,
                                                      IMouldChangeBalanceStrategy mouldChangeBalance) {
         if (isChangeoverBalanceEnabled(context)) {
             return mouldChangeBalance.allocateMouldChange(
-                    context, machineCode, switchReadyTime, switchDurationHours);
+                    context, machineCode, switchReadyTime, switchDurationHours,
+                    sku, IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
         }
         return allocateBasicMouldChangeStartTime(context, machineCode, switchReadyTime, switchDurationHours);
     }

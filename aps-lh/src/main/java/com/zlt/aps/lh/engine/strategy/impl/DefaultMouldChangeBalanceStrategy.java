@@ -3,6 +3,7 @@
  */
 package com.zlt.aps.lh.engine.strategy.impl;
 
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -16,7 +17,7 @@ import java.util.Date;
 
 /**
  * 默认模具切换均衡策略实现
- * <p>控制每日模具切换总数(最多15台)和早/中班切换均衡(早班8台, 中班7台), 夜班不切换</p>
+ * <p>启用换模均衡后，每日总次数为硬限制，早/中班次数仅用于共用胎胚均衡，夜班不切换。</p>
  *
  * @author APS
  */
@@ -52,6 +53,109 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
                                     String machineCode,
                                     Date endingTime,
                                     int switchDurationHours) {
+        if (!isChangeoverBalanceEnabled(context)) {
+            return allocateLegacyMouldChange(context, machineCode, endingTime, switchDurationHours);
+        }
+        return allocateMouldChange(context, machineCode, endingTime, switchDurationHours, null, ACTION_CHANGEOVER);
+    }
+
+    @Override
+    public Date allocateMouldChange(LhScheduleContext context,
+                                    String machineCode,
+                                    Date endingTime,
+                                    int switchDurationHours,
+                                    SkuScheduleDTO sku,
+                                    String actionType) {
+        if (!isChangeoverBalanceEnabled(context)) {
+            return allocateLegacyMouldChange(context, machineCode, endingTime, switchDurationHours);
+        }
+        if (endingTime == null) {
+            return null;
+        }
+
+        clearBlockedReason(context, sku);
+        Date adjustedTime = endingTime;
+
+        // 最多向后探索有限次数，避免极端数据导致死循环
+        for (int attempt = 0; attempt < MAX_ALLOCATION_ATTEMPTS; attempt++) {
+            // 先扣掉设备停机窗口，确保“停机后再换模”从停机结束时刻继续判断。
+            Date downtimeAdjustedTime = resolveDowntimeAdjustedStartTime(
+                    context, machineCode, adjustedTime, switchDurationHours);
+            if (downtimeAdjustedTime.after(adjustedTime)) {
+                adjustedTime = downtimeAdjustedTime;
+                continue;
+            }
+
+            // 若在禁止换模时间段内（20:00-次日6:00），顺延到禁止时段结束后的第一个早班（凌晨段为当日早班，晚间段为次日早班）
+            if (LhScheduleTimeUtil.isNoMouldChangeTime(context, adjustedTime)) {
+                adjustedTime = LhScheduleTimeUtil.resolveNextMorningAfterNoMouldChangeWindow(context, adjustedTime);
+                continue;
+            }
+
+            String dateKey = formatDateKey(adjustedTime);
+            int[] counts = context.getDailyMouldChangeCountMap().computeIfAbsent(dateKey, k -> new int[]{0, 0});
+            int dailyLimit = getDailyLimit(context);
+            int totalUsed = getTotalUsed(counts);
+
+            if (totalUsed >= dailyLimit) {
+                if (isOnOrAfterScheduleTargetDate(context, adjustedTime)) {
+                    recordBlockedReason(context, sku, dailyLimit);
+                    log.warn("换模/换活字块每日次数达到T+2上限，进入未排, materialCode: {}, embryoCode: {}, "
+                                    + "actionType: {}, 日期: {}, 当天总次数: {}/{}, 早班次数: {}, 中班次数: {}",
+                            sku == null ? null : sku.getMaterialCode(),
+                            sku == null ? null : sku.getEmbryoCode(),
+                            StringUtils.defaultIfEmpty(actionType, ACTION_CHANGEOVER),
+                            dateKey, totalUsed, dailyLimit, counts[IDX_MORNING], counts[IDX_AFTERNOON]);
+                    return null;
+                }
+                Date nextDayMorningStart = getNextCalendarDayMorningStart(context, adjustedTime);
+                log.info("换模/换活字块每日次数已达上限，顺延到后一天, materialCode: {}, embryoCode: {}, "
+                                + "actionType: {}, 当前日期: {}, 顺延日期: {}, 当天总次数: {}/{}",
+                        sku == null ? null : sku.getMaterialCode(),
+                        sku == null ? null : sku.getEmbryoCode(),
+                        StringUtils.defaultIfEmpty(actionType, ACTION_CHANGEOVER),
+                        dateKey, LhScheduleTimeUtil.formatDate(nextDayMorningStart), totalUsed, dailyLimit);
+                adjustedTime = nextDayMorningStart;
+                continue;
+            }
+
+            boolean sharedEmbryo = isSharedEmbryo(context, sku);
+            Date balancedTime = sharedEmbryo
+                    ? resolveSharedEmbryoBalancedTime(context, adjustedTime, counts) : adjustedTime;
+            if (balancedTime != null && balancedTime.after(adjustedTime)) {
+                adjustedTime = balancedTime;
+                continue;
+            }
+
+            if (registerMouldChangeCount(context, adjustedTime)) {
+                int[] updatedCounts = context.getDailyMouldChangeCountMap().get(dateKey);
+                log.info("换模/换活字块班次落点完成, materialCode: {}, embryoCode: {}, 是否共用胎胚: {}, "
+                                + "actionType: {}, 日期: {}, 当天总次数: {}/{}, 早班次数: {}, 中班次数: {}, 最终换模班次: {}",
+                        sku == null ? null : sku.getMaterialCode(),
+                        sku == null ? null : sku.getEmbryoCode(),
+                        sharedEmbryo,
+                        StringUtils.defaultIfEmpty(actionType, ACTION_CHANGEOVER),
+                        dateKey, getTotalUsed(updatedCounts), dailyLimit,
+                        updatedCounts[IDX_MORNING], updatedCounts[IDX_AFTERNOON],
+                        LhScheduleTimeUtil.isMorningShift(context, adjustedTime) ? "早班" : "中班");
+                return adjustedTime;
+            }
+            adjustedTime = getNextCalendarDayMorningStart(context, adjustedTime);
+        }
+
+        log.warn("换模均衡分配失败，无可用换模班次, 原始时间: {}",
+                LhScheduleTimeUtil.formatDateTime(endingTime));
+        return null;
+    }
+
+    /**
+     * 旧换模均衡逻辑。
+     * <p>参数关闭时保持原早班8次/中班7次硬限制口径不变，避免关闭态排程结果漂移。</p>
+     */
+    private Date allocateLegacyMouldChange(LhScheduleContext context,
+                                           String machineCode,
+                                           Date endingTime,
+                                           int switchDurationHours) {
         if (endingTime == null) {
             return null;
         }
@@ -139,6 +243,133 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
         int totalUsed = counts[IDX_MORNING] + counts[IDX_AFTERNOON];
         int dailyLimit = getDailyLimit(context);
         return Math.max(0, dailyLimit - totalUsed);
+    }
+
+    /**
+     * 判断是否启用换模均衡新口径。
+     *
+     * @param context 排程上下文
+     * @return true-启用；false-关闭
+     */
+    private boolean isChangeoverBalanceEnabled(LhScheduleContext context) {
+        return context != null
+                && context.getScheduleConfig() != null
+                && context.getScheduleConfig().isChangeoverBalanceEnabled();
+    }
+
+    /**
+     * 统计当天已使用换模/换活字块总次数。
+     *
+     * @param counts 当天早/中班计数
+     * @return 当天总次数
+     */
+    private int getTotalUsed(int[] counts) {
+        if (counts == null || counts.length < 2) {
+            return 0;
+        }
+        return counts[IDX_MORNING] + counts[IDX_AFTERNOON];
+    }
+
+    /**
+     * 判断当前SKU是否属于本月共用胎胚。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @return true-共用胎胚；false-单胎胚或无法识别
+     */
+    private boolean isSharedEmbryo(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return false;
+        }
+        return Boolean.TRUE.equals(context.getMaterialSharedEmbryoMap().get(sku.getMaterialCode()));
+    }
+
+    /**
+     * 解析共用胎胚本次应落定的均衡班次。
+     * <p>只能在不早于当前可切换时间的候选班次内均衡；如果当前已进入中班，则不回退到早班。</p>
+     *
+     * @param context 排程上下文
+     * @param candidateTime 当前候选切换时间
+     * @param counts 当天早/中班计数
+     * @return 均衡后的候选切换时间
+     */
+    private Date resolveSharedEmbryoBalancedTime(LhScheduleContext context, Date candidateTime, int[] counts) {
+        if (candidateTime == null || counts == null || counts.length < 2) {
+            return candidateTime;
+        }
+        if (LhScheduleTimeUtil.isMorningShift(context, candidateTime)
+                && counts[IDX_MORNING] > counts[IDX_AFTERNOON]) {
+            return LhScheduleTimeUtil.getAfternoonShiftStart(context, candidateTime);
+        }
+        return candidateTime;
+    }
+
+    /**
+     * 登记本次换模/换活字块次数。
+     *
+     * @param context 排程上下文
+     * @param allocatedTime 已落定切换时间
+     * @return true-登记成功；false-无法登记
+     */
+    private boolean registerMouldChangeCount(LhScheduleContext context, Date allocatedTime) {
+        if (context == null || allocatedTime == null) {
+            return false;
+        }
+        String dateKey = formatDateKey(allocatedTime);
+        int[] counts = context.getDailyMouldChangeCountMap().computeIfAbsent(dateKey, key -> new int[]{0, 0});
+        if (LhScheduleTimeUtil.isMorningShift(context, allocatedTime)) {
+            counts[IDX_MORNING]++;
+            return true;
+        }
+        if (LhScheduleTimeUtil.isAfternoonShift(context, allocatedTime)) {
+            counts[IDX_AFTERNOON]++;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * 判断候选日期是否已经达到排程窗口最后一天。
+     *
+     * @param context 排程上下文
+     * @param candidateTime 候选切换时间
+     * @return true-已到T+2或更晚；false-仍可顺延
+     */
+    private boolean isOnOrAfterScheduleTargetDate(LhScheduleContext context, Date candidateTime) {
+        if (context == null || context.getScheduleTargetDate() == null || candidateTime == null) {
+            return false;
+        }
+        Date candidateDate = LhScheduleTimeUtil.clearTime(candidateTime);
+        Date targetDate = LhScheduleTimeUtil.clearTime(context.getScheduleTargetDate());
+        return !candidateDate.before(targetDate);
+    }
+
+    /**
+     * 记录T+2换模/换活字块日上限阻塞原因，供未排结果复用。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param dailyLimit 每日换模/换活字块上限
+     */
+    private void recordBlockedReason(LhScheduleContext context, SkuScheduleDTO sku, int dailyLimit) {
+        if (context == null || sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return;
+        }
+        context.getMouldChangeLimitBlockedReasonMap().put(sku.getMaterialCode(),
+                "T+2 换模/换活字块次数超过每日" + dailyLimit + "次上限");
+    }
+
+    /**
+     * 清理当前SKU上一次换模上限阻塞原因，避免候选重试成功后残留旧原因。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     */
+    private void clearBlockedReason(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return;
+        }
+        context.getMouldChangeLimitBlockedReasonMap().remove(sku.getMaterialCode());
     }
 
     /**
