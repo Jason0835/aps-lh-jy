@@ -1777,7 +1777,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, skuResults, keptResults);
         for (LhScheduleResult result : removedResults) {
-            redistributeShiftQty(context, result, shifts, 0);
+            boolean nightShiftProtected = applyNoMouldChangeNightFillBeforeRelease(
+                    context, sourceSku, result, shifts, ending);
+            if (!nightShiftProtected) {
+                redistributeShiftQty(context, result, shifts, 0);
+            }
         }
         log.info("续作多机台降模结果, materialCode: {}, 原始机台: {}, 保留机台: {}, 下机机台: {}, 原始机台明细: {}, "
                         + "保留机台明细: {}, 下机机台明细: {}, 原因: dayN保障量={}，按胶囊使用次数和机台编码排序",
@@ -1833,6 +1837,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int allocation = Math.min(remainingDemandQty, machineCapacity);
             redistributeShiftQty(context, result, dayShifts, allocation);
             clearContinuationShiftsAfterDate(context, result, allShifts, productionDate);
+            if (allocation > 0) {
+                applyNoMouldChangeNightFillBeforeRelease(context, sourceSku, result, allShifts, false);
+            }
             remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
             log.info("续作多机台当日补量下机机台排量, materialCode: {}, 日期: {}, machineCode: {}, allocation: {}, "
                             + "machineCapacity: {}, 当日剩余需求: {}",
@@ -1929,6 +1936,128 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         clearShiftPlanQty(result, shiftsToClear);
         refreshResultSummary(context, result, shifts);
+    }
+
+    /**
+     * 续作机台准备下机前，处理中班结束后紧接不可换模晚班的补班。
+     * <p>中班结束后如果直接释放机台，后续SKU在晚班无法换模开产，当前SKU已在机可继续无换模生产；
+     * 收尾场景仍优先遵守目标量上限，只允许在剩余收尾目标量范围内补晚班。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param result 准备释放的续作结果
+     * @param shifts 全窗口班次
+     * @param strictEnding 是否严格收尾
+     * @return true-已保留或补充晚班；false-未命中规则
+     */
+    private boolean applyNoMouldChangeNightFillBeforeRelease(LhScheduleContext context,
+                                                             SkuScheduleDTO sourceSku,
+                                                             LhScheduleResult result,
+                                                             List<LhShiftConfigVO> shifts,
+                                                             boolean strictEnding) {
+        if (context == null || sourceSku == null || result == null || CollectionUtils.isEmpty(shifts)) {
+            return false;
+        }
+        int lastShiftIndex = resolveLastPlannedShiftIndex(result);
+        if (lastShiftIndex <= 0) {
+            return false;
+        }
+        LhShiftConfigVO currentShift = findShiftByIndex(shifts, lastShiftIndex);
+        LhShiftConfigVO nextShift = findShiftByIndex(shifts, lastShiftIndex + 1);
+        if (!isAfternoonToNoMouldChangeNightShift(context, currentShift, nextShift)) {
+            return false;
+        }
+        if (isMachineShiftOccupiedByOtherSku(context, sourceSku, result, nextShift)) {
+            log.info("续作中班下机晚班补满跳过, materialCode: {}, machineCode: {}, nightShift: {}, 原因: 下一晚班已被其他SKU占用",
+                    sourceSku.getMaterialCode(), result.getLhMachineCode(), nextShift.getShiftIndex());
+            return false;
+        }
+        int currentQty = resolveShiftPlanQty(result, nextShift.getShiftIndex());
+        int availableQty = Math.max(0, calculateResultShiftCapacity(context, result, nextShift) - currentQty);
+        int fillLimitQty = strictEnding
+                ? resolveRemainingEndingQtyForContinuationGroup(context, sourceSku)
+                : availableQty;
+        int fillQty = Math.min(availableQty, Math.max(0, fillLimitQty));
+        if (fillQty <= 0) {
+            return currentQty > 0;
+        }
+        setShiftPlanQty(result, nextShift.getShiftIndex(), currentQty + fillQty,
+                nextShift.getShiftStartDateTime(), null);
+        refreshResultSummary(context, result, shifts);
+        log.info("续作中班下机晚班补满命中, materialCode: {}, machineCode: {}, 当前班次: {}, 晚班班次: {}, "
+                        + "补满数量: {}, 是否严格收尾: {}, 原因: 晚班不可换模且当前SKU可无换模续作",
+                sourceSku.getMaterialCode(), result.getLhMachineCode(), lastShiftIndex, nextShift.getShiftIndex(),
+                fillQty, strictEnding);
+        return true;
+    }
+
+    /**
+     * 判断当前班次是否为中班且下一班次为不可换模晚班。
+     *
+     * @param context 排程上下文
+     * @param currentShift 当前最后有量班次
+     * @param nextShift 下一班次
+     * @return true-中班后紧接不可换模晚班
+     */
+    private boolean isAfternoonToNoMouldChangeNightShift(LhScheduleContext context,
+                                                         LhShiftConfigVO currentShift,
+                                                         LhShiftConfigVO nextShift) {
+        return context != null
+                && currentShift != null
+                && nextShift != null
+                && nextShift.getShiftStartDateTime() != null
+                && StringUtils.equals(ShiftEnum.AFTERNOON_SHIFT.getCode(), currentShift.getShiftType())
+                && nextShift.isNightShift()
+                && !nextShift.isAllowMouldChange()
+                && LhScheduleTimeUtil.isNoMouldChangeTime(context, nextShift.getShiftStartDateTime());
+    }
+
+    /**
+     * 计算续作共享账本组剩余收尾目标量。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @return 剩余可补量
+     */
+    private int resolveRemainingEndingQtyForContinuationGroup(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        int endingDemandQty = Math.max(Math.max(0, sourceSku.getSurplusQty()), Math.max(0, sourceSku.getEmbryoStock()));
+        int scheduledQty = resolveEffectiveContinuousPhaseScheduledQty(context, buildContinuationGroupKey(sourceSku));
+        return Math.max(0, endingDemandQty - scheduledQty);
+    }
+
+    /**
+     * 判断准备补晚班的机台班次是否已被其他SKU占用。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 当前SKU
+     * @param currentResult 当前结果
+     * @param targetShift 目标晚班
+     * @return true-其他SKU已占用
+     */
+    private boolean isMachineShiftOccupiedByOtherSku(LhScheduleContext context,
+                                                     SkuScheduleDTO sourceSku,
+                                                     LhScheduleResult currentResult,
+                                                     LhShiftConfigVO targetShift) {
+        if (context == null || sourceSku == null || currentResult == null || targetShift == null
+                || StringUtils.isEmpty(currentResult.getLhMachineCode())
+                || targetShift.getShiftIndex() == null
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return false;
+        }
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (result == null || result == currentResult
+                    || !StringUtils.equals(currentResult.getLhMachineCode(), result.getLhMachineCode())) {
+                continue;
+            }
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, targetShift.getShiftIndex());
+            if (planQty == null || planQty <= 0) {
+                continue;
+            }
+            if (!StringUtils.equals(sourceSku.getMaterialCode(), result.getMaterialCode())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -3864,7 +3864,7 @@ class NewSpecProductionStrategyRegressionTest {
         endingSku.setLhTimeSeconds(3600);
         endingSku.setShiftCapacity(17);
         endingSku.setMouldQty(1);
-        endingSku.setSurplusQty(17);
+        endingSku.setSurplusQty(22);
         LhScheduleResult endingResult = buildEndingResult(context, endingSku, "K1114");
         endingResult.setSingleMouldShiftQty(17);
         ShiftFieldUtil.setShiftPlanQty(endingResult, 5, 17,
@@ -3873,7 +3873,8 @@ class NewSpecProductionStrategyRegressionTest {
 
         invokeNightNoMouldChangeContinuationFill(strategy, context, endingSku, endingResult, shifts,
                 ProductionQuantityPolicy.from(endingSku, true));
-        assertEquals(0, resolveShiftQty(endingResult, 6), "收尾SKU不允许为了晚班补满而超排");
+        assertEquals(5, resolveShiftQty(endingResult, 6), "收尾SKU中班结束后进入不可换模晚班时，只能补剩余目标量");
+        assertEquals(22, endingResult.getDailyPlanQty().intValue(), "收尾SKU晚班补量后不得超过收尾目标量");
     }
 
     @Test
@@ -4092,6 +4093,125 @@ class NewSpecProductionStrategyRegressionTest {
 
         assertEquals(17, resolveShiftQty(primaryResult, 6), "3302002546 主机 C6 应补满晚班");
         assertEquals(0, resolveShiftQty(auxResult, 6), "3302002546 辅机 C6 不允许被晚班补回");
+    }
+
+    @Test
+    void applyNightNoMouldChangeContinuationFill_shouldFillTailMachineBeforePersistEvenPrimaryCoversDay() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 5, 3, 0, 0));
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate);
+        context.setScheduleWindowShifts(shifts);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001074");
+        sku.setMaterialDesc("尾机台落地前中班后保留晚班");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setSurplusQty(1440);
+        sku.setTargetScheduleQty(146);
+        sku.setWindowPlanQty(146);
+        sku.setPendingQty(146);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, sku.getMaterialCode(), 8, 92, 46));
+        context.getNewSpecSkuList().add(sku);
+
+        LhScheduleResult primaryResult = buildEndingResult(context, sku, "K1206");
+        primaryResult.setIsEnd("0");
+        primaryResult.setSingleMouldShiftQty(16);
+        for (int shiftIndex = 2; shiftIndex <= 8; shiftIndex++) {
+            ShiftFieldUtil.setShiftPlanQty(primaryResult, shiftIndex, 16,
+                    shifts.get(shiftIndex - 1).getShiftStartDateTime(),
+                    shifts.get(shiftIndex - 1).getShiftEndDateTime());
+        }
+        ShiftFieldUtil.syncDailyPlanQty(primaryResult);
+
+        LhScheduleResult tailResult = buildEndingResult(context, sku, "K1313");
+        tailResult.setIsEnd("0");
+        tailResult.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(tailResult, 3, 16,
+                shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(tailResult, 4, 16,
+                shifts.get(3).getShiftStartDateTime(), shifts.get(3).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(tailResult, 5, 16,
+                shifts.get(4).getShiftStartDateTime(), shifts.get(4).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(tailResult);
+
+        context.getScheduleResultList().add(primaryResult);
+        context.getMachineScheduleMap().put("K1206", buildMachine("K1206", shifts.get(7).getShiftEndDateTime()));
+        context.getMachineScheduleMap().put("K1313", buildMachine("K1313", shifts.get(4).getShiftEndDateTime()));
+
+        invokeNightNoMouldChangeContinuationFill(strategy, context, sku, tailResult, shifts,
+                ProductionQuantityPolicy.from(sku, false));
+
+        assertEquals(16, resolveShiftQty(tailResult, 6),
+                "尾机台落地前 C5 后紧接不可换模晚班时，即使主机已覆盖当日目标，也必须保留 C6");
+        assertEquals(64, tailResult.getDailyPlanQty().intValue(), "尾机台补晚班后应刷新本结果汇总量");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldKeepNightShiftWhenAuxMachineReleasedAfterAfternoon() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 5, 3, 0, 0));
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate);
+        context.setScheduleWindowShifts(shifts);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001074");
+        sku.setMaterialDesc("辅助机台中班释放后保留晚班");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setSurplusQty(1440);
+        sku.setTargetScheduleQty(1440);
+        sku.setWindowPlanQty(1440);
+        sku.setPendingQty(1440);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, sku.getMaterialCode(), 0, 32, 0));
+        context.getNewSpecSkuList().add(sku);
+
+        LhScheduleResult primaryResult = buildEndingResult(context, sku, "K1206");
+        primaryResult.setIsEnd("0");
+        primaryResult.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, 3, 16,
+                shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, 4, 16,
+                shifts.get(3).getShiftStartDateTime(), shifts.get(3).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, 5, 16,
+                shifts.get(4).getShiftStartDateTime(), shifts.get(4).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(primaryResult);
+
+        LhScheduleResult auxResult = buildEndingResult(context, sku, "K1313");
+        auxResult.setIsEnd("0");
+        auxResult.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(auxResult, 5, 16,
+                shifts.get(4).getShiftStartDateTime(), shifts.get(4).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(auxResult);
+
+        context.getScheduleResultList().add(primaryResult);
+        context.getScheduleResultList().add(auxResult);
+        context.getMachineScheduleMap().put("K1206", buildMachine("K1206", shifts.get(4).getShiftEndDateTime()));
+        context.getMachineScheduleMap().put("K1313", buildMachine("K1313", shifts.get(4).getShiftEndDateTime()));
+
+        invokeSameSkuMultiMachineAllocation(strategy, context, sku, shifts,
+                ProductionQuantityPolicy.from(sku, false), false);
+
+        assertEquals(0, resolveShiftQty(auxResult, 5), "辅机 C5 满足当日目标后允许释放");
+        assertEquals(16, resolveShiftQty(auxResult, 6),
+                "辅机 C5 释放点后紧接不可换模晚班时，当前SKU必须继续补满 C6 后再下机");
+        assertEquals(16, auxResult.getDailyPlanQty().intValue(), "辅机只保留中班后补出的晚班产量");
     }
 
     @Test

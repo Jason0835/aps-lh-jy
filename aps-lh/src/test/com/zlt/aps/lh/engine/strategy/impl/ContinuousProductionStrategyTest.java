@@ -1024,16 +1024,16 @@ public class ContinuousProductionStrategyTest {
         LhScheduleResult removedFromSecondDayResult = findResultByMachineCode(context, "K1702");
         assertEquals(80, retainedResult.getDailyPlanQty().intValue(),
                 "K1405 应保留 day1 的 2 个班次和 day2 的 3 个班次");
-        assertEquals(32, removedFromSecondDayResult.getDailyPlanQty().intValue(),
-                "K1702 只应保留 day1 的 2 个班次，day2 起下机");
+        assertEquals(48, removedFromSecondDayResult.getDailyPlanQty().intValue(),
+                "K1702 中班结束后进入不可换模晚班，应保留 day1 早中晚 3 个班次后再下机");
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 1));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 2));
-        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 3));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 3));
         assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 4));
         assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 5));
         assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 6));
-        assertEquals(112, sumScheduledQty(context),
-                "按 2/3/3 班窗口降模后，总量应收口为 day1 64 + day2 48");
+        assertEquals(128, sumScheduledQty(context),
+                "按新规则中班后补满晚班，总量应收口为 day1 80 + day2 48");
     }
 
     @Test
@@ -1059,6 +1059,23 @@ public class ContinuousProductionStrategyTest {
         assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(downMachineResult, 3));
         assertEquals(96, sumScheduledQty(context),
                 "保留机台继续满班续作，下机机台只补足day1剩余量");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldKeepNightShiftWhenDownMachineReleasedAfterAfternoon() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiDayContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), 128, 80, 48, 10, 5, "K1405", "K1702");
+
+        strategy.scheduleReduceMould(context);
+
+        LhScheduleResult downMachineResult = findResultByMachineCode(context, "K1702");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachineResult, 1));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachineResult, 2));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachineResult, 3),
+                "下机机台中班结束后进入不可换模晚班时，当前SKU应继续补满晚班后再释放");
+        assertEquals(48, downMachineResult.getDailyPlanQty().intValue(),
+                "晚班不可换模补满后，下机机台应保留早中晚三个班次产量");
     }
 
     @Test
@@ -1091,13 +1108,14 @@ public class ContinuousProductionStrategyTest {
         LhScheduleResult removedFromSecondDayResult = findResultByMachineCode(context, "K1702");
         assertEquals(128, retainedResult.getDailyPlanQty().intValue(),
                 "正规非收尾续作多机台场景下，K1405 在 day2/day3 保留后应补满当天剩余班次产能");
-        assertEquals(32, removedFromSecondDayResult.getDailyPlanQty().intValue(),
-                "K1702 仍只保留 day1 的 2 个班次，day2 起下机");
+        assertEquals(48, removedFromSecondDayResult.getDailyPlanQty().intValue(),
+                "K1702 中班结束后进入不可换模晚班，应保留 day1 早中晚 3 个班次后再下机");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(removedFromSecondDayResult, 3));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 6));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 7));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(retainedResult, 8));
-        assertEquals(160, sumScheduledQty(context),
-                "day1=64、day2=48、day3=48 的文档案例下，总量应为 160");
+        assertEquals(176, sumScheduledQty(context),
+                "day1=64、day2=48、day3=48 且下机中班后补晚班，总量应为 176");
     }
 
     @Test
@@ -1391,8 +1409,9 @@ public class ContinuousProductionStrategyTest {
         LhScheduleResult downMachine = findResultByMachineCode(context, "K1412");
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachine, 1));
         assertEquals(Integer.valueOf(10), ShiftFieldUtil.getShiftPlanQty(downMachine, 2));
-        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(downMachine, 3));
-        assertEquals(26, downMachine.getDailyPlanQty().intValue(), "下机机台只补足day1剩余量，后续班次必须释放");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachine, 3));
+        assertEquals(42, downMachine.getDailyPlanQty().intValue(),
+                "下机机台补足day1剩余量后若中班结束进入不可换模晚班，应继续补满晚班");
         assertEquals(5, context.getScheduleResultList().size(), "第一天下机机台有排产量，不应被零计划收口移除");
     }
 
@@ -1410,10 +1429,10 @@ public class ContinuousProductionStrategyTest {
         LhScheduleResult firstDayOnly = findResultByMachineCode(context, "K1505");
         assertEquals(128, firstKept.getDailyPlanQty().intValue());
         assertEquals(128, secondKept.getDailyPlanQty().intValue());
-        assertEquals(32, firstDayOnly.getDailyPlanQty().intValue());
+        assertEquals(48, firstDayOnly.getDailyPlanQty().intValue());
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(firstDayOnly, 1));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(firstDayOnly, 2));
-        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(firstDayOnly, 3));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(firstDayOnly, 3));
         assertEquals(3, context.getScheduleResultList().size(), "零排产机台应释放并移出续作结果");
     }
 

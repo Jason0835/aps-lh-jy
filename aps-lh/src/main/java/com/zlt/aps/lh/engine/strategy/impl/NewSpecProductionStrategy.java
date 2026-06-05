@@ -4065,6 +4065,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         sortedResults.sort(buildSameSkuPrimaryComparator(0));
         LhScheduleResult primaryResult = sortedResults.get(0);
         Set<String> releasedMachineCodes = new LinkedHashSet<String>(4);
+        Set<String> protectedNightShiftKeySet = new HashSet<String>(4);
         boolean changed = false;
         int carryShortage = 0;
         for (Map.Entry<LocalDate, List<LhShiftConfigVO>> entry : shiftMapByDate.entrySet()) {
@@ -4082,6 +4083,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     if (shiftQty == null || shiftQty <= 0) {
                         continue;
                     }
+                    String machineShiftKey = buildMachineShiftKey(result.getLhMachineCode(), shift.getShiftIndex());
+                    if (protectedNightShiftKeySet.contains(machineShiftKey)) {
+                        actualQty += shiftQty;
+                        log.info("新增SKU辅助机台晚班保留, materialCode: {}, productionDate: {}, shiftIndex: {}, "
+                                        + "machine: {}, reason: 中班结束后进入晚班不可换模，不能在同轮释放中清掉已保留晚班",
+                                sku.getMaterialCode(), productionDate, shift.getShiftIndex(),
+                                result.getLhMachineCode());
+                        continue;
+                    }
                     boolean primaryMachine = result == primaryResult;
                     boolean necessary = primaryMachine || actualQty < requiredQty;
                     if (!necessary) {
@@ -4094,6 +4104,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                     result.getLhMachineCode());
                             continue;
                         }
+                        boolean nightShiftProtected = applyNightNoMouldChangeContinuationFill(
+                                context, sku, result, shifts, quantityPolicy, shift.getShiftIndex());
+                        if (nightShiftProtected) {
+                            protectedNightShiftKeySet.add(buildMachineShiftKey(
+                                    result.getLhMachineCode(), shift.getShiftIndex() + 1));
+                        }
                         setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
                         refreshResultSummary(context, result);
                         refreshMachineStateAfterEndingStagger(context, result);
@@ -4105,6 +4121,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                 sku.getMaterialCode(), productionDate, shift.getShiftIndex(), primaryResult.getLhMachineCode(),
                                 result.getLhMachineCode(), carryShortage, resolveDayPlanQty(sku, productionDate),
                                 requiredQty, actualQty);
+                        if (nightShiftProtected) {
+                            log.info("新增SKU辅助机台晚班保留, materialCode: {}, releasedMachine: {}, shiftIndex: {}, "
+                                            + "reason: 中班结束后进入晚班不可换模，当前SKU继续无换模生产",
+                                    sku.getMaterialCode(), result.getLhMachineCode(), shift.getShiftIndex() + 1);
+                        }
                         continue;
                     }
                     actualQty += shiftQty;
@@ -4118,6 +4139,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     StringUtils.join(releasedMachineCodes, ","), buildSameSkuAllocationSummary(sortedResults));
         }
         return changed;
+    }
+
+    /**
+     * 构造机台班次保护键，避免辅助机台释放遍历中把中班后保留的晚班再次清掉。
+     *
+     * @param machineCode 机台编码
+     * @param shiftIndex 班次序号
+     * @return 机台班次保护键
+     */
+    private String buildMachineShiftKey(String machineCode, Integer shiftIndex) {
+        return machineCode + "#" + shiftIndex;
     }
 
     private boolean shouldKeepAuxiliaryShiftForFutureDayDemand(SkuScheduleDTO sku,
@@ -4600,57 +4632,75 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 晚班不可换模时，正规/量试/小批量非收尾SKU在当前机台无换模续作补满下一晚班。
+     * 晚班不可换模时，当前SKU在本机台无换模续作补下一晚班。
+     * <p>非收尾SKU按可用晚班班产补满；收尾SKU只允许在剩余收尾目标量范围内补量，不能超排。</p>
      *
      * @param context 排程上下文
      * @param sku 当前SKU
      * @param result 当前机台结果
      * @param shifts 班次列表
      * @param quantityPolicy 数量控制策略
+     * @return true-已保留或补充晚班；false-未命中规则
      */
-    private void applyNightNoMouldChangeContinuationFill(LhScheduleContext context,
-                                                         SkuScheduleDTO sku,
-                                                         LhScheduleResult result,
-                                                         List<LhShiftConfigVO> shifts,
-                                                         ProductionQuantityPolicy quantityPolicy) {
+    private boolean applyNightNoMouldChangeContinuationFill(LhScheduleContext context,
+                                                            SkuScheduleDTO sku,
+                                                            LhScheduleResult result,
+                                                            List<LhShiftConfigVO> shifts,
+                                                            ProductionQuantityPolicy quantityPolicy) {
+        return applyNightNoMouldChangeContinuationFill(context, sku, result, shifts, quantityPolicy, null);
+    }
+
+    private boolean applyNightNoMouldChangeContinuationFill(LhScheduleContext context,
+                                                            SkuScheduleDTO sku,
+                                                            LhScheduleResult result,
+                                                            List<LhShiftConfigVO> shifts,
+                                                            ProductionQuantityPolicy quantityPolicy,
+                                                            Integer releaseShiftIndex) {
         if (context == null || sku == null || result == null || CollectionUtils.isEmpty(shifts)
-                || quantityPolicy == null || quantityPolicy.isEnding()
-                || !quantityPolicy.isAllowFillStartedShift() || quantityPolicy.isStrictUpperLimit()) {
-            return;
+                || quantityPolicy == null) {
+            return false;
         }
-        if ("1".equals(result.getIsEnd())) {
-            return;
+        boolean endingPolicy = quantityPolicy.isEnding();
+        if (!endingPolicy && (!quantityPolicy.isAllowFillStartedShift() || quantityPolicy.isStrictUpperLimit())) {
+            return false;
         }
-        int lastShiftIndex = resolveLastPlannedShiftIndex(result);
+        if ("1".equals(result.getIsEnd()) && !endingPolicy) {
+            return false;
+        }
+        int lastShiftIndex = releaseShiftIndex == null ? resolveLastPlannedShiftIndex(result) : releaseShiftIndex;
         if (lastShiftIndex <= 0) {
-            return;
+            return false;
         }
+        LhShiftConfigVO currentShift = findShiftByIndex(shifts, lastShiftIndex);
         LhShiftConfigVO nextShift = findShiftByIndex(shifts, lastShiftIndex + 1);
-        if (nextShift == null || !nextShift.isNightShift() || nextShift.isAllowMouldChange()
+        if (!isAfternoonToNoMouldChangeNightShift(currentShift, nextShift)
                 || nextShift.getShiftStartDateTime() == null
                 || !LhScheduleTimeUtil.isNoMouldChangeTime(context, nextShift.getShiftStartDateTime())) {
-            return;
+            return false;
         }
         if (isMachineShiftOccupiedByOtherSku(context, sku, result, nextShift)) {
             log.info("晚班不可换模续作补满跳过, materialCode: {}, 机台: {}, 晚班班次: {}, 原因: 下一晚班已被其他SKU占用",
                     sku.getMaterialCode(), result.getLhMachineCode(), nextShift.getShiftIndex());
-            return;
+            return false;
         }
-        if (!isNightContinuationFillNecessary(context, sku, result, shifts, nextShift)) {
+        boolean pendingResultBeforePersist = releaseShiftIndex == null
+                && isNewSpecResultPendingPersist(context, result);
+        if (releaseShiftIndex == null && !endingPolicy && !pendingResultBeforePersist
+                && !isNightContinuationFillNecessary(context, sku, result, shifts, nextShift)) {
             log.info("晚班不可换模续作补满跳过, materialCode: {}, 机台: {}, 晚班班次: {}, 原因: 当前机台为辅助机台且主承接机台已可覆盖当日目标",
                     sku.getMaterialCode(), result.getLhMachineCode(), nextShift.getShiftIndex());
-            return;
+            return false;
         }
         int realSurplusRemainingQty = resolveRealSurplusRemainingQty(context, sku, result);
         if (realSurplusRemainingQty <= 0) {
-            return;
+            return false;
         }
         Integer existingQty = ShiftFieldUtil.getShiftPlanQty(result, nextShift.getShiftIndex());
         int currentQty = existingQty == null ? 0 : Math.max(0, existingQty);
         int availableQty = Math.max(0, resolveAvailableShiftQtyForEndingStagger(context, result, nextShift) - currentQty);
         int fillQty = Math.min(availableQty, realSurplusRemainingQty);
         if (fillQty <= 0) {
-            return;
+            return currentQty > 0;
         }
         setShiftPlanQty(result, nextShift.getShiftIndex(), currentQty + fillQty,
                 nextShift.getShiftStartDateTime(), null);
@@ -4659,6 +4709,46 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         + "补满数量: {}, 真实余量剩余: {}, 原因: 晚班不可换模且当前SKU可无换模续作",
                 sku.getMaterialCode(), result.getLhMachineCode(), lastShiftIndex, nextShift.getShiftIndex(),
                 fillQty, realSurplusRemainingQty);
+        return true;
+    }
+
+    /**
+     * 判断新增结果是否处于落地前状态。
+     * <p>尾机台初始排到中班结束时，结果尚未加入上下文；此时下个晚班不可换模，不能套用已落地辅助机的主机覆盖跳过保护。</p>
+     *
+     * @param context 排程上下文
+     * @param result 当前新增结果
+     * @return true-新增结果尚未落地；false-结果已落地或无效
+     */
+    private boolean isNewSpecResultPendingPersist(LhScheduleContext context, LhScheduleResult result) {
+        if (context == null || result == null
+                || !NEW_SPEC_SCHEDULE_TYPE.equals(result.getScheduleType())
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return false;
+        }
+        for (LhScheduleResult scheduleResult : context.getScheduleResultList()) {
+            if (scheduleResult == result) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 判断当前结果是否从中班收尾进入不可换模晚班。
+     * <p>中班结束后如果直接下机，后续SKU在晚班无法换模开产；当前SKU已在机，可继续无换模生产晚班。</p>
+     *
+     * @param currentShift 当前最后有量班次
+     * @param nextShift 下一班次
+     * @return true-中班后紧接不可换模晚班
+     */
+    private boolean isAfternoonToNoMouldChangeNightShift(LhShiftConfigVO currentShift,
+                                                         LhShiftConfigVO nextShift) {
+        return currentShift != null
+                && nextShift != null
+                && StringUtils.equals(ShiftEnum.AFTERNOON_SHIFT.getCode(), currentShift.getShiftType())
+                && nextShift.isNightShift()
+                && !nextShift.isAllowMouldChange();
     }
 
     private boolean isNightContinuationFillNecessary(LhScheduleContext context,

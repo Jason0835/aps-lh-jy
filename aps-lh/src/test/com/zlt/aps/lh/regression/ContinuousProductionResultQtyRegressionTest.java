@@ -80,9 +80,10 @@ class ContinuousProductionResultQtyRegressionTest {
         LhScheduleResult result = context.getScheduleResultList().get(0);
         assertEquals("LR", result.getLeftRightMould());
         assertEquals(50, result.getTotalDailyPlanQty());
-        assertEquals(30, result.getDailyPlanQty());
+        assertEquals(128, result.getDailyPlanQty(), "单机非收尾续作按满排窗口保存本次实际排产量");
         assertEquals(16, result.getClass1PlanQty());
-        assertEquals(14, result.getClass2PlanQty());
+        assertEquals(16, result.getClass2PlanQty());
+        assertEquals(16, result.getClass8PlanQty());
     }
 
     @Test
@@ -298,6 +299,7 @@ class ContinuousProductionResultQtyRegressionTest {
                 1,
                 false);
         context.getScheduleResultList().add(refinedResult);
+        context.getScheduleResultSourceSkuMap().put(refinedResult, sku);
 
         LhScheduleResult extraResult = new LhScheduleResult();
         extraResult.setLhMachineCode("M5");
@@ -311,6 +313,7 @@ class ContinuousProductionResultQtyRegressionTest {
         extraResult.setClass1StartTime(context.getScheduleWindowShifts().get(0).getShiftStartDateTime());
         extraResult.setClass1EndTime(context.getScheduleWindowShifts().get(0).getShiftEndDateTime());
         context.getScheduleResultList().add(extraResult);
+        context.getScheduleResultSourceSkuMap().put(extraResult, sku);
 
         strategy.scheduleReduceMould(context);
 
