@@ -617,6 +617,33 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void scheduleReduceMould_shouldNotAppendCompensationWhenLargeShortageBackToThreshold() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+
+        LhScheduleContext context = buildMultiDayContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), 336, 48, 48, 48,
+                10, 5, "K2028", "K2029");
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, "150")));
+        for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
+            sku.setMonthlyHistoryShortageQty(192);
+            sku.setScheduleDayFinishQty(0);
+            sku.setWindowPlanQty(336);
+            sku.setWindowRemainingPlanQty(336);
+        }
+
+        Boolean forcedShortageWindowSatisfied = ReflectionTestUtils.invokeMethod(
+                strategy, "isForcedShortageWindowSatisfied", context, context.getContinuousSkuList().get(0), 144, 224);
+        Assertions.assertTrue(Boolean.TRUE.equals(forcedShortageWindowSatisfied),
+                "历史欠产超过阈值且两台机台窗口有效产能足够时，应命中阈值回落分支");
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertTrue(context.getNewSpecSkuList().isEmpty(),
+                "两台续作机台窗口有效产能已让剩余欠产回到阈值以内，不应继续生成S4.5补偿SKU");
+    }
+
+    @Test
     public void scheduleReduceMould_shouldNotAppendCompensationWhenSharedQuotaExhausted() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
 

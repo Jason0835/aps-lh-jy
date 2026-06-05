@@ -40,6 +40,12 @@ public class DailyMachineCapacitySimulationRequest implements Serializable {
     /** 当前排程月份内、早于T日的历史欠产量 */
     private int monthlyHistoryShortageQty;
 
+    /** T日晚班已完成量，已经在日计划账本初始化时扣减 */
+    private int scheduleDayFinishQty;
+
+    /** T~T+2窗口内月计划dayN汇总，不包含历史欠产追加量 */
+    private int windowMonthPlanQty;
+
     /** 排程窗口结束日期 */
     private LocalDate windowEndDate;
 

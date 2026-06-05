@@ -2277,6 +2277,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         request.setShortageLookAheadDays(resolveNewSpecShortageLookAheadDays(context));
         int monthlyHistoryShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         request.setMonthlyHistoryShortageQty(monthlyHistoryShortageQty);
+        request.setScheduleDayFinishQty(Math.max(0, sku.getScheduleDayFinishQty()));
+        request.setWindowMonthPlanQty(sumSimulationWindowMonthPlanQty(sku.getDailyPlanQuotaMap()));
         request.setShortageAddMachineThreshold(resolveNewSpecShortageAddMachineThreshold(context));
         request.setWindowEndDate(resolveScheduleTargetLocalDate(context));
         request.setSceneType("newSpec");
@@ -2422,6 +2424,28 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
             int remainingTargetQty) {
         return DailyMachineExpansionPlanner.buildSimulationQuotaMap(quotaMap, remainingTargetQty);
+    }
+
+    /**
+     * 汇总新增排产模拟使用的 T~T+2 原始月计划量。
+     * <p>强制欠产增机台判断需要使用月计划 dayN 汇总，不能使用已追加历史欠产后的 remainingQty，
+     * 否则会把历史欠产重复计入窗口计划，导致超阈值 SKU 过度加机台。</p>
+     *
+     * @param quotaMap 日计划额度账本
+     * @return T~T+2 原始月计划量汇总
+     */
+    private int sumSimulationWindowMonthPlanQty(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
+        if (CollectionUtils.isEmpty(quotaMap)) {
+            return 0;
+        }
+        int planQty = 0;
+        for (SkuDailyPlanQuotaDTO quota : quotaMap.values()) {
+            if (quota == null) {
+                continue;
+            }
+            planQty += Math.max(0, quota.getDayPlanQty());
+        }
+        return Math.max(0, planQty);
     }
 
     /**
@@ -2708,13 +2732,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             log.info("新增SKU dayN机台模拟, materialCode: {}, 当前机台: {}, 日期: {}, 追补截止: {}, "
                             + "dayN计划: {}, carryShortage: {}, 当日需求: {}, 当日产能: {}, "
                             + "当日欠产: {}, 决策模式: {}, 是否超过阈值: {}, 窗口8班产能: {}, "
-                            + "窗口计划总量: {}, 后一天计划: {}, 后一天3班产能: {}, 累计需求: {}, "
+                            + "窗口计划总量: {}, 欠产阈值: {}, T日晚班完成: {}, 窗口有效产能: {}, "
+                            + "窗口后剩余欠产: {}, 后一天计划: {}, 后一天3班产能: {}, 累计需求: {}, "
                             + "累计产能: {}, 启用机台: {}, 新增机台: {}, 未满足: {}, 原因: {}",
                     sku.getMaterialCode(), segment.getMachineCode(), decision.getProductionDate(),
                     decision.getLookAheadEndDate(), decision.getTodayPlanQty(), decision.getCarryShortageQty(),
                     decision.getTodayRequiredQty(), decision.getTodayCapacityQty(), decision.getDayShortageQty(),
                     decision.getDecisionMode(), decision.isShortageThresholdExceeded(),
                     decision.getWindowTotalCapacityQty(), decision.getWindowPlanQty(),
+                    decision.getShortageAddMachineThreshold(), decision.getScheduleDayFinishQty(),
+                    decision.getWindowEffectiveCapacityQty(), decision.getWindowRemainingShortageQty(),
                     decision.getNextDayPlanQty(), decision.getNextDayThreeShiftCapacityQty(),
                     decision.getDemandQty(), decision.getCapacityQty(),
                     decision.getActiveMachineCount(), decision.getAddedMachineCount(),

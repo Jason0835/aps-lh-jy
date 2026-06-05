@@ -3305,7 +3305,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldAddMachineForLargeShortageByWindowDemand() throws Exception {
+    void scheduleNewSpecs_shouldStopWhenWindowRemainingShortageBackToThreshold() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
 
@@ -3314,6 +3314,8 @@ class NewSpecProductionStrategyRegressionTest {
         context.setScheduleDate(scheduleDate);
         context.setScheduleTargetDate(dateTime(2026, 5, 11, 0, 0));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, "150")));
 
         SkuScheduleDTO sku = buildSku();
         sku.setMaterialCode("3302001592");
@@ -3327,7 +3329,7 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setWindowRemainingPlanQty(144);
         sku.setSurplusQty(1256);
         sku.setEmbryoStock(-1);
-        sku.setMonthlyHistoryShortageQty(240);
+        sku.setMonthlyHistoryShortageQty(192);
         sku.setScheduleDayFinishQty(0);
         sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
                 context.getScheduleWindowShifts(), sku.getMaterialCode(), 48, 48, 48));
@@ -3340,8 +3342,10 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, orderedMachineMatch(k1115, k1116, k1117),
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals(3, context.getScheduleResultList().size(),
-                "大欠产超过阈值时，应按窗口需消化量动态扩到足够机台");
+        assertEquals(2, context.getScheduleResultList().size(),
+                "窗口后剩余欠产回到阈值以内时，应停止继续增加第三台机台");
+        assertEquals("K1115", context.getScheduleResultList().get(0).getLhMachineCode());
+        assertEquals("K1116", context.getScheduleResultList().get(1).getLhMachineCode());
     }
 
     @Test

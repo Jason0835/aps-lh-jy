@@ -49,6 +49,21 @@ public class DailyMachineCapacityDayDecision implements Serializable {
     /** T日到T+2窗口日计划总量 */
     private int windowPlanQty;
 
+    /** 欠产强制增机台模式下，T~T+2原始月计划总量 */
+    private int windowMonthPlanQty;
+
+    /** T日晚班已完成量 */
+    private int scheduleDayFinishQty;
+
+    /** 当前启用机台在T~T+2窗口内的有效产能 */
+    private int windowEffectiveCapacityQty;
+
+    /** 按公式计算的窗口后剩余欠产 */
+    private int windowRemainingShortageQty;
+
+    /** 欠产强制增机台阈值 */
+    private int shortageAddMachineThreshold;
+
     /** 是否超过欠产增机台阈值 */
     private boolean shortageThresholdExceeded;
 

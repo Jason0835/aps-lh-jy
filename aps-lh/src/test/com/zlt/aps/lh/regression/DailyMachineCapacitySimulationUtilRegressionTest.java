@@ -102,7 +102,7 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
     }
 
     @Test
-    void simulateExpansion_shouldAddMachineByShortageThresholdWindowDemand() {
+    void simulateExpansion_shouldStopWhenWindowRemainingShortageBackToThreshold() {
         LocalDate day1 = LocalDate.of(2026, 5, 9);
         LocalDate day2 = LocalDate.of(2026, 5, 10);
         LocalDate day3 = LocalDate.of(2026, 5, 11);
@@ -111,7 +111,7 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = quotaMap(day1, day2, day3, 48, 48, 48);
         quotaMap.get(day1).setRemainingQty(240);
         request.setDailyPlanQuotaMap(quotaMap);
-        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 32, 48, 48, 3));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 0, 48, 64, 3));
         request.setInitialActiveMachines(1);
         request.setShiftCapacity(16);
         request.setShortageLookAheadDays(2);
@@ -123,8 +123,41 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         DailyMachineCapacitySimulationResult result =
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
 
-        assertEquals(3, result.getFinalActiveMachines(), "大欠产超过阈值时应按窗口需消化量动态扩到三台机台");
-        assertEquals(2, result.getTotalAddedMachineCount(), "缺口需要两台机台时不能写死只加一台");
+        assertEquals(2, result.getFinalActiveMachines(),
+                "窗口后剩余欠产回到阈值以内时，应停止继续增加第三台机台");
+        assertEquals(1, result.getTotalAddedMachineCount(), "缺口需要两台机台时不能写死只加一台");
+        assertEquals("欠产阈值窗口回落", result.getDayDecisionList().get(0).getDecisionMode());
+        assertEquals(144, result.getDayDecisionList().get(0).getWindowMonthPlanQty());
+        assertEquals(224, result.getDayDecisionList().get(0).getWindowEffectiveCapacityQty());
+        assertEquals(112, result.getDayDecisionList().get(0).getWindowRemainingShortageQty());
+        assertEquals(0, result.getDayDecisionList().get(0).getUnmetQty());
+        assertEquals(0, result.getTotalUnmetQty(), "窗口后剩余欠产已回到阈值以内时，不应再记录未满足缺口");
+    }
+
+    @Test
+    void simulateExpansion_shouldKeepUnmetWhenForcedShortageCandidateExhausted() {
+        LocalDate day1 = LocalDate.of(2026, 5, 9);
+        LocalDate day2 = LocalDate.of(2026, 5, 10);
+        LocalDate day3 = LocalDate.of(2026, 5, 11);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        request.setDailyPlanQuotaMap(quotaMap(day1, day2, day3, 48, 48, 48));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 0, 25, 25, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(192);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(2, result.getFinalActiveMachines(), "候选机台耗尽后必须停止，不能无限加机台");
+        assertEquals(1, result.getTotalAddedMachineCount());
+        assertEquals(86, result.getTotalUnmetQty(), "候选耗尽后应记录距离阈值仍不足的产能缺口");
+        assertEquals(236, result.getDayDecisionList().get(0).getWindowRemainingShortageQty());
     }
 
     @Test
@@ -312,10 +345,10 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
         DailyMachineCapacitySimulationResult result =
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
 
-        assertEquals(2, result.getFinalActiveMachines(),
-                "滚动到T+1时累计欠产超过阈值，应切换为窗口需消化量强制增机台");
-        assertEquals(1, result.getTotalAddedMachineCount());
-        assertEquals("窗口需消化量", result.getDayDecisionList().get(1).getDecisionMode());
+        assertEquals(1, result.getFinalActiveMachines(),
+                "本月前日累计欠产未超过阈值时，不应因T+1滚动欠产超过阈值切换强制增机台");
+        assertEquals(0, result.getTotalAddedMachineCount());
+        assertFalse(result.getDayDecisionList().get(1).isShortageThresholdExceeded());
     }
 
     private Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap(LocalDate day1,

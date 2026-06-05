@@ -3368,6 +3368,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         int windowPlanQty = sumDailyPlanQty(sourceSku.getDailyPlanQuotaMap());
         int pureContinuousScheduledQty = resolvePureContinuousScheduledWindowQty(context, sourceSku);
+        if (isForcedShortageWindowSatisfied(context, sourceSku, windowPlanQty, pureContinuousScheduledQty)) {
+            return true;
+        }
         if (pureContinuousScheduledQty < windowPlanQty) {
             return false;
         }
@@ -3406,6 +3409,38 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             first = false;
         }
         return true;
+    }
+
+    /**
+     * 判断续作机台是否已让窗口后剩余欠产回到阈值以内。
+     * <p>本月前日累计欠产超过阈值时，阈值只表示进入强制增机台判断；
+     * 是否继续补机台要按“历史欠产 + T~T+2月计划 - T日晚班完成 - 当前续作窗口有效产能”重新计算。
+     * 若剩余欠产已小于等于阈值，说明当前续作机台已足够，不能因为仍有欠产就盲目生成补偿SKU。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作SKU
+     * @param windowPlanQty T~T+2窗口月计划量
+     * @param pureContinuousScheduledQty 当前纯续作结果在窗口内的有效排产量
+     * @return true-已满足阈值回落要求；false-仍需按原补偿链路判断
+     */
+    private boolean isForcedShortageWindowSatisfied(LhScheduleContext context,
+                                                    SkuScheduleDTO sourceSku,
+                                                    int windowPlanQty,
+                                                    int pureContinuousScheduledQty) {
+        int threshold = Math.max(0, DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context));
+        int historyShortageQty = sourceSku == null ? 0 : Math.max(0, sourceSku.getMonthlyHistoryShortageQty());
+        if (threshold <= 0 || historyShortageQty <= threshold) {
+            return false;
+        }
+        int scheduleDayFinishQty = Math.max(0, sourceSku.getScheduleDayFinishQty());
+        int demandQty = Math.max(0, historyShortageQty + Math.max(0, windowPlanQty) - scheduleDayFinishQty);
+        int windowRemainingShortageQty = Math.max(0, demandQty - Math.max(0, pureContinuousScheduledQty));
+        log.info("续作欠产阈值窗口回落判断, materialCode: {}, historyShortageQty: {}, threshold: {}, "
+                        + "windowPlanQty: {}, scheduleDayFinishQty: {}, pureContinuousScheduledQty: {}, "
+                        + "windowRemainingShortageQty: {}",
+                sourceSku.getMaterialCode(), historyShortageQty, threshold, windowPlanQty,
+                scheduleDayFinishQty, pureContinuousScheduledQty, windowRemainingShortageQty);
+        return windowRemainingShortageQty <= threshold;
     }
 
     /**
