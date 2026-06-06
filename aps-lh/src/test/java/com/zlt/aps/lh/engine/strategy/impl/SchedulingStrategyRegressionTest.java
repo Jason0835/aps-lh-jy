@@ -6,8 +6,11 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.component.OrderNoGenerator;
+import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -17,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Date;
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -175,6 +179,41 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(2, requiredMachineCount);
     }
 
+    /**
+     * 同胎胚同模具且仅存在历史欠产额度时，换活字块必须先准备账本并落 S4.4 结果。
+     */
+    @Test
+    public void shouldAppendTypeBlockResultWhenResidualShiftHasCapacity() throws Exception {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        injectTypeBlockAppendDependencies(strategy);
+        LhScheduleContext context = buildTypeBlockAppendContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        MachineScheduleDTO machine = buildTypeBlockMachine();
+        SkuScheduleDTO sku = buildTypeBlockSkuWithRollingQuota();
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getNewSpecSkuList().add(sku);
+
+        Method method = TypeBlockProductionStrategy.class.getDeclaredMethod(
+                "appendTypeBlockResultWithRollback",
+                LhScheduleContext.class, MachineScheduleDTO.class, SkuScheduleDTO.class,
+                Date.class, Date.class, List.class, boolean.class, StringBuilder.class);
+        method.setAccessible(true);
+        StringBuilder failureReason = new StringBuilder(64);
+        boolean success = (Boolean) method.invoke(strategy, context, machine, sku,
+                dateTime(2026, 6, 8, 15, 27), dateTime(2026, 6, 8, 7, 27),
+                shifts, true, failureReason);
+
+        Assertions.assertTrue(success);
+        Assertions.assertEquals("", failureReason.toString());
+        Assertions.assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        Assertions.assertEquals("03", result.getScheduleType());
+        Assertions.assertEquals("1", result.getIsTypeBlock());
+        Assertions.assertEquals("1", result.getIsChangeMould());
+        Assertions.assertEquals(Integer.valueOf(14), result.getClass8PlanQty());
+        Assertions.assertEquals(Integer.valueOf(14), result.getDailyPlanQty());
+    }
+
     private SkuScheduleDTO buildSkuForTypeBlockExpansion() {
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("3302002654");
@@ -216,6 +255,79 @@ public class SchedulingStrategyRegressionTest {
         shift.setScheduleBaseDate(Date.from(LocalDate.of(2026, 5, 1)
                 .atStartOfDay(ZoneId.systemDefault()).toInstant()));
         return shift;
+    }
+
+    private void injectTypeBlockAppendDependencies(TypeBlockProductionStrategy strategy) throws Exception {
+        OrderNoGenerator orderNoGenerator = new OrderNoGenerator();
+        setField(orderNoGenerator, "useRedis", false);
+        setField(strategy, "orderNoGenerator", orderNoGenerator);
+        setField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        setField(strategy, "endingJudgmentStrategy", new IEndingJudgmentStrategy() {
+            @Override
+            public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+                return true;
+            }
+
+            @Override
+            public int calculateEndingShifts(LhScheduleContext context, SkuScheduleDTO sku) {
+                return 1;
+            }
+
+            @Override
+            public int calculateEndingDays(LhScheduleContext context, SkuScheduleDTO sku) {
+                return 1;
+            }
+        });
+    }
+
+    private LhScheduleContext buildTypeBlockAppendContext() {
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        context.setScheduleDate(dateTime(2026, 6, 6, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 6, 8, 0, 0));
+        context.setBatchNo("TEST_BATCH");
+        context.setFactoryCode("116");
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setScheduleResultList(new ArrayList<LhScheduleResult>());
+        context.setNewSpecSkuList(new ArrayList<SkuScheduleDTO>());
+        return context;
+    }
+
+    private MachineScheduleDTO buildTypeBlockMachine() {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1305");
+        machine.setMachineName("K1305");
+        machine.setCurrentMaterialCode("3302002531");
+        machine.setMaxMoldNum(2);
+        machine.setEstimatedEndTime(dateTime(2026, 6, 8, 7, 27));
+        return machine;
+    }
+
+    private SkuScheduleDTO buildTypeBlockSkuWithRollingQuota() {
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002642");
+        sku.setMaterialDesc("215/75R17.5 128/126M 16PR UD150 BL3HEU DL");
+        sku.setSpecCode("215/75R17.5");
+        sku.setEmbryoCode("215103006");
+        sku.setShiftCapacity(22);
+        sku.setLhTimeSeconds(3600);
+        sku.setTargetScheduleQty(176);
+        sku.setRemainingScheduleQty(176);
+        sku.setSurplusQty(15);
+        sku.setEmbryoStock(20);
+        sku.setMonthPlanQty(198);
+        sku.setMonthlyHistoryShortageQty(15);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(LocalDate.of(2026, 6, 6), buildQuota(0));
+        quotaMap.put(LocalDate.of(2026, 6, 7), buildQuota(0));
+        quotaMap.put(LocalDate.of(2026, 6, 8), buildQuota(0));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        return sku;
+    }
+
+    private void setField(Object target, String fieldName, Object value) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
     }
 
     private LhScheduleContext buildChangeoverBalanceContext() {

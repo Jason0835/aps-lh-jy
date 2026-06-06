@@ -225,7 +225,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                             machineCode, machineTriggerSourceMap.get(machineCode),
                             typeBlockCandidates.size());
                     traceTypeBlockDecision(context, machine, typeBlockCandidates,
-                            null, matchedLayer, false, null, null, machineTriggerSourceMap.get(machineCode));
+                            null, matchedLayer, false, null, null, machineTriggerSourceMap.get(machineCode),
+                            "未匹配到满足换活字块条件的候选SKU");
                     completedMachineMap.put(machineCode, true);
                     continue;
                 }
@@ -247,16 +248,18 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                         context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
                 int eligibleMachineCount = countEligibleTypeBlockMachines(context, typeBlockSku, activeMachines);
                 // 换活字块本阶段不主动扩多台；eligibleMachineCount 只用于单台目标量口径判断。
+                StringBuilder failureReason = new StringBuilder(128);
                 boolean success = appendTypeBlockResultWithRollback(
                         context, machine, typeBlockSku, typeBlockStartTime, typeBlockSwitchStartTime, shifts,
-                        eligibleMachineCount == 1);
+                        eligibleMachineCount == 1, failureReason);
                 traceTypeBlockDecision(context, machine, typeBlockCandidates,
                         typeBlockSku, matchedLayer, success, typeBlockSwitchStartTime, typeBlockStartTime,
-                        machineTriggerSourceMap.get(machineCode));
+                        machineTriggerSourceMap.get(machineCode), failureReason.toString());
                 if (!success) {
-                    log.warn("换活字块排产失败, 机台: {}, materialCode: {}, 结构: {}, 开始时间: {}, 匹配层级: {}",
+                    log.warn("换活字块排产失败, 机台: {}, materialCode: {}, 结构: {}, 开始时间: {}, 匹配层级: {}, 失败原因: {}",
                             machineCode, typeBlockSku.getMaterialCode(), typeBlockSku.getStructureName(),
-                            LhScheduleTimeUtil.formatDateTime(typeBlockStartTime), matchedLayer);
+                            LhScheduleTimeUtil.formatDateTime(typeBlockStartTime), matchedLayer,
+                            StringUtils.isNotEmpty(failureReason.toString()) ? failureReason.toString() : "-");
                     completedMachineMap.put(machineCode, true);
                     continue;
                 }
@@ -390,9 +393,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
                 context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
         int eligibleMachineCount = countEligibleTypeBlockMachines(context, specifySku, activeMachines);
+        StringBuilder failureReason = new StringBuilder(128);
         boolean success = appendTypeBlockResultWithRollback(
                 context, machine, specifySku, typeBlockStartTime, typeBlockSwitchStartTime, shifts,
-                eligibleMachineCount == 1);
+                eligibleMachineCount == 1, failureReason);
         if (success) {
             if (!machine.isEnding()) {
                 completedMachineMap.put(machine.getMachineCode(), true);
@@ -402,8 +406,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     LhScheduleTimeUtil.formatDateTime(typeBlockStartTime));
             return true;
         }
-        log.debug("定点物料衔接失败，继续原衔接匹配, machineCode: {}, materialCode: {}",
-                machine.getMachineCode(), specifySku.getMaterialCode());
+        log.debug("定点物料衔接失败，继续原衔接匹配, machineCode: {}, materialCode: {}, 失败原因: {}",
+                machine.getMachineCode(), specifySku.getMaterialCode(),
+                StringUtils.isNotEmpty(failureReason.toString()) ? failureReason.toString() : "-");
         return false;
     }
 
@@ -1063,15 +1068,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                          Date startTime,
                                          Date switchStartTime,
                                          List<LhShiftConfigVO> shifts,
-                                         boolean isSingleMachine) {
+                                         boolean isSingleMachine,
+                                         StringBuilder failureReason) {
         if (startTime == null) {
+            recordTypeBlockAppendFailure(failureReason, "换活字块开产时间为空");
             return false;
         }
         if (sku.resolveTargetScheduleQty() <= 0) {
+            recordTypeBlockAppendFailure(failureReason, "换活字块目标量为0");
             log.info("换活字块目标量为0，跳过排产, machineCode: {}, materialCode: {}",
                     machine.getMachineCode(), sku.getMaterialCode());
             return false;
         }
+        // 换活字块与新增排产共用历史欠产账本口径，避免窗口无日计划时 S4.4 被回裁为0后再落入S4.5换模。
+        DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "换活字块");
         // 保存原目标量和严格目标量标识，换活字块单台试算失败时必须完整恢复，不能污染 S4.5 新增排产。
         Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
         int originalRemainingScheduleQty = sku.getRemainingScheduleQty();
@@ -1086,6 +1096,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         LhScheduleResult result = buildScheduleResult(
                 context, machine, sku, startTime, switchStartTime, shifts, machineMouldQty, isEnding);
         if (result == null || result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
+            int dailyPlanQty = result == null || result.getDailyPlanQty() == null ? 0 : result.getDailyPlanQty();
+            recordTypeBlockAppendFailure(failureReason, "换活字块结果班次量为0");
+            log.info("换活字块结果班次量为0，跳过落地, machineCode: {}, materialCode: {}, startTime: {}, dailyPlanQty: {}",
+                    machine.getMachineCode(), sku.getMaterialCode(),
+                    LhScheduleTimeUtil.formatDateTime(startTime), dailyPlanQty);
             sku.setTargetScheduleQty(originalTargetScheduleQty);
             sku.setRemainingScheduleQty(originalRemainingScheduleQty);
             sku.setStrictTargetQty(originalStrictTargetQty);
@@ -1102,6 +1117,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         // 换活字块结果即便非收尾，也必须补齐可计算完工时刻，避免结果校验失败。
         Date actualCompletionTime = resolveActualCompletionTime(context, result);
         if (actualCompletionTime == null) {
+            recordTypeBlockAppendFailure(failureReason, "换活字块实际完工时间为空");
+            log.info("换活字块实际完工时间为空，跳过落地, machineCode: {}, materialCode: {}, startTime: {}, dailyPlanQty: {}",
+                    machine.getMachineCode(), sku.getMaterialCode(),
+                    LhScheduleTimeUtil.formatDateTime(startTime), result.getDailyPlanQty());
             return false;
         }
         result.setSpecEndTime(actualCompletionTime);
@@ -1112,8 +1131,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         // 非收尾正规/量试可保留满班补齐口径，剩余缺口继续留给 S4.5。
         int quotaTrimmedQty = applyTypeBlockToDailyQuota(context, sku, result, shifts);
         if (quotaTrimmedQty <= 0) {
-            log.info("换活字块日计划账本回裁后为0, 跳过落地, machineCode: {}, materialCode: {}",
-                    machine.getMachineCode(), sku.getMaterialCode());
+            recordTypeBlockAppendFailure(failureReason, "换活字块日计划账本回裁后为0");
+            log.info("换活字块日计划账本回裁后为0, 跳过落地, machineCode: {}, materialCode: {}, 原排产量: {}",
+                    machine.getMachineCode(), sku.getMaterialCode(), result.getDailyPlanQty());
             sku.setTargetScheduleQty(originalTargetScheduleQty);
             sku.setRemainingScheduleQty(originalRemainingScheduleQty);
             sku.setStrictTargetQty(originalStrictTargetQty);
@@ -1185,14 +1205,31 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                       Date startTime,
                                                       Date switchStartTime,
                                                       List<LhShiftConfigVO> shifts,
-                                                      boolean isSingleMachine) {
+                                                      boolean isSingleMachine,
+                                                      StringBuilder failureReason) {
         boolean success = appendFollowUpResult(context, machine, sku, startTime, switchStartTime, shifts,
-                isSingleMachine);
+                isSingleMachine, failureReason);
         if (!success && switchStartTime != null) {
             // 换活字块结果落地失败时，回滚本轮已占用的切换配额。
             getMouldChangeBalanceStrategy().rollbackMouldChange(context, switchStartTime);
         }
         return success;
+    }
+
+    /**
+     * 记录换活字块追加失败原因。
+     *
+     * @param failureReason 失败原因载体
+     * @param reason 当前失败原因
+     */
+    private void recordTypeBlockAppendFailure(StringBuilder failureReason, String reason) {
+        if (failureReason == null || StringUtils.isEmpty(reason)) {
+            return;
+        }
+        if (failureReason.length() > 0) {
+            failureReason.append("；");
+        }
+        failureReason.append(reason);
     }
 
     /**
@@ -1718,7 +1755,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                         boolean success,
                                         Date switchStartTime,
                                         Date startTime,
-                                        String triggerSource) {
+                                        String triggerSource,
+                                        String failureReason) {
         if (!PriorityTraceLogHelper.isEnabled(context)) {
             return;
         }
@@ -1765,6 +1803,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                         + ", " + PriorityTraceLogHelper.kv("选中SKU", selectedSku == null ? "-" : selectedSku.getMaterialCode())
                         + ", " + PriorityTraceLogHelper.kv("选中原因", selectReason)
                         + ", " + PriorityTraceLogHelper.kv("衔接结果", success ? "成功" : "未衔接")
+                        + ", " + PriorityTraceLogHelper.kv("失败原因", success ? "-" : PriorityTraceLogHelper.safeText(failureReason))
                         + ", " + PriorityTraceLogHelper.kv("换活字块开始时间", PriorityTraceLogHelper.formatDateTime(switchStartTime))
                         + ", " + PriorityTraceLogHelper.kv("开产时间", PriorityTraceLogHelper.formatDateTime(startTime)));
 
@@ -2986,9 +3025,19 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             if (quota == null) {
                 continue;
             }
+            LocalDate lookAheadEndDate = resolveLookAheadEndDate(context, quotaMap, productionDate);
+            // 先按只读账本计算本班允许落地量，再按模台数收敛，避免双模回裁出奇数计划量。
+            int quotaCap = resolveConsumableRollingQuota(quotaMap, productionDate, planQty, lookAheadEndDate);
+            int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(
+                    result.getMouldQty() != null ? result.getMouldQty() : 0);
+            int allowedPlanQty = Math.min(planQty, quotaCap);
+            int normalizedPlanQty = ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(
+                    allowedPlanQty, planQty, mouldQty);
             // 按历史欠产、当日计划、受限追补窗口消费同一SKU的日计划账本
-            int consumed = SkuDailyPlanQuotaUtil.consumeRollingQuota(
-                    quotaMap, productionDate, planQty, resolveLookAheadEndDate(context, quotaMap, productionDate));
+            int consumed = normalizedPlanQty > 0
+                    ? SkuDailyPlanQuotaUtil.consumeRollingQuota(
+                    quotaMap, productionDate, normalizedPlanQty, lookAheadEndDate)
+                    : 0;
             int overQty = planQty - consumed;
             if (overQty > 0) {
                 boolean endingResult = YES_FLAG.equals(result.getIsEnd());
@@ -3014,6 +3063,61 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         refreshResultSummary(context, result, shifts);
         return result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+    }
+
+    /**
+     * 只读计算当前班次可消费的滚动日计划额度。
+     *
+     * @param quotaMap 日计划账本
+     * @param productionDate 实际生产日期
+     * @param planQty 本班计划量
+     * @param lookAheadEndDate 允许借用的最晚日期
+     * @return 可消费额度
+     */
+    private int resolveConsumableRollingQuota(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+                                              LocalDate productionDate,
+                                              int planQty,
+                                              LocalDate lookAheadEndDate) {
+        if (CollectionUtils.isEmpty(quotaMap) || productionDate == null || planQty <= 0) {
+            return 0;
+        }
+        int consumableQty = 0;
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            if (entry.getKey().isAfter(productionDate)) {
+                continue;
+            }
+            consumableQty += resolveRemainingQuotaQty(entry.getValue(), planQty - consumableQty);
+            if (consumableQty >= planQty) {
+                return planQty;
+            }
+        }
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            if (!entry.getKey().isAfter(productionDate)) {
+                continue;
+            }
+            if (lookAheadEndDate != null && entry.getKey().isAfter(lookAheadEndDate)) {
+                continue;
+            }
+            consumableQty += resolveRemainingQuotaQty(entry.getValue(), planQty - consumableQty);
+            if (consumableQty >= planQty) {
+                return planQty;
+            }
+        }
+        return Math.max(0, consumableQty);
+    }
+
+    /**
+     * 解析单日账本剩余额度。
+     *
+     * @param quota 单日账本
+     * @param demandQty 需求量
+     * @return 可用额度
+     */
+    private int resolveRemainingQuotaQty(SkuDailyPlanQuotaDTO quota, int demandQty) {
+        if (quota == null || demandQty <= 0) {
+            return 0;
+        }
+        return Math.min(Math.max(0, quota.getRemainingQty()), demandQty);
     }
 
     /**
