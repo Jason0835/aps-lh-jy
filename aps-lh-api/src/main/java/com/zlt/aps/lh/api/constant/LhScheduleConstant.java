@@ -334,13 +334,13 @@ public final class LhScheduleConstant {
     public static final int NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD = 200;
 
     /** 新增排产换模均衡开关默认值（0-关闭，1-开启） */
-    public static final int ENABLE_CHANGEOVER_BALANCE = 0;
+    public static final int ENABLE_CHANGEOVER_BALANCE = 1;
 
     /** 续作欠产追补判断天数默认值（当前天发生欠产后，额外向后观察1天） */
     public static final int CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS = 1;
 
     /** 是否追加本月历史欠产量默认值（0-关闭，1-开启） */
-    public static final int ENABLE_CARRY_FORWARD_QTY = 0;
+    public static final int ENABLE_CARRY_FORWARD_QTY = 1;
 
     /** 硫化示方历史保护开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_CURE_FORMULA_HISTORY_PROTECT = 0;
