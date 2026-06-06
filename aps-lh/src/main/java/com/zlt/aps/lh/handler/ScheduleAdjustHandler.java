@@ -1274,22 +1274,34 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 基于月计划开始日期（BEGIN_DAY）计算延迟上机天数。
+     * 基于月计划 day1～day31 中最早有计划量的日期计算延迟上机天数。
      * <p>
-     * 计算公式：月计划开始日期（year+month+beginDay构建完整日期）- T日（scheduleDate），
+     * beginDay 取值口径：不再直接使用月计划的 beginDay 字段，而是遍历 day1～day31，
+     * 取第一个计划量 > 0 的 dayN 作为 beginDay。
+     * 若 day1～day31 全部为 0 或 null，则返回 null，不参与延期排序。
+     * </p>
+     * <p>
+     * 计算公式：beginDate（year+month+beginDay构建完整日期）- T日（scheduleDate），
      * 负数表示已过开始日（延误），正数表示尚未到开始日（富余），null表示无法计算。
      * </p>
      *
      * @param context 排程上下文
      * @param plan    月生产计划
-     * @return 延迟天数=月计划开始日距T日的天数差（beginDate - scheduleDate），无法计算时返回null
+     * @return 延迟天数=最早有计划量日期距T日的天数差（beginDate - scheduleDate），无法计算时返回null
      */
     private Integer resolveDelayDays(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
         if (context.getScheduleDate() == null) {
             return null;
         }
-        Integer beginDay = plan != null ? plan.getBeginDay() : null;
-        if (beginDay == null || beginDay < MIN_DAY_OF_MONTH || beginDay > MAX_DAY_OF_MONTH) {
+        if (plan == null) {
+            return null;
+        }
+        // 从 day1～day31 中查找最早有计划量的日期，替代原 beginDay 字段
+        int firstPlannedDay = MonthPlanDayQtyUtil.resolveFirstPlannedDay(plan);
+        if (firstPlannedDay < MIN_DAY_OF_MONTH) {
+            // day1～day31 全部为 0 或 null，无法确定起产日，不参与延期排序
+            log.info("延期天数计算跳过, 物料: {}, 原因: day1~day31均无计划量",
+                    plan.getMaterialCode());
             return null;
         }
         Integer year = plan.getYear();
@@ -1297,9 +1309,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         if (year == null || month == null) {
             return null;
         }
-        // 构建月计划开始日期（清零时分秒毫秒）
+        // 使用最早有计划量的日期构建起产日（清零时分秒毫秒）
         Calendar beginCal = Calendar.getInstance();
-        beginCal.set(year, month - 1, beginDay, 0, 0, 0);
+        beginCal.set(year, month - 1, firstPlannedDay, 0, 0, 0);
         beginCal.set(Calendar.MILLISECOND, 0);
         // 构建T日日期（清零时分秒毫秒）
         Calendar scheduleCal = Calendar.getInstance();
@@ -1310,7 +1322,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         scheduleCal.set(Calendar.MILLISECOND, 0);
         // 计算天数差：beginDate - scheduleDate
         long diffMillis = beginCal.getTimeInMillis() - scheduleCal.getTimeInMillis();
-        return (int) (diffMillis / (24 * 60 * 60 * 1000));
+        int delayDays = (int) (diffMillis / (24 * 60 * 60 * 1000));
+        log.info("延期天数计算, 物料: {}, 原beginDay: {}, 最早有计划量dayN: {}, 延期天数: {}",
+                plan.getMaterialCode(), plan.getBeginDay(), firstPlannedDay, delayDays);
+        return delayDays;
     }
 
     /**

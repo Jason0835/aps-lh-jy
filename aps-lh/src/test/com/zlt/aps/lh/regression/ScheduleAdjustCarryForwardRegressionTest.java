@@ -734,7 +734,8 @@ class ScheduleAdjustCarryForwardRegressionTest {
 
         SkuScheduleDTO sku = context.getStructureSkuMap().get("S-LOCK").get(0);
         assertEquals(true, sku.isDeliveryLocked());
-        assertEquals((Integer) (-4), sku.getDelayDays());
+        // beginDay取day1~day31最早有计划量的日期：day9=20，beginDate=4月9日，delayDays=4月9日-4月11日=-2
+        assertEquals((Integer) (-2), sku.getDelayDays());
         assertEquals(11, sku.getHighPriorityPendingQty());
         assertEquals(9, sku.getCycleProductionPendingQty());
         assertEquals(7, sku.getMidPriorityPendingQty());
@@ -742,7 +743,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
     }
 
     @Test
-    void doHandle_shouldSetDelayDaysToNullWhenBeginDayMissingOrInvalid() {
+    void doHandle_shouldSetDelayDaysToNullWhenAllDayQtyZero() {
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
 
         LhScheduleContext context = new LhScheduleContext();
@@ -751,35 +752,68 @@ class ScheduleAdjustCarryForwardRegressionTest {
         context.setScheduleTargetDate(date(2026, 4, 13));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
 
-        FactoryMonthPlanProductionFinalResult missingBeginDayPlan = new FactoryMonthPlanProductionFinalResult();
-        missingBeginDayPlan.setMaterialCode("MAT-BEGIN-MISS");
-        missingBeginDayPlan.setMaterialDesc("MAT-BEGIN-MISS-DESC");
-        missingBeginDayPlan.setStructureName("S-BEGIN-MISS");
-        missingBeginDayPlan.setSpecifications("SPEC-BEGIN-MISS");
-        missingBeginDayPlan.setTotalQty(100);
-        missingBeginDayPlan.setYear(2026);
-        missingBeginDayPlan.setMonth(4);
-        missingBeginDayPlan.setDay11(30);
+        // day1~day31全部为null，无计划量，延期天数应为null
+        FactoryMonthPlanProductionFinalResult noPlanDayPlan = new FactoryMonthPlanProductionFinalResult();
+        noPlanDayPlan.setMaterialCode("MAT-NO-DAY");
+        noPlanDayPlan.setMaterialDesc("MAT-NO-DAY-DESC");
+        noPlanDayPlan.setStructureName("S-NO-DAY");
+        noPlanDayPlan.setSpecifications("SPEC-NO-DAY");
+        noPlanDayPlan.setTotalQty(100);
+        noPlanDayPlan.setYear(2026);
+        noPlanDayPlan.setMonth(4);
+        noPlanDayPlan.setBeginDay(7);
 
-        FactoryMonthPlanProductionFinalResult invalidBeginDayPlan = new FactoryMonthPlanProductionFinalResult();
-        invalidBeginDayPlan.setMaterialCode("MAT-BEGIN-INVALID");
-        invalidBeginDayPlan.setMaterialDesc("MAT-BEGIN-INVALID-DESC");
-        invalidBeginDayPlan.setStructureName("S-BEGIN-INVALID");
-        invalidBeginDayPlan.setSpecifications("SPEC-BEGIN-INVALID");
-        invalidBeginDayPlan.setTotalQty(100);
-        invalidBeginDayPlan.setYear(2026);
-        invalidBeginDayPlan.setMonth(4);
-        invalidBeginDayPlan.setBeginDay(0);
-        invalidBeginDayPlan.setDay11(30);
+        // day1~day31全部为0，延期天数应为null
+        FactoryMonthPlanProductionFinalResult allZeroDayPlan = new FactoryMonthPlanProductionFinalResult();
+        allZeroDayPlan.setMaterialCode("MAT-ALL-ZERO");
+        allZeroDayPlan.setMaterialDesc("MAT-ALL-ZERO-DESC");
+        allZeroDayPlan.setStructureName("S-ALL-ZERO");
+        allZeroDayPlan.setSpecifications("SPEC-ALL-ZERO");
+        allZeroDayPlan.setTotalQty(100);
+        allZeroDayPlan.setYear(2026);
+        allZeroDayPlan.setMonth(4);
+        allZeroDayPlan.setBeginDay(5);
+        allZeroDayPlan.setDay1(0);
+        allZeroDayPlan.setDay2(0);
 
-        context.setMonthPlanList(Arrays.asList(missingBeginDayPlan, invalidBeginDayPlan));
+        context.setMonthPlanList(Arrays.asList(noPlanDayPlan, allZeroDayPlan));
 
         ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
 
-        SkuScheduleDTO missingBeginDaySku = context.getStructureSkuMap().get("S-BEGIN-MISS").get(0);
-        SkuScheduleDTO invalidBeginDaySku = context.getStructureSkuMap().get("S-BEGIN-INVALID").get(0);
-        assertNull(missingBeginDaySku.getDelayDays());
-        assertNull(invalidBeginDaySku.getDelayDays());
+        SkuScheduleDTO noDaySku = context.getStructureSkuMap().get("S-NO-DAY").get(0);
+        SkuScheduleDTO allZeroSku = context.getStructureSkuMap().get("S-ALL-ZERO").get(0);
+        assertNull(noDaySku.getDelayDays());
+        assertNull(allZeroSku.getDelayDays());
+    }
+
+    @Test
+    void doHandle_shouldUseFirstPlannedDayWhenBeginDayDiffers() {
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new DefaultEndingJudgmentStrategy());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(createConfig("0"));
+        context.setScheduleDate(date(2026, 4, 11));
+        context.setScheduleTargetDate(date(2026, 4, 13));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        // beginDay=3，但day3无量，最早有计划量的是day11=30
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-DIFF");
+        plan.setMaterialDesc("MAT-DIFF-DESC");
+        plan.setStructureName("S-DIFF");
+        plan.setSpecifications("SPEC-DIFF");
+        plan.setTotalQty(100);
+        plan.setYear(2026);
+        plan.setMonth(4);
+        plan.setBeginDay(3);
+        plan.setDay11(30);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
+
+        SkuScheduleDTO sku = context.getStructureSkuMap().get("S-DIFF").get(0);
+        // beginDay从day11取值，beginDate=4月11日，delayDays=4月11日-4月11日=0
+        assertEquals((Integer) 0, sku.getDelayDays());
     }
 
     @Test
