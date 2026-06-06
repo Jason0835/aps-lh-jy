@@ -413,6 +413,17 @@
 如果需求与现有逻辑冲突，先说明冲突点，再给最小改动方案。
 输出方案时必须能直接作为开发任务拆解依据。
 
+# OpenSpec 执行规则
+凡是用户要求“基于 OpenSpec 执行变更”，必须：
+
+1. 先阅读 openspec/changes 下对应 spec.md；
+2. 再阅读 openspec/specs 下主 spec.md；
+3. 分析 change spec 与主 spec 是否冲突；
+4. 实现代码时优先复用已有逻辑；
+5. 关键业务逻辑必须添加注释和日志；
+6. 实现完成后必须更新 openspec/specs 下对应 spec.md；
+7. 如果主 spec.md 未更新，则任务不算完成。
+
 # 应用启动方式：
 mvn spring-boot:run -pl aps-lh -Dmaven.test.skip=true 2>&1 | tee aps-lh-start.log | grep -E "(Started|ERROR|Application Lh is running|启动|port:)" | head -1
 或者
