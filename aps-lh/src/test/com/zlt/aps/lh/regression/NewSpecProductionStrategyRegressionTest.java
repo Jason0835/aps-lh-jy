@@ -31,6 +31,8 @@ import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -509,6 +511,57 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()));
         assertEquals(Integer.valueOf(2), ShiftFieldUtil.getShiftPlanQty(result, nextDayShift.getShiftIndex()));
         assertEquals(6, context.getSkuShiftFillOverQtyMap().get("MAT-QUOTA").intValue());
+    }
+
+    @Test
+    void adjustSameSkuMultiMachineAllocation_shouldKeepAuxiliaryMachineForFutureDayDemand() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 4, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001236");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setShiftCapacity(16);
+        sku.setSurplusQty(1432);
+        sku.setTargetScheduleQty(96);
+        sku.setWindowPlanQty(88);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(shifts, "3302001236", 0, 8, 80));
+
+        LhScheduleResult primaryResult = buildNewSpecResult("3302001236", "K2025");
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, shifts.get(3).getShiftIndex(), 16,
+                shifts.get(3).getShiftStartDateTime(), shifts.get(3).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, shifts.get(4).getShiftIndex(), 16,
+                shifts.get(4).getShiftStartDateTime(), shifts.get(4).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, shifts.get(5).getShiftIndex(), 16,
+                shifts.get(5).getShiftStartDateTime(), shifts.get(5).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, shifts.get(6).getShiftIndex(), 16,
+                shifts.get(6).getShiftStartDateTime(), shifts.get(6).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(primaryResult);
+
+        LhScheduleResult auxiliaryResult = buildNewSpecResult("3302001236", "K1002");
+        ShiftFieldUtil.setShiftPlanQty(auxiliaryResult, shifts.get(3).getShiftIndex(), 16,
+                shifts.get(3).getShiftStartDateTime(), shifts.get(3).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(auxiliaryResult, shifts.get(4).getShiftIndex(), 16,
+                shifts.get(4).getShiftStartDateTime(), shifts.get(4).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(auxiliaryResult);
+
+        context.getScheduleResultList().add(primaryResult);
+        context.getScheduleResultList().add(auxiliaryResult);
+
+        invokeAdjustSameSkuMultiMachineAllocation(strategy, context, sku, shifts,
+                ProductionQuantityPolicy.from(sku, false), false);
+
+        assertEquals(32, auxiliaryResult.getDailyPlanQty().intValue(),
+                "辅助机台承接后续dayN需求时，不能被当前日目标已满足逻辑清零");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(auxiliaryResult, shifts.get(3).getShiftIndex()));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(auxiliaryResult, shifts.get(4).getShiftIndex()));
     }
 
     @Test
@@ -2707,6 +2760,8 @@ class NewSpecProductionStrategyRegressionTest {
 
         context.getNewSpecSkuList().add(firstSku);
         context.getNewSpecSkuList().add(secondSku);
+        attachAvailableMould(context, firstSku.getMaterialCode(), "MOULD-3302003005");
+        attachAvailableMould(context, secondSku.getMaterialCode(), "MOULD-3302003006");
 
         MachineScheduleDTO k1105 = buildMachine("K1105", dateTime(2026, 5, 1, 6, 0));
 
@@ -3302,6 +3357,107 @@ class NewSpecProductionStrategyRegressionTest {
                 "1台*16班产*8班=128 已覆盖 8+60+60 时，不应因真实换模后只剩112继续加机台");
         assertEquals("K1313", context.getScheduleResultList().get(0).getLhMachineCode());
         assertEquals(112, context.getScheduleResultList().get(0).getDailyPlanQty().intValue());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldSkipFirstDayWhenFormalNonEndingHasNoFirstDayPlan() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 4, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002326");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(1376);
+        sku.setDailyPlanQty(80);
+        sku.setTargetScheduleQty(128);
+        sku.setWindowPlanQty(80);
+        sku.setWindowRemainingPlanQty(80);
+        sku.setSurplusQty(1376);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 32, 48));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO k2024 = buildMachine("K2024", dateTime(2026, 4, 1, 6, 0));
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302002326");
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(k2024),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), skuCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "首日无计划但后续有计划时，应从后续生产日开始落量");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(0, resolveShiftQty(result, 1), "首日日计划为0时，不应落早班");
+        assertEquals(0, resolveShiftQty(result, 2), "首日日计划为0时，不应落中班");
+        assertTrue(resolveShiftQty(result, 3) > 0, "应从第二个生产日首个班次开始排产");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldFillSmallBatchSingleControlMachineToWindowEnd() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 4, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002795");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setSmallBatchValidation(true);
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(20);
+        sku.setMouldQty(1);
+        sku.setPendingQty(98);
+        sku.setDailyPlanQty(48);
+        sku.setTargetScheduleQty(160);
+        sku.setWindowPlanQty(48);
+        sku.setWindowRemainingPlanQty(48);
+        sku.setSurplusQty(98);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 16, 16, 16));
+        context.getNewSpecSkuList().add(sku);
+
+        SkuScheduleDTO nextSku = buildSku();
+        nextSku.setMaterialCode("3302002796");
+        nextSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        nextSku.setLhTimeSeconds(3600);
+        nextSku.setShiftCapacity(20);
+        nextSku.setMouldQty(1);
+        nextSku.setPendingQty(40);
+        nextSku.setDailyPlanQty(40);
+        nextSku.setTargetScheduleQty(40);
+        nextSku.setWindowPlanQty(40);
+        nextSku.setSurplusQty(40);
+        nextSku.setEmbryoStock(-1);
+        nextSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), nextSku.getMaterialCode(), 20, 20, 0));
+        context.getNewSpecSkuList().add(nextSku);
+
+        MachineScheduleDTO k1501r = buildMachine("K1501R", dateTime(2026, 4, 1, 6, 0));
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302002795");
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(k1501r),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), skuCapacityCalculate());
+
+        LhScheduleResult result = findResultByMaterialCode(context.getScheduleResultList(), sku.getMaterialCode());
+        assertNotNull(result, "小批量单控非收尾应保持单机台排产");
+        assertEquals(70, result.getDailyPlanQty().intValue(), "K1501R 应从2班到8班补满7个单侧班产");
+        for (int shiftIndex = 2; shiftIndex <= 8; shiftIndex++) {
+            assertEquals(10, resolveShiftQty(result, shiftIndex), "单控机台每个有效班次应按单侧班产排满");
+        }
     }
 
     @Test
@@ -4732,6 +4888,35 @@ class NewSpecProductionStrategyRegressionTest {
         return sku;
     }
 
+    private LhScheduleResult buildNewSpecResult(String materialCode, String machineCode) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(materialCode);
+        result.setLhMachineCode(machineCode);
+        result.setScheduleType("02");
+        result.setIsTypeBlock("0");
+        result.setIsEnd("0");
+        result.setLhTime(3600);
+        result.setMouldQty(1);
+        return result;
+    }
+
+    private void invokeAdjustSameSkuMultiMachineAllocation(NewSpecProductionStrategy strategy,
+                                                           LhScheduleContext context,
+                                                           SkuScheduleDTO sku,
+                                                           List<LhShiftConfigVO> shifts,
+                                                           ProductionQuantityPolicy quantityPolicy,
+                                                           boolean isEnding) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "adjustSameSkuMultiMachineAllocation",
+                LhScheduleContext.class,
+                SkuScheduleDTO.class,
+                List.class,
+                ProductionQuantityPolicy.class,
+                boolean.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, sku, shifts, quantityPolicy, isEnding);
+    }
+
     private LhShiftConfigVO resolveNextWorkDateShift(List<LhShiftConfigVO> shifts, LhShiftConfigVO firstShift) {
         for (LhShiftConfigVO shift : shifts) {
             if (shift.getWorkDate() != null
@@ -4836,6 +5021,19 @@ class NewSpecProductionStrategyRegressionTest {
         machine.setPreviousProSize("22.5");
         machine.setPreviousMaterialCode("PREV-" + machineCode);
         return machine;
+    }
+
+    private void attachAvailableMould(LhScheduleContext context, String materialCode, String mouldCode) {
+        MdmSkuMouldRel rel = new MdmSkuMouldRel();
+        rel.setMaterialCode(materialCode);
+        rel.setMouldCode(mouldCode);
+        context.getSkuMouldRelMap().put(materialCode,
+                new java.util.ArrayList<MdmSkuMouldRel>(Collections.singletonList(rel)));
+
+        MdmModelInfo modelInfo = new MdmModelInfo();
+        modelInfo.setMouldCode(mouldCode);
+        modelInfo.setMouldStatus(1);
+        context.getModelInfoMap().put(mouldCode, modelInfo);
     }
 
     private LhScheduleResult buildEndingResult(LhScheduleContext context, SkuScheduleDTO sku, String machineCode) {
@@ -5054,6 +5252,30 @@ class NewSpecProductionStrategyRegressionTest {
             @Override
             public int calculateDailyCapacity(int lhTimeSeconds, int mouldQty) {
                 return 1;
+            }
+        };
+    }
+
+    private ICapacityCalculateStrategy skuCapacityCalculate() {
+        return new ICapacityCalculateStrategy() {
+            @Override
+            public int calculateShiftCapacity(LhScheduleContext ctx, int lhTimeSeconds, int mouldQty) {
+                return 16;
+            }
+
+            @Override
+            public Date calculateStartTime(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                return endingTime;
+            }
+
+            @Override
+            public int calculateFirstShiftQty(Date startTime, Date shiftEndTime, int lhTimeSeconds, int mouldQty) {
+                return startTime.before(shiftEndTime) ? 16 : 0;
+            }
+
+            @Override
+            public int calculateDailyCapacity(int lhTimeSeconds, int mouldQty) {
+                return 16;
             }
         };
     }

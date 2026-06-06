@@ -572,6 +572,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         runtimeShiftCapacity,
                         sku.getLhTimeSeconds(),
                         machineMouldQty);
+                firstProductionStartTime = alignFirstProductionStartTimeByDailyPlan(
+                        context, sku, firstProductionStartTime, shifts, isEnding);
                 if (firstProductionStartTime == null) {
                     log.debug("新增SKU排程窗口内无可开产时间, materialCode: {}, 机台: {}, 首检时间: {}, 班产: {}, 硫化时间: {}, 模数: {}",
                             sku.getMaterialCode(), machineCode,
@@ -604,7 +606,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         maxQtyToWindowEnd, candidateTargetQty);
                 segment.setRole(role);
                 boolean singleMachineWindowFill = shouldFillSingleMachineToWindowEnd(
-                        context, sku, isEnding, totalScheduledQty, candidateTargetQty, maxQtyToWindowEnd);
+                        context, sku, candidateMachine, isEnding, totalScheduledQty,
+                        candidateTargetQty, maxQtyToWindowEnd);
                 int machinePlanQty = singleMachineWindowFill
                         ? maxQtyToWindowEnd
                         : resolveMachinePlanQty(context, sku, quantityPolicy, role, segment,
@@ -1979,6 +1982,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      */
     private boolean shouldFillSingleMachineToWindowEnd(LhScheduleContext context,
                                                        SkuScheduleDTO sku,
+                                                       MachineScheduleDTO candidateMachine,
                                                        boolean isEnding,
                                                        int totalScheduledQty,
                                                        int candidateTargetQty,
@@ -1996,6 +2000,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (candidateTargetQty <= 0 || maxQtyToWindowEnd < candidateTargetQty) {
             return false;
         }
+        if (isSmallBatchSingleControlMachine(context, sku, candidateMachine)) {
+            // 小批量 SKU 优先占用单控运行态机台，命中后应补满该单控侧窗口，避免被后续普通 SKU 截断。
+            return true;
+        }
         if (!CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return hasMultiDayQuotaWindow(sku) && isOnlyPendingNewSpecSku(context);
         }
@@ -2003,6 +2011,114 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return false;
         }
         return candidateTargetQty > Math.max(0, sku.getPendingQty());
+    }
+
+    /**
+     * 判断当前候选是否为小批量 SKU 命中的单控运行态机台。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param candidateMachine 当前候选机台
+     * @return true-小批量命中单控运行态机台
+     */
+    private boolean isSmallBatchSingleControlMachine(LhScheduleContext context,
+                                                     SkuScheduleDTO sku,
+                                                     MachineScheduleDTO candidateMachine) {
+        if (Objects.isNull(sku) || Objects.isNull(candidateMachine) || !sku.isSmallBatchValidation()) {
+            return false;
+        }
+        return LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
+                context, candidateMachine.getMachineCode());
+    }
+
+    /**
+     * 新增非收尾首日无日计划时，将首个可排时间推进到首个有计划的生产日。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param firstProductionStartTime 当前首个可排时间
+     * @param shifts 排程窗口班次
+     * @param isEnding 是否收尾
+     * @return 调整后的首个可排时间
+     */
+    private Date alignFirstProductionStartTimeByDailyPlan(LhScheduleContext context,
+                                                          SkuScheduleDTO sku,
+                                                          Date firstProductionStartTime,
+                                                          List<LhShiftConfigVO> shifts,
+                                                          boolean isEnding) {
+        if (!shouldDelayFirstProductionForNoPlanDate(sku, firstProductionStartTime, isEnding)) {
+            return firstProductionStartTime;
+        }
+        LocalDate productionDate = firstProductionStartTime.toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        SkuDailyPlanQuotaDTO currentQuota = sku.getDailyPlanQuotaMap().get(productionDate);
+        if (hasPositiveDailyPlanQuota(currentQuota)) {
+            return firstProductionStartTime;
+        }
+        LocalDate nextPlanDate = resolveNextPositiveDailyPlanDate(
+                sku.getDailyPlanQuotaMap(), productionDate, resolveScheduleTargetLocalDate(context));
+        if (Objects.isNull(nextPlanDate)) {
+            return firstProductionStartTime;
+        }
+        Date nextPlanDateStartTime = resolveFirstShiftStartTime(shifts, nextPlanDate);
+        if (Objects.isNull(nextPlanDateStartTime) || !nextPlanDateStartTime.after(firstProductionStartTime)) {
+            return firstProductionStartTime;
+        }
+        return nextPlanDateStartTime;
+    }
+
+    private boolean shouldDelayFirstProductionForNoPlanDate(SkuScheduleDTO sku,
+                                                            Date firstProductionStartTime,
+                                                            boolean isEnding) {
+        if (Objects.isNull(sku) || Objects.isNull(firstProductionStartTime) || isEnding
+                || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        if (sku.isContinuousCompensationSku() || Math.max(0, sku.getMonthlyHistoryShortageQty()) > 0) {
+            return false;
+        }
+        return !StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage());
+    }
+
+    private boolean hasPositiveDailyPlanQuota(SkuDailyPlanQuotaDTO quota) {
+        return Objects.nonNull(quota)
+                && (Math.max(0, quota.getDayPlanQty()) > 0 || Math.max(0, quota.getRemainingQty()) > 0);
+    }
+
+    private LocalDate resolveNextPositiveDailyPlanDate(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+                                                       LocalDate productionDate,
+                                                       LocalDate windowEndDate) {
+        if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(productionDate)) {
+            return null;
+        }
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            LocalDate date = entry.getKey();
+            if (Objects.isNull(date) || !date.isAfter(productionDate)
+                    || (Objects.nonNull(windowEndDate) && date.isAfter(windowEndDate))) {
+                continue;
+            }
+            if (hasPositiveDailyPlanQuota(entry.getValue())) {
+                return date;
+            }
+        }
+        return null;
+    }
+
+    private Date resolveFirstShiftStartTime(List<LhShiftConfigVO> shifts, LocalDate productionDate) {
+        if (CollectionUtils.isEmpty(shifts) || Objects.isNull(productionDate)) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
+                    || Objects.isNull(shift.getWorkDate())) {
+                continue;
+            }
+            LocalDate shiftWorkDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            if (productionDate.equals(shiftWorkDate)) {
+                return shift.getShiftStartDateTime();
+            }
+        }
+        return null;
     }
 
     /**
@@ -4161,7 +4277,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 || CollectionUtils.isEmpty(shifts) || CollectionUtils.isEmpty(sameSkuResults)) {
             return false;
         }
-        LocalDate nextPlannedWorkDate = resolveNextPlannedWorkDate(currentResult, shifts, productionDate);
+        LocalDate nextPlannedWorkDate = resolveNextPositivePlanDate(sku, productionDate);
+        if (nextPlannedWorkDate == null) {
+            nextPlannedWorkDate = resolveNextPlannedWorkDate(currentResult, shifts, productionDate);
+        }
         if (nextPlannedWorkDate == null) {
             return false;
         }
@@ -4177,6 +4296,32 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         int scheduledQtyWithoutCurrent = resolveSameSkuScheduledQtyByShiftsExcludingResult(
                 sameSkuResults, nextDateShifts, currentResult);
         return scheduledQtyWithoutCurrent < nextDateRequiredQty;
+    }
+
+    /**
+     * 解析当前生产日之后仍有日计划的最近业务日。
+     * <p>新增非收尾增机台可能在 T+1 提前借用 T+2 计划；辅助机台释放时必须按后续 dayN 需求判断，
+     * 不能只看辅助机台自身是否已经落到后续日期，否则会把提前承接未来计划的第二台清零。</p>
+     *
+     * @param sku 当前 SKU
+     * @param productionDate 当前生产日
+     * @return 后续有计划的最近业务日
+     */
+    private LocalDate resolveNextPositivePlanDate(SkuScheduleDTO sku, LocalDate productionDate) {
+        if (sku == null || productionDate == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return null;
+        }
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sku.getDailyPlanQuotaMap().entrySet()) {
+            LocalDate quotaDate = entry.getKey();
+            SkuDailyPlanQuotaDTO quota = entry.getValue();
+            if (quotaDate == null || !quotaDate.isAfter(productionDate) || quota == null) {
+                continue;
+            }
+            if (Math.max(0, quota.getDayPlanQty()) > 0 || Math.max(0, quota.getRemainingQty()) > 0) {
+                return quotaDate;
+            }
+        }
+        return null;
     }
 
     private LocalDate resolveNextPlannedWorkDate(LhScheduleResult result,

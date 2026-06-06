@@ -216,6 +216,33 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
     }
 
     @Test
+    void simulateExpansion_shouldAddMachineOnSecondDayWhenThirdDayPlanExceedsThreeShiftCapacity() {
+        LocalDate day1 = LocalDate.of(2026, 4, 1);
+        LocalDate day2 = LocalDate.of(2026, 4, 2);
+        LocalDate day3 = LocalDate.of(2026, 4, 3);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001236");
+        request.setDailyPlanQuotaMap(quotaMap(day1, day2, day3, 0, 8, 80));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 112, 112, 112, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(2, result.getFinalActiveMachines(),
+                "第二天一台机台无法满足第三天3班计划时，应提前新增一台机台");
+        assertEquals(1, result.getTotalAddedMachineCount());
+        assertEquals(80, result.getDayDecisionList().get(1).getNextDayPlanQty());
+        assertEquals(1, result.getDayDecisionList().get(1).getAddedMachineCount());
+    }
+
+    @Test
     void simulateExpansion_shouldKeepSmallShortageModeWhenHistoryShortageIsZero() {
         LocalDate day1 = LocalDate.of(2026, 5, 9);
         LocalDate day2 = LocalDate.of(2026, 5, 10);
