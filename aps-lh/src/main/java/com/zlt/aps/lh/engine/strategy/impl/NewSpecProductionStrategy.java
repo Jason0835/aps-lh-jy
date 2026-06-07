@@ -2658,7 +2658,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Set<String> addedMachineCodes = new HashSet<String>(4);
         String currentMachineCode = currentMachine == null ? null : currentMachine.getMachineCode();
         for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (!isExistingSameMaterialActiveResult(result, sku.getMaterialCode(), currentMachineCode)) {
+            if (!isExistingSameMaterialActiveResult(context, result, sku, currentMachineCode)) {
                 continue;
             }
             if (!addedMachineCodes.add(result.getLhMachineCode())) {
@@ -2676,24 +2676,39 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     /**
      * 判断结果是否属于当前 SKU 已启用的同 SKU 机台。
      *
+     * @param context 排程上下文
      * @param result 排程结果
-     * @param materialCode 当前物料编码
+     * @param sku 当前 SKU
      * @param currentMachineCode 当前候选机台编码
      * @return true-属于已启用机台
      */
-    private boolean isExistingSameMaterialActiveResult(LhScheduleResult result,
-                                                       String materialCode,
+    private boolean isExistingSameMaterialActiveResult(LhScheduleContext context,
+                                                       LhScheduleResult result,
+                                                       SkuScheduleDTO sku,
                                                        String currentMachineCode) {
         if (result == null
-                || StringUtils.isEmpty(materialCode)
-                || !StringUtils.equals(materialCode, result.getMaterialCode())
+                || sku == null
+                || StringUtils.isEmpty(sku.getMaterialCode())
+                || !StringUtils.equals(sku.getMaterialCode(), result.getMaterialCode())
                 || StringUtils.equals(currentMachineCode, result.getLhMachineCode())
                 || StringUtils.isEmpty(result.getLhMachineCode())
                 || resolveResultScheduledQty(result) <= 0) {
             return false;
         }
-        return StringUtils.equals(NEW_SPEC_SCHEDULE_TYPE, result.getScheduleType())
-                || StringUtils.equals(ScheduleTypeEnum.TYPE_BLOCK.getCode(), result.getScheduleType());
+        if (StringUtils.equals(NEW_SPEC_SCHEDULE_TYPE, result.getScheduleType())
+                || StringUtils.equals(ScheduleTypeEnum.TYPE_BLOCK.getCode(), result.getScheduleType())) {
+            return true;
+        }
+        if (!StringUtils.equals(ScheduleTypeEnum.CONTINUOUS.getCode(), result.getScheduleType())) {
+            return false;
+        }
+        SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+        /*
+         * 续作补偿转入 S4.5 后，当前补偿 SKU 与来源续作 SKU 共用同一份日计划账本。
+         * 只有同账本续作结果才能作为“当前已选机台窗口有效产能”参与扩机判断，
+         * 避免同物料但不同月计划/不同补偿来源的续作结果串入产能。
+         */
+        return sourceSku != null && sourceSku.getDailyPlanQuotaMap() == sku.getDailyPlanQuotaMap();
     }
 
     /**

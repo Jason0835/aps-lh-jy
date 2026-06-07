@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -177,6 +178,52 @@ public class SchedulingStrategyRegressionTest {
         int requiredMachineCount = (Integer) machineCountMethod.invoke(strategy, 3, existingCapacityMaps.size());
 
         Assertions.assertEquals(2, requiredMachineCount);
+    }
+
+    /**
+     * 续作补偿转 S4.5 新增时，dayN 扩机模拟必须把同账本续作结果视为已启用机台。
+     */
+    @Test
+    public void shouldIncludeExistingContinuousMachineInDailyCapacitySimulation() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        List<LhShiftConfigVO> shifts = buildSimulationShifts();
+        context.setScheduleWindowShifts(shifts);
+
+        SkuScheduleDTO sourceSku = buildSkuForTypeBlockExpansion();
+        SkuScheduleDTO compensationSku = buildSkuForTypeBlockExpansion();
+        compensationSku.setDailyPlanQuotaMap(sourceSku.getDailyPlanQuotaMap());
+
+        LhScheduleResult continuousResult = new LhScheduleResult();
+        continuousResult.setMaterialCode("3302002654");
+        continuousResult.setLhMachineCode("K2024");
+        continuousResult.setScheduleType(ScheduleTypeEnum.CONTINUOUS.getCode());
+        ShiftFieldUtil.setShiftPlanQty(continuousResult, 1, 17, new Date(), new Date());
+        ShiftFieldUtil.setShiftPlanQty(continuousResult, 2, 17, new Date(), new Date());
+        ShiftFieldUtil.setShiftPlanQty(continuousResult, 3, 17, new Date(), new Date());
+        ShiftFieldUtil.syncDailyPlanQty(continuousResult);
+        context.setScheduleResultList(new ArrayList<LhScheduleResult>());
+        context.getScheduleResultList().add(continuousResult);
+        context.getScheduleResultSourceSkuMap().put(continuousResult, sourceSku);
+
+        MachineScheduleDTO currentMachine = new MachineScheduleDTO();
+        currentMachine.setMachineCode("K1110");
+
+        Method capacityMapMethod = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "buildExistingSameMaterialCapacityMaps",
+                LhScheduleContext.class, SkuScheduleDTO.class, MachineScheduleDTO.class,
+                List.class, Map.class);
+        capacityMapMethod.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<Map<LocalDate, Integer>> existingCapacityMaps =
+                (List<Map<LocalDate, Integer>>) capacityMapMethod.invoke(
+                        strategy, context, compensationSku, currentMachine, shifts,
+                        compensationSku.getDailyPlanQuotaMap());
+
+        Assertions.assertEquals(1, existingCapacityMaps.size());
+        Assertions.assertEquals(Integer.valueOf(17), existingCapacityMaps.get(0).get(LocalDate.of(2026, 5, 1)));
+        Assertions.assertEquals(Integer.valueOf(17), existingCapacityMaps.get(0).get(LocalDate.of(2026, 5, 2)));
+        Assertions.assertEquals(Integer.valueOf(17), existingCapacityMaps.get(0).get(LocalDate.of(2026, 5, 3)));
     }
 
     /**
