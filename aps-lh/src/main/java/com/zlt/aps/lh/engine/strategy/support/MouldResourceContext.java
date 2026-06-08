@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.engine.strategy.support;
 
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.MouldStatusUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -11,6 +12,7 @@ import org.springframework.util.CollectionUtils;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -31,19 +33,29 @@ public class MouldResourceContext {
 
     /** SKU可用模具号列表，key=materialCode */
     private final Map<String, List<String>> skuAvailableMouldCodeMap;
+    /** SKU台账缺失或禁用模具号列表，key=materialCode */
+    private final Map<String, List<String>> skuUnavailableMouldCodeMap;
     /** SKU模具关系中存在台账缺失或禁用的标识，key=materialCode */
     private final Map<String, Boolean> skuUnavailableModelInfoMap;
     /** 机台模数，key=machineCode */
     private final Map<String, Integer> machineMouldQtyMap;
-    /** SKU已被新增链路占用的模具号集合，key=materialCode */
-    private final Map<String, LinkedHashSet<String>> skuOccupiedMouldCodeMap = new HashMap<String, LinkedHashSet<String>>(16);
+    /** 机台当前绑定的实际模具号，key=machineCode */
+    private final Map<String, LinkedHashSet<String>> machineBoundMouldCodeMap;
+    /** 本次排程已被SKU实际占用的模具号集合 */
+    private final LinkedHashSet<String> occupiedMouldCodeSet;
 
     private MouldResourceContext(Map<String, List<String>> skuAvailableMouldCodeMap,
+                                 Map<String, List<String>> skuUnavailableMouldCodeMap,
                                  Map<String, Boolean> skuUnavailableModelInfoMap,
-                                 Map<String, Integer> machineMouldQtyMap) {
+                                 Map<String, Integer> machineMouldQtyMap,
+                                 Map<String, LinkedHashSet<String>> machineBoundMouldCodeMap,
+                                 LinkedHashSet<String> occupiedMouldCodeSet) {
         this.skuAvailableMouldCodeMap = skuAvailableMouldCodeMap;
+        this.skuUnavailableMouldCodeMap = skuUnavailableMouldCodeMap;
         this.skuUnavailableModelInfoMap = skuUnavailableModelInfoMap;
         this.machineMouldQtyMap = machineMouldQtyMap;
+        this.machineBoundMouldCodeMap = machineBoundMouldCodeMap;
+        this.occupiedMouldCodeSet = occupiedMouldCodeSet;
     }
 
     /**
@@ -53,10 +65,17 @@ public class MouldResourceContext {
      * @return 模具资源上下文
      */
     public static MouldResourceContext from(LhScheduleContext context) {
-        Map<String, List<String>> skuAvailableMouldCodeMap = buildSkuAvailableMouldCodeMap(context);
+        Map<String, Integer> mouldSharedSkuCountMap = buildMouldSharedSkuCountMap(context);
+        Map<String, List<String>> skuAvailableMouldCodeMap =
+                buildSkuAvailableMouldCodeMap(context, mouldSharedSkuCountMap);
+        Map<String, List<String>> skuUnavailableMouldCodeMap = buildSkuUnavailableMouldCodeMap(context);
         Map<String, Boolean> skuUnavailableModelInfoMap = buildSkuUnavailableModelInfoMap(context);
         Map<String, Integer> machineMouldQtyMap = buildMachineMouldQtyMap(context);
-        return new MouldResourceContext(skuAvailableMouldCodeMap, skuUnavailableModelInfoMap, machineMouldQtyMap);
+        Map<String, LinkedHashSet<String>> machineBoundMouldCodeMap =
+                buildMachineBoundMouldCodeMap(context, skuAvailableMouldCodeMap, machineMouldQtyMap);
+        LinkedHashSet<String> occupiedMouldCodeSet = buildOccupiedMouldCodeSet(machineBoundMouldCodeMap);
+        return new MouldResourceContext(skuAvailableMouldCodeMap, skuUnavailableMouldCodeMap,
+                skuUnavailableModelInfoMap, machineMouldQtyMap, machineBoundMouldCodeMap, occupiedMouldCodeSet);
     }
 
     /**
@@ -70,38 +89,62 @@ public class MouldResourceContext {
         int requiredMouldQty = resolveRequiredMouldQty(machineCode);
         List<String> availableMouldCodeList = skuAvailableMouldCodeMap.get(materialCode);
         int availableMouldQty = CollectionUtils.isEmpty(availableMouldCodeList) ? 0 : availableMouldCodeList.size();
-        LinkedHashSet<String> occupiedMouldCodeSet = skuOccupiedMouldCodeMap.get(materialCode);
-        int occupiedMouldQty = CollectionUtils.isEmpty(occupiedMouldCodeSet) ? 0 : occupiedMouldCodeSet.size();
+        LinkedHashSet<String> releasableMouldCodeSet = machineBoundMouldCodeMap.get(machineCode);
+        List<String> occupiedSkuMouldCodeList = resolveOccupiedSkuMouldCodeList(availableMouldCodeList, releasableMouldCodeSet);
+        int occupiedMouldQty = occupiedSkuMouldCodeList.size();
         int remainingAvailableMouldQty = Math.max(0, availableMouldQty - occupiedMouldQty);
         if (CollectionUtils.isEmpty(availableMouldCodeList)) {
-            return MouldResourceAllocationResult.rejected(
+            MouldResourceAllocationResult rejectedResult = MouldResourceAllocationResult.rejected(
                     requiredMouldQty, availableMouldQty, occupiedMouldQty, remainingAvailableMouldQty,
+                    occupiedSkuMouldCodeList, skuUnavailableMouldCodeMap.get(materialCode),
                     resolveNoAvailableReason(materialCode));
+            rejectedResult.setMachineCode(machineCode);
+            return rejectedResult;
         }
         if (remainingAvailableMouldQty < requiredMouldQty) {
-            return MouldResourceAllocationResult.rejected(
+            MouldResourceAllocationResult rejectedResult = MouldResourceAllocationResult.rejected(
                     requiredMouldQty, availableMouldQty, occupiedMouldQty, remainingAvailableMouldQty,
+                    occupiedSkuMouldCodeList, skuUnavailableMouldCodeMap.get(materialCode),
                     resolveInsufficientReason(materialCode));
+            rejectedResult.setMachineCode(machineCode);
+            return rejectedResult;
         }
         List<String> allocatedMouldCodeList = new ArrayList<String>(requiredMouldQty);
-        LinkedHashSet<String> mutableOccupiedSet = skuOccupiedMouldCodeMap.computeIfAbsent(
-                materialCode, key -> new LinkedHashSet<String>(availableMouldCodeList.size()));
         for (String mouldCode : availableMouldCodeList) {
-            if (mutableOccupiedSet.contains(mouldCode)) {
+            if (occupiedMouldCodeSet.contains(mouldCode)
+                    && (CollectionUtils.isEmpty(releasableMouldCodeSet) || !releasableMouldCodeSet.contains(mouldCode))) {
                 continue;
             }
-            mutableOccupiedSet.add(mouldCode);
             allocatedMouldCodeList.add(mouldCode);
             if (allocatedMouldCodeList.size() >= requiredMouldQty) {
                 break;
             }
         }
-        return MouldResourceAllocationResult.allowed(
+        if (allocatedMouldCodeList.size() < requiredMouldQty) {
+            MouldResourceAllocationResult rejectedResult = MouldResourceAllocationResult.rejected(
+                    requiredMouldQty, availableMouldQty, occupiedMouldQty, remainingAvailableMouldQty,
+                    occupiedSkuMouldCodeList, skuUnavailableMouldCodeMap.get(materialCode),
+                    resolveInsufficientReason(materialCode));
+            rejectedResult.setMachineCode(machineCode);
+            return rejectedResult;
+        }
+        List<String> releasedMouldCodeList = CollectionUtils.isEmpty(releasableMouldCodeSet)
+                ? Collections.<String>emptyList() : new ArrayList<String>(releasableMouldCodeSet);
+        // 真正换模成功时，先释放当前机台前物料实际模具，再绑定新SKU本次实际分配模具。
+        if (!CollectionUtils.isEmpty(releasedMouldCodeList)) {
+            occupiedMouldCodeSet.removeAll(releasedMouldCodeList);
+        }
+        occupiedMouldCodeSet.addAll(allocatedMouldCodeList);
+        machineBoundMouldCodeMap.put(machineCode, new LinkedHashSet<String>(allocatedMouldCodeList));
+        MouldResourceAllocationResult allowedResult = MouldResourceAllocationResult.allowed(
                 requiredMouldQty,
                 availableMouldQty,
                 occupiedMouldQty,
-                Math.max(0, availableMouldQty - mutableOccupiedSet.size()),
-                allocatedMouldCodeList);
+                Math.max(0, availableMouldQty - occupiedMouldQty - allocatedMouldCodeList.size()),
+                allocatedMouldCodeList,
+                releasedMouldCodeList);
+        allowedResult.setMachineCode(machineCode);
+        return allowedResult;
     }
 
     /**
@@ -117,11 +160,14 @@ public class MouldResourceContext {
                 || CollectionUtils.isEmpty(allocationResult.getAllocatedMouldCodeList())) {
             return;
         }
-        LinkedHashSet<String> occupiedMouldCodeSet = skuOccupiedMouldCodeMap.get(materialCode);
-        if (CollectionUtils.isEmpty(occupiedMouldCodeSet)) {
-            return;
-        }
         occupiedMouldCodeSet.removeAll(allocationResult.getAllocatedMouldCodeList());
+        if (!CollectionUtils.isEmpty(allocationResult.getReleasedMouldCodeList())) {
+            occupiedMouldCodeSet.addAll(allocationResult.getReleasedMouldCodeList());
+            machineBoundMouldCodeMap.put(allocationResult.getMachineCode(),
+                    new LinkedHashSet<String>(allocationResult.getReleasedMouldCodeList()));
+        } else if (StringUtils.isNotEmpty(allocationResult.getMachineCode())) {
+            machineBoundMouldCodeMap.remove(allocationResult.getMachineCode());
+        }
     }
 
     private int resolveRequiredMouldQty(String machineCode) {
@@ -141,7 +187,23 @@ public class MouldResourceContext {
                 : MouldResourceSkipReason.MOULD_QTY_NOT_ENOUGH;
     }
 
-    private static Map<String, List<String>> buildSkuAvailableMouldCodeMap(LhScheduleContext context) {
+    private List<String> resolveOccupiedSkuMouldCodeList(List<String> availableMouldCodeList,
+                                                         Set<String> releasableMouldCodeSet) {
+        if (CollectionUtils.isEmpty(availableMouldCodeList) || CollectionUtils.isEmpty(occupiedMouldCodeSet)) {
+            return Collections.emptyList();
+        }
+        List<String> resultList = new ArrayList<String>(availableMouldCodeList.size());
+        for (String mouldCode : availableMouldCodeList) {
+            if (occupiedMouldCodeSet.contains(mouldCode)
+                    && (CollectionUtils.isEmpty(releasableMouldCodeSet) || !releasableMouldCodeSet.contains(mouldCode))) {
+                resultList.add(mouldCode);
+            }
+        }
+        return resultList;
+    }
+
+    private static Map<String, List<String>> buildSkuAvailableMouldCodeMap(LhScheduleContext context,
+                                                                            Map<String, Integer> mouldSharedSkuCountMap) {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getSkuMouldRelMap())) {
             return Collections.emptyMap();
         }
@@ -159,7 +221,33 @@ public class MouldResourceContext {
                     mouldCodeSet.add(mouldCode);
                 }
             }
-            resultMap.put(entry.getKey(), new ArrayList<String>(mouldCodeSet));
+            List<String> mouldCodeList = new ArrayList<String>(mouldCodeSet);
+            sortMouldCodesBySharedSkuCount(mouldCodeList, mouldSharedSkuCountMap);
+            resultMap.put(entry.getKey(), mouldCodeList);
+        }
+        return resultMap;
+    }
+
+    private static Map<String, List<String>> buildSkuUnavailableMouldCodeMap(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getSkuMouldRelMap())) {
+            return Collections.emptyMap();
+        }
+        Map<String, List<String>> resultMap = new HashMap<String, List<String>>(context.getSkuMouldRelMap().size());
+        Map<String, MdmModelInfo> modelInfoMap = context.getModelInfoMap();
+        for (Map.Entry<String, List<MdmSkuMouldRel>> entry : context.getSkuMouldRelMap().entrySet()) {
+            Set<String> checkedMouldCodeSet = new LinkedHashSet<String>(4);
+            List<String> unavailableMouldCodeList = new ArrayList<String>(4);
+            for (MdmSkuMouldRel rel : entry.getValue()) {
+                String mouldCode = Objects.isNull(rel) ? null : StringUtils.trim(rel.getMouldCode());
+                if (StringUtils.isEmpty(mouldCode) || !checkedMouldCodeSet.add(mouldCode)) {
+                    continue;
+                }
+                MdmModelInfo modelInfo = CollectionUtils.isEmpty(modelInfoMap) ? null : modelInfoMap.get(mouldCode);
+                if (Objects.isNull(modelInfo) || !MouldStatusUtil.isEnabled(modelInfo.getMouldStatus())) {
+                    unavailableMouldCodeList.add(mouldCode);
+                }
+            }
+            resultMap.put(entry.getKey(), unavailableMouldCodeList);
         }
         return resultMap;
     }
@@ -202,5 +290,134 @@ public class MouldResourceContext {
             machineMouldQtyMap.put(machine.getMachineCode(), ShiftCapacityResolverUtil.resolveMachineMouldQty(machine));
         }
         return machineMouldQtyMap;
+    }
+
+    private static Map<String, Integer> buildMouldSharedSkuCountMap(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getSkuMouldRelMap())) {
+            return Collections.emptyMap();
+        }
+        Map<String, Set<String>> mouldSkuSetMap = new HashMap<String, Set<String>>(16);
+        for (Map.Entry<String, List<MdmSkuMouldRel>> entry : context.getSkuMouldRelMap().entrySet()) {
+            for (MdmSkuMouldRel rel : entry.getValue()) {
+                String mouldCode = Objects.isNull(rel) ? null : StringUtils.trim(rel.getMouldCode());
+                if (StringUtils.isEmpty(mouldCode)) {
+                    continue;
+                }
+                mouldSkuSetMap.computeIfAbsent(mouldCode, key -> new LinkedHashSet<String>(4)).add(entry.getKey());
+            }
+        }
+        Map<String, Integer> resultMap = new HashMap<String, Integer>(mouldSkuSetMap.size());
+        for (Map.Entry<String, Set<String>> entry : mouldSkuSetMap.entrySet()) {
+            resultMap.put(entry.getKey(), entry.getValue().size());
+        }
+        return resultMap;
+    }
+
+    private static void sortMouldCodesBySharedSkuCount(List<String> mouldCodeList,
+                                                        Map<String, Integer> mouldSharedSkuCountMap) {
+        if (CollectionUtils.isEmpty(mouldCodeList)) {
+            return;
+        }
+        mouldCodeList.sort(Comparator
+                .comparing((String mouldCode) -> mouldSharedSkuCountMap.getOrDefault(mouldCode, 1))
+                .thenComparing(Comparator.naturalOrder()));
+    }
+
+    private static Map<String, LinkedHashSet<String>> buildMachineBoundMouldCodeMap(
+            LhScheduleContext context,
+            Map<String, List<String>> skuAvailableMouldCodeMap,
+            Map<String, Integer> machineMouldQtyMap) {
+        Map<String, LinkedHashSet<String>> resultMap = new HashMap<String, LinkedHashSet<String>>(16);
+        if (Objects.isNull(context)) {
+            return resultMap;
+        }
+        appendMachineBoundMouldCodeFromCurrentMaterial(resultMap, context, skuAvailableMouldCodeMap, machineMouldQtyMap);
+        appendMachineBoundMouldCodeFromResults(resultMap, context.getScheduleResultList());
+        if (!CollectionUtils.isEmpty(context.getMachineAssignmentMap())) {
+            for (List<LhScheduleResult> resultList : context.getMachineAssignmentMap().values()) {
+                appendMachineBoundMouldCodeFromResults(resultMap, resultList);
+            }
+        }
+        return resultMap;
+    }
+
+    private static void appendMachineBoundMouldCodeFromCurrentMaterial(
+            Map<String, LinkedHashSet<String>> resultMap,
+            LhScheduleContext context,
+            Map<String, List<String>> skuAvailableMouldCodeMap,
+            Map<String, Integer> machineMouldQtyMap) {
+        if (CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
+            return;
+        }
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (Objects.isNull(machine)
+                    || StringUtils.isEmpty(machine.getMachineCode())
+                    || StringUtils.isEmpty(machine.getCurrentMaterialCode())) {
+                continue;
+            }
+            List<String> mouldCodeList = skuAvailableMouldCodeMap.get(machine.getCurrentMaterialCode());
+            if (CollectionUtils.isEmpty(mouldCodeList)) {
+                continue;
+            }
+            Integer machineMouldQty = machineMouldQtyMap.get(machine.getMachineCode());
+            int requiredMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(
+                    machineMouldQty == null ? 0 : machineMouldQty);
+            LinkedHashSet<String> machineMouldCodeSet = new LinkedHashSet<String>(requiredMouldQty);
+            for (String mouldCode : mouldCodeList) {
+                machineMouldCodeSet.add(mouldCode);
+                if (machineMouldCodeSet.size() >= requiredMouldQty) {
+                    break;
+                }
+            }
+            resultMap.put(machine.getMachineCode(), machineMouldCodeSet);
+        }
+    }
+
+    private static void appendMachineBoundMouldCodeFromResults(Map<String, LinkedHashSet<String>> resultMap,
+                                                               List<LhScheduleResult> resultList) {
+        if (CollectionUtils.isEmpty(resultList)) {
+            return;
+        }
+        for (LhScheduleResult result : resultList) {
+            if (Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())) {
+                continue;
+            }
+            LinkedHashSet<String> mouldCodeSet = splitMouldCode(result.getMouldCode());
+            if (!CollectionUtils.isEmpty(mouldCodeSet)) {
+                resultMap.put(result.getLhMachineCode(), mouldCodeSet);
+            }
+        }
+    }
+
+    private static LinkedHashSet<String> buildOccupiedMouldCodeSet(
+            Map<String, LinkedHashSet<String>> machineBoundMouldCodeMap) {
+        LinkedHashSet<String> occupiedMouldCodeSet = new LinkedHashSet<String>(16);
+        if (CollectionUtils.isEmpty(machineBoundMouldCodeMap)) {
+            return occupiedMouldCodeSet;
+        }
+        for (Set<String> mouldCodeSet : machineBoundMouldCodeMap.values()) {
+            if (!CollectionUtils.isEmpty(mouldCodeSet)) {
+                occupiedMouldCodeSet.addAll(mouldCodeSet);
+            }
+        }
+        return occupiedMouldCodeSet;
+    }
+
+    private static LinkedHashSet<String> splitMouldCode(String mouldCodeText) {
+        LinkedHashSet<String> mouldCodeSet = new LinkedHashSet<String>(4);
+        if (StringUtils.isEmpty(mouldCodeText)) {
+            return mouldCodeSet;
+        }
+        String[] mouldCodeArray = StringUtils.split(mouldCodeText, ",");
+        if (mouldCodeArray == null) {
+            return mouldCodeSet;
+        }
+        for (String mouldCode : mouldCodeArray) {
+            String normalizedMouldCode = StringUtils.trim(mouldCode);
+            if (StringUtils.isNotEmpty(normalizedMouldCode)) {
+                mouldCodeSet.add(normalizedMouldCode);
+            }
+        }
+        return mouldCodeSet;
     }
 }

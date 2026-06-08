@@ -571,8 +571,17 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 if (shouldIgnoreReleasedContinuousPlaceholder(context, result)) {
                     continue;
                 }
-                if (result.getMouldCode() != null) {
-                    occupied.add(result.getMouldCode());
+                if (StringUtils.isNotEmpty(result.getMouldCode())) {
+                    String[] mouldCodeArray = StringUtils.split(result.getMouldCode(), ",");
+                    if (mouldCodeArray == null) {
+                        continue;
+                    }
+                    for (String mouldCode : mouldCodeArray) {
+                        String normalizedMouldCode = StringUtils.trim(mouldCode);
+                        if (StringUtils.isNotEmpty(normalizedMouldCode)) {
+                            occupied.add(normalizedMouldCode);
+                        }
+                    }
                 }
             }
         }

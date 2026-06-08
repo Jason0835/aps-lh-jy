@@ -1109,7 +1109,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setScheduleType(ScheduleTypeEnum.TYPE_BLOCK.getCode());
         result.setIsChangeMould(YES_FLAG);
         result.setIsTypeBlock(YES_FLAG);
-        result.setMouldCode(resolveMouldCode(context, sku.getMaterialCode(), machine.getCurrentMaterialCode()));
+        result.setMouldCode(resolveTypeBlockActualMouldCode(context, machine, sku));
         // 换活字块虽然不是新增规格换模，但下游换模计划仍按真实切换开始时间生成。
         result.setMouldChangeStartTime(switchStartTime);
         result.setIsEnd(isEnding ? YES_FLAG : NO_FLAG);
@@ -2868,31 +2868,51 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
-     * 解析模具编码。
+     * 解析换活字块结果实际使用的模具号。
+     * <p>换活字块不是更换整副模具，因此不释放在机模具，也不按新SKU重新分配模具；
+     * 结果字段沿用当前机台在机物料按机台模数解析出的实际模具号。</p>
      *
      * @param context 排程上下文
-     * @param materialCodes 物料编码
-     * @return 模具编码
+     * @param machine 当前机台
+     * @param sku 候选SKU
+     * @return 实际使用模具号，多个逗号分隔
      */
-    private String resolveMouldCode(LhScheduleContext context, String... materialCodes) {
-        if (context == null || materialCodes == null) {
+    private String resolveTypeBlockActualMouldCode(LhScheduleContext context,
+                                                   MachineScheduleDTO machine,
+                                                   SkuScheduleDTO sku) {
+        if (context == null || machine == null) {
             return null;
         }
-        for (String materialCode : materialCodes) {
-            if (StringUtils.isEmpty(materialCode) || !context.getSkuMouldRelMap().containsKey(materialCode)) {
-                continue;
-            }
-            String mouldCode = context.getSkuMouldRelMap().get(materialCode).stream()
-                .map(MdmSkuMouldRel::getMouldCode)
-                    .map(this::normalizeCompareToken)
-                    .filter(StringUtils::isNotEmpty)
-                    .distinct()
-                    .collect(Collectors.joining(","));
-            if (StringUtils.isNotEmpty(mouldCode)) {
-                return mouldCode;
-            }
+        int requiredMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+        String mouldCode = resolveMouldCode(context, machine.getCurrentMaterialCode(), requiredMouldQty);
+        if (StringUtils.isEmpty(mouldCode)) {
+            log.info("换活字块结果在机实际模具号为空, machineCode: {}, currentMaterialCode: {}, materialCode: {}, "
+                            + "requiredMouldQty: {}",
+                    machine.getMachineCode(), machine.getCurrentMaterialCode(),
+                    sku == null ? null : sku.getMaterialCode(), requiredMouldQty);
+            return null;
         }
-        return null;
+        log.debug("换活字块沿用在机实际模具号, machineCode: {}, currentMaterialCode: {}, materialCode: {}, "
+                        + "requiredMouldQty: {}, actualMouldCode: {}",
+                machine.getMachineCode(), machine.getCurrentMaterialCode(),
+                sku == null ? null : sku.getMaterialCode(), requiredMouldQty, mouldCode);
+        return mouldCode;
+    }
+
+    private String resolveMouldCode(LhScheduleContext context, String materialCode, int limit) {
+        if (context == null
+                || StringUtils.isEmpty(materialCode)
+                || CollectionUtils.isEmpty(context.getSkuMouldRelMap())
+                || !context.getSkuMouldRelMap().containsKey(materialCode)) {
+            return null;
+        }
+        return context.getSkuMouldRelMap().get(materialCode).stream()
+                .map(MdmSkuMouldRel::getMouldCode)
+                .map(this::normalizeCompareToken)
+                .filter(StringUtils::isNotEmpty)
+                .distinct()
+                .limit(Math.max(1, limit))
+                .collect(Collectors.joining(","));
     }
 
     /**

@@ -658,7 +658,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         context, machineCode, shifts, deferredCompensationSkuList);
                 LhScheduleResult result = buildNewSpecScheduleResult(
                         context, candidateMachine, sku, firstProductionStartTime, mouldChangeStartTime,
-                        mouldChangeCompleteTime, shifts, machineMouldQty, isEnding);
+                        mouldChangeCompleteTime, shifts, machineMouldQty, isEnding, mouldResourceAllocationResult);
                 if (result == null || result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
                     log.debug("新增SKU结果无有效班次计划量, materialCode: {}, 机台: {}, 目标量: {}, 开产时间: {}",
                             sku.getMaterialCode(), machineCode, sku.resolveTargetScheduleQty(),
@@ -1397,22 +1397,25 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (allocationResult.isAllowed()) {
             log.debug("SKU增机台模具资源校验通过, materialCode: {}, scheduleDate: {}, productionType: {}, "
                             + "machineCode: {}, machineMouldType: {}, requiredMouldQty: {}, "
-                            + "availableMouldQty: {}, occupiedMouldQty: {}, remainingAvailableMouldQty: {}",
+                            + "availableMouldQty: {}, occupiedMouldQty: {}, remainingAvailableMouldQty: {}, "
+                            + "releasedMouldCodes: {}, allocatedMouldCodes: {}",
                     sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), productionType,
                     candidateMachine.getMachineCode(), resolveMachineMouldTypeText(allocationResult.getRequiredMouldQty()),
                     allocationResult.getRequiredMouldQty(), allocationResult.getAvailableMouldQty(),
-                    allocationResult.getOccupiedMouldQty(), allocationResult.getRemainingAvailableMouldQty());
+                    allocationResult.getOccupiedMouldQty(), allocationResult.getRemainingAvailableMouldQty(),
+                    allocationResult.getReleasedMouldCodeList(), allocationResult.getAllocatedMouldCodeList());
             return allocationResult;
         }
         log.info("SKU增机台模具资源不足跳过候选机台, materialCode: {}, scheduleDate: {}, productionType: {}, "
                         + "originalAddMachineCount: {}, actualAllowedAddMachineCount: {}, candidateMachineCode: {}, "
                         + "machineMouldType: {}, requiredMouldQty: {}, availableMouldQty: {}, occupiedMouldQty: {}, "
-                        + "remainingAvailableMouldQty: {}, skipReason: {}",
+                        + "remainingAvailableMouldQty: {}, occupiedMouldCodes: {}, unavailableMouldCodes: {}, skipReason: {}",
                 sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), productionType,
                 originalAddMachineCount, actualAllowedAddMachineCount, candidateMachine.getMachineCode(),
                 resolveMachineMouldTypeText(allocationResult.getRequiredMouldQty()),
                 allocationResult.getRequiredMouldQty(), allocationResult.getAvailableMouldQty(),
                 allocationResult.getOccupiedMouldQty(), allocationResult.getRemainingAvailableMouldQty(),
+                allocationResult.getOccupiedMouldCodeList(), allocationResult.getUnavailableMouldCodeList(),
                 allocationResult.getSkipReason().getDescription());
         return allocationResult;
     }
@@ -4059,7 +4062,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                          Date mouldChangeEndTime,
                                                          List<LhShiftConfigVO> shifts,
                                                          int mouldQty,
-                                                         boolean isEnding) {
+                                                         boolean isEnding,
+                                                         MouldResourceAllocationResult mouldResourceAllocationResult) {
         LhScheduleResult result = new LhScheduleResult();
         result.setFactoryCode(context.getFactoryCode());
         result.setBatchNo(context.getBatchNo());
@@ -4139,7 +4143,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         result.setMachineOrder(machine.getMachineOrder());
         result.setRealScheduleDate(context.getScheduleDate());
         result.setProductionStatus("0");
-        result.setMouldCode(resolveMouldCode(context, sku.getMaterialCode()));
+        result.setMouldCode(resolveActualMouldCodeForNewSpecResult(
+                context, sku, machine, mouldQty, mouldResourceAllocationResult));
         result.setHasSpecialMaterial(LhSpecialMaterialUtil.resolveHasSpecialMaterial(context, sku));
         // 保存真实换模开始时间，供下游换模计划表直接复用。
         result.setMouldChangeStartTime(mouldChangeStartTime);
@@ -5924,15 +5929,39 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 cleaningWindowList, switchStartTime, firstProductionStartTime));
     }
 
-    private String resolveMouldCode(LhScheduleContext context, String materialCode) {
-        if (!context.getSkuMouldRelMap().containsKey(materialCode)) {
+    /**
+     * 解析新增换模结果实际使用的模具号。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param machine 当前机台
+     * @param mouldQty 机台模数
+     * @param allocationResult 模具资源分配结果
+     * @return 实际使用模具号，多个逗号分隔
+     */
+    private String resolveActualMouldCodeForNewSpecResult(LhScheduleContext context,
+                                                          SkuScheduleDTO sku,
+                                                          MachineScheduleDTO machine,
+                                                          int mouldQty,
+                                                          MouldResourceAllocationResult allocationResult) {
+        int requiredMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(mouldQty);
+        if (allocationResult == null || CollectionUtils.isEmpty(allocationResult.getAllocatedMouldCodeList())) {
+            log.info("新增排产结果实际模具号为空, materialCode: {}, machineCode: {}, requiredMouldQty: {}",
+                    sku.getMaterialCode(), machine.getMachineCode(), requiredMouldQty);
             return null;
         }
-        return context.getSkuMouldRelMap().get(materialCode).stream()
-                .map(rel -> rel.getMouldCode())
-                .filter(code -> code != null && !code.trim().isEmpty())
-                .distinct()
-                .collect(Collectors.joining(","));
+        if (allocationResult.getAllocatedMouldCodeList().size() < requiredMouldQty) {
+            log.info("新增排产结果实际模具数量不足, materialCode: {}, machineCode: {}, requiredMouldQty: {}, "
+                            + "allocatedMouldCodes: {}",
+                    sku.getMaterialCode(), machine.getMachineCode(), requiredMouldQty,
+                    allocationResult.getAllocatedMouldCodeList());
+            return null;
+        }
+        String actualMouldCode = StringUtils.join(allocationResult.getAllocatedMouldCodeList(), ",");
+        log.debug("新增排产结果写入实际模具号, batchNo: {}, materialCode: {}, machineCode: {}, "
+                        + "requiredMouldQty: {}, actualMouldCode: {}",
+                context.getBatchNo(), sku.getMaterialCode(), machine.getMachineCode(), requiredMouldQty, actualMouldCode);
+        return actualMouldCode;
     }
 
     /**

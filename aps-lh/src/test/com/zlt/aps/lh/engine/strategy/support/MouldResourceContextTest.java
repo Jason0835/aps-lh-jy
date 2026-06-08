@@ -82,6 +82,37 @@ public class MouldResourceContextTest {
         Assertions.assertEquals(1, result.getAvailableMouldQty());
     }
 
+    /**
+     * 用例说明：SKU选择模具时，必须排除其他SKU已占用模具，再按共用SKU数量和模具号排序。
+     */
+    @Test
+    public void shouldAllocateLeastSharedMouldAcrossSkusAndSkipOccupiedMould() {
+        LhScheduleContext context = buildContext(
+                Arrays.asList(
+                        buildRel("SKU-001", "M003"),
+                        buildRel("SKU-001", "M001"),
+                        buildRel("SKU-001", "M002"),
+                        buildRel("SKU-002", "M001"),
+                        buildRel("SKU-002", "M004"),
+                        buildRel("SKU-003", "M001"),
+                        buildRel("SKU-003", "M002")),
+                Arrays.asList(
+                        buildModel("M001", 1),
+                        buildModel("M002", 1),
+                        buildModel("M003", 1),
+                        buildModel("M004", 1)),
+                Arrays.asList(buildMachine("K1105", 2), buildMachine("K1110", 1)));
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+
+        MouldResourceAllocationResult first = resourceContext.tryAllocate("SKU-001", "K1105");
+        MouldResourceAllocationResult second = resourceContext.tryAllocate("SKU-002", "K1110");
+
+        Assertions.assertTrue(first.isAllowed());
+        Assertions.assertEquals(Arrays.asList("M003", "M002"), first.getAllocatedMouldCodeList());
+        Assertions.assertTrue(second.isAllowed());
+        Assertions.assertEquals(Collections.singletonList("M004"), second.getAllocatedMouldCodeList());
+    }
+
     private LhScheduleContext buildContext(List<MdmSkuMouldRel> relList,
                                            List<MdmModelInfo> modelList,
                                            List<MachineScheduleDTO> machineList) {

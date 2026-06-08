@@ -20,6 +20,7 @@ import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -294,6 +295,30 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(Integer.valueOf(14), result.getDailyPlanQty());
     }
 
+    /**
+     * 换活字块不释放、不重选新模具，结果模具号应沿用当前机台在机物料的实际模具号。
+     */
+    @Test
+    public void shouldUseCurrentMachineMouldCodeForTypeBlockResult() throws Exception {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        putMouldRels(context, "SKU-CURRENT", "M001", "M002");
+        putMouldRels(context, "SKU-NEXT", "M001", "M002", "M099");
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1305");
+        machine.setCurrentMaterialCode("SKU-CURRENT");
+        machine.setMaxMoldNum(2);
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("SKU-NEXT");
+
+        Method method = TypeBlockProductionStrategy.class.getDeclaredMethod(
+                "resolveTypeBlockActualMouldCode", LhScheduleContext.class, MachineScheduleDTO.class, SkuScheduleDTO.class);
+        method.setAccessible(true);
+        String mouldCode = (String) method.invoke(strategy, context, machine, sku);
+
+        Assertions.assertEquals("M001,M002", mouldCode);
+    }
+
     private SkuScheduleDTO buildSkuForTypeBlockExpansion() {
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("3302002654");
@@ -449,6 +474,17 @@ public class SchedulingStrategyRegressionTest {
         sku.setMaterialCode(materialCode);
         sku.setEmbryoCode(embryoCode);
         return sku;
+    }
+
+    private void putMouldRels(LhScheduleContext context, String materialCode, String... mouldCodes) {
+        List<MdmSkuMouldRel> relationList = new ArrayList<MdmSkuMouldRel>(mouldCodes.length);
+        for (String mouldCode : mouldCodes) {
+            MdmSkuMouldRel relation = new MdmSkuMouldRel();
+            relation.setMaterialCode(materialCode);
+            relation.setMouldCode(mouldCode);
+            relationList.add(relation);
+        }
+        context.getSkuMouldRelMap().put(materialCode, relationList);
     }
 
     private Date dateTime(int year, int month, int day, int hour, int minute) {
