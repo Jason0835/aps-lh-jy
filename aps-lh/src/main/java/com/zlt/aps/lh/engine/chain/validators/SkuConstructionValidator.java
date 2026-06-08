@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhDataValidationGroupConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.ValidationPolicyEnum;
 import com.zlt.aps.lh.engine.chain.IDataValidator;
+import com.zlt.aps.lh.util.SkuConstructionRefResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import lombok.extern.slf4j.Slf4j;
@@ -18,7 +19,8 @@ import java.util.Objects;
 
 /**
  * SKU与示方书关系校验器
- * <p>按物料编码 + 产品状态精确查找示方书关系，校验 lhNo 和 lhType 是否为空。</p>
+ * <p>按物料编码 + 产品状态查找示方书关系（支持降级匹配），校验 lhNo 和 lhType 是否为空。</p>
+ * <p>降级规则：正规(S)→量试(T)→试制(X)；量试(T)→试制(X)；试制(X)不降级。</p>
  *
  * @author APS
  */
@@ -42,26 +44,33 @@ public class SkuConstructionValidator implements IDataValidator {
                     + context.getFactoryDisplayName());
             return false;
         }
-        // 遍历月计划物料，按物料编码+产品状态精确查找并校验 lhNo/lhType
+        // 遍历月计划物料，按物料编码+产品状态降级查找并校验 lhNo/lhType
         Map<String, String> missingFieldMap = new LinkedHashMap<>();
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
             String materialCode = plan.getMaterialCode();
             if (StringUtils.isEmpty(materialCode)) {
                 continue;
             }
-            String compositeKey = materialCode + "::" + plan.getProductStatus();
-            MdmSkuConstructionRef ref = compositeKeyMap.get(compositeKey);
+            String productStatus = plan.getProductStatus();
+            String statusDesc = SkuConstructionRefResolverUtil.resolveProductStatusDesc(productStatus);
+            // 使用降级匹配公共方法，与排程结果赋值逻辑保持一致
+            MdmSkuConstructionRef ref = SkuConstructionRefResolverUtil.resolveCuringRecipeRef(
+                    materialCode, productStatus, compositeKeyMap);
             if (Objects.isNull(ref)) {
-                missingFieldMap.put(materialCode, "未找到匹配物料编码和产品状态的示方书关系数据");
+                missingFieldMap.put(materialCode,
+                        "产品状态:" + statusDesc + ", 未找到匹配硫化示方书号(已按降级规则查找)");
                 continue;
             }
             // 校验 lhNo / lhType 是否为空
             if (StringUtils.isEmpty(ref.getLhNo()) && StringUtils.isEmpty(ref.getLhType())) {
-                missingFieldMap.put(materialCode, "硫化示方书号和硫化示方书类型均为空");
+                missingFieldMap.put(materialCode,
+                        "产品状态:" + statusDesc + ", 硫化示方书号和硫化示方书类型均为空");
             } else if (StringUtils.isEmpty(ref.getLhNo())) {
-                missingFieldMap.put(materialCode, "硫化示方书号为空");
+                missingFieldMap.put(materialCode,
+                        "产品状态:" + statusDesc + ", 硫化示方书号为空");
             } else if (StringUtils.isEmpty(ref.getLhType())) {
-                missingFieldMap.put(materialCode, "硫化示方书类型为空");
+                missingFieldMap.put(materialCode,
+                        "产品状态:" + statusDesc + ", 硫化示方书类型为空");
             }
         }
         if (!missingFieldMap.isEmpty()) {

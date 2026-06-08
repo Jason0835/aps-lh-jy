@@ -15,6 +15,7 @@ import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
+import com.zlt.aps.lh.util.SkuConstructionRefResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
@@ -433,20 +434,18 @@ public class LhScheduleContext {
     }
 
     /**
-     * 按物料编码 + 产品状态从SKU与示方书关系中精确查找。
+     * 按物料编码 + 产品状态从SKU与示方书关系中查找（支持降级匹配）。
+     * <p>降级规则：正规(S)→量试(T)→试制(X)；量试(T)→试制(X)；试制(X)不降级。</p>
      * <p>用于排产结果写入前回写文字/硫化/制造示方书号，未命中时返回 null，
      * 由调用方决定是否回退到其他来源或置空。</p>
      *
      * @param materialCode 物料编码
-     * @param productStatus 产品状态
+     * @param productStatus 产品状态（S-正规、T-量试、X-试制）
      * @return SKU与示方书关系，未命中返回 null
      */
     public MdmSkuConstructionRef findSkuConstructionRef(String materialCode, String productStatus) {
-        if (StringUtils.isEmpty(materialCode) || StringUtils.isEmpty(productStatus)
-                || CollectionUtils.isEmpty(skuConstructionRefCompositeKeyMap)) {
-            return null;
-        }
-        return skuConstructionRefCompositeKeyMap.get(materialCode + "::" + productStatus);
+        return SkuConstructionRefResolverUtil.resolveCuringRecipeRef(
+                materialCode, productStatus, skuConstructionRefCompositeKeyMap);
     }
 
 }
