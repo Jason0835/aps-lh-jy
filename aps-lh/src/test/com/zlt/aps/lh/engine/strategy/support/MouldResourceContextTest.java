@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.engine.strategy.support;
 
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -113,6 +114,31 @@ public class MouldResourceContextTest {
         Assertions.assertEquals(Collections.singletonList("M004"), second.getAllocatedMouldCodeList());
     }
 
+    /**
+     * 用例说明：续作在机模具号必须作为本次排程已占用模具，后续新增分配不能重复选择。
+     */
+    @Test
+    public void shouldTreatOnlineInMachineMouldCodeAsOccupiedMould() {
+        LhScheduleContext context = buildContext(
+                Arrays.asList(
+                        buildRel("SKU-CURRENT", "M001"),
+                        buildRel("SKU-NEW", "M102"),
+                        buildRel("SKU-NEW", "M103")),
+                Arrays.asList(buildModel("M001", 1), buildModel("M102", 1), buildModel("M103", 1)),
+                Arrays.asList(buildMachineWithCurrentMaterial("K1105", 2, "SKU-CURRENT"),
+                        buildMachine("K1110", 1)));
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1105");
+        onlineInfo.setInMachineMouldCode("M102");
+        context.getMachineOnlineInfoMap().put("K1105", onlineInfo);
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+
+        MouldResourceAllocationResult result = resourceContext.tryAllocate("SKU-NEW", "K1110");
+
+        Assertions.assertTrue(result.isAllowed());
+        Assertions.assertEquals(Collections.singletonList("M103"), result.getAllocatedMouldCodeList());
+    }
+
     private LhScheduleContext buildContext(List<MdmSkuMouldRel> relList,
                                            List<MdmModelInfo> modelList,
                                            List<MachineScheduleDTO> machineList) {
@@ -154,6 +180,14 @@ public class MouldResourceContextTest {
         MachineScheduleDTO machine = new MachineScheduleDTO();
         machine.setMachineCode(machineCode);
         machine.setMaxMoldNum(maxMouldNum);
+        return machine;
+    }
+
+    private MachineScheduleDTO buildMachineWithCurrentMaterial(String machineCode,
+                                                               int maxMouldNum,
+                                                               String currentMaterialCode) {
+        MachineScheduleDTO machine = buildMachine(machineCode, maxMouldNum);
+        machine.setCurrentMaterialCode(currentMaterialCode);
         return machine;
     }
 }

@@ -32,6 +32,7 @@ import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.lh.util.LhMouldCodeUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhMultiMachineDistributionUtil;
@@ -2793,6 +2794,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         result.setScheduleDate(context.getScheduleTargetDate());
         result.setLhTime(sku.getLhTimeSeconds());
         result.setMouldQty(mouldQty);
+        result.setMouldCode(resolveContinuousActualMouldCode(context, machine, sku));
         int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
                 context, machine, sku.getShiftCapacity());
         result.setSingleMouldShiftQty(SingleMouldShiftQtyUtil.resolveSingleMouldShiftQty(
@@ -2874,6 +2876,46 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         result.setProductionStatus("0");
 
         return result;
+    }
+
+    /**
+     * 解析续作结果实际使用的在机模具号。
+     *
+     * <p>续作不是重新分配模具，结果必须保存硫化在机信息中的当前机台实际模具号，
+     * 不能写入 SKU 关联的全部模具号。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 当前续作机台
+     * @param sku 当前续作SKU
+     * @return 实际在机模具号，多个英文逗号分隔
+     */
+    private String resolveContinuousActualMouldCode(LhScheduleContext context,
+                                                    MachineScheduleDTO machine,
+                                                    SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(machine)) {
+            return null;
+        }
+        int requiredMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+        LinkedHashSet<String> mouldCodeSet = LhMouldCodeUtil.resolveInMachineMouldCodeSet(
+                context, machine.getMachineCode());
+        if (CollectionUtils.isEmpty(mouldCodeSet)) {
+            log.info("续作结果在机实际模具号为空, batchNo: {}, machineCode: {}, materialCode: {}, requiredMouldQty: {}",
+                    context.getBatchNo(), machine.getMachineCode(),
+                    Objects.isNull(sku) ? null : sku.getMaterialCode(), requiredMouldQty);
+            return null;
+        }
+        if (mouldCodeSet.size() < requiredMouldQty) {
+            log.info("续作结果在机实际模具数量不足, batchNo: {}, machineCode: {}, materialCode: {}, "
+                            + "requiredMouldQty: {}, actualMouldCodes: {}",
+                    context.getBatchNo(), machine.getMachineCode(),
+                    Objects.isNull(sku) ? null : sku.getMaterialCode(), requiredMouldQty, mouldCodeSet);
+        }
+        String actualMouldCode = LhMouldCodeUtil.joinMouldCode(mouldCodeSet);
+        log.debug("续作结果写入在机实际模具号, batchNo: {}, machineCode: {}, materialCode: {}, "
+                        + "requiredMouldQty: {}, actualMouldCode: {}",
+                context.getBatchNo(), machine.getMachineCode(),
+                Objects.isNull(sku) ? null : sku.getMaterialCode(), requiredMouldQty, actualMouldCode);
+        return actualMouldCode;
     }
 
     /**

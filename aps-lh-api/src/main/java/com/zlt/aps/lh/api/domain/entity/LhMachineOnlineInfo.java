@@ -47,6 +47,10 @@ public class LhMachineOnlineInfo extends BaseEntity implements Serializable {
     @TableField(value = "LR_MOLDS")
     private String lrMolds;
 
+    @ApiModelProperty(value = "在机模号，多个英文逗号分隔", name = "inMachineMouldCode")
+    @TableField(value = "IN_MACHINE_MOULD_CODE")
+    private String inMachineMouldCode;
+
     @ApiModelProperty(value = "版本号", name = "dataVersion")
     @TableField(value = "DATA_VERSION")
     private String dataVersion;

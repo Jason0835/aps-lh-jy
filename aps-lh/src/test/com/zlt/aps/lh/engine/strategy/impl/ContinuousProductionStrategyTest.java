@@ -3,6 +3,7 @@ package com.zlt.aps.lh.engine.strategy.impl;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
@@ -1533,6 +1534,26 @@ public class ContinuousProductionStrategyTest {
 
         assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
                 "首日无计划释放机台应在续作主循环开始前完成预登记，供S4.4内新增预判选机降优先级");
+    }
+
+    @Test
+    public void resolveContinuousActualMouldCode_shouldUseOnlineInMachineMouldCode() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501");
+        machine.setMaxMoldNum(2);
+        SkuScheduleDTO sku = sku("MAT-CONTINUOUS");
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1501");
+        onlineInfo.setInMachineMouldCode("CM001, CM002");
+        context.getMachineOnlineInfoMap().put("K1501", onlineInfo);
+
+        String mouldCode = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveContinuousActualMouldCode", context, machine, sku);
+
+        assertEquals("CM001,CM002", mouldCode,
+                "续作结果模具号必须取硫化在机信息中的实际在机模具号");
     }
 
     @Test

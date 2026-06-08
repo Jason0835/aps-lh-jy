@@ -27,6 +27,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
+import com.zlt.aps.lh.util.LhMouldCodeUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
@@ -2870,7 +2871,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     /**
      * 解析换活字块结果实际使用的模具号。
      * <p>换活字块不是更换整副模具，因此不释放在机模具，也不按新SKU重新分配模具；
-     * 结果字段沿用当前机台在机物料按机台模数解析出的实际模具号。</p>
+     * 结果字段沿用当前机台硫化在机信息中的实际模具号。</p>
      *
      * @param context 排程上下文
      * @param machine 当前机台
@@ -2884,7 +2885,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             return null;
         }
         int requiredMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-        String mouldCode = resolveMouldCode(context, machine.getCurrentMaterialCode(), requiredMouldQty);
+        String mouldCode = LhMouldCodeUtil.resolveInMachineMouldCode(context, machine.getMachineCode());
         if (StringUtils.isEmpty(mouldCode)) {
             log.info("换活字块结果在机实际模具号为空, machineCode: {}, currentMaterialCode: {}, materialCode: {}, "
                             + "requiredMouldQty: {}",
@@ -2897,22 +2898,6 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 machine.getMachineCode(), machine.getCurrentMaterialCode(),
                 sku == null ? null : sku.getMaterialCode(), requiredMouldQty, mouldCode);
         return mouldCode;
-    }
-
-    private String resolveMouldCode(LhScheduleContext context, String materialCode, int limit) {
-        if (context == null
-                || StringUtils.isEmpty(materialCode)
-                || CollectionUtils.isEmpty(context.getSkuMouldRelMap())
-                || !context.getSkuMouldRelMap().containsKey(materialCode)) {
-            return null;
-        }
-        return context.getSkuMouldRelMap().get(materialCode).stream()
-                .map(MdmSkuMouldRel::getMouldCode)
-                .map(this::normalizeCompareToken)
-                .filter(StringUtils::isNotEmpty)
-                .distinct()
-                .limit(Math.max(1, limit))
-                .collect(Collectors.joining(","));
     }
 
     /**

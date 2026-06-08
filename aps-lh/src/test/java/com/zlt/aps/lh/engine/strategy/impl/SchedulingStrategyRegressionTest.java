@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
@@ -310,13 +311,17 @@ public class SchedulingStrategyRegressionTest {
         machine.setMaxMoldNum(2);
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("SKU-NEXT");
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1305");
+        onlineInfo.setInMachineMouldCode("M010, M011");
+        context.getMachineOnlineInfoMap().put("K1305", onlineInfo);
 
         Method method = TypeBlockProductionStrategy.class.getDeclaredMethod(
                 "resolveTypeBlockActualMouldCode", LhScheduleContext.class, MachineScheduleDTO.class, SkuScheduleDTO.class);
         method.setAccessible(true);
         String mouldCode = (String) method.invoke(strategy, context, machine, sku);
 
-        Assertions.assertEquals("M001,M002", mouldCode);
+        Assertions.assertEquals("M010,M011", mouldCode);
     }
 
     private SkuScheduleDTO buildSkuForTypeBlockExpansion() {

@@ -3,10 +3,12 @@ package com.zlt.aps.lh.engine.strategy.support;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.util.LhMouldCodeUtil;
 import com.zlt.aps.lh.util.MouldStatusUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
@@ -29,6 +31,7 @@ import java.util.Set;
  *
  * @author APS
  */
+@Slf4j
 public class MouldResourceContext {
 
     /** SKU可用模具号列表，key=materialCode */
@@ -351,8 +354,19 @@ public class MouldResourceContext {
         }
         for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
             if (Objects.isNull(machine)
-                    || StringUtils.isEmpty(machine.getMachineCode())
-                    || StringUtils.isEmpty(machine.getCurrentMaterialCode())) {
+                    || StringUtils.isEmpty(machine.getMachineCode())) {
+                continue;
+            }
+            LinkedHashSet<String> inMachineMouldCodeSet = LhMouldCodeUtil.resolveInMachineMouldCodeSet(
+                    context, machine.getMachineCode());
+            if (!CollectionUtils.isEmpty(inMachineMouldCodeSet)) {
+                // 续作在机模具号是机台真实占用，必须优先进入已使用模具列表，避免后续新增重复分配。
+                resultMap.put(machine.getMachineCode(), inMachineMouldCodeSet);
+                log.debug("模具资源初始化占用在机模具号, machineCode: {}, currentMaterialCode: {}, mouldCodes: {}",
+                        machine.getMachineCode(), machine.getCurrentMaterialCode(), inMachineMouldCodeSet);
+                continue;
+            }
+            if (StringUtils.isEmpty(machine.getCurrentMaterialCode())) {
                 continue;
             }
             List<String> mouldCodeList = skuAvailableMouldCodeMap.get(machine.getCurrentMaterialCode());
@@ -382,7 +396,7 @@ public class MouldResourceContext {
             if (Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())) {
                 continue;
             }
-            LinkedHashSet<String> mouldCodeSet = splitMouldCode(result.getMouldCode());
+            LinkedHashSet<String> mouldCodeSet = LhMouldCodeUtil.splitMouldCode(result.getMouldCode());
             if (!CollectionUtils.isEmpty(mouldCodeSet)) {
                 resultMap.put(result.getLhMachineCode(), mouldCodeSet);
             }
@@ -403,21 +417,4 @@ public class MouldResourceContext {
         return occupiedMouldCodeSet;
     }
 
-    private static LinkedHashSet<String> splitMouldCode(String mouldCodeText) {
-        LinkedHashSet<String> mouldCodeSet = new LinkedHashSet<String>(4);
-        if (StringUtils.isEmpty(mouldCodeText)) {
-            return mouldCodeSet;
-        }
-        String[] mouldCodeArray = StringUtils.split(mouldCodeText, ",");
-        if (mouldCodeArray == null) {
-            return mouldCodeSet;
-        }
-        for (String mouldCode : mouldCodeArray) {
-            String normalizedMouldCode = StringUtils.trim(mouldCode);
-            if (StringUtils.isNotEmpty(normalizedMouldCode)) {
-                mouldCodeSet.add(normalizedMouldCode);
-            }
-        }
-        return mouldCodeSet;
-    }
 }
