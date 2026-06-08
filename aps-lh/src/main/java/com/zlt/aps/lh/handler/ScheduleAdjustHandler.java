@@ -251,18 +251,20 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /**
      * 计算SKU的硫化余量
      * <p>
-     * 统一按 月度计划总量 - 已完成量 计算，不再读取月余量表（T_MDM_MONTH_SURPLUS）
+     * 硫化余量 = Max(月度计划总量 - 已完成量, 0)，已完成量超过月计划总量时余量为0。
+     * 不再将逐日超产量加回剩余需求，避免月累计完成量已超月计划时余量被虚增。
      * </p>
      *
      * @param context 排程上下文
      * @param plan    月生产计划记录
-     * @return 硫化余量
+     * @return 硫化余量计算结果
      */
     private SurplusCalculation calculateSurplusQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
         int totalPlanQty = plan.getTotalQty() != null ? plan.getTotalQty() : 0;
         int actualFinishedQty = calculateFinishedQty(context, plan);
+        int remainingDemandQty = Math.max(0, totalPlanQty - actualFinishedQty);
+        // 保留逐日超产统计用于诊断日志，不参与余量计算
         int ignoredOverProductionQty = calculateIgnoredOverProductionQty(context, plan);
-        int remainingDemandQty = Math.max(0, totalPlanQty - actualFinishedQty + ignoredOverProductionQty);
         return new SurplusCalculation(remainingDemandQty, actualFinishedQty, ignoredOverProductionQty);
     }
 
@@ -301,8 +303,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 计算本月已发生日期和 T 日晚班中的被忽略超产量。
-     * <p>超产不允许抵扣后续计划，因此需要把“超过当日计划量”的部分加回本月剩余需求。</p>
+     * 统计本月已发生日期和 T 日晚班中的逐日超产量（仅用于诊断日志，不参与硫化余量计算）。
      *
      * @param context 排程上下文
      * @param plan 月生产计划记录
@@ -423,8 +424,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         dto.setSurplusQty(surplus.getSurplusQty());
         dto.setEmbryoStock(resolveAllocatedEmbryoStock(context, plan, embryoStandardCapacitySumMap));
-        // 待排量保持“需求口径”：使用已忽略超产抵扣后的本月剩余需求，再扣减滚动继承量。
-        // 本月历史欠产已经体现在剩余需求和首日日计划账本中，不能再次重复叠加。
+        // 待排量保持"需求口径"：使用月计划余量扣减滚动继承量，再与胎胚库存取大。
+        // 本月历史欠产已体现在首日日计划账本中，不能再次重复叠加。
         int basePendingQty = resolveBasePendingQty(surplus.getSurplusQty(), inheritedPlanQty, dto.getEmbryoStock());
         if (context.isStopProductionMode()) {
             // 停产收尾按"停产日含损耗计划量"和"胎胚库存"取大，优先把停锅前可收的量拉齐。
@@ -840,7 +841,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
     /**
      * 解析常规待排需求量。
-     * <p>待排需求 = 已按“只处理本月欠产、不处理超产抵扣”修正后的月计划余量 - 已继承量。</p>
+     * <p>待排需求 = Max(月计划余量 - 已继承量, 0) 与胎胚库存取大。</p>
      *
      * @param surplusQty 月计划余量
      * @param inheritedPlanQty 已继承量
