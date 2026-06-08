@@ -12,6 +12,10 @@ import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacityDayDecision;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationRequest;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationResult;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationUtil;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -227,6 +231,35 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 欠产未超过阈值时，T+2 也必须继续后看 T+3 日计划量决定是否保留/新增机台。
+     */
+    @Test
+    public void shouldLookAheadNextDayPlanOnWindowLastDayWhenSmallShortage() {
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001236");
+        request.setDailyPlanQuotaMap(buildQuotaMap(0, 8, 48, 96));
+        request.setMachineDailyCapacityList(buildDailyCapacityMaps(2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(1);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setWindowLastDayNextPlanLookAheadEnabled(true);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        Assertions.assertEquals(2, result.getFinalActiveMachines());
+        DailyMachineCapacityDayDecision windowLastDayDecision = result.getDayDecisionList().get(2);
+        Assertions.assertEquals(LocalDate.of(2026, 5, 3), windowLastDayDecision.getProductionDate());
+        Assertions.assertEquals(LocalDate.of(2026, 5, 4), windowLastDayDecision.getLookAheadEndDate());
+        Assertions.assertEquals(96, windowLastDayDecision.getNextDayPlanQty());
+        Assertions.assertEquals(1, windowLastDayDecision.getAddedMachineCount());
+    }
+
+    /**
      * 同胎胚同模具且仅存在历史欠产额度时，换活字块必须先准备账本并落 S4.4 结果。
      */
     @Test
@@ -278,6 +311,26 @@ public class SchedulingStrategyRegressionTest {
         quotaMap.put(LocalDate.of(2026, 5, 2), buildQuota(day2Qty));
         quotaMap.put(LocalDate.of(2026, 5, 3), buildQuota(day3Qty));
         return quotaMap;
+    }
+
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> buildQuotaMap(
+            int day1Qty, int day2Qty, int day3Qty, int day4Qty) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(day1Qty, day2Qty, day3Qty);
+        quotaMap.put(LocalDate.of(2026, 5, 4), buildQuota(day4Qty));
+        return quotaMap;
+    }
+
+    private List<Map<LocalDate, Integer>> buildDailyCapacityMaps(int machineCount) {
+        List<Map<LocalDate, Integer>> machineCapacityList =
+                new ArrayList<Map<LocalDate, Integer>>(Math.max(1, machineCount));
+        for (int index = 0; index < machineCount; index++) {
+            Map<LocalDate, Integer> capacityMap = new LinkedHashMap<LocalDate, Integer>(4);
+            capacityMap.put(LocalDate.of(2026, 5, 1), 32);
+            capacityMap.put(LocalDate.of(2026, 5, 2), 48);
+            capacityMap.put(LocalDate.of(2026, 5, 3), 48);
+            machineCapacityList.add(capacityMap);
+        }
+        return machineCapacityList;
     }
 
     private SkuDailyPlanQuotaDTO buildQuota(int qty) {

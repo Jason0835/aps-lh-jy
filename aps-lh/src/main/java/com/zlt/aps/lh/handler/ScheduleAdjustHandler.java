@@ -404,6 +404,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setEffectiveCarryForwardQty(Math.max(0, carryForwardQty));
         dto.setScheduleDayFinishQty(Math.max(0, scheDayFinishQty));
         dto.setFutureMonthPlanQtyAfterWindow(resolveFutureMonthPlanQtyAfterWindow(context, plan));
+        dto.setNextDayPlanQtyAfterWindow(resolveNextDayPlanQtyAfterWindow(context, plan));
 
         // 初始化日计划额度账本：按排程窗口日期读取月计划 dayN，扣减继承量。
         // day1/day2/day3 的业务日期由窗口 T日～目标日决定，不能按字段名固定绑定自然日。
@@ -897,6 +898,34 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             futurePlanQty += MonthPlanDayQtyUtil.resolveDayQty(plan, dayOfMonth);
         }
         return Math.max(0, futurePlanQty);
+    }
+
+    /**
+     * 解析排程窗口结束后第一天的月计划日量。
+     * <p>用于新增排产欠产未超阈值时的 T+2 后看 T+3 判断；
+     * 只作为增机台和窗口内满班保留依据，不写入 T～T+2 日计划扣账账本。</p>
+     *
+     * @param context 排程上下文
+     * @param plan 月计划记录
+     * @return 窗口后第一天日计划量
+     */
+    private int resolveNextDayPlanQtyAfterWindow(LhScheduleContext context,
+                                                 FactoryMonthPlanProductionFinalResult plan) {
+        if (Objects.isNull(context) || Objects.isNull(plan)
+                || Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getScheduleTargetDate())) {
+            return 0;
+        }
+        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
+        LocalDate targetDate = toLocalDate(context.getScheduleTargetDate());
+        LocalDate monthEndDate = scheduleDate.withDayOfMonth(scheduleDate.lengthOfMonth());
+        if (!targetDate.isBefore(monthEndDate)) {
+            return 0;
+        }
+        LocalDate nextDate = targetDate.plusDays(1);
+        if (!scheduleDate.getMonth().equals(nextDate.getMonth())) {
+            return 0;
+        }
+        return Math.max(0, MonthPlanDayQtyUtil.resolveDayQty(plan, nextDate.getDayOfMonth()));
     }
 
     /**
@@ -1558,6 +1587,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         copy.setEffectiveCarryForwardQty(source.getEffectiveCarryForwardQty());
         copy.setScheduleDayFinishQty(source.getScheduleDayFinishQty());
         copy.setFutureMonthPlanQtyAfterWindow(source.getFutureMonthPlanQtyAfterWindow());
+        copy.setNextDayPlanQtyAfterWindow(source.getNextDayPlanQtyAfterWindow());
         // 收尾信息
         copy.setEndingDaysRemaining(source.getEndingDaysRemaining());
         // 新增排产目标量控制

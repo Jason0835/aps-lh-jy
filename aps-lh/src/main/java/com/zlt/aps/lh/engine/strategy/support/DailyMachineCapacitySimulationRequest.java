@@ -49,6 +49,9 @@ public class DailyMachineCapacitySimulationRequest implements Serializable {
     /** 排程窗口结束日期 */
     private LocalDate windowEndDate;
 
+    /** 欠产未超阈值时，窗口末日是否继续后看下一日计划 */
+    private boolean windowLastDayNextPlanLookAheadEnabled;
+
     /** 场景类型 */
     private String sceneType;
 }

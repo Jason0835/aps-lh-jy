@@ -155,6 +155,9 @@ public class SkuScheduleDTO {
     /** T+3到月底仍存在的月计划日计划量 */
     private int futureMonthPlanQtyAfterWindow;
 
+    /** 窗口结束后第一天的月计划日计划量，用于新增排产 T+2 后看 T+3 判断 */
+    private int nextDayPlanQtyAfterWindow;
+
     // ========== 目标量控制字段 ==========
     /** 是否严格限制目标量（试制/收尾=true，正式/量试=false）。为true时禁止超出dayN补满班次 */
     private boolean strictTargetQty;

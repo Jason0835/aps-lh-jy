@@ -34,7 +34,7 @@ public final class DailyMachineCapacitySimulationUtil {
      *   <li>判断当前 SKU 是否需要从 1 台扩到多台，而不是直接按候选机台数全量铺开；</li>
      *   <li>优先确认 8 班窗口总产能是否覆盖窗口计划，避免真实换模后残班不足导致过度扩机；</li>
      *   <li>本月历史欠产超过阈值时，按窗口后剩余欠产是否回到阈值以内判断是否继续增机台；</li>
-     *   <li>欠产未超阈值时保持原逐日后看口径，只检查当前日和后一天 3 班承接能力；</li>
+     *   <li>欠产未超阈值时保持逐日后看口径，新增排产可在窗口末日继续后看 T+3 日计划；</li>
      *   <li>只读模拟，不修改排程结果、机台状态和 SKU 日计划账本。</li>
      * </ul>
      *
@@ -61,9 +61,7 @@ public final class DailyMachineCapacitySimulationUtil {
             if (Objects.isNull(productionDate) || isAfterWindowEnd(productionDate, request.getWindowEndDate())) {
                 continue;
             }
-            LocalDate lookAheadEndDate = SkuDailyPlanQuotaUtil.resolveLookAheadEndDate(
-                    request.getDailyPlanQuotaMap(), productionDate,
-                    request.getShortageLookAheadDays(), request.getWindowEndDate());
+            LocalDate lookAheadEndDate = resolveSimulationLookAheadEndDate(request, productionDate);
             DailyMachineCapacityDayDecision decision = buildDayDecision(
                     request, productionDate, lookAheadEndDate, activeMachines, carryShortage,
                     firstProductionDate);
@@ -137,7 +135,7 @@ public final class DailyMachineCapacitySimulationUtil {
         int nextDayPlanQty = 0;
         int nextDayThreeShiftCapacityQty = 0;
         LocalDate nextProductionDate = resolveNextProductionDate(
-                request.getDailyPlanQuotaMap(), decision.getProductionDate(), request.getWindowEndDate());
+                request, decision.getProductionDate(), forcedShortageWindowMode);
         if (Objects.nonNull(nextProductionDate)) {
             nextDayPlanQty = resolveTodayPlanQty(request.getDailyPlanQuotaMap().get(nextProductionDate));
             nextDayThreeShiftCapacityQty = resolveNextDayThreeShiftCapacityQty(request, activeMachines);
@@ -190,7 +188,11 @@ public final class DailyMachineCapacitySimulationUtil {
                 capacityQty = 0;
                 decisionMode = MODE_WINDOW_LAST_DAY;
             } else {
-                // 当前日可支撑时，再看后一天 3 班产能，防止今天勉强满足但明天计划被拖垮。
+                /*
+                 * 当前日可支撑时，再看后一天 3 班产能，防止今天勉强满足但明天计划被拖垮。
+                 * 新增排产小欠产场景下，T+2 也必须判断 T+3 的日月计划量；
+                 * 这里只用于增机台判断，不放开 T+2 结果扣账去提前消耗 T+3 计划。
+                 */
                 demandQty = nextDayPlanQty;
                 capacityQty = nextDayThreeShiftCapacityQty;
                 decisionMode = MODE_NEXT_DAY_CAPACITY;
@@ -351,19 +353,78 @@ public final class DailyMachineCapacitySimulationUtil {
         return request != null && request.getShortageAddMachineThreshold() > 0;
     }
 
-    private static LocalDate resolveNextProductionDate(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+    /**
+     * 解析 dayN 模拟后看截止日。
+     * <p>新增排产小欠产场景需要让 T+2 的模拟日志和决策口径看到 T+3；
+     * 强制欠产窗口回落仍按 T~T+2 截断，避免改变超阈值增机台口径。</p>
+     *
+     * @param request 模拟请求
+     * @param productionDate 当前生产日
+     * @return 后看截止日
+     */
+    private static LocalDate resolveSimulationLookAheadEndDate(
+            DailyMachineCapacitySimulationRequest request,
+            LocalDate productionDate) {
+        LocalDate lookAheadEndDate = SkuDailyPlanQuotaUtil.resolveLookAheadEndDate(
+                request.getDailyPlanQuotaMap(), productionDate,
+                request.getShortageLookAheadDays(), request.getWindowEndDate());
+        if (shouldAllowWindowLastDayNextPlanLookAhead(request, productionDate,
+                Objects.isNull(request.getWindowEndDate()) ? null : request.getWindowEndDate().plusDays(1),
+                shouldUseForcedShortageWindowMode(request))) {
+            LocalDate nextDate = request.getWindowEndDate().plusDays(1);
+            if (request.getDailyPlanQuotaMap().containsKey(nextDate)) {
+                return nextDate;
+            }
+        }
+        return lookAheadEndDate;
+    }
+
+    private static LocalDate resolveNextProductionDate(DailyMachineCapacitySimulationRequest request,
                                                        LocalDate productionDate,
-                                                       LocalDate windowEndDate) {
+                                                       boolean forcedShortageWindowMode) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap =
+                Objects.isNull(request) ? null : request.getDailyPlanQuotaMap();
         if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(productionDate)) {
             return null;
         }
         for (LocalDate date : quotaMap.keySet()) {
-            if (Objects.isNull(date) || !date.isAfter(productionDate) || isAfterWindowEnd(date, windowEndDate)) {
+            if (Objects.isNull(date) || !date.isAfter(productionDate)) {
+                continue;
+            }
+            if (isAfterWindowEnd(date, request.getWindowEndDate())
+                    && !shouldAllowWindowLastDayNextPlanLookAhead(
+                    request, productionDate, date, forcedShortageWindowMode)) {
                 continue;
             }
             return date;
         }
         return null;
+    }
+
+    /**
+     * 判断窗口末日是否允许继续后看下一日计划。
+     * <p>该开关只服务新增排产小欠产场景：T+2 要看 T+3 是否需要保留/新增机台，
+     * 但欠产超过阈值的强制窗口回落仍严格按 T~T+2 计算，避免改变强制增机台语义。</p>
+     *
+     * @param request 模拟请求
+     * @param productionDate 当前生产日
+     * @param nextDate 下一账本日期
+     * @param forcedShortageWindowMode 是否强制欠产窗口模式
+     * @return true-允许窗口末日后看下一日；false-仍按窗口结束日截断
+     */
+    private static boolean shouldAllowWindowLastDayNextPlanLookAhead(
+            DailyMachineCapacitySimulationRequest request,
+            LocalDate productionDate,
+            LocalDate nextDate,
+            boolean forcedShortageWindowMode) {
+        if (request == null || forcedShortageWindowMode
+                || !request.isWindowLastDayNextPlanLookAheadEnabled()
+                || Objects.isNull(request.getWindowEndDate())
+                || Objects.isNull(productionDate) || Objects.isNull(nextDate)) {
+            return false;
+        }
+        return productionDate.equals(request.getWindowEndDate())
+                && nextDate.equals(request.getWindowEndDate().plusDays(1));
     }
 
     private static LocalDate resolveFirstProductionDate(DailyMachineCapacitySimulationRequest request) {

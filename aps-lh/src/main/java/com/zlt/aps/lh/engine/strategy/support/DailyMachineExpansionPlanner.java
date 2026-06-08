@@ -202,6 +202,14 @@ public final class DailyMachineExpansionPlanner {
         if (Objects.isNull(sku) || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return false;
         }
+        /*
+         * 新增排产 T+2 后看 T+3 时，T+3 不进入 T~T+2 扣账账本；
+         * 如果这里仍只看窗口内账本，会在第一台机台排满后误判“后续日计划已满足”，
+         * 导致满足 T+3 所需的第二台机台无法继续尝试。
+         */
+        if (Math.max(0, sku.getNextDayPlanQtyAfterWindow()) > 0) {
+            return false;
+        }
         boolean first = true;
         for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
             if (Objects.isNull(quota)) {
