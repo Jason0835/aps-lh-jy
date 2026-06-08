@@ -1025,6 +1025,14 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Integer shortageQty;
 
     /**
+     * 月累计已完成量
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.totalFinishQty")
+    @ApiModelProperty(value = "月累计已完成量", name = "totalFinishQty")
+    @TableField(value = "TOTAL_FINISH_QTY")
+    private Integer totalFinishQty;
+
+    /**
      * 是否为滚动排程继承结果，仅用于本次排程运行期识别，不落库。
      */
     @TableField(exist = false)

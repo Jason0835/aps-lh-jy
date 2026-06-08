@@ -2181,6 +2181,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setDailyPlanQty(0);
         result.setTotalDailyPlanQty(sku.getMonthPlanQty());
         result.setMouldSurplusQty(sku.getSurplusQty());
+        result.setTotalFinishQty(sku.getFinishedQty());
         result.setIsEnd(isEnding ? YES_FLAG : NO_FLAG);
         result.setIsDelivery(sku.isDeliveryLocked() ? YES_FLAG : NO_FLAG);
         result.setIsRelease(NO_FLAG);

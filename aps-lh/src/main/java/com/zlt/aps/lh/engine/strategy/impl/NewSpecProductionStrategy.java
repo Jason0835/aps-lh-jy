@@ -4090,6 +4090,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         result.setDailyPlanQty(0);
         result.setTotalDailyPlanQty(sku.getMonthPlanQty());
         result.setMouldSurplusQty(sku.getSurplusQty());
+        result.setTotalFinishQty(sku.getFinishedQty());
         result.setIsEnd(isEnding ? "1" : "0");
         result.setIsDelivery(sku.isDeliveryLocked() ? "1" : "0");
         result.setIsRelease("0");
