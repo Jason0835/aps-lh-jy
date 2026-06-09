@@ -45,13 +45,13 @@ import java.util.Map;
 public class SchedulingStrategyRegressionTest {
 
     /**
-     * 共用胎胚启用换模均衡时，早班次数多于中班，应优先顺延到中班执行。
+     * 共用胎胚启用换模均衡时，早班次数已达阈值8次，应顺延到中班执行。
      */
     @Test
-    public void shouldBalanceSharedEmbryoChangeoverToLowerCountShift() {
+    public void shouldBalanceSharedEmbryoChangeoverWhenMorningExceedsLimit() {
         DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
         LhScheduleContext context = buildChangeoverBalanceContext();
-        context.getDailyMouldChangeCountMap().put("2026-06-01", new int[]{6, 2});
+        context.getDailyMouldChangeCountMap().put("2026-06-01", new int[]{8, 2});
         SkuScheduleDTO sku = buildChangeoverSku("3302001001", "E001");
         context.getMaterialSharedEmbryoMap().put(sku.getMaterialCode(), true);
 
@@ -59,7 +59,42 @@ public class SchedulingStrategyRegressionTest {
                 context, "K1101", dateTime(2026, 6, 1, 8, 0), 1, sku, "新增换模");
 
         Assertions.assertEquals(dateTime(2026, 6, 1, 14, 0), allocatedTime);
-        Assertions.assertArrayEquals(new int[]{6, 3}, context.getDailyMouldChangeCountMap().get("2026-06-01"));
+        Assertions.assertArrayEquals(new int[]{8, 3}, context.getDailyMouldChangeCountMap().get("2026-06-01"));
+    }
+
+    /**
+     * 共用胎胚早班次数未达阈值8次时，仍留在早班，不挪到中班。
+     */
+    @Test
+    public void shouldKeepSharedEmbryoInMorningWhenBelowLimit() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        context.getDailyMouldChangeCountMap().put("2026-06-01", new int[]{6, 3});
+        SkuScheduleDTO sku = buildChangeoverSku("3302001018", "E018");
+        context.getMaterialSharedEmbryoMap().put(sku.getMaterialCode(), true);
+
+        Date allocatedTime = strategy.allocateMouldChange(
+                context, "K1118", dateTime(2026, 6, 1, 8, 0), 1, sku, "新增换模");
+
+        Assertions.assertEquals(dateTime(2026, 6, 1, 8, 0), allocatedTime);
+        Assertions.assertArrayEquals(new int[]{7, 3}, context.getDailyMouldChangeCountMap().get("2026-06-01"));
+    }
+    /**
+     * 共用胎胚原本落中班，中班次数已达参考值7次，不强制挪动。
+     */
+    @Test
+    public void shouldKeepSharedEmbryoInAfternoonWhenAfternoonReachesReference() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        context.getDailyMouldChangeCountMap().put("2026-06-01", new int[]{3, 7});
+        SkuScheduleDTO sku = buildChangeoverSku("3302001019", "E019");
+        context.getMaterialSharedEmbryoMap().put(sku.getMaterialCode(), true);
+
+        Date allocatedTime = strategy.allocateMouldChange(
+                context, "K1119", dateTime(2026, 6, 1, 14, 0), 1, sku, "新增换模");
+
+        Assertions.assertEquals(dateTime(2026, 6, 1, 14, 0), allocatedTime);
+        Assertions.assertArrayEquals(new int[]{3, 8}, context.getDailyMouldChangeCountMap().get("2026-06-01"));
     }
 
     /**

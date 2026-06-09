@@ -1,6 +1,9 @@
-根据补充，核心要改成：**共用胎胚不是一律落到次数少的班，而是只有“落到早班且早班超过 8 次”时，才挪到中班；单胎胚永远不挪班。**
+# 换模/换活字块均衡与次数限制 - 主规格文档
 
-```text
+**状态：已实现** | **实现日期：2026-06-09** | **变更类：DefaultMouldChangeBalanceStrategy**
+
+---
+
 请结合项目现有硫化排程代码，调整“换模/换活字块均衡与次数限制”逻辑，要求优先复用已有换模均衡、换模次数统计、换模时间计算、未排结果记录等逻辑，实在无法复用再做小范围重构。
 
 一、核心规则
@@ -107,3 +110,40 @@
 - 共用胎胚只有“原本落早班，且早班次数超过 8 次”时，才挪到中班。
 - 每日 15 次是硬限制；早班 8 次、中班 7 次主要是均衡参考，不是总控硬限制。
 ```
+
+---
+
+## 实现说明
+
+### 修改文件
+
+| 文件 | 变更类型 | 说明 |
+|------|---------|------|
+| `aps-lh/src/main/java/.../DefaultMouldChangeBalanceStrategy.java` | 修改 | resolveSharedEmbryoBalancedTime() 均衡判断条件 |
+| `aps-lh/src/test/java/.../SchedulingStrategyRegressionTest.java` | 修改+新增 | 调整测试数据和新增边界测试 |
+
+### 核心改动
+
+resolveSharedEmbryoBalancedTime 方法：
+
+- 旧逻辑：counts[MORNING] > counts[AFTERNOON] 挪到中班（总是向次数少的班均衡）
+- 新逻辑：counts[MORNING] >= morningLimit(默认8) 挪到中班（只有早班超阈值才挪）
+
+### 未改动的逻辑
+
+- 每日总次数 15 硬限制：复用已有逻辑，未改动
+- 单胎胚不挪班：复用已有 isSharedEmbryo 过滤，未改动
+- 共用胎胚在中班不强制挪动：复用已有逻辑，未改动
+- T+2 超限进入未排：复用已有逻辑，未改动
+- 旧版参数关闭路径（allocateLegacyMouldChange）：完全未改动
+- 参数体系（SYS0304021/SYS0302003/SYS0302004/SYS0302005）：未改动
+
+### 测试覆盖
+
+| 测试方法 | 场景 |
+|---------|------|
+| shouldBalanceSharedEmbryoChangeoverWhenMorningExceedsLimit | 共用胎胚+早班已达阈值8 挪到中班 |
+| shouldKeepSharedEmbryoInMorningWhenBelowLimit | 共用胎胚+早班未达阈值 留在早班 |
+| shouldKeepSharedEmbryoInAfternoonWhenAfternoonReachesReference | 共用胎胚+中班已达参考值7 不强制挪动 |
+| shouldKeepSingleEmbryoChangeoverOnCurrentShiftWhenDailyLimitAvailable | 单胎胚+早班8次 不挪班 |
+| shouldBlockChangeoverWhenTargetDayDailyLimitReached | T+2换模总次数超限 进入未排（预存问题） |
