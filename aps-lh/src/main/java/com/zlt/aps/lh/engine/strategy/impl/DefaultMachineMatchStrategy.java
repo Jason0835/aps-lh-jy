@@ -93,6 +93,21 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 3. 获取已被其他计划占用的模具集合
         Set<String> occupiedMouldCodes = getOccupiedMouldCodes(context);
 
+        // 模具匹配日志：记录SKU模具总数、已占用模具号，便于排查模具冲突问题
+        if (!skuMouldCodes.isEmpty() && !CollectionUtils.isEmpty(occupiedMouldCodes)) {
+            List<String> conflictedMouldCodes = new ArrayList<>();
+            for (String mouldCode : skuMouldCodes) {
+                if (occupiedMouldCodes.contains(mouldCode)) {
+                    conflictedMouldCodes.add(mouldCode);
+                }
+            }
+            int freeMouldCount = skuMouldCodes.size() - conflictedMouldCodes.size();
+            log.info("SKU模具占用检查, materialCode: {}, scheduleDate: {}, SKU模具总数: {}, 全局已占用模具号: {}, "
+                            + "冲突模具数: {}, 空闲模具数: {}, 冲突模具号: {}",
+                    sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                    skuMouldCodes.size(), occupiedMouldCodes,
+                    conflictedMouldCodes.size(), freeMouldCount, conflictedMouldCodes);
+        }
         // 4. 过滤候选机台：状态启用 + 硬性指标匹配 + 模具未被占用。
         // 这里只保留业务上可承接的机台，不在这里提前决定最终排产量。
         BigDecimal skuInch = parseInch(sku.getProSize());
@@ -840,25 +855,42 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 检查模具是否与机台兼容（仅校验模具未被占用）。
+     * 检查SKU模具是否与已占用模具兼容。
+     *
+     * <p>只要SKU至少有一个模具未被全局占用，就允许候选机台通过初筛；
+     * 精确的模具数量分配由 MouldResourceContext.tryAllocate 在后续逐台试算中控制。
+     * 只有当SKU所有模具均被占用时才返回false。</p>
      *
      * @param sku 待排SKU
      * @param skuMouldCodes SKU模具列表
      * @param machine 候选机台
      * @param occupiedMouldCodes 已占用模具集合
-     * @return true-兼容，false-不兼容
+     * @return true-兼容（至少有一个空闲模具），false-不兼容（所有模具已被占用）
      */
     private boolean isMouldCompatible(SkuScheduleDTO sku, List<String> skuMouldCodes, MachineScheduleDTO machine, Set<String> occupiedMouldCodes) {
         if (skuMouldCodes.isEmpty()) {
             return true;
         }
-        // 当前 mouldQty 的业务语义是"选机后的机台模台数"，此处不再拿 SKU 预置模数拦截候选机台。
+        // 只要至少有一个模具未被全局占用，就允许候选机台通过；
+        // 精确的模数扣减和分配由 MouldResourceContext.tryAllocate 在增机台环节控制。
+        int freeMouldCount = 0;
+        List<String> occupiedOverlapMouldList = new ArrayList<>(4);
         for (String mouldCode : skuMouldCodes) {
             if (occupiedMouldCodes.contains(mouldCode)) {
-                return false;
+                occupiedOverlapMouldList.add(mouldCode);
+            } else {
+                freeMouldCount++;
             }
         }
-        return true;
+        boolean compatible = freeMouldCount > 0;
+        if (!compatible) {
+            log.info("SKU模具全部被占用, materialCode: {}, SKU模具总数: {}, 全部被占用模具号: {}",
+                    sku.getMaterialCode(), skuMouldCodes.size(), skuMouldCodes);
+        } else if (!occupiedOverlapMouldList.isEmpty()) {
+            log.debug("SKU模具部分占用, materialCode: {}, SKU模具总数: {}, 空闲模具数: {}, 占用重叠模具号: {}",
+                    sku.getMaterialCode(), skuMouldCodes.size(), freeMouldCount, occupiedOverlapMouldList);
+        }
+        return compatible;
     }
 
     /**
