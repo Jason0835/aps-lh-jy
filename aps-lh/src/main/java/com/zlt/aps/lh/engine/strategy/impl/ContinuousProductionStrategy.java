@@ -666,6 +666,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
             log.info("续作同SKU多机台识别, materialCode: {}, 机台列表: {}, 是否多机台: {}",
                     sourceSku.getMaterialCode(), joinMachineCodes(skuResults), true);
+            // 非收尾多机台续作不降模，跳过降模流程保留初始排程结果（8班次全满）
+            if (!hasEndingResult(skuResults)
+                    && !ProductionQuantityPolicy.from(sourceSku, false).isStrictUpperLimit()
+                    && skuResults.size() > 1) {
+                log.info("续作多机台非收尾不降模, materialCode: {}, 机台: {}, 原因: 非收尾场景保留全部在机机台全产能排产",
+                        sourceSku.getMaterialCode(), joinMachineCodes(skuResults));
+                continue;
+            }
 
             if (shouldReduceContinuationByWorkDate(sourceSku, skuResults)) {
                 reduceContinuationMachinesByWorkDate(context, sourceSku, skuResults, shifts);
