@@ -631,7 +631,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setIsRelease("0");
             plan.setMouldStatus("0");
             plan.setIsDelete(0);
-            plan.setEndType("1".equals(result.getIsEnd()) ? "1" : "0");
+            plan.setEndType("1".equals(result.getIsEnd()) ? "0" : "1");
             plan.setChangeTime(resolvePlanChangeTime(result, state));
 
             // 判断交替类型：普通换模、换活字块、干冰清洗、喷砂清洗在这里统一落数据字典值。
@@ -742,7 +742,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setMouldStatus("0");
             plan.setRemark(cleaningWindow.getRemark());
             plan.setIsDelete(0);
-            plan.setEndType(machine.isEnding() ? "1" : "0");
+            plan.setEndType(machine.isEnding() ? "0" : "1");
             plans.add(plan);
         }
         return planOrder;

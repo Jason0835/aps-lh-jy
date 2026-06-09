@@ -178,9 +178,9 @@ public class LhMouldChangePlan extends BaseEntity implements Serializable {
     private String mouldStatus;
 
     /**
-     * 收尾类型（0-正常 1-收尾）
+     * 收尾类型（1-正常 0-收尾）
      */
-    @ApiModelProperty(value = "收尾类型", name = "endType", notes = "0-正常 1-收尾")
+    @ApiModelProperty(value = "收尾类型", name = "endType", notes = "1-正常 0-收尾")
     @TableField(value = "END_TYPE")
     private String endType;
 
