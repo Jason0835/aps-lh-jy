@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.handler;
 
+import cn.hutool.core.date.DateUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
@@ -34,7 +35,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
-import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -922,8 +922,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
      */
     private void assignOrderNumbers(LhScheduleContext context) {
         log.info("补全工单号, 排程结果数: {}", context.getScheduleResultList().size());
-        // TODO 后续可统一替换为 Hutool 或 java.time 格式化，当前保持历史工单号格式不变。
-        String dateStr = new SimpleDateFormat("yyyyMMdd").format(context.getScheduleTargetDate());
+        String dateStr = DateUtil.format(context.getScheduleTargetDate(), "yyyyMMdd");
 
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (result.getOrderNo() == null || result.getOrderNo().isEmpty()) {
@@ -1206,8 +1205,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
      * 生成模具交替计划工单号：CHG+yyyyMMdd+3位流水号
      */
     private String generateChangePlanOrderNo(LhScheduleContext context) {
-        // TODO 后续可统一替换为 Hutool 或 java.time 格式化，当前保持历史换模工单号格式不变。
-        String dateStr = new SimpleDateFormat("yyyyMMdd").format(context.getScheduleTargetDate());
+        String dateStr = DateUtil.format(context.getScheduleTargetDate(), "yyyyMMdd");
         int seq = CHG_SEQ.incrementAndGet() % 1000;
         return String.format("%s%s%03d", LhScheduleConstant.MOULD_CHANGE_ORDER_PREFIX, dateStr, seq);
     }
@@ -1296,16 +1294,16 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
      * @return 班别编码，未命中班次时返回null
      */
     private String resolvePlanShiftCode(LhScheduleContext context, Date plannedMouldChangeStartTime) {
-        if (context == null || plannedMouldChangeStartTime == null || context.getScheduleTargetDate() == null) {
+        if (context == null || plannedMouldChangeStartTime == null || context.getWindowEndDate() == null) {
             return null;
         }
         int shiftIndex = LhScheduleTimeUtil.getShiftIndex(
-                context, context.getScheduleTargetDate(), plannedMouldChangeStartTime);
+                context, context.getWindowEndDate(), plannedMouldChangeStartTime);
         if (shiftIndex <= 0) {
             return null;
         }
         LhShiftConfigVO shift = LhScheduleTimeUtil.getShiftByIndex(
-                context, context.getScheduleTargetDate(), shiftIndex);
+                context, context.getWindowEndDate(), shiftIndex);
         if (shift == null) {
             return null;
         }
@@ -1396,7 +1394,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
      * <ol>
      *   <li>检查 ENABLE_CURE_FORMULA_HISTORY_PROTECT 开关</li>
      *   <li>从 context 读取 S4.2 已加载的上一轮排程结果</li>
-     *   <li>反推窗口开始日期 T = scheduleTargetDate - 2 天</li>
+     *   <li>反推窗口开始日期 T = windowEndDate - 2 天</li>
      *   <li>获取当前精确时间 LocalDateTime.now()，判断当前所属班次 currentWindowShiftNo</li>
      *   <li>逐机台逐班次判断是否历史班次：班次日期 &lt; 当前日期，或等于当前日期且班次编号 &lt; 当前班次</li>
      *   <li>历史班次从历史结果复制 16 个字段，非历史班次保留本次排程值</li>
@@ -1424,11 +1422,11 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             historyMap.put(hr.getLhMachineCode(), hr);
         }
 
-        // ===== 4. 反推窗口开始日期 T = scheduleTargetDate - 2 天 =====
-        // 排程日期 scheduleDate 是 T+2（当前传入的排程目标日）
-        // 窗口开始日期 T = scheduleDate - 2 天
+        // ===== 4. 反推窗口开始日期 T = windowEndDate - 2 天 =====
+        // 窗口结束日期 windowEndDate 是 T+2
+        // 窗口开始日期 T = windowEndDate - 2 天
         // 1-8 班次与日期映射：1-2班 -> T，3-5班 -> T+1，6-8班 -> T+2
-        Date targetDate = context.getScheduleTargetDate();
+        Date targetDate = context.getWindowEndDate();
         LocalDate scheduleLocalDate = targetDate.toInstant()
                 .atZone(ZoneId.systemDefault()).toLocalDate();
         LocalDate windowStartDate = scheduleLocalDate.minusDays(2);

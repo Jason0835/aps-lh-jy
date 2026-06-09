@@ -397,7 +397,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int carryForwardQty = resolveEffectiveCarryForwardQty(context, plan.getMaterialCode(), rawCarryForwardQty);
         int scheDayFinishQty = resolveScheDayFinishQty(context, plan.getMaterialCode());
         int windowPlanQty = MonthPlanDayQtyUtil.resolveWindowPlanQty(
-                plan, context.getScheduleDate(), context.getScheduleTargetDate());
+                plan, context.getScheduleDate(), context.getWindowEndDate());
         // 继承量已由滚动衔接占用，需从窗口待排量中扣减，防止重复排产
         int inheritedPlanQty = Math.max(0, context.getInheritedPlanQtyMap().getOrDefault(plan.getMaterialCode(), 0));
         dto.setWindowPlanQty(windowPlanQty);
@@ -627,18 +627,18 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                                                                         FactoryMonthPlanProductionFinalResult plan,
                                                                         String materialCode) {
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
-        if (Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getScheduleTargetDate())) {
+        if (Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getWindowEndDate())) {
             return quotaMap;
         }
-        if (MonthPlanDayQtyUtil.isCrossMonthWindow(context.getScheduleDate(), context.getScheduleTargetDate())) {
-            log.warn("排程窗口跨月，无法构建日计划额度账本, materialCode: {}, scheduleDate: {}, targetDate: {}",
+        if (MonthPlanDayQtyUtil.isCrossMonthWindow(context.getScheduleDate(), context.getWindowEndDate())) {
+            log.warn("排程窗口跨月，无法构建日计划额度账本, materialCode: {}, scheduleDate: {}, windowEndDate: {}",
                     materialCode,
                     LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
-                    LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()));
+                    LhScheduleTimeUtil.formatDate(context.getWindowEndDate()));
             return quotaMap;
         }
         Date startDate = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
-        Date endDate = LhScheduleTimeUtil.clearTime(context.getScheduleTargetDate());
+        Date endDate = LhScheduleTimeUtil.clearTime(context.getWindowEndDate());
         if (startDate.after(endDate)) {
             return quotaMap;
         }
@@ -883,11 +883,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private int resolveFutureMonthPlanQtyAfterWindow(LhScheduleContext context,
                                                      FactoryMonthPlanProductionFinalResult plan) {
         if (Objects.isNull(context) || Objects.isNull(plan)
-                || Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getScheduleTargetDate())) {
+                || Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getWindowEndDate())) {
             return 0;
         }
         LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
-        LocalDate targetDate = toLocalDate(context.getScheduleTargetDate());
+        LocalDate targetDate = toLocalDate(context.getWindowEndDate());
         LocalDate monthEndDate = scheduleDate.withDayOfMonth(scheduleDate.lengthOfMonth());
         LocalDate effectiveWindowEndDate = targetDate.isAfter(monthEndDate) ? monthEndDate : targetDate;
         if (!effectiveWindowEndDate.isBefore(monthEndDate)) {
@@ -913,11 +913,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private int resolveNextDayPlanQtyAfterWindow(LhScheduleContext context,
                                                  FactoryMonthPlanProductionFinalResult plan) {
         if (Objects.isNull(context) || Objects.isNull(plan)
-                || Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getScheduleTargetDate())) {
+                || Objects.isNull(context.getScheduleDate()) || Objects.isNull(context.getWindowEndDate())) {
             return 0;
         }
         LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
-        LocalDate targetDate = toLocalDate(context.getScheduleTargetDate());
+        LocalDate targetDate = toLocalDate(context.getWindowEndDate());
         LocalDate monthEndDate = scheduleDate.withDayOfMonth(scheduleDate.lengthOfMonth());
         if (!targetDate.isBefore(monthEndDate)) {
             return 0;

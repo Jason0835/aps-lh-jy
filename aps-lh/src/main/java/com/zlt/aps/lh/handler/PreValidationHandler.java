@@ -64,13 +64,13 @@ public class PreValidationHandler extends AbsScheduleStepHandler {
      * @param context 排程上下文
      */
     private void checkCrossMonthWindow(LhScheduleContext context) {
-        if (!MonthPlanDayQtyUtil.isCrossMonthWindow(context.getScheduleDate(), context.getScheduleTargetDate())) {
+        if (!MonthPlanDayQtyUtil.isCrossMonthWindow(context.getScheduleDate(), context.getWindowEndDate())) {
             return;
         }
         log.warn("排程被拒绝: 工厂[{}] 排程窗口跨月, T日: {}, 目标日: {}",
                 context.getFactoryCode(),
                 LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
-                LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()));
+                LhScheduleTimeUtil.formatDate(context.getWindowEndDate()));
         throw new ScheduleException(ScheduleStepEnum.S4_1_PRE_VALIDATION,
                 ScheduleErrorCode.CROSS_MONTH_SCHEDULE_UNSUPPORTED,
                 context.getFactoryCode(),

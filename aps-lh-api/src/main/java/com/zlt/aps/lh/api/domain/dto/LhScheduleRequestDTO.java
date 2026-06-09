@@ -14,7 +14,7 @@ public class LhScheduleRequestDTO {
 
     /** 分厂编号 */
     private String factoryCode;
-    /** 排程目标日期(默认T+2) */
+    /** 排程业务日期(默认T+1)，仅用于业务归属；排程窗口仍为T～T+2三天8班次 */
     private Date scheduleDate;
     /** 月计划需求版本 */
     private String monthPlanVersion;

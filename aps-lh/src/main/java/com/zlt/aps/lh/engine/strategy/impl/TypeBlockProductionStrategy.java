@@ -3160,10 +3160,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 }
             }
         }
-        if (context.getScheduleTargetDate() == null) {
+        if (context.getWindowEndDate() == null) {
             return null;
         }
-        return context.getScheduleTargetDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        return context.getWindowEndDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     /**

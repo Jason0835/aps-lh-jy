@@ -149,13 +149,17 @@ public class LhScheduleServiceImpl implements ILhScheduleService {
         context.setScheduleTargetDate(target);
         scheduleConfigResolver.resolveAndAttach(context);
         int scheduleDays = context.getScheduleConfig().getScheduleDays();
-        int offsetDays = Math.max(0, scheduleDays - 1);
-        // 引擎使用 T 日 = 目标日 − (连续排程日历跨度 − 1)
+        int offsetDays = Math.max(0, scheduleDays - 2);
+        // 引擎使用 T 日 = 目标日 − (连续排程日历跨度 − 2)，确保窗口仍为 T～T+2
         context.setScheduleDate(LhScheduleTimeUtil.addDays(target, -offsetDays));
-        log.info("排程上下文构建完成, 工厂: {}, 工厂名称: {}, 目标日: {}, T日: {}, 排程天数: {}, 强制重排: {}, 局部搜索: {}, 定点机台规则: {}",
+        // 排程窗口结束日期 = T + 2，用于产能计算、加机台、收尾等核心逻辑
+        context.setWindowEndDate(LhScheduleTimeUtil.addDays(context.getScheduleDate(), scheduleDays - 1));
+        log.info("排程上下文构建完成, 工厂: {}, 工厂名称: {}, 目标日(业务): {}, T日: {}, 窗口结束日: {}, 排程天数: {}, 强制重排: {}, 局部搜索: {}, 定点机台规则: {}",
                 context.getFactoryCode(), context.getFactoryDisplayName(),
                 LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
-                LhScheduleTimeUtil.formatDate(context.getScheduleDate()), scheduleDays,
+                LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                LhScheduleTimeUtil.formatDate(context.getWindowEndDate()),
+                scheduleDays,
                 context.getScheduleConfig().isForceRescheduleEnabled(),
                 context.getScheduleConfig().isLocalSearchEnabled(),
                 context.getScheduleConfig().isSpecifyMachineRuleEnabled());

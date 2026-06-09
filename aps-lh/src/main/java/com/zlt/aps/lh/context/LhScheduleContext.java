@@ -61,14 +61,21 @@ public class LhScheduleContext {
     private String factoryCode;
     /** 分厂名称 */
     private String factoryName;
-    /** 排程目标日（与请求体日期一致，如业务上的 T+2） */
+    /** 排程目标日/业务保存日期（与请求体日期一致，业务口径为 T+1），仅用于结果保存、查询、日志等业务归属 */
     private Date scheduleTargetDate;
     /**
-     * 排程窗口起点 T 日：由 {@link #scheduleTargetDate} 减去 (排程天数 - 1) 得到，
+     * 排程窗口起点 T 日：由 {@link #scheduleTargetDate} 减去 (排程天数 - 2) 得到，
      * 排程天数来自硫化参数 {@code SCHEDULE_DAYS}（默认见 {@link com.zlt.aps.lh.api.constant.LhScheduleConstant#SCHEDULE_DAYS}），
      * 供班次计算、基础数据加载等引擎时间轴使用
      */
     private Date scheduleDate;
+    /**
+     * 排程窗口结束日期 T+2 日：由 {@link #scheduleDate} + 2 得到，
+     * 用于 day1/day2/day3 月计划映射、产能计算、加机台、收尾、欠产追补、换模日上限、
+     * 跨月检测、滚动续作追加起点、班次日期反推等排程核心逻辑，
+     * 与仅用于业务保存/查询的 {@link #scheduleTargetDate}（T+1）分离。
+     */
+    private Date windowEndDate;
     /** 批次号 */
     private String batchNo;
     /** 月计划需求版本 */

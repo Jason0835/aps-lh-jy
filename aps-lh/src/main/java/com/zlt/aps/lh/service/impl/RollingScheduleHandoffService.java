@@ -397,12 +397,12 @@ public class RollingScheduleHandoffService {
      * @return 追加排程起点
      */
     private Date resolveAppendStartTime(LhScheduleContext context, List<LhShiftConfigVO> currentShifts) {
-        if (Objects.isNull(context.getScheduleTargetDate())) {
+        if (Objects.isNull(context.getWindowEndDate())) {
             interrupt(context, "滚动排程衔接失败：排程目标日为空，无法解析追加起点");
             return null;
         }
         // 从班次配置中查找目标日最早班次开始时间，作为追加排程起点
-        Date targetDate = LhScheduleTimeUtil.clearTime(context.getScheduleTargetDate());
+        Date targetDate = LhScheduleTimeUtil.clearTime(context.getWindowEndDate());
         Date appendStartTime = null;
         for (LhShiftConfigVO shift : currentShifts) {
             if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())

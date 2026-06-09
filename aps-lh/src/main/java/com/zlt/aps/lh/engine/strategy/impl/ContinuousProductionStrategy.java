@@ -452,11 +452,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      */
     private Date resolveRollingAppendStartTime(LhScheduleContext context, List<LhShiftConfigVO> shifts) {
         if (context == null
-                || context.getScheduleTargetDate() == null
+                || context.getWindowEndDate() == null
                 || CollectionUtils.isEmpty(shifts)) {
             return null;
         }
-        Date targetDate = LhScheduleTimeUtil.clearTime(context.getScheduleTargetDate());
+        Date targetDate = LhScheduleTimeUtil.clearTime(context.getWindowEndDate());
         Date appendStartTime = null;
         for (LhShiftConfigVO shift : shifts) {
             if (shift == null

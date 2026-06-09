@@ -333,14 +333,14 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
      *
      * @param context 排程上下文
      * @param candidateTime 候选切换时间
-     * @return true-已到T+2或更晚；false-仍可顺延
+     * @return true-已到窗口结束日(T+2)或更晚；false-仍可顺延
      */
     private boolean isOnOrAfterScheduleTargetDate(LhScheduleContext context, Date candidateTime) {
-        if (context == null || context.getScheduleTargetDate() == null || candidateTime == null) {
+        if (context == null || context.getWindowEndDate() == null || candidateTime == null) {
             return false;
         }
         Date candidateDate = LhScheduleTimeUtil.clearTime(candidateTime);
-        Date targetDate = LhScheduleTimeUtil.clearTime(context.getScheduleTargetDate());
+        Date targetDate = LhScheduleTimeUtil.clearTime(context.getWindowEndDate());
         return !candidateDate.before(targetDate);
     }
 
@@ -356,7 +356,7 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
             return;
         }
         context.getMouldChangeLimitBlockedReasonMap().put(sku.getMaterialCode(),
-                "T+2 换模/换活字块次数超过每日" + dailyLimit + "次上限");
+                "窗口结束日 换模/换活字块次数超过每日" + dailyLimit + "次上限");
     }
 
     /**
