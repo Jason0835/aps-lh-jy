@@ -6,6 +6,8 @@ knife4j:
   enable: true
 
 spring:
+  main:
+    allow-bean-definition-overriding: true
   application:
     name: aps-lh
   # Spring Boot 2.6+ 默认 PathPatternParser，与 Springfox 2.9.x 不兼容会导致 documentationPluginsBootstrapper NPE

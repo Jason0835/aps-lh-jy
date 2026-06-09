@@ -53,11 +53,17 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
             }
         }
 
-        // 规则3：待排量 < 日产能（非满产运行）
+        // 规则3：待排量 < 日产能。
+        // 满排模式且启用"按余量判收尾"时，优先按实际收尾需求量（max(余量,胎胚库存)）判断，
+        // 避免全月待排量过大导致收尾漏判。
         int dailyCapacity = sku.getDailyCapacity();
-        if (dailyCapacity > 0 && targetScheduleQty < dailyCapacity && targetScheduleQty > 0) {
-            log.debug("SKU[{}]判定为收尾(规则3): 目标量{} < 日产能{}",
-                    sku.getMaterialCode(), targetScheduleQty, dailyCapacity);
+        int rule3CandidateQty = (fullCapacityMode && endingBySurplusInFullModeEnabled)
+                ? resolveMaxDemandQty(sku.getSurplusQty(), sku.getEmbryoStock())
+                : targetScheduleQty;
+        if (dailyCapacity > 0 && rule3CandidateQty < dailyCapacity && rule3CandidateQty > 0) {
+            log.debug("SKU[{}]判定为收尾(规则3): 比较量{} < 日产能{} (满排模式:{}, 满排余量开关:{})",
+                    sku.getMaterialCode(), rule3CandidateQty, dailyCapacity,
+                    fullCapacityMode, endingBySurplusInFullModeEnabled);
             return true;
         }
 
