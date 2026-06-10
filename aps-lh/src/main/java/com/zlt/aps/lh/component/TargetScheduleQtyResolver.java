@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
@@ -26,10 +27,12 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 排产目标量解析器。
@@ -624,7 +627,9 @@ public class TargetScheduleQtyResolver {
     /**
      * 收尾场景下调整目标排产量。
      * <p>仅在收尾判定完成后调用，非收尾SKU不应调用此方法。</p>
-     * <p>公式：endingTargetQty = max(embryoStock, surplusQty)。</p>
+     * <p>单胎胚/非共用胎胚：endingTargetQty = max(embryoStock, surplusQty)。</p>
+     * <p>共用胎胚：endingTargetQty = surplusQty，不按胎胚库存抬高排产目标，
+     * 避免共用胎胚库存被单一SKU过量消耗。</p>
      * <p>收尾SKU的目标量不再受窗口 dayN 总量限制，也不被窗口产能压低；
      * 产能不足时由排产结果和未排结果体现剩余缺口。</p>
      *
@@ -643,20 +648,108 @@ public class TargetScheduleQtyResolver {
         int embryoStock = Math.max(0, sku.getEmbryoStock());
         int surplusQty = Math.max(0, sku.getSurplusQty());
         int windowPlanQty = Math.max(0, sku.getWindowPlanQty());
-        int endingBaseQty = Math.max(embryoStock, surplusQty);
+
+        // 共用胎胚收尾只按硫化余量排，不按胎胚库存排；单胎胚仍按 MAX(余量, 胎胚库存)
+        int activeSkuCount = countActiveSkusSharingEmbryo(context, sku);
+        boolean sharedEmbryo = activeSkuCount > 1;
+        int endingBaseQty;
+        String qtySource;
+        if (sharedEmbryo) {
+            endingBaseQty = surplusQty;
+            qtySource = "共用胎胚-仅按硫化余量";
+        } else {
+            endingBaseQty = Math.max(embryoStock, surplusQty);
+            qtySource = embryoStock > surplusQty ? "单胎胚-取胎胚库存" : "单胎胚-取硫化余量";
+        }
         int endingTargetQty = endingBaseQty;
         if (endingTargetQty != currentTargetQty) {
             String direction = endingTargetQty > currentTargetQty ? "上调" : "下调";
             int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
-            log.info("收尾SKU目标量{}, materialCode: {}, 原目标量: {}, 调整后: {}, "
-                            + "窗口日计划总量: {}, 窗口日计划剩余: {}, 胎胚库存: {}, 月计划余量: {}",
-                    direction, sku.getMaterialCode(), currentTargetQty, endingTargetQty,
+            log.info("收尾SKU目标量{}, materialCode: {}, 胎胚编码: {}, 是否共用胎胚: {}, "
+                            + "当前共用该胎胚的未完成SKU数: {}, 目标量取值来源: {}, "
+                            + "原目标量: {}, 调整后: {}, 窗口日计划总量: {}, 窗口日计划剩余: {}, "
+                            + "胎胚库存: {}, 月计划余量: {}",
+                    direction, sku.getMaterialCode(), sku.getEmbryoCode(), sharedEmbryo,
+                    activeSkuCount, qtySource,
+                    currentTargetQty, endingTargetQty,
                     windowPlanQty, windowRemainingPlanQty, embryoStock, surplusQty);
             sku.setTargetScheduleQty(endingTargetQty);
             sku.setRemainingScheduleQty(endingTargetQty);
             return endingTargetQty;
         }
         return currentTargetQty;
+    }
+
+    /**
+     * 动态判断当前SKU的胎胚在排程窗口内是否仍被多个未完成SKU共用。
+     * <p>已收尾完成的SKU不参与共用胎胚判断，只统计当前仍在排程列表中的活跃SKU。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @return true-共用胎胚（活跃SKU数 > 1）；false-单胎胚
+     */
+    public boolean isSharedEmbryoInWindow(LhScheduleContext context, SkuScheduleDTO sku) {
+        return countActiveSkusSharingEmbryo(context, sku) > 1;
+    }
+
+    /**
+     * 统计当前排程窗口内与指定SKU共用同一胎胚的未完成SKU数量。
+     * <p>从续作列表和新增列表中收集同胎胚编码的SKU，已收尾完成的SKU不会被计入。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @return 共用该胎胚的未完成SKU数（含自身）
+     */
+    private int countActiveSkusSharingEmbryo(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || StringUtils.isEmpty(sku.getEmbryoCode())) {
+            return 0;
+        }
+        String embryoCode = sku.getEmbryoCode();
+        Set<String> activeMaterialCodes = new HashSet<>(8);
+        // 从续作列表中收集同胎胚的活跃SKU
+        if (!CollectionUtils.isEmpty(context.getContinuousSkuList())) {
+            for (SkuScheduleDTO s : context.getContinuousSkuList()) {
+                if (embryoCode.equals(s.getEmbryoCode()) && StringUtils.isNotEmpty(s.getMaterialCode())) {
+                    activeMaterialCodes.add(s.getMaterialCode());
+                }
+            }
+        }
+        // 从新增列表中收集同胎胚的活跃SKU
+        if (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
+            for (SkuScheduleDTO s : context.getNewSpecSkuList()) {
+                if (embryoCode.equals(s.getEmbryoCode()) && StringUtils.isNotEmpty(s.getMaterialCode())) {
+                    activeMaterialCodes.add(s.getMaterialCode());
+                }
+            }
+        }
+        // 排除已收尾完成的SKU：已排产且排产量达到收尾需求量的SKU不再参与共用胎胚判断
+        // 仅依据当前批次排产结果（context.scheduleResultList 每次排程重建，无跨批次污染）
+        excludeCompletedEndingSkus(context, activeMaterialCodes);
+        return activeMaterialCodes.size();
+    }
+
+    /**
+     * 从活跃物料集合中排除已收尾完成的SKU。
+     * <p>已收尾完成的物料（排产结果中 isEnd="1"）不再占用胎胚库存，
+     * 应排除出共用胎胚判断，使剩余唯一SKU能按单胎胚规则排产。</p>
+     * <p>注意：scheduleResultList 每次排程 API 调用重建，不存在跨批次结果污染。</p>
+     *
+     * @param context 排程上下文
+     * @param materialCodes 待过滤的物料编码集合
+     */
+    private void excludeCompletedEndingSkus(LhScheduleContext context, Set<String> materialCodes) {
+        if (CollectionUtils.isEmpty(context.getScheduleResultList()) || materialCodes.isEmpty()) {
+            return;
+        }
+        Set<String> completedCodes = new HashSet<>(8);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (result != null && "1".equals(result.getIsEnd())
+                    && StringUtils.isNotEmpty(result.getMaterialCode())
+                    && materialCodes.contains(result.getMaterialCode())) {
+                completedCodes.add(result.getMaterialCode());
+            }
+        }
+        materialCodes.removeAll(completedCodes);
     }
 
     /**

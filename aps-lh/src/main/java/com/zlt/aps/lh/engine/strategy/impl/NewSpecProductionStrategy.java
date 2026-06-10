@@ -24,6 +24,7 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.NewSpecFailReasonEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
@@ -5436,10 +5437,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 计算结果行收尾比较量（从SKU DTO取全量值，避免多机台分摊后偏小）。
+     * <p>仅收尾SKU才按共用胎胚规则（仅取硫化余量）；非收尾SKU继续按 MAX(余量, 胎胚库存)，
+     * 避免共用胎胚导致非收尾SKU的 isEnd 被误翻转为 "1"。</p>
      *
      * @param context 排程上下文
      * @param result 排程结果
-     * @return max(硫化余量, 胎胚库存)
+     * @return 收尾比较量
      */
     private int resolveEndingDemandQty(LhScheduleContext context, LhScheduleResult result) {
         SkuScheduleDTO sku = findSkuDto(context, result.getMaterialCode());
@@ -5447,6 +5450,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 : Math.max(0, result.getMouldSurplusQty() == null ? 0 : result.getMouldSurplusQty());
         int embryoStock = sku != null ? Math.max(0, sku.getEmbryoStock())
                 : Math.max(0, result.getEmbryoStock() == null ? 0 : result.getEmbryoStock());
+        // 仅收尾SKU才按共用胎胚规则（仅取硫化余量），非收尾SKU保持原口径
+        if (sku != null
+                && SkuTagEnum.ENDING.getCode().equals(sku.getSkuTag())
+                && getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku)) {
+            return surplusQty;
+        }
         return Math.max(surplusQty, embryoStock);
     }
 

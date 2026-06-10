@@ -38,7 +38,7 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
         // 规则2：排产目标量 <= 多台可用机台在排程窗口内的合计产能。
         // 不再使用单SKU理论产能（shiftCapacity * totalScheduleShifts），改为基于实际候选机台计算。
         // 满排模式下可选"按余量判定"开关，避免目标量封顶导致误判。
-        int rule2CandidateQty = resolveRule2CandidateQty(sku, targetScheduleQty, fullCapacityMode,
+        int rule2CandidateQty = resolveRule2CandidateQty(context, sku, targetScheduleQty, fullCapacityMode,
                 endingBySurplusInFullModeEnabled);
         if (rule2CandidateQty > 0
                 && !shouldSkipRule2ByWindowRemainingPlanQty(sku, fullCapacityMode,
@@ -58,7 +58,7 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
         // 避免全月待排量过大导致收尾漏判。
         int dailyCapacity = sku.getDailyCapacity();
         int rule3CandidateQty = (fullCapacityMode && endingBySurplusInFullModeEnabled)
-                ? resolveMaxDemandQty(sku.getSurplusQty(), sku.getEmbryoStock())
+                ? resolveMaxDemandQty(context, sku)
                 : targetScheduleQty;
         if (dailyCapacity > 0 && rule3CandidateQty < dailyCapacity && rule3CandidateQty > 0) {
             log.debug("SKU[{}]判定为收尾(规则3): 比较量{} < 日产能{} (满排模式:{}, 满排余量开关:{})",
@@ -145,7 +145,8 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
      * @param endingBySurplusInFullModeEnabled 满排按余量判收尾开关
      * @return 规则2比较量，<=0 表示本轮不执行规则2
      */
-    private int resolveRule2CandidateQty(SkuScheduleDTO sku,
+    private int resolveRule2CandidateQty(LhScheduleContext context,
+                                         SkuScheduleDTO sku,
                                          int targetScheduleQty,
                                          boolean fullCapacityMode,
                                          boolean endingBySurplusInFullModeEnabled) {
@@ -155,7 +156,7 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
         if (!endingBySurplusInFullModeEnabled) {
             return 0;
         }
-        return resolveMaxDemandQty(sku.getSurplusQty(), sku.getEmbryoStock());
+        return resolveMaxDemandQty(context, sku);
     }
 
     /**
@@ -186,13 +187,27 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
 
     /**
      * 计算收尾比较量。
+     * <p>共用胎胚收尾只按硫化余量判定，不按胎胚库存；单胎胚仍按 MAX(余量, 库存)。</p>
      *
-     * @param surplusQty 月计划余量
-     * @param embryoStock 胎胚库存
-     * @return max(余量, 库存)
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return 收尾比较量
      */
-    private int resolveMaxDemandQty(int surplusQty, int embryoStock) {
-        return Math.max(Math.max(surplusQty, 0), Math.max(embryoStock, 0));
+    private int resolveMaxDemandQty(LhScheduleContext context, SkuScheduleDTO sku) {
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int embryoStock = Math.max(0, sku.getEmbryoStock());
+        // 共用胎胚收尾只按硫化余量，不按胎胚库存
+        if (getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku)) {
+            if (embryoStock > surplusQty) {
+                log.debug("共用胎胚收尾判定比较量下调, materialCode: {}, 胎胚编码: {}, "
+                                + "原口径MAX(余量,库存): {}, 新口径仅余量: {}, 下调幅度: {}",
+                        sku.getMaterialCode(), sku.getEmbryoCode(),
+                        Math.max(surplusQty, embryoStock), surplusQty,
+                        Math.max(surplusQty, embryoStock) - surplusQty);
+            }
+            return surplusQty;
+        }
+        return Math.max(surplusQty, embryoStock);
     }
 
     /**

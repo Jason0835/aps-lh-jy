@@ -281,7 +281,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         String appliedRule = "沿用原规则";
         if (isSingleMachine && isEnding) {
             getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
-            appliedRule = "单机台收尾MAX(余量,胎胚库存)";
+            appliedRule = getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku)
+                    ? "单机台收尾共用胎胚仅按余量" : "单机台收尾MAX(余量,胎胚库存)";
         } else if (isSingleMachine && sku.isStrictNewSpecShortageOnly()) {
             appliedRule = "窗口无计划仅补本月欠产";
         } else if (isSingleMachine && getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
@@ -2030,7 +2031,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @return 剩余可补量
      */
     private int resolveRemainingEndingQtyForContinuationGroup(LhScheduleContext context, SkuScheduleDTO sourceSku) {
-        int endingDemandQty = Math.max(Math.max(0, sourceSku.getSurplusQty()), Math.max(0, sourceSku.getEmbryoStock()));
+        // 共用胎胚收尾只按硫化余量，不按胎胚库存
+        int endingDemandQty;
+        if (getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sourceSku)) {
+            endingDemandQty = Math.max(0, sourceSku.getSurplusQty());
+        } else {
+            endingDemandQty = Math.max(Math.max(0, sourceSku.getSurplusQty()), Math.max(0, sourceSku.getEmbryoStock()));
+        }
         int scheduledQty = resolveEffectiveContinuousPhaseScheduledQty(context, buildContinuationGroupKey(sourceSku));
         return Math.max(0, endingDemandQty - scheduledQty);
     }
@@ -3238,15 +3245,23 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * 计算结果行收尾比较量（从SKU DTO取全量值，避免多机台分摊后偏小）。
+     * <p>仅收尾SKU才按共用胎胚规则（仅取硫化余量）；非收尾SKU继续按 MAX(余量, 胎胚库存)，
+     * 避免共用胎胚导致非收尾SKU的 isEnd 被误翻转为 "1"。</p>
      *
      * @param context 排程上下文
      * @param result 排程结果
-     * @return max(硫化余量, 胎胚库存)
+     * @return 收尾比较量
      */
     private int resolveEndingDemandQty(LhScheduleContext context, LhScheduleResult result) {
         SkuScheduleDTO sku = resolveResultSourceSku(context, result);
         int surplusQty = sku != null ? Math.max(0, sku.getSurplusQty()) : 0;
         int embryoStock = sku != null ? Math.max(0, sku.getEmbryoStock()) : 0;
+        // 仅收尾SKU才按共用胎胚规则（仅取硫化余量），非收尾SKU保持原口径
+        if (sku != null
+                && SkuTagEnum.ENDING.getCode().equals(sku.getSkuTag())
+                && getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku)) {
+            return surplusQty;
+        }
         return Math.max(surplusQty, embryoStock);
     }
 
