@@ -20,6 +20,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
@@ -4060,14 +4061,19 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (overQty <= 0) {
                 continue;
             }
-            boolean endingResult = "1".equals(result.getIsEnd());
-            // 续作链路与新增链路保持一致：
-            // 收尾结果必须严格截断且不记超排；试制等严格目标量场景回裁后仍保留超排账本。
-            if (endingResult || (sku != null && sku.isStrictTargetQty())) {
-                trimShiftPlanQty(result, shift.getShiftIndex(), consumedQty);
-                if (endingResult) {
-                    continue;
+            // 通过 SKU 标记判断收尾，不受 refreshContinuousEndingFlagByResult 翻转 isEnd 影响
+            boolean endingSku = sku != null && StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag());
+            if (endingSku) {
+                // 收尾SKU的结果保留完整计划量不截断，超排部分记入 shiftFillOverQty 保持账本可追溯
+                if (overQty > 0) {
+                    quota.setShiftFillOverQty(quota.getShiftFillOverQty() + overQty);
+                    totalShiftFillOverQty += overQty;
                 }
+                continue;
+            }
+            // 非收尾的试制严格目标量：仍保持 dayN 额度截断
+            if (sku != null && sku.isStrictTargetQty()) {
+                trimShiftPlanQty(result, shift.getShiftIndex(), consumedQty);
             }
             quota.setShiftFillOverQty(quota.getShiftFillOverQty() + overQty);
             totalShiftFillOverQty += overQty;
