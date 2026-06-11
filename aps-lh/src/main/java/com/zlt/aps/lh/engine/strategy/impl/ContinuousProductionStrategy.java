@@ -97,6 +97,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private static final String CONTINUOUS_SCHEDULE_TYPE = "01";
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "续作结果裁剪为0";
+    private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
+            "共用胎胚收尾仅按硫化余量，余量为0且胎胚库存不可用，收尾目标量为0";
     private static final String WINDOW_NO_PLAN_UNSCHEDULED_REASON =
             "当前排程窗口内无日计划量，等待后续滚动窗口排产";
     private static final int TYPE_BLOCK_SWITCH_MAX_ATTEMPTS = 16;
@@ -3342,6 +3344,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int unscheduledQty = resolveRemainingUnscheduledQty(context, groupKey, sourceSku);
             if (unscheduledQty > 0) {
                 zeroPlanQtyMap.merge(sourceSku.getMaterialCode(), unscheduledQty, Integer::sum);
+            } else {
+                // 共用胎胚余量为0导致收尾目标量为0时，也写入未排记录
+                appendSharedEmbryoZeroSurplusUnscheduledIfNecessary(context, sourceSku);
             }
         }
         for (Map.Entry<String, Integer> entry : zeroPlanQtyMap.entrySet()) {
@@ -4405,6 +4410,49 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             unscheduled.setMouldQty(sku.getMouldQty());
         }
         context.getUnscheduledResultList().add(unscheduled);
+    }
+
+    /**
+     * 共用胎胚余量为0导致收尾目标量为0时，写入未排记录。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     */
+    private void appendSharedEmbryoZeroSurplusUnscheduledIfNecessary(LhScheduleContext context,
+                                                                     SkuScheduleDTO sourceSku) {
+        if (sourceSku == null || StringUtils.isEmpty(sourceSku.getMaterialCode())) {
+            return;
+        }
+        if (sourceSku.getSurplusQty() > 0 || sourceSku.getEmbryoStock() <= 0) {
+            return;
+        }
+        Boolean sharedEmbryo = context.getMaterialSharedEmbryoMap() != null
+                ? context.getMaterialSharedEmbryoMap().get(sourceSku.getMaterialCode()) : null;
+        if (!Boolean.TRUE.equals(sharedEmbryo)) {
+            return;
+        }
+        if (findUnscheduledResultByMaterial(context, sourceSku.getMaterialCode()) != null) {
+            return;
+        }
+        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+        unscheduled.setFactoryCode(context.getFactoryCode());
+        unscheduled.setBatchNo(context.getBatchNo());
+        unscheduled.setScheduleDate(context.getScheduleTargetDate());
+        unscheduled.setMaterialCode(sourceSku.getMaterialCode());
+        unscheduled.setMaterialDesc(sourceSku.getMaterialDesc());
+        unscheduled.setStructureName(sourceSku.getStructureName());
+        unscheduled.setMainMaterialDesc(sourceSku.getMainMaterialDesc());
+        unscheduled.setSpecCode(sourceSku.getSpecCode());
+        unscheduled.setEmbryoCode(sourceSku.getEmbryoCode());
+        unscheduled.setMouldQty(sourceSku.getMouldQty());
+        unscheduled.setUnscheduledQty(0);
+        unscheduled.setUnscheduledReason(SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
+        unscheduled.setDataSource(AUTO_DATA_SOURCE);
+        unscheduled.setIsDelete(0);
+        context.getUnscheduledResultList().add(unscheduled);
+        log.info("共用胎胚余量为0写入未排记录, materialCode: {}, embryoCode: {}, surplusQty: {}, embryoStock: {}",
+                sourceSku.getMaterialCode(), sourceSku.getEmbryoCode(),
+                sourceSku.getSurplusQty(), sourceSku.getEmbryoStock());
     }
 
     /**
