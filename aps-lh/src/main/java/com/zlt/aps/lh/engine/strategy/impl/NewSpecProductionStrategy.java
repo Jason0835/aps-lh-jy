@@ -109,6 +109,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String NEW_SPEC_SCHEDULE_TYPE = "02";
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
+    private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
+            "共用胎胚收尾仅按硫化余量，余量为0且胎胚库存不可用，收尾目标量为0";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
     private static final Set<String> EMPTY_STRING_SET = Collections.emptySet();
@@ -385,8 +387,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 isEnding = false;
             }
             // 收尾SKU在排产前上调目标量（考虑胎胚库存），非收尾SKU保持按余量计算的目标量
+            boolean sharedEmbryoZeroSurplusEnding = false;
             if (isEnding) {
+                sharedEmbryoZeroSurplusEnding = getTargetScheduleQtyResolver()
+                        .isSharedEmbryoZeroSurplusEnding(context, sku);
                 getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
+                if (handleSharedEmbryoZeroSurplusEndingIfNecessary(
+                        context, iterator, sku, sharedEmbryoZeroSurplusEnding, unscheduledReasonCountMap)) {
+                    progressed = true;
+                    continue;
+                }
             }
             ProductionQuantityPolicy quantityPolicy = ProductionQuantityPolicy.from(sku, isEnding);
             sku.setStrictTargetQty(quantityPolicy.isStrictUpperLimit());
@@ -1212,6 +1222,35 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         return context != null
                 && sku != null
                 && Boolean.TRUE.equals(context.getNewSpecTypeRuleBlockedMap().get(sku));
+    }
+
+    /**
+     * 处理共用胎胚收尾零余量未排。
+     * <p>该分支必须在候选机台匹配前完成，避免目标量为0的SKU继续走通用失败链路并覆盖业务未排原因。</p>
+     *
+     * @param context 排程上下文
+     * @param iterator 新增SKU迭代器
+     * @param sku 当前SKU
+     * @param sharedEmbryoZeroSurplusEnding 是否命中共用胎胚零余量收尾
+     * @param unscheduledReasonCountMap 未排原因统计
+     * @return true-已写未排并移出待排队列；false-不需要处理
+     */
+    private boolean handleSharedEmbryoZeroSurplusEndingIfNecessary(LhScheduleContext context,
+                                                                   Iterator<SkuScheduleDTO> iterator,
+                                                                   SkuScheduleDTO sku,
+                                                                   boolean sharedEmbryoZeroSurplusEnding,
+                                                                   Map<String, Integer> unscheduledReasonCountMap) {
+        if (!sharedEmbryoZeroSurplusEnding || sku.resolveTargetScheduleQty() > 0) {
+            return false;
+        }
+        addUnscheduledResult(context, sku, 0,
+                SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON, unscheduledReasonCountMap);
+        getTargetScheduleQtyResolver().removeActiveEmbryoSku(
+                context, sku, SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
+        removeCurrentNewSpecSku(context, iterator, sku);
+        log.info("新增共用胎胚收尾零余量写入未排, materialCode: {}, embryoCode: {}, surplusQty: {}, embryoStock: {}",
+                sku.getMaterialCode(), sku.getEmbryoCode(), sku.getSurplusQty(), sku.getEmbryoStock());
+        return true;
     }
 
     /**

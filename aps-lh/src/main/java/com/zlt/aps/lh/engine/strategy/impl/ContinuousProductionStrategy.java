@@ -4450,6 +4450,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         unscheduled.setDataSource(AUTO_DATA_SOURCE);
         unscheduled.setIsDelete(0);
         context.getUnscheduledResultList().add(unscheduled);
+        getTargetScheduleQtyResolver().removeActiveEmbryoSku(
+                context, sourceSku, SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
         log.info("共用胎胚余量为0写入未排记录, materialCode: {}, embryoCode: {}, surplusQty: {}, embryoStock: {}",
                 sourceSku.getMaterialCode(), sourceSku.getEmbryoCode(),
                 sourceSku.getSurplusQty(), sourceSku.getEmbryoStock());
