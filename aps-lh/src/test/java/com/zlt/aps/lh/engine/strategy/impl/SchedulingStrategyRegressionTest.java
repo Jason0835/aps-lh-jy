@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -17,6 +18,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacityDayDecision;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationRequest;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationResult;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationUtil;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -268,6 +270,99 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作日计划下降时，非收尾多机台也必须按业务日降模，不能被“非收尾不降模”提前跳过。
+     */
+    @Test
+    public void shouldReduceContinuousMachinesWhenFutureDayPlanDrops() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001075", 16, 256, buildQuotaMapByShifts(shifts, 92, 92, 46));
+        LhScheduleResult firstResult = buildContinuousResult("3302001075", "K1406", 16, shifts, "0");
+        LhScheduleResult secondResult = buildContinuousResult("3302001075", "K1712", 16, shifts, "0");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        int thirdDayMachineCount = countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts,
+                resolveShiftWorkDate(shifts, 3));
+        Assertions.assertEquals(1, thirdDayMachineCount);
+    }
+
+    /**
+     * 收尾续作即使左右单控来自不同运行态对象，也必须按同物料严格目标统一控量。
+     */
+    @Test
+    public void shouldCapEndingSingleControlContinuousByStrictTargetAcrossRuntimeMachines() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO leftSku = buildContinuousSku("3302002481", 9, 144, buildQuotaMapByShifts(shifts, 0, 0, 0));
+        SkuScheduleDTO rightSku = buildContinuousSku("3302002481", 9, 144, buildQuotaMapByShifts(shifts, 0, 0, 0));
+        leftSku.setSurplusQty(6);
+        rightSku.setSurplusQty(6);
+        leftSku.setMonthlyHistoryShortageQty(15);
+        rightSku.setMonthlyHistoryShortageQty(15);
+        leftSku.setFutureMonthPlanQtyAfterWindow(0);
+        rightSku.setFutureMonthPlanQtyAfterWindow(0);
+        leftSku.setSkuTag(SkuTagEnum.ENDING.getCode());
+        rightSku.setSkuTag(SkuTagEnum.ENDING.getCode());
+        applyContinuousNoFutureEndingStrictTarget(strategy, leftSku,
+                DailyMachineExpansionPlanner.prepareShortageQuota(context, leftSku, "续作排产"));
+        applyContinuousNoFutureEndingStrictTarget(strategy, rightSku,
+                DailyMachineExpansionPlanner.prepareShortageQuota(context, rightSku, "续作排产"));
+        LhScheduleResult leftResult = buildContinuousResult("3302002481", "K1501L", 9, shifts, "1");
+        LhScheduleResult rightResult = buildContinuousResult("3302002481", "K1501R", 9, shifts, "1");
+        context.getScheduleResultList().add(leftResult);
+        context.getScheduleResultList().add(rightResult);
+        context.getScheduleResultSourceSkuMap().put(leftResult, leftSku);
+        context.getScheduleResultSourceSkuMap().put(rightResult, rightSku);
+
+        strategy.scheduleReduceMould(context);
+
+        int totalPlanQty = context.getScheduleResultList().stream()
+                .filter(result -> "3302002481".equals(result.getMaterialCode()))
+                .mapToInt(ShiftFieldUtil::resolveScheduledQty)
+                .sum();
+        long activeMachineCount = context.getScheduleResultList().stream()
+                .filter(result -> "3302002481".equals(result.getMaterialCode()))
+                .filter(result -> ShiftFieldUtil.resolveScheduledQty(result) > 0)
+                .count();
+        Assertions.assertEquals(21, totalPlanQty);
+        Assertions.assertEquals(1L, activeMachineCount);
+    }
+
+    /**
+     * 续作单机理论窗口产能已覆盖硫化余量时，不应仅因窗口日计划账本剩余额度继续转新增补机台。
+     */
+    @Test
+    public void shouldSkipContinuousCompensationWhenSurplusCoveredByOneMachineCapacity() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001466", 18, 162, buildQuotaMapByShifts(shifts, 54, 54, 54));
+        sku.setSurplusQty(101);
+        sku.setWindowPlanQty(162);
+        sku.setWindowRemainingPlanQty(62);
+        LhScheduleResult result = buildContinuousResult("3302001466", "K1908", 18, shifts, "0");
+        clearShiftPlanQty(result, shifts, 7);
+        clearShiftPlanQty(result, shifts, 8);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "isContinuousDailyCapacitySatisfied", LhScheduleContext.class, SkuScheduleDTO.class);
+        method.setAccessible(true);
+        boolean satisfied = (Boolean) method.invoke(strategy, context, sku);
+
+        Assertions.assertTrue(satisfied);
+    }
+
+    /**
      * 欠产未超过阈值时，T+2 也必须继续后看 T+3 日计划量决定是否保留/新增机台。
      */
     @Test
@@ -403,6 +498,123 @@ public class SchedulingStrategyRegressionTest {
         quota.setDayPlanQty(qty);
         quota.setRemainingQty(qty);
         return quota;
+    }
+
+    private LhScheduleContext buildContinuousReduceContext() {
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        context.setScheduleDate(dateTime(2026, 6, 11, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 6, 12, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setScheduleResultList(new ArrayList<LhScheduleResult>());
+        context.setContinuousSkuList(new ArrayList<SkuScheduleDTO>());
+        context.setNewSpecSkuList(new ArrayList<SkuScheduleDTO>());
+        return context;
+    }
+
+    private void applyContinuousNoFutureEndingStrictTarget(ContinuousProductionStrategy strategy,
+                                                           SkuScheduleDTO sku,
+                                                           Object shortageQuotaPlan) throws Exception {
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "applyContinuousNoFutureEndingStrictTarget", SkuScheduleDTO.class,
+                shortageQuotaPlan.getClass());
+        method.setAccessible(true);
+        method.invoke(strategy, sku, shortageQuotaPlan);
+    }
+
+    private SkuScheduleDTO buildContinuousSku(String materialCode,
+                                              int shiftCapacity,
+                                              int targetQty,
+                                              Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode(materialCode);
+        sku.setShiftCapacity(shiftCapacity);
+        sku.setTargetScheduleQty(targetQty);
+        sku.setRemainingScheduleQty(targetQty);
+        sku.setWindowPlanQty(targetQty);
+        sku.setWindowRemainingPlanQty(targetQty);
+        sku.setSurplusQty(targetQty);
+        sku.setDailyPlanQuotaMap(quotaMap);
+        return sku;
+    }
+
+    private LhScheduleResult buildContinuousResult(String materialCode,
+                                                   String machineCode,
+                                                   int shiftCapacity,
+                                                   List<LhShiftConfigVO> shifts,
+                                                   String isEnd) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(materialCode);
+        result.setLhMachineCode(machineCode);
+        result.setScheduleType(ScheduleTypeEnum.CONTINUOUS.getCode());
+        result.setIsTypeBlock("0");
+        result.setIsEnd(isEnd);
+        result.setMouldQty(2);
+        result.setSingleMouldShiftQty(shiftCapacity);
+        result.setLhTime(3600);
+        for (LhShiftConfigVO shift : shifts) {
+            ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), shiftCapacity,
+                    shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+        }
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        return result;
+    }
+
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> buildQuotaMapByShifts(List<LhShiftConfigVO> shifts,
+                                                                        int day1Qty,
+                                                                        int day2Qty,
+                                                                        int day3Qty) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        int[] qtyArray = new int[]{day1Qty, day2Qty, day3Qty};
+        for (LhShiftConfigVO shift : shifts) {
+            LocalDate workDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            if (quotaMap.containsKey(workDate)) {
+                continue;
+            }
+            int index = Math.min(quotaMap.size(), qtyArray.length - 1);
+            quotaMap.put(workDate, buildQuota(qtyArray[index]));
+        }
+        return quotaMap;
+    }
+
+    private int countPositiveMachineByWorkDate(List<LhScheduleResult> results,
+                                               List<LhShiftConfigVO> shifts,
+                                               LocalDate workDate) {
+        int count = 0;
+        for (LhScheduleResult result : results) {
+            int qty = 0;
+            for (LhShiftConfigVO shift : shifts) {
+                LocalDate currentDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                if (!workDate.equals(currentDate)) {
+                    continue;
+                }
+                Integer shiftPlanQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                qty += shiftPlanQty == null ? 0 : Math.max(0, shiftPlanQty);
+            }
+            if (qty > 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private LocalDate resolveShiftWorkDate(List<LhShiftConfigVO> shifts, int dayIndex) {
+        List<LocalDate> dateList = new ArrayList<LocalDate>(4);
+        for (LhShiftConfigVO shift : shifts) {
+            LocalDate workDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            if (!dateList.contains(workDate)) {
+                dateList.add(workDate);
+            }
+        }
+        return dateList.get(dayIndex - 1);
+    }
+
+    private void clearShiftPlanQty(LhScheduleResult result, List<LhShiftConfigVO> shifts, int shiftIndex) {
+        for (LhShiftConfigVO shift : shifts) {
+            if (shift.getShiftIndex() == shiftIndex) {
+                ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, 0, null, null);
+                return;
+            }
+        }
     }
 
     private List<LhShiftConfigVO> buildSimulationShifts() {
