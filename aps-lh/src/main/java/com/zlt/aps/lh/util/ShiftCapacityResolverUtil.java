@@ -480,7 +480,7 @@ public final class ShiftCapacityResolverUtil {
     }
 
     /**
-     * 双模及多模残班统一向下收敛到模台数整数倍。
+     * 双模及多模残班统一向上收敛到模台数整数倍。
      *
      * @param qty 当前计划量
      * @param mouldQty 模台数
@@ -498,11 +498,11 @@ public final class ShiftCapacityResolverUtil {
         if (qty < resolvedMouldQty) {
             return 0;
         }
-        return qty - qty % resolvedMouldQty;
+        return ((qty + resolvedMouldQty - 1) / resolvedMouldQty) * resolvedMouldQty;
     }
 
     /**
-     * 统一收敛班次实际落点计划量，避免双模残班落成奇数。
+     * 统一收敛班次实际落点计划量，避免双模残班落成奇数；奇数向上收敛到模台数整数倍。
      *
      * @param allocationQty 当前拟分配计划量
      * @param shiftMaxQty 当前班次最大可排量

@@ -153,7 +153,7 @@ class ShiftCapacityResolverUtilTest {
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacity(
                 22, 2160, 2, 8 * 3600L, 4 * 3600L);
 
-        assertEquals(10, shiftQty, "双模机台残班按班产主数据折算时，应向下收敛到模台数整数倍");
+        assertEquals(12, shiftQty, "双模机台残班按班产主数据折算时，应向上收敛到模台数整数倍");
     }
 
     @Test
@@ -178,7 +178,7 @@ class ShiftCapacityResolverUtilTest {
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                 null, cleaningWindowList, "K2025", shiftStart, shiftEnd, 21, 2160, 2, 8 * 3600L, 6, 3);
 
-        assertEquals(10, shiftQty, "双模机台喷砂扣量后的残班计划量应向下收敛为偶数");
+        assertEquals(12, shiftQty, "双模机台喷砂扣量后的残班计划量应向上收敛为偶数");
     }
 
     @Test
@@ -212,10 +212,11 @@ class ShiftCapacityResolverUtilTest {
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                 null, cleaningWindowList, "K1110", shiftStart, shiftEnd, 22, 2160, 2, 8 * 3600L, 6, 3);
         Date completionTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
-                null, cleaningWindowList, "K1110", shiftStart, shiftEnd, 12, 12);
+                null, cleaningWindowList, "K1110", shiftStart, shiftEnd, 14, 13);
 
-        assertEquals(12, shiftQty, "双模机台命中 3 小时干冰时，应按剩余 5/8 时间折算到 12");
-        assertEquals(shiftEnd, completionTime, "按剩余时间折算后的 12 条应在班末完工");
+        assertEquals(14, shiftQty, "双模机台命中 3 小时干冰时，应按剩余 5/8 时间折算到 14");
+        assertEquals(dateTime(2026, 4, 22, 22, 23, 5), completionTime,
+                "向上收敛到 14 条跨过干冰窗口，完工时间超出班末");
     }
 
     @Test
@@ -231,10 +232,11 @@ class ShiftCapacityResolverUtilTest {
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                 null, null, maintenanceWindowList, "K1110", shiftStart, shiftEnd, 22, 2160, 2, 8 * 3600L, 6, 3);
         Date completionTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
-                null, null, maintenanceWindowList, "K1110", shiftStart, shiftEnd, 18, 18);
+                null, null, maintenanceWindowList, "K1110", shiftStart, shiftEnd, 20, 19);
 
-        assertEquals(18, shiftQty, "保养占用中班 1 小时后，应按剩余 7/8 时间折算班产并收敛到双模偶数");
-        assertEquals(shiftEnd, completionTime, "保养窗口应进入时间轴，生产完工需跳过保养占用时段");
+        assertEquals(20, shiftQty, "保养占用中班 1 小时后，应按剩余 7/8 时间折算班产并向上收敛到双模偶数");
+        assertEquals(dateTime(2026, 4, 22, 22, 22, 7), completionTime,
+                "向上收敛到 20 条需跨过保养窗口，完工时间超出班末");
     }
 
     private LhShiftConfigVO findMorningShift(Date scheduleDate) {
