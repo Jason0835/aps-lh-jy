@@ -41,6 +41,7 @@ import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
+import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
@@ -72,6 +73,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
@@ -109,6 +111,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
+    private static final Set<String> EMPTY_STRING_SET = Collections.emptySet();
+    private static final Map<String, String> EMPTY_STRING_MAP = Collections.emptyMap();
     @Resource
     private OrderNoGenerator orderNoGenerator;
     @Resource
@@ -366,9 +370,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                               List<SkuScheduleDTO> deferredCompensationSkuList) {
         int scheduledCount = 0;
         boolean progressed = false;
+        refreshPendingNewSpecSkuTypeCounts(context);
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
         while (iterator.hasNext()) {
-            refreshPendingNewSpecSkuTypeCounts(context);
             SkuScheduleDTO sku = iterator.next();
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
@@ -405,14 +409,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // 1. 匹配候选机台：只做硬性准入和候选排序，换模/首检/产能在后续逐台试算。
             context.getNewSpecTypeRuleBlockedMap().remove(sku);
             List<MachineScheduleDTO> candidates = machineMatch.matchMachines(context, sku);
-            logNewSpecMachineCandidateSnapshot(context, sku, candidates, new HashSet<String>(0), null);
+            logNewSpecMachineCandidateSnapshot(context, sku, candidates, EMPTY_STRING_SET, null);
             if (candidates.isEmpty()) {
                 String noCandidateReason = resolveNoCandidateMachineReason(context, sku);
                 log.warn("新增SKU无候选机台, materialCode: {}, 结构: {}, 规格: {}, 寸口: {}, 目标量: {}, 原因: {}",
                         sku.getMaterialCode(), sku.getStructureName(), sku.getSpecCode(),
                         sku.getProSize(), sku.resolveTargetScheduleQty(), noCandidateReason);
                 traceNewSpecMachineDecision(context, sku, candidates, null, null,
-                        new HashSet<String>(0), new LinkedHashMap<String, String>(0),
+                        EMPTY_STRING_SET, EMPTY_STRING_MAP,
                         NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED,
                         false, noCandidateReason);
                 addUnscheduledResult(context, sku, noCandidateReason, unscheduledReasonCountMap);
@@ -459,13 +463,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             Date finalProductionStartTime = null;
             // 多机台累计调度结果，用于最终按总量、日计划账本和满班超排口径确认排完与否。
             int totalScheduledQty = 0;
-            int originalAddMachineCount = countAvailableCandidateMachines(candidates, new HashSet<String>(0));
+            int originalAddMachineCount = countAvailableCandidateMachines(candidates, EMPTY_STRING_SET);
             int actualAllowedAddMachineCount = 0;
+            NewSpecCandidateCache candidateCache = NewSpecCandidateCache.from(candidates,
+                    machine -> isSingleControlMachine(context, machine.getMachineCode()));
             while (true) {
                 logNewSpecMachineCandidateSnapshot(context, sku, candidates, excludedMachineCodes, excludedMachineReasonMap);
                 MachineScheduleDTO candidateMachine = selectCandidateMachine(
-                        context, sku, candidates, excludedMachineCodes, machineMatch, preferredTrialMachine,
-                        quantityPolicy);
+                        context, sku, candidateCache, excludedMachineCodes, machineMatch,
+                        preferredTrialMachine, quantityPolicy);
                 if (candidateMachine == null) {
                     break;
                 }
@@ -482,6 +488,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         context, sku, candidateMachine, originalAddMachineCount, actualAllowedAddMachineCount);
                 if (!mouldResourceAllocationResult.isAllowed()) {
                     excludedMachineCodes.add(machineCode);
+                    candidateCache.removeMachine(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             mouldResourceAllocationResult.getSkipReason().getDescription(),
                             null, null, null, null, null, null, null, null, null);
@@ -497,6 +504,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                             context, candidateMachine, endingTime);
                 }
+                // 保养窗口挂载会改变候选机台运行态，提前清理窗口产能缓存，避免后续复用旧产能。
+                candidateCache.clearCapacityCache();
                 Date machineReadyTime = capacityCalculate.calculateStartTime(context,
                         machineCode, endingTime);
                 boolean maintenanceOverlapSwitch = getMaintenanceScheduleService()
@@ -547,6 +556,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 if (mouldChangeStartTime == null) {
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     excludedMachineCodes.add(machineCode);
+                    candidateCache.removeMachine(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             switchAllocateFailReason == NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED
                                     ? "首检分配失败" : "换模窗口分配失败",
@@ -584,6 +594,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     excludedMachineCodes.add(machineCode);
+                    candidateCache.removeMachine(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             "排程窗口内无可开产时间",
                             machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
@@ -643,6 +654,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     excludedMachineCodes.add(machineCode);
+                    candidateCache.removeMachine(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             "动态分配后本机台计划量为0",
                             machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
@@ -671,6 +683,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     // 候选机台失败时恢复原目标量，避免把本次失败收敛值泄漏到后续候选机台。
                     sku.setTargetScheduleQty(baseTargetScheduleQty);
                     excludedMachineCodes.add(machineCode);
+                    candidateCache.removeMachine(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             "结果无有效班次计划量",
                             machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
@@ -696,6 +709,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         break;
                     }
                     excludedMachineCodes.add(machineCode);
+                    candidateCache.removeMachine(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                             "日计划额度回裁后为0",
                             machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
@@ -710,6 +724,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 updateMachineState(context, candidateMachine, sku, result);
                 registerMachineAssignment(context, machineCode, result);
                 clearSpecifyReservation(context, machineCode, sku.getMaterialCode());
+                candidateCache.clearCapacityCache();
                 scheduledCount++;
                 actualAllowedAddMachineCount++;
                 progressed = true;
@@ -725,6 +740,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 remainingQty = Math.max(0, dynamicTargetQty - totalScheduledQty);
                 sku.setRemainingScheduleQty(remainingQty);
                 finalTargetScheduleQty = dynamicTargetQty;
+                /*
+                 * 小批量待排计数依赖日计划账本剩余额度，当前机台扣账后需要刷新，
+                 * 保证同一SKU继续拆机台时单控保护规则读取的是最新待排视图。
+                 */
+                refreshPendingNewSpecSkuTypeCounts(context);
                 log.debug("新增排产本机台完成, SKU: {}, 机台: {}, 本机台排产量: {}, 累计已排: {}, 剩余: {}, 满班超排: {}, 机台就绪: {}, 换模开始: {}, 换模结束: {}, 首检开始: {}, 开产时间: {}",
                         sku.getMaterialCode(), machineCode, machineScheduledQty, totalScheduledQty, remainingQty,
                         sku.getShiftFillOverQty(),
@@ -753,6 +773,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 // 已成功排产的机台加入排除集合，表示本 SKU 后续拆量不再回头重复尝试同一机台。
                 sku.setTargetScheduleQty(baseTargetScheduleQty);
                 excludedMachineCodes.add(machineCode);
+                candidateCache.removeMachine(machineCode);
                 recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
                         "本机台已排产但仍有剩余，继续尝试下一台",
                         machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
@@ -838,12 +859,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                                List<SkuScheduleDTO> deferredCompensationSkuList) {
         if (context == null || StringUtils.isEmpty(machineCode)
                 || CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())
-                || !context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains(machineCode)
-                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+                || !context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains(machineCode)) {
+            return;
+        }
+        List<LhScheduleResult> machineResults = resolveMachineResultsForPlaceholderTakeover(context, machineCode);
+        if (CollectionUtils.isEmpty(machineResults)) {
             return;
         }
         List<LhScheduleResult> placeholderResults = new ArrayList<LhScheduleResult>(2);
-        for (LhScheduleResult result : context.getScheduleResultList()) {
+        for (LhScheduleResult result : machineResults) {
             if (result == null || !StringUtils.equals(machineCode, result.getLhMachineCode())) {
                 continue;
             }
@@ -866,6 +890,84 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             context.getScheduleResultList().remove(placeholderResult);
         }
         removeResultsFromMachineAssignments(context, placeholderResults);
+    }
+
+    /**
+     * 解析释放续作占位结果所在机台的结果集合。
+     * <p>正常主链优先按机台占用索引查找；若索引中未命中占位结果，
+     * 继续按结果列表补充扫描当前机台，保持与旧版全量扫描语义一致。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return 当前机台结果集合
+     */
+    private List<LhScheduleResult> resolveMachineResultsForPlaceholderTakeover(LhScheduleContext context,
+                                                                               String machineCode) {
+        if (context == null || StringUtils.isEmpty(machineCode)) {
+            return new ArrayList<LhScheduleResult>(0);
+        }
+        List<LhScheduleResult> machineResults = null;
+        if (!CollectionUtils.isEmpty(context.getMachineAssignmentMap())) {
+            machineResults = context.getMachineAssignmentMap().get(machineCode);
+        }
+        if (hasReleasedPlaceholderResult(context, machineResults, machineCode)) {
+            return machineResults;
+        }
+        List<LhScheduleResult> scannedResults = new ArrayList<LhScheduleResult>(2);
+        if (!CollectionUtils.isEmpty(machineResults)) {
+            scannedResults.addAll(machineResults);
+        }
+        if (CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return scannedResults;
+        }
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (result != null && StringUtils.equals(machineCode, result.getLhMachineCode())) {
+                addMachineResultIfAbsent(scannedResults, result);
+            }
+        }
+        return scannedResults;
+    }
+
+    /**
+     * 判断机台结果集合中是否包含释放续作占位结果。
+     *
+     * @param context 排程上下文
+     * @param machineResults 机台结果集合
+     * @param machineCode 机台编码
+     * @return true-包含释放续作占位结果
+     */
+    private boolean hasReleasedPlaceholderResult(LhScheduleContext context,
+                                                 List<LhScheduleResult> machineResults,
+                                                 String machineCode) {
+        if (CollectionUtils.isEmpty(machineResults)) {
+            return false;
+        }
+        for (LhScheduleResult result : machineResults) {
+            if (result != null
+                    && StringUtils.equals(machineCode, result.getLhMachineCode())
+                    && isReleasedFirstDayNoPlanPlaceholderResult(context, result)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 按对象引用去重追加机台结果，避免 Map 与结果列表命中同一结果时重复处理。
+     *
+     * @param machineResults 机台结果集合
+     * @param result 待追加结果
+     */
+    private void addMachineResultIfAbsent(List<LhScheduleResult> machineResults, LhScheduleResult result) {
+        if (result == null) {
+            return;
+        }
+        for (LhScheduleResult existsResult : machineResults) {
+            if (existsResult == result) {
+                return;
+            }
+        }
+        machineResults.add(result);
     }
 
     /**
@@ -965,7 +1067,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 将补偿SKU追加到待排列表，并同步更新本轮待排SKU类型计数。
+     * 将补偿SKU追加到待排列表，并同步刷新本轮待排SKU类型计数。
      *
      * @param context 排程上下文
      * @param deferredCompensationSkuList 延后补排集合
@@ -1113,7 +1215,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 移除当前新增待排SKU，并同步更新类型计数。
+     * 移除当前新增待排SKU，并同步刷新类型计数。
+     * <p>当前SKU排产前可能追加历史欠产并改变日计划账本，出队后使用全量刷新，
+     * 避免按出队时可变状态做增量扣减导致单控保护计数偏移。</p>
      *
      * @param context 排程上下文
      * @param iterator 新增SKU迭代器
@@ -1321,19 +1425,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     private MachineScheduleDTO selectCandidateMachine(LhScheduleContext context,
                                                       SkuScheduleDTO sku,
-                                                      List<MachineScheduleDTO> candidates,
+                                                      NewSpecCandidateCache candidateCache,
                                                       Set<String> excludedMachineCodes,
                                                       IMachineMatchStrategy machineMatch,
                                                       MachineScheduleDTO preferredTrialMachine,
                                                       ProductionQuantityPolicy quantityPolicy) {
-        List<MachineScheduleDTO> singleControlCandidates = filterAvailableCandidatesByMachineType(
-                context, candidates, excludedMachineCodes, true);
-        List<MachineScheduleDTO> normalCandidates = filterAvailableCandidatesByMachineType(
-                context, candidates, excludedMachineCodes, false);
-        logNewSpecMachineTypeSplit(context, sku, singleControlCandidates, normalCandidates, excludedMachineCodes);
+        List<MachineScheduleDTO> singleControlCandidates = candidateCache.getSingleControlCandidates();
+        List<MachineScheduleDTO> normalCandidates = candidateCache.getNormalCandidates();
+        logNewSpecMachineTypeSplit(context, sku, singleControlCandidates, normalCandidates,
+                excludedMachineCodes, candidateCache);
         if (shouldOnlyUseSingleControlCandidate(sku)) {
             MachineScheduleDTO singleControlMachine = selectCandidateMachineFromScopedList(
-                    context, sku, singleControlCandidates, machineMatch, preferredTrialMachine, quantityPolicy);
+                    context, sku, singleControlCandidates, machineMatch, preferredTrialMachine, quantityPolicy,
+                    candidateCache);
             if (singleControlMachine != null) {
                 log.info("新增排产{}SKU仅尝试单控机台, materialCode: {}, machineCode: {}",
                         resolveNewSpecSkuType(sku), sku.getMaterialCode(), singleControlMachine.getMachineCode());
@@ -1352,7 +1456,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 return reusedSingleControlMachine;
             }
             MachineScheduleDTO singleControlMachine = selectCandidateMachineFromScopedList(
-                    context, sku, singleControlCandidates, machineMatch, preferredTrialMachine, quantityPolicy);
+                    context, sku, singleControlCandidates, machineMatch, preferredTrialMachine, quantityPolicy,
+                    candidateCache);
             if (singleControlMachine != null) {
                 log.info("新增排产{}SKU优先消化单控机台, materialCode: {}, machineCode: {}, remainingSingleControlCount: {}, normalCandidateCount: {}",
                         resolveNewSpecSkuType(sku), sku.getMaterialCode(), singleControlMachine.getMachineCode(),
@@ -1362,15 +1467,18 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             log.info("新增排产{}SKU单控机台均无法承接，开始尝试普通机台, materialCode: {}, normalCandidateCount: {}",
                     resolveNewSpecSkuType(sku), sku.getMaterialCode(), normalCandidates.size());
             return selectCandidateMachineFromScopedList(
-                    context, sku, normalCandidates, machineMatch, null, quantityPolicy);
+                    context, sku, normalCandidates, machineMatch, null, quantityPolicy,
+                    candidateCache);
         }
         MachineScheduleDTO normalMachine = selectCandidateMachineFromScopedList(
-                context, sku, normalCandidates, machineMatch, null, quantityPolicy);
+                context, sku, normalCandidates, machineMatch, null, quantityPolicy,
+                candidateCache);
         if (normalMachine != null) {
             return normalMachine;
         }
         return selectCandidateMachineFromScopedList(
-                context, sku, singleControlCandidates, machineMatch, null, quantityPolicy);
+                context, sku, singleControlCandidates, machineMatch, null, quantityPolicy,
+                candidateCache);
     }
 
     /**
@@ -1465,7 +1573,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                                     List<MachineScheduleDTO> scopedCandidates,
                                                                     IMachineMatchStrategy machineMatch,
                                                                     MachineScheduleDTO preferredTrialMachine,
-                                                                    ProductionQuantityPolicy quantityPolicy) {
+                                                                    ProductionQuantityPolicy quantityPolicy,
+                                                                    NewSpecCandidateCache candidateCache) {
         if (CollectionUtils.isEmpty(scopedCandidates)) {
             return null;
         }
@@ -1482,10 +1591,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return preferredTrialMachine;
         }
         if (quantityPolicy != null && quantityPolicy.isFullRunForNonTailMachine()) {
-            return machineMatch.selectBestMachine(context, sku, scopedCandidates, new HashSet<String>(0));
+            return machineMatch.selectBestMachine(context, sku, scopedCandidates, EMPTY_STRING_SET);
         }
         MachineScheduleDTO finishRemainingFirstMachine = resolveCanFinishRemainingQtyFirst(
-                context, sku, scopedCandidates, new HashSet<String>(0));
+                context, sku, scopedCandidates, EMPTY_STRING_SET, candidateCache);
         if (finishRemainingFirstMachine != null) {
             log.info("新增排产优先选择可单机收完剩余量的机台, materialCode: {}, machineCode: {}, remainingQty: {}",
                     sku.getMaterialCode(), finishRemainingFirstMachine.getMachineCode(),
@@ -1493,14 +1602,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return finishRemainingFirstMachine;
         }
         MachineScheduleDTO tailConcentratedMachine = resolveTailConcentratedSplitMachine(
-                context, sku, scopedCandidates, new HashSet<String>(0));
+                context, sku, scopedCandidates, EMPTY_STRING_SET, candidateCache);
         if (tailConcentratedMachine != null) {
             log.info("新增排产优先选择可保留尾量集中能力的机台, materialCode: {}, machineCode: {}, remainingQty: {}",
                     sku.getMaterialCode(), tailConcentratedMachine.getMachineCode(),
                     Math.max(0, sku.getRemainingScheduleQty()));
             return tailConcentratedMachine;
         }
-        return machineMatch.selectBestMachine(context, sku, scopedCandidates, new HashSet<String>(0));
+        return machineMatch.selectBestMachine(context, sku, scopedCandidates, EMPTY_STRING_SET);
     }
 
     /**
@@ -1595,7 +1704,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                             SkuScheduleDTO sku,
                                             List<MachineScheduleDTO> singleControlCandidates,
                                             List<MachineScheduleDTO> normalCandidates,
-                                            Set<String> excludedMachineCodes) {
+                                            Set<String> excludedMachineCodes,
+                                            NewSpecCandidateCache candidateCache) {
         if (sku == null) {
             return;
         }
@@ -1614,7 +1724,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 sku.getMaterialCode(), resolveNewSpecSkuType(sku),
                 context == null ? 0 : context.getPendingSmallBatchNewSpecSkuCount(),
                 joinMachineCodes(singleControlCandidates), joinMachineCodes(normalCandidates),
-                resolveMachineCapacitySummary(context, sku, singleControlCandidates),
+                resolveMachineCapacitySummary(context, sku, singleControlCandidates, candidateCache),
                 containsMachineCode(singleControlCandidates, "K1501L"),
                 containsMachineCode(singleControlCandidates, "K1501R"),
                 containsMachineCode(normalCandidates, "K1501L"),
@@ -1653,7 +1763,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     private String resolveMachineCapacitySummary(LhScheduleContext context,
                                                  SkuScheduleDTO sku,
-                                                 List<MachineScheduleDTO> candidates) {
+                                                 List<MachineScheduleDTO> candidates,
+                                                 NewSpecCandidateCache candidateCache) {
         if (context == null || sku == null || CollectionUtils.isEmpty(candidates)) {
             return "-";
         }
@@ -1662,8 +1773,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (candidate == null || StringUtils.isEmpty(candidate.getMachineCode())) {
                 continue;
             }
-            int availableCapacity = getTargetScheduleQtyResolver()
-                    .calcMachineAvailableCapacityInWindow(context, sku, candidate);
+            int availableCapacity = resolveCachedMachineAvailableCapacityInWindow(
+                    context, sku, candidate, candidateCache);
             if (builder.length() > 0) {
                 builder.append(", ");
             }
@@ -1681,31 +1792,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         return context.getParamIntValue(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
                 LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD);
-    }
-
-    private List<MachineScheduleDTO> filterAvailableCandidatesByMachineType(LhScheduleContext context,
-                                                                            List<MachineScheduleDTO> candidates,
-                                                                            Set<String> excludedMachineCodes,
-                                                                            boolean singleControl) {
-        List<MachineScheduleDTO> filteredCandidates = new ArrayList<MachineScheduleDTO>(
-                CollectionUtils.isEmpty(candidates) ? 0 : candidates.size());
-        if (CollectionUtils.isEmpty(candidates)) {
-            return filteredCandidates;
-        }
-        for (MachineScheduleDTO candidate : candidates) {
-            if (candidate == null || StringUtils.isEmpty(candidate.getMachineCode())) {
-                continue;
-            }
-            if (!CollectionUtils.isEmpty(excludedMachineCodes)
-                    && excludedMachineCodes.contains(candidate.getMachineCode())) {
-                continue;
-            }
-            boolean currentSingleControl = isSingleControlMachine(context, candidate.getMachineCode());
-            if (singleControl == currentSingleControl) {
-                filteredCandidates.add(candidate);
-            }
-        }
-        return filteredCandidates;
     }
 
     private boolean containsMachine(List<MachineScheduleDTO> candidates, String machineCode) {
@@ -3269,7 +3355,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private MachineScheduleDTO resolveCanFinishRemainingQtyFirst(LhScheduleContext context,
                                                                  SkuScheduleDTO sku,
                                                                  List<MachineScheduleDTO> candidates,
-                                                                 Set<String> excludedMachineCodes) {
+                                                                 Set<String> excludedMachineCodes,
+                                                                 NewSpecCandidateCache candidateCache) {
         if (context == null || sku == null || CollectionUtils.isEmpty(candidates)) {
             return null;
         }
@@ -3307,8 +3394,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     && !isSingleControlMachine(context, candidate.getMachineCode())) {
                 continue;
             }
-            int machineCapacity = getTargetScheduleQtyResolver()
-                    .calcMachineAvailableCapacityInWindow(context, sku, candidate);
+            int machineCapacity = resolveCachedMachineAvailableCapacityInWindow(
+                    context, sku, candidate, candidateCache);
             if (machineCapacity >= remainingQty) {
                 return candidate;
             }
@@ -3329,7 +3416,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private MachineScheduleDTO resolveTailConcentratedSplitMachine(LhScheduleContext context,
                                                                    SkuScheduleDTO sku,
                                                                    List<MachineScheduleDTO> candidates,
-                                                                   Set<String> excludedMachineCodes) {
+                                                                   Set<String> excludedMachineCodes,
+                                                                   NewSpecCandidateCache candidateCache) {
         if (context == null || sku == null || CollectionUtils.isEmpty(candidates)) {
             return null;
         }
@@ -3347,8 +3435,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     && excludedMachineCodes.contains(candidate.getMachineCode()))) {
                 continue;
             }
-            int machineCapacity = getTargetScheduleQtyResolver()
-                    .calcMachineAvailableCapacityInWindow(context, sku, candidate);
+            int machineCapacity = resolveCachedMachineAvailableCapacityInWindow(
+                    context, sku, candidate, candidateCache);
             if (machineCapacity > 0 && machineCapacity < remainingQty) {
                 machineCapacityMap.put(candidate, machineCapacity);
             }
@@ -3376,6 +3464,39 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
         }
         return selectedMachine;
+    }
+
+    /**
+     * 获取候选机台窗口可用产能。
+     * <p>同一SKU的一次选机中，“可单机收完”和“尾量集中”会重复读取同一机台窗口产能，
+     * 这里使用当前SKU内短生命周期缓存，成功落地结果后即清空，避免机台运行态变化后复用旧产能。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param candidate 候选机台
+     * @param candidateCache 当前SKU候选机台缓存上下文
+     * @return 窗口可用产能
+     */
+    private int resolveCachedMachineAvailableCapacityInWindow(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            MachineScheduleDTO candidate,
+            NewSpecCandidateCache candidateCache) {
+        if (candidate == null || StringUtils.isEmpty(candidate.getMachineCode())) {
+            return 0;
+        }
+        if (candidateCache == null) {
+            return getTargetScheduleQtyResolver()
+                    .calcMachineAvailableCapacityInWindow(context, sku, candidate);
+        }
+        Integer cachedCapacity = candidateCache.getCandidateWindowCapacity(candidate.getMachineCode());
+        if (cachedCapacity != null) {
+            return cachedCapacity;
+        }
+        int machineCapacity = getTargetScheduleQtyResolver()
+                .calcMachineAvailableCapacityInWindow(context, sku, candidate);
+        candidateCache.putCandidateWindowCapacity(candidate.getMachineCode(), machineCapacity);
+        return machineCapacity;
     }
 
     private MachineScheduleDTO resolvePreferredTrialMachine(LhScheduleContext context,

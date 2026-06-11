@@ -37,7 +37,7 @@ public interface IMachineMatchStrategy {
      * @param context 排程上下文
      * @param sku 待排产SKU
      * @param candidates 候选机台列表
-     * @param excludedMachineCodes 已尝试失败需排除的机台编码集合
+     * @param excludedMachineCodes 已尝试失败需排除的机台编码集合，只读参数，策略实现不得修改该集合
      * @return 最优机台, 无候选时返回null
      */
     MachineScheduleDTO selectBestMachine(LhScheduleContext context,
