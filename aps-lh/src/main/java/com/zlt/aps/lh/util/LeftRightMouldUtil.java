@@ -39,4 +39,23 @@ public final class LeftRightMouldUtil {
         }
         return LhScheduleConstant.LEFT_RIGHT_MOULD;
     }
+
+    /**
+     * 清洗计划场景下解析左右模标识。
+     * <p>规则：双模机台赋值 LR，单模机台按机台编码后缀赋值 L 或 R，忽略清洗计划原始值。</p>
+     *
+     * @param machineCode 机台编码
+     * @return 左右模标识（L/R/LR）
+     */
+    public static String resolveCleaningLeftRightMould(String machineCode) {
+        if (StringUtils.isEmpty(machineCode)) {
+            return LhScheduleConstant.LEFT_RIGHT_MOULD;
+        }
+        // 单模机台按机台编码后缀确定左/右模
+        if (LhSingleControlMachineUtil.isSingleMouldMachine(machineCode)) {
+            return LhSingleControlMachineUtil.resolveSplitSide(machineCode);
+        }
+        // 双模机台统一赋值 LR
+        return LhScheduleConstant.LEFT_RIGHT_MOULD;
+    }
 }

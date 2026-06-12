@@ -29,4 +29,28 @@ class LeftRightMouldUtilRegressionTest {
     void resolveLeftRightMould_shouldKeepCurrentValueWhenAlreadyPresent() {
         assertEquals("LR", LeftRightMouldUtil.resolveLeftRightMould("LR", "K1501L"));
     }
+
+    @Test
+    void resolveCleaningLeftRightMould_shouldReturnLrForDualMouldMachine() {
+        // 双模机台（编码不以 L/R 结尾）赋值 LR
+        assertEquals("LR", LeftRightMouldUtil.resolveCleaningLeftRightMould("K1501"));
+    }
+
+    @Test
+    void resolveCleaningLeftRightMould_shouldReturnLForSingleMouldMachineLeft() {
+        // 单模机台编码以 L 结尾赋值 L
+        assertEquals("L", LeftRightMouldUtil.resolveCleaningLeftRightMould("K1501L"));
+    }
+
+    @Test
+    void resolveCleaningLeftRightMould_shouldReturnRForSingleMouldMachineRight() {
+        // 单模机台编码以 R 结尾赋值 R
+        assertEquals("R", LeftRightMouldUtil.resolveCleaningLeftRightMould("K1502R"));
+    }
+
+    @Test
+    void resolveCleaningLeftRightMould_shouldReturnLrForNullMachineCode() {
+        // 机台编码为空默认 LR
+        assertEquals("LR", LeftRightMouldUtil.resolveCleaningLeftRightMould(null));
+    }
 }

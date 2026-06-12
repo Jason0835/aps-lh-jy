@@ -348,6 +348,40 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
     }
 
     @Test
+    void generateMouldChangePlan_shouldResolveCleaningLeftRightMouldByMachineCodeSuffix() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.setInitialMachineScheduleMap(new LinkedHashMap<>());
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501L");
+        machine.setMachineName("华澳左模");
+        machine.setCurrentMaterialCode("MAT-ONLINE");
+        machine.setCurrentMaterialDesc("当前在机物料");
+
+        MachineCleaningWindowDTO dryIceWindow = new MachineCleaningWindowDTO();
+        dryIceWindow.setLhCode("K1501L");
+        dryIceWindow.setCleanType(CleaningTypeEnum.DRY_ICE.getCode());
+        dryIceWindow.setCleanStartTime(dateTime(2026, 4, 17, 8, 0));
+        dryIceWindow.setCleanEndTime(dateTime(2026, 4, 17, 11, 0));
+        // 清洗计划原始值为 LR，但单模机台应按编码后缀赋值 L
+        dryIceWindow.setLeftRightMould("LR");
+        dryIceWindow.setMouldCode("MOULD-001");
+        dryIceWindow.setRemark("单模干冰计划");
+        machine.setCleaningWindowList(Collections.singletonList(dryIceWindow));
+
+        context.getMachineScheduleMap().put("K1501L", machine);
+        context.getInitialMachineScheduleMap().put("K1501L", machine);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(1, context.getMouldChangePlanList().size());
+        LhMouldChangePlan plan = context.getMouldChangePlanList().get(0);
+        // 单模机台 K1501L 应赋值 L，而不是清洗计划原始值 LR
+        assertEquals("L", plan.getLeftRightMould());
+    }
+
+    @Test
     void generateMouldChangePlan_shouldResolveCleaningWindowMaterialByCleaningTime() {
         ResultValidationHandler handler = new ResultValidationHandler();
         LhScheduleContext context = newContext();

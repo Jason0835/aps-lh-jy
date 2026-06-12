@@ -729,8 +729,8 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setClassIndex(resolvePlanShiftCode(context, cleaningWindow.getCleanStartTime()));
             plan.setLhMachineCode(machineCode);
             plan.setLhMachineName(machine != null ? machine.getMachineName() : null);
-            plan.setLeftRightMould(LeftRightMouldUtil.resolveLeftRightMould(
-                    cleaningWindow.getLeftRightMould(), machineCode));
+            // 清洗场景：双模机台赋值 LR，单模机台按编码后缀赋值 L/R
+            plan.setLeftRightMould(LeftRightMouldUtil.resolveCleaningLeftRightMould(machineCode));
             plan.setBeforeMaterialCode(cleaningState.getCurrentMaterialCode());
             plan.setBeforeMaterialDesc(cleaningState.getCurrentMaterialDesc());
             plan.setAfterMaterialCode(cleaningState.getCurrentMaterialCode());
