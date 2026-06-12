@@ -293,7 +293,7 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 收尾续作即使左右单控来自不同运行态对象，也必须按同物料严格目标统一控量。
+     * 收尾续作即使左右单控来自不同运行态对象，也必须按同物料硫化余量严格控量。
      */
     @Test
     public void shouldCapEndingSingleControlContinuousByStrictTargetAcrossRuntimeMachines() throws Exception {
@@ -331,7 +331,7 @@ public class SchedulingStrategyRegressionTest {
                 .filter(result -> "3302002481".equals(result.getMaterialCode()))
                 .filter(result -> ShiftFieldUtil.resolveScheduledQty(result) > 0)
                 .count();
-        Assertions.assertEquals(21, totalPlanQty);
+        Assertions.assertEquals(6, totalPlanQty);
         Assertions.assertEquals(1L, activeMachineCount);
     }
 

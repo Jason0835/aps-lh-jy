@@ -404,7 +404,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 续作窗口及月底均无日计划时，按硫化余量和本月历史欠产严格控制收尾目标。
+     * 续作窗口及月底均无日计划时，按硫化余量严格控制收尾目标。
      *
      * @param sku 续作SKU
      * @param shortageQuotaPlan 欠产账本准备结果
@@ -414,14 +414,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (sku == null || shortageQuotaPlan == null || !shortageQuotaPlan.isForceEndingByNoFuturePlan()) {
             return;
         }
-        int strictTargetQty = Math.max(0, sku.getSurplusQty())
-                + Math.max(0, shortageQuotaPlan.getHistoryShortageQty());
+        int strictTargetQty = Math.max(0, sku.getSurplusQty());
         sku.setStrictTargetQty(true);
         sku.setTargetScheduleQty(strictTargetQty);
         sku.setRemainingScheduleQty(strictTargetQty);
         sku.setWindowPlanQty(strictTargetQty);
         sku.setWindowRemainingPlanQty(strictTargetQty);
-        log.info("续作窗口及月底均无日计划，按硫化余量和本月历史欠产严格控量, materialCode: {}, "
+        log.info("续作窗口及月底均无日计划，按硫化余量严格控量, materialCode: {}, "
                         + "surplusQty: {}, historyShortageQty: {}, strictTargetQty: {}",
                 sku.getMaterialCode(), Math.max(0, sku.getSurplusQty()),
                 Math.max(0, shortageQuotaPlan.getHistoryShortageQty()), strictTargetQty);
