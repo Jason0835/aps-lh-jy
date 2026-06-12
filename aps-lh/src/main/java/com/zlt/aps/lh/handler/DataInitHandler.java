@@ -364,8 +364,10 @@ public class DataInitHandler extends AbsScheduleStepHandler {
 
     private Date resolveInitialEstimatedEndTime(LhScheduleContext context, String machineCode) {
         Date latestSpecEndTime = null;
+        LhMachineOnlineInfo onlineInfo = resolveRuntimeOnlineInfo(context, machineCode);
         for (com.zlt.aps.lh.api.domain.entity.LhScheduleResult result : context.getPreviousScheduleResultList()) {
             if (!StringUtils.equals(machineCode, result.getLhMachineCode())
+                    || isDifferentOnlineMaterial(onlineInfo, result)
                     || !LhSingleControlMachineUtil.isLeftRightCompatible(machineCode, result.getLeftRightMould())
                     || result.getSpecEndTime() == null) {
                 continue;
@@ -379,7 +381,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                     machineCode, LhScheduleTimeUtil.formatDateTime(latestSpecEndTime));
             return latestSpecEndTime;
         }
-        if (Objects.nonNull(resolveRuntimeOnlineInfo(context, machineCode))) {
+        if (Objects.nonNull(onlineInfo)) {
             List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
             if (!shifts.isEmpty() && shifts.get(0).getShiftStartDateTime() != null) {
                 log.debug("机台初始结束时间取窗口首班开始, 机台: {}, 原因: MES在机无前批次结束时间, 时间: {}",
@@ -396,6 +398,21 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         log.warn("机台初始结束时间未匹配班次窗口, 机台: {}, 使用T日: {}",
                 machineCode, LhScheduleTimeUtil.formatDate(context.getScheduleDate()));
         return context.getScheduleDate();
+    }
+
+    /**
+     * 判断前批次结果是否与当前 MES 在机物料不一致。
+     *
+     * @param onlineInfo MES 在机信息
+     * @param result 前批次结果
+     * @return true-物料不一致
+     */
+    private boolean isDifferentOnlineMaterial(LhMachineOnlineInfo onlineInfo,
+                                              com.zlt.aps.lh.api.domain.entity.LhScheduleResult result) {
+        return Objects.nonNull(onlineInfo)
+                && StringUtils.isNotEmpty(onlineInfo.getMaterialCode())
+                && Objects.nonNull(result)
+                && !StringUtils.equals(onlineInfo.getMaterialCode(), result.getMaterialCode());
     }
 
     /**

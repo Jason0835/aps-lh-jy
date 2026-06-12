@@ -13,6 +13,7 @@ import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
@@ -93,6 +94,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             "T-1 最新记录未收尾，跳过兜底反查";
     private static final String TYPE_BLOCK_SKIP_REASON_LIMIT_SPECIFY_RESERVED =
             "机台存在需走新增换模链路的定点物料，当前阶段预留给S4.5";
+    private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
+            "共用胎胚物料硫化余量为0，不允许换活字块排产";
     private static final String YES_FLAG = "1";
     private static final String NO_FLAG = "0";
     private static final String AUTO_DATA_SOURCE = "0";
@@ -1082,6 +1085,18 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     machine.getMachineCode(), sku.getMaterialCode());
             return false;
         }
+        if (isSharedEmbryoZeroSurplusSku(context, sku)) {
+            recordTypeBlockAppendFailure(failureReason, SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
+            addSharedEmbryoZeroSurplusUnscheduledResult(context, sku);
+            context.getNewSpecSkuList().remove(sku);
+            getTargetScheduleQtyResolver().removeActiveEmbryoSku(
+                    context, sku, SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
+            log.info("换活字块共用胎胚余量为0，跳过排产并移出待排队列, machineCode: {}, materialCode: {}, "
+                            + "embryoCode: {}, surplusQty: {}, embryoStock: {}",
+                    machine.getMachineCode(), sku.getMaterialCode(), sku.getEmbryoCode(),
+                    sku.getSurplusQty(), sku.getEmbryoStock());
+            return false;
+        }
         // 换活字块与新增排产共用历史欠产账本口径，避免窗口无日计划时 S4.4 被回裁为0后再落入S4.5换模。
         DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "换活字块");
         // 保存原目标量和严格目标量标识，换活字块单台试算失败时必须完整恢复，不能污染 S4.5 新增排产。
@@ -1163,6 +1178,46 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         log.debug("换活字块排产完成, 机台: {}, SKU: {}, 已排: {}, 剩余: {}",
                 machine.getMachineCode(), sku.getMaterialCode(), scheduledQty, remainingQty);
         return true;
+    }
+
+    /**
+     * 判断是否为共用胎胚零余量SKU。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-共用胎胚且硫化余量小于等于0；false-不命中
+     */
+    private boolean isSharedEmbryoZeroSurplusSku(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null || sku.getSurplusQty() > 0
+                || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return false;
+        }
+        return Boolean.TRUE.equals(context.getMaterialSharedEmbryoMap().get(sku.getMaterialCode()));
+    }
+
+    /**
+     * 写入换活字块共用胎胚零余量未排结果。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     */
+    private void addSharedEmbryoZeroSurplusUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku) {
+        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+        unscheduled.setFactoryCode(context.getFactoryCode());
+        unscheduled.setBatchNo(context.getBatchNo());
+        unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setMaterialDesc(sku.getMaterialDesc());
+        unscheduled.setScheduleDate(context.getScheduleTargetDate());
+        unscheduled.setUnscheduledReason(SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
+        unscheduled.setUnscheduledQty(0);
+        unscheduled.setStructureName(sku.getStructureName());
+        unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
+        unscheduled.setSpecCode(sku.getSpecCode());
+        unscheduled.setEmbryoCode(sku.getEmbryoCode());
+        unscheduled.setMouldQty(sku.getMouldQty());
+        unscheduled.setDataSource(AUTO_DATA_SOURCE);
+        unscheduled.setIsDelete(0);
+        context.getUnscheduledResultList().add(unscheduled);
     }
 
     /**

@@ -387,6 +387,30 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 非收尾续作首日有日计划时，即使额度被T日晚班扣完，也应从窗口首班起排满在机班次。
+     */
+    @Test
+    public void shouldStartNonEndingContinuousFromFirstShiftWhenFirstDayHasPlan() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3202000220", 16, 128, buildQuotaMapByShifts(shifts, 8, 48, 48));
+        sku.getDailyPlanQuotaMap().get(resolveShiftWorkDate(shifts, 1)).setRemainingQty(0);
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1608");
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "resolveContinuousStartTime", LhScheduleContext.class, SkuScheduleDTO.class,
+                MachineScheduleDTO.class, List.class, boolean.class);
+        method.setAccessible(true);
+        Date nonEndingStartTime = (Date) method.invoke(strategy, context, sku, machine, shifts, false);
+        Date endingStartTime = (Date) method.invoke(strategy, context, sku, machine, shifts, true);
+
+        Assertions.assertEquals(shifts.get(0).getShiftStartDateTime(), nonEndingStartTime);
+        Assertions.assertEquals(shifts.get(2).getShiftStartDateTime(), endingStartTime);
+    }
+
+    /**
      * 欠产未超过阈值时，T+2 也必须继续后看 T+3 日计划量决定是否保留/新增机台。
      */
     @Test
@@ -446,8 +470,41 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals("03", result.getScheduleType());
         Assertions.assertEquals("1", result.getIsTypeBlock());
         Assertions.assertEquals("1", result.getIsChangeMould());
-        Assertions.assertEquals(Integer.valueOf(14), result.getClass8PlanQty());
-        Assertions.assertEquals(Integer.valueOf(14), result.getDailyPlanQty());
+        Assertions.assertEquals(Integer.valueOf(15), result.getClass8PlanQty());
+        Assertions.assertEquals(Integer.valueOf(15), result.getDailyPlanQty());
+    }
+
+    /**
+     * 共用胎胚物料硫化余量为0时，换活字块不能按班产补量，也不能继续回流新增排产。
+     */
+    @Test
+    public void shouldBlockTypeBlockWhenSharedEmbryoSurplusIsZero() throws Exception {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        injectTypeBlockAppendDependencies(strategy);
+        LhScheduleContext context = buildTypeBlockAppendContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        MachineScheduleDTO machine = buildTypeBlockMachine();
+        SkuScheduleDTO sku = buildTypeBlockSkuWithRollingQuota();
+        sku.setSurplusQty(0);
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getNewSpecSkuList().add(sku);
+        context.getMaterialSharedEmbryoMap().put(sku.getMaterialCode(), true);
+
+        Method method = TypeBlockProductionStrategy.class.getDeclaredMethod(
+                "appendTypeBlockResultWithRollback",
+                LhScheduleContext.class, MachineScheduleDTO.class, SkuScheduleDTO.class,
+                Date.class, Date.class, List.class, boolean.class, StringBuilder.class);
+        method.setAccessible(true);
+        StringBuilder failureReason = new StringBuilder(64);
+        boolean success = (Boolean) method.invoke(strategy, context, machine, sku,
+                dateTime(2026, 6, 8, 15, 27), dateTime(2026, 6, 8, 7, 27),
+                shifts, true, failureReason);
+
+        Assertions.assertFalse(success);
+        Assertions.assertEquals(0, context.getScheduleResultList().size());
+        Assertions.assertEquals(1, context.getUnscheduledResultList().size());
+        Assertions.assertFalse(context.getNewSpecSkuList().contains(sku));
+        Assertions.assertTrue(failureReason.toString().contains("共用胎胚物料硫化余量为0"));
     }
 
     /**
@@ -680,6 +737,22 @@ public class SchedulingStrategyRegressionTest {
         setField(orderNoGenerator, "useRedis", false);
         setField(strategy, "orderNoGenerator", orderNoGenerator);
         setField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        setField(strategy, "mouldChangeBalanceStrategy", new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext context, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext context, String machineCode, Date endingTime) {
+                return endingTime;
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext context, Date targetDate) {
+                return 1;
+            }
+        });
         setField(strategy, "endingJudgmentStrategy", new IEndingJudgmentStrategy() {
             @Override
             public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {

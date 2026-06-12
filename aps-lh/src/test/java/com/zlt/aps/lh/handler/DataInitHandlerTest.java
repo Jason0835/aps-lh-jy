@@ -1,9 +1,12 @@
 package com.zlt.aps.lh.handler;
 
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
+import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.service.impl.LhCleaningScheduleService;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -29,6 +32,58 @@ import java.util.Map;
 public class DataInitHandlerTest {
 
     private static final ZoneId ZONE_ID = ZoneId.of("Asia/Shanghai");
+
+    /**
+     * 用例说明：MES 在机物料与前批次同机台物料不一致时，不应使用前批次结束时间抬高续作起排点。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldUseWindowStartWhenOnlineMaterialDiffersFromPreviousResult() throws Exception {
+        LhScheduleContext context = new LhScheduleContext();
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1608");
+        onlineInfo.setMaterialCode("3202000220");
+        context.getMachineOnlineInfoMap().put("K1608", onlineInfo);
+        context.setScheduleWindowShifts(Collections.singletonList(buildShift(1, 0,
+                "06:00:00", "14:00:00")));
+
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setLhMachineCode("K1608");
+        previousResult.setMaterialCode("3202000092");
+        previousResult.setSpecEndTime(toDate(2026, 6, 11, 22, 0, 0));
+        context.setPreviousScheduleResultList(Collections.singletonList(previousResult));
+
+        Date estimatedEndTime = invokeResolveInitialEstimatedEndTime(context, "K1608");
+
+        Assertions.assertEquals(toDate(2026, 6, 11, 6, 0, 0), estimatedEndTime);
+    }
+
+    /**
+     * 用例说明：MES 在机物料与前批次同机台物料一致时，仍沿用前批次规格结束时间衔接续作。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldUsePreviousEndTimeWhenOnlineMaterialMatchesPreviousResult() throws Exception {
+        LhScheduleContext context = new LhScheduleContext();
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1608");
+        onlineInfo.setMaterialCode("3202000220");
+        context.getMachineOnlineInfoMap().put("K1608", onlineInfo);
+        context.setScheduleWindowShifts(Collections.singletonList(buildShift(1, 0,
+                "06:00:00", "14:00:00")));
+
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setLhMachineCode("K1608");
+        previousResult.setMaterialCode("3202000220");
+        previousResult.setSpecEndTime(toDate(2026, 6, 11, 22, 0, 0));
+        context.setPreviousScheduleResultList(Collections.singletonList(previousResult));
+
+        Date estimatedEndTime = invokeResolveInitialEstimatedEndTime(context, "K1608");
+
+        Assertions.assertEquals(toDate(2026, 6, 11, 22, 0, 0), estimatedEndTime);
+    }
 
     /**
      * 用例说明：干冰清洗时间早于允许窗口时，清洗窗口应调整到当天 07:30。
@@ -427,6 +482,23 @@ public class DataInitHandlerTest {
     }
 
     /**
+     * 反射调用私有方法 resolveInitialEstimatedEndTime。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return 初始预计结束时间
+     * @throws Exception 反射异常
+     */
+    private Date invokeResolveInitialEstimatedEndTime(LhScheduleContext context, String machineCode)
+            throws Exception {
+        DataInitHandler handler = new DataInitHandler();
+        Method method = DataInitHandler.class.getDeclaredMethod(
+                "resolveInitialEstimatedEndTime", LhScheduleContext.class, String.class);
+        method.setAccessible(true);
+        return (Date) method.invoke(handler, context, machineCode);
+    }
+
+    /**
      * 反射调用私有方法 resolveScheduledCleaningWindowMap。
      *
      * @param context 排程上下文
@@ -493,6 +565,17 @@ public class DataInitHandlerTest {
         stop.setEndDate(stopEnd);
         context.setDevicePlanShutList(Arrays.asList(stop));
         return context;
+    }
+
+    private LhShiftConfigVO buildShift(int shiftIndex, int dateOffset, String startTime, String endTime) {
+        LhShiftConfigVO shift = new LhShiftConfigVO();
+        shift.setScheduleBaseDate(toDate(2026, 6, 11, 0, 0, 0));
+        shift.setShiftIndex(shiftIndex);
+        shift.setDateOffset(dateOffset);
+        shift.setShiftType(ShiftEnum.MORNING_SHIFT.getCode());
+        shift.setStartTime(startTime);
+        shift.setEndTime(endTime);
+        return shift;
     }
 
     private com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar buildHolidayCalendar(Date holidayDate) {

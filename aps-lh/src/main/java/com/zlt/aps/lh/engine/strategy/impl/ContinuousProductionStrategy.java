@@ -186,8 +186,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             boolean isSingleMachine = continuationGroupMachineCountMap
                     .getOrDefault(buildContinuationGroupKey(sku), 0) == 1;
 
-            // 滚动衔接时沿用机台继承后的可用时间；普通续作从首个有日计划剩余额度的班次起排。
-            Date startTime = resolveContinuousStartTime(context, sku, machine, shifts);
+            // 滚动衔接时沿用机台继承后的可用时间；非收尾在机续作首日有计划时从窗口首班满排。
+            Date startTime = resolveContinuousStartTime(context, sku, machine, shifts, isEnding);
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine, shortageQuotaPlan);
             // 非收尾续作可以为定点新增物料挤出后续换模窗口；收尾场景不走挤量预留。
@@ -312,13 +312,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * 解析续作起排时间。
-     * <p>滚动衔接场景下从机台继承后的可用时间继续排；普通场景仍从窗口首班开始。</p>
+     * <p>滚动衔接场景下从机台继承后的可用时间继续排；非收尾在机续作首日有日计划时从窗口首班开始。</p>
      */
     private Date resolveContinuousStartTime(LhScheduleContext context,
                                             SkuScheduleDTO sku,
                                             MachineScheduleDTO machine,
-                                            List<LhShiftConfigVO> shifts) {
-        Date defaultStartTime = resolveFirstPositiveDailyPlanStartTime(sku, shifts);
+                                            List<LhShiftConfigVO> shifts,
+                                            boolean isEnding) {
+        Date defaultStartTime = resolveFirstPositiveDailyPlanStartTime(sku, shifts, isEnding);
         if (context == null || !context.isRollingScheduleHandoff()) {
             return defaultStartTime;
         }
@@ -342,9 +343,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param shifts 排程窗口班次
      * @return 首个可排班次开始时间；无可识别额度时返回窗口首班开始时间
      */
-    private Date resolveFirstPositiveDailyPlanStartTime(SkuScheduleDTO sku, List<LhShiftConfigVO> shifts) {
+    private Date resolveFirstPositiveDailyPlanStartTime(SkuScheduleDTO sku,
+                                                        List<LhShiftConfigVO> shifts,
+                                                        boolean isEnding) {
         Date defaultStartTime = CollectionUtils.isEmpty(shifts) ? new Date() : shifts.get(0).getShiftStartDateTime();
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
+            return defaultStartTime;
+        }
+        if (!isEnding && hasFirstWindowDateDailyPlan(sku, shifts)) {
             return defaultStartTime;
         }
         Set<LocalDate> positivePlanDateSet = resolvePositiveDailyPlanDateSet(sku);
@@ -355,6 +361,25 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
         }
         return defaultStartTime;
+    }
+
+    /**
+     * 判断窗口首日是否配置了日计划。
+     *
+     * @param sku 续作SKU
+     * @param shifts 排程窗口班次
+     * @return true-首日有日计划
+     */
+    private boolean hasFirstWindowDateDailyPlan(SkuScheduleDTO sku, List<LhShiftConfigVO> shifts) {
+        if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
+            return false;
+        }
+        LocalDate firstWindowDate = resolveShiftWorkDate(shifts.get(0));
+        if (firstWindowDate == null) {
+            return false;
+        }
+        SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(firstWindowDate);
+        return quota != null && Math.max(0, quota.getDayPlanQty()) > 0;
     }
 
     /**
