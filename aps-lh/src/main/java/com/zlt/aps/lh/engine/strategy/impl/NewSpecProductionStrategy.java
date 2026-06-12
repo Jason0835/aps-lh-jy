@@ -1990,6 +1990,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
             if (!started) {
@@ -2003,6 +2004,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (control == null || !control.isCanSchedule()) {
                 continue;
             }
+            int actualShiftPlanQty = ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
+                    shiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
+            boolean oddShiftAdjustEnabled = ShiftCapacityResolverUtil.isOddShiftCapacityAdjustEnabled(
+                    shiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
+            log.debug("奇数班产修正检查, 当前流程: 新增排程, materialCode: {}, machineCode: {}, 参数是否配置: {}, "
+                            + "参数值: {}, 配置值是否合法: {}, 是否启用: {}, 未启用原因: {}, 原始班产: {}, "
+                            + "班次序号: {}, 当前班别: {}, 当前班次修正后的计划量: {}, 班产落库字段值: {}",
+                    sku.getMaterialCode(), machine.getMachineCode(), StringUtils.isNotEmpty(configPlusShiftType),
+                    configPlusShiftType,
+                    ShiftCapacityResolverUtil.isOddShiftCapacityPlusShiftTypeValid(configPlusShiftType),
+                    oddShiftAdjustEnabled,
+                    ShiftCapacityResolverUtil.resolveOddShiftCapacityDisabledReason(
+                            shiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()),
+                    shiftCapacity, shift.getShiftIndex(), shift.resolveShiftTypeEnum(), actualShiftPlanQty,
+                    shiftCapacity);
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
@@ -2015,10 +2031,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
-                    dryIceDurationHours);
+                    dryIceDurationHours,
+                    shift,
+                    configPlusShiftType,
+                    ScheduleTypeEnum.NEW_SPEC.getCode());
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;
+            }
+            if (oddShiftAdjustEnabled) {
+                log.info("奇数班产修正命中, 当前流程: 新增排程, materialCode: {}, machineCode: {}, 参数值: {}, "
+                                + "原始班产: {}, 班次序号: {}, 当前班别: {}, 修正后班次计划量: {}, 班产落库字段值: {}",
+                        sku.getMaterialCode(), machine.getMachineCode(), configPlusShiftType, shiftCapacity,
+                        shift.getShiftIndex(), shift.resolveShiftTypeEnum(), actualShiftPlanQty, shiftCapacity);
             }
             shiftCapacityMap.put(shift.getShiftIndex(), shiftMaxQty);
             cursorStartTime = control.getEffectiveEndTime();
@@ -2682,6 +2707,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 shifts, capacityCalculate, request.getDailyPlanQuotaMap(), existingMachineCapacityMaps));
         request.setInitialActiveMachines(Math.max(1, existingMachineCapacityMaps.size() + 1));
         request.setShiftCapacity(Math.max(0, sku.getShiftCapacity()));
+        String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
+        request.setSingleMachineWindowCapacityQty(ShiftCapacityResolverUtil.sumActualShiftPlanQty(
+                shifts, Math.max(0, sku.getShiftCapacity()), configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
+        request.setSingleMachineDailyCapacityMap(ShiftCapacityResolverUtil.sumActualShiftPlanQtyByWorkDate(
+                shifts, Math.max(0, sku.getShiftCapacity()), configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
         request.setShortageLookAheadDays(resolveNewSpecShortageLookAheadDays(context));
         int monthlyHistoryShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         request.setMonthlyHistoryShortageQty(monthlyHistoryShortageQty);
@@ -3399,7 +3429,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
         sku.setTargetScheduleQty(dynamicTargetQty);
         int refinedTargetQty = getTargetScheduleQtyResolver().refineTargetQtyByMachineCapacity(
-                context, sku, candidateMachine, mouldChangeStartTime, firstProductionStartTime, shifts);
+                context, sku, candidateMachine, mouldChangeStartTime, firstProductionStartTime,
+                shifts, ScheduleTypeEnum.NEW_SPEC.getCode());
         sku.setTargetScheduleQty(originalTargetScheduleQty);
         return Math.max(0, refinedTargetQty);
     }
@@ -5247,7 +5278,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 result.getMouldQty(),
                 ShiftCapacityResolverUtil.resolveShiftDurationSeconds(targetShift),
                 dryIceLossQty,
-                dryIceDurationHours);
+                dryIceDurationHours,
+                targetShift,
+                ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context),
+                ScheduleTypeEnum.NEW_SPEC.getCode());
         return Math.max(0, ShiftProductionControlUtil.deductCapacityByControl(
                 control, shiftMaxQty, result.getMouldQty()));
     }
@@ -5736,6 +5770,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
 
         // 试制非收尾SKU在本轮分配内按日期追踪已消费日计划额度，防止同一天多个班次重复消费。
         // 新增排产仅补欠产场景复用该账本做滚动额度预演，避免窗口日计划为0时跨天班次被误裁。
@@ -5779,7 +5814,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
-                    dryIceDurationHours);
+                    dryIceDurationHours,
+                    shift,
+                    configPlusShiftType,
+                    ScheduleTypeEnum.NEW_SPEC.getCode());
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;

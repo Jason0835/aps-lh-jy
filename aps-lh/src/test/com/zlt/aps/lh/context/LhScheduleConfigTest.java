@@ -128,6 +128,25 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：奇数班产计划量加一班别默认不配置，配置后保留原始值交由产能入口判断合法性。
+     */
+    @Test
+    public void shouldReadOddShiftCapacityPlusShiftTypeConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals("", defaultConfig.getOddShiftCapacityPlusShiftType());
+
+        Map<String, String> paramMap = new HashMap<>(1);
+        paramMap.put(LhScheduleParamConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE, "2");
+        LhScheduleConfig config = new LhScheduleConfig(paramMap);
+        Assertions.assertEquals("2", config.getOddShiftCapacityPlusShiftType());
+
+        Map<String, String> invalidParamMap = new HashMap<>(1);
+        invalidParamMap.put(LhScheduleParamConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE, "9");
+        LhScheduleConfig invalidConfig = new LhScheduleConfig(invalidParamMap);
+        Assertions.assertEquals("9", invalidConfig.getOddShiftCapacityPlusShiftType());
+    }
+
+    /**
      * 用例说明：续作收尾小余量允许欠产偏差异常配置按默认2处理。
      */
     @Test
@@ -186,12 +205,12 @@ public class LhScheduleConfigTest {
     }
 
     /**
-     * 用例说明：新增排产换模均衡开关默认关闭，配置为1时才启用。
+     * 用例说明：新增排产换模均衡开关默认开启，配置为0时才关闭。
      */
     @Test
     public void shouldReadChangeoverBalanceSwitchConfig() {
         LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
-        Assertions.assertFalse(defaultConfig.isChangeoverBalanceEnabled());
+        Assertions.assertTrue(defaultConfig.isChangeoverBalanceEnabled());
 
         Map<String, String> enabledParamMap = new HashMap<String, String>(1);
         enabledParamMap.put(LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE, "1");
@@ -219,12 +238,12 @@ public class LhScheduleConfigTest {
     }
 
     /**
-     * 用例说明：本月历史欠产追加默认关闭，配置为1时才启用。
+     * 用例说明：本月历史欠产追加默认开启，配置为0时才关闭。
      */
     @Test
     public void shouldReadCarryForwardQtySwitchConfig() {
         LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
-        Assertions.assertFalse(defaultConfig.isCarryForwardQtyEnabled());
+        Assertions.assertTrue(defaultConfig.isCarryForwardQtyEnabled());
 
         Map<String, String> paramMap = new HashMap<>(1);
         paramMap.put(LhScheduleParamConstant.ENABLE_CARRY_FORWARD_QTY, "1");

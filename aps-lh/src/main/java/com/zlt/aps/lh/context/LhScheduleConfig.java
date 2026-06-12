@@ -526,6 +526,17 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 获取奇数班产计划量加一班别配置。
+     * <p>空值表示不启用；合法性由产能计算入口按 1/2/3 判断，非法值保持原班产口径。</p>
+     *
+     * @return 班别配置值
+     */
+    public String getOddShiftCapacityPlusShiftType() {
+        return getParamValue(LhScheduleParamConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE,
+                LhScheduleConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE);
+    }
+
+    /**
      * 判断新增排产是否启用换模均衡。
      *
      * @return true-启用；false-关闭

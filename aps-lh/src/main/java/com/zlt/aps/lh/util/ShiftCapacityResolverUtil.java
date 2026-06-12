@@ -4,6 +4,8 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -12,10 +14,14 @@ import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -35,6 +41,12 @@ public final class ShiftCapacityResolverUtil {
     private static final int SECONDS_PER_HOUR = 3600;
     /** 单控拆分机台固定按左右两侧拆分班产 */
     private static final int SINGLE_CONTROL_SPLIT_SIDE_COUNT = 2;
+    /** 晚班 +1 配置值 */
+    private static final int NIGHT_PLUS_SHIFT_TYPE = 1;
+    /** 早班 +1 配置值 */
+    private static final int MORNING_PLUS_SHIFT_TYPE = 2;
+    /** 中班 +1 配置值 */
+    private static final int AFTERNOON_PLUS_SHIFT_TYPE = 3;
 
     private ShiftCapacityResolverUtil() {
     }
@@ -83,6 +95,164 @@ public final class ShiftCapacityResolverUtil {
             return shiftCapacity;
         }
         return shiftCapacity / SINGLE_CONTROL_SPLIT_SIDE_COUNT;
+    }
+
+    /**
+     * 解析奇数班产修正后的当前班次计划量。
+     * <p>仅新增、续作、换活字块显式传入排程类型时启用；参数未配置、非法、班产为偶数时保持原值。</p>
+     *
+     * @param baseCapacity 原始班产
+     * @param shift 当前班次
+     * @param configPlusShiftType 配置的加一班别，1-晚班，2-早班，3-中班
+     * @param scheduleType 排程类型
+     * @return 当前班次实际计划量
+     */
+    public static int resolveActualShiftPlanQty(int baseCapacity,
+                                                LhShiftConfigVO shift,
+                                                String configPlusShiftType,
+                                                String scheduleType) {
+        if (!isOddShiftCapacityAdjustEnabled(baseCapacity, shift, configPlusShiftType, scheduleType)) {
+            return baseCapacity;
+        }
+        int plusShiftType = Integer.parseInt(configPlusShiftType.trim());
+        Integer currentShiftType = resolveShiftTypeValue(shift.resolveShiftTypeEnum());
+        if (Objects.isNull(currentShiftType)) {
+            return baseCapacity;
+        }
+        return currentShiftType == plusShiftType ? baseCapacity + 1 : baseCapacity - 1;
+    }
+
+    /**
+     * 按班次列表汇总修正后的单机窗口理论产能。
+     *
+     * @param shifts 班次列表
+     * @param baseCapacity 原始班产
+     * @param configPlusShiftType 配置的加一班别
+     * @param scheduleType 排程类型
+     * @return 理论产能合计
+     */
+    public static int sumActualShiftPlanQty(List<LhShiftConfigVO> shifts,
+                                            int baseCapacity,
+                                            String configPlusShiftType,
+                                            String scheduleType) {
+        if (CollectionUtils.isEmpty(shifts)) {
+            return 0;
+        }
+        int totalQty = 0;
+        for (LhShiftConfigVO shift : shifts) {
+            totalQty += Math.max(0, resolveActualShiftPlanQty(
+                    baseCapacity, shift, configPlusShiftType, scheduleType));
+        }
+        return Math.max(0, totalQty);
+    }
+
+    /**
+     * 按业务日汇总修正后的单机理论产能。
+     *
+     * @param shifts 班次列表
+     * @param baseCapacity 原始班产
+     * @param configPlusShiftType 配置的加一班别
+     * @param scheduleType 排程类型
+     * @return key=业务日，value=当日理论产能
+     */
+    public static Map<LocalDate, Integer> sumActualShiftPlanQtyByWorkDate(List<LhShiftConfigVO> shifts,
+                                                                          int baseCapacity,
+                                                                          String configPlusShiftType,
+                                                                          String scheduleType) {
+        Map<LocalDate, Integer> capacityMap = new LinkedHashMap<LocalDate, Integer>(
+                CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
+        if (CollectionUtils.isEmpty(shifts)) {
+            return capacityMap;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())) {
+                continue;
+            }
+            LocalDate workDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            int shiftPlanQty = resolveActualShiftPlanQty(
+                    baseCapacity, shift, configPlusShiftType, scheduleType);
+            capacityMap.merge(workDate, Math.max(0, shiftPlanQty), Integer::sum);
+        }
+        return capacityMap;
+    }
+
+    /**
+     * 获取奇数班产修正参数。
+     *
+     * @param context 排程上下文
+     * @return 参数值，未配置返回空字符串
+     */
+    public static String resolveOddShiftCapacityPlusShiftType(LhScheduleContext context) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleConfig())) {
+            return StringUtils.EMPTY;
+        }
+        return context.getScheduleConfig().getOddShiftCapacityPlusShiftType();
+    }
+
+    /**
+     * 判断奇数班产修正是否启用。
+     *
+     * @param baseCapacity 原始班产
+     * @param shift 当前班次
+     * @param configPlusShiftType 配置值
+     * @param scheduleType 排程类型
+     * @return true-启用；false-不启用
+     */
+    public static boolean isOddShiftCapacityAdjustEnabled(int baseCapacity,
+                                                          LhShiftConfigVO shift,
+                                                          String configPlusShiftType,
+                                                          String scheduleType) {
+        return isOddShiftCapacityAdjustEnabledInternal(baseCapacity, shift, configPlusShiftType, scheduleType);
+    }
+
+    /**
+     * 判断奇数班产加一班别配置是否合法。
+     *
+     * @param configPlusShiftType 配置值
+     * @return true-合法
+     */
+    public static boolean isOddShiftCapacityPlusShiftTypeValid(String configPlusShiftType) {
+        return isValidPlusShiftType(configPlusShiftType);
+    }
+
+    /**
+     * 解析奇数班产修正未启用原因。
+     *
+     * @param baseCapacity 原始班产
+     * @param shift 当前班次
+     * @param configPlusShiftType 配置值
+     * @param scheduleType 排程类型
+     * @return 未启用原因，已启用时返回空字符串
+     */
+    public static String resolveOddShiftCapacityDisabledReason(int baseCapacity,
+                                                               LhShiftConfigVO shift,
+                                                               String configPlusShiftType,
+                                                               String scheduleType) {
+        if (isOddShiftCapacityAdjustEnabled(baseCapacity, shift, configPlusShiftType, scheduleType)) {
+            return StringUtils.EMPTY;
+        }
+        if (!isSupportedScheduleType(scheduleType)) {
+            return "流程不在范围";
+        }
+        if (StringUtils.isEmpty(configPlusShiftType)) {
+            return "参数未配置";
+        }
+        if (!isValidPlusShiftType(configPlusShiftType)) {
+            return "参数值非法";
+        }
+        if (baseCapacity <= 0) {
+            return "原始班产小于等于0";
+        }
+        if (baseCapacity % 2 == 0) {
+            return "原始班产为偶数";
+        }
+        if (Objects.isNull(shift)) {
+            return "班次为空";
+        }
+        if (Objects.isNull(resolveShiftTypeValue(shift.resolveShiftTypeEnum()))) {
+            return "班别无法识别";
+        }
+        return "未知原因";
     }
 
     /**
@@ -182,6 +352,77 @@ public final class ShiftCapacityResolverUtil {
     }
 
     /**
+     * 判断当前班次是否启用奇数班产修正。
+     *
+     * @param baseCapacity 原始班产
+     * @param shift 当前班次
+     * @param configPlusShiftType 配置值
+     * @param scheduleType 排程类型
+     * @return true-启用；false-保持原逻辑
+     */
+    private static boolean isOddShiftCapacityAdjustEnabledInternal(int baseCapacity,
+                                                                   LhShiftConfigVO shift,
+                                                                   String configPlusShiftType,
+                                                                   String scheduleType) {
+        return baseCapacity > 0
+                && baseCapacity % 2 != 0
+                && Objects.nonNull(shift)
+                && isSupportedScheduleType(scheduleType)
+                && isValidPlusShiftType(configPlusShiftType);
+    }
+
+    /**
+     * 判断排程类型是否属于本次规则范围。
+     *
+     * @param scheduleType 排程类型
+     * @return true-新增、续作或换活字块
+     */
+    private static boolean isSupportedScheduleType(String scheduleType) {
+        return StringUtils.equals(ScheduleTypeEnum.NEW_SPEC.getCode(), scheduleType)
+                || StringUtils.equals(ScheduleTypeEnum.CONTINUOUS.getCode(), scheduleType)
+                || StringUtils.equals(ScheduleTypeEnum.TYPE_BLOCK.getCode(), scheduleType);
+    }
+
+    /**
+     * 判断配置的加一班别是否合法。
+     *
+     * @param configPlusShiftType 配置值
+     * @return true-合法
+     */
+    private static boolean isValidPlusShiftType(String configPlusShiftType) {
+        if (StringUtils.isEmpty(configPlusShiftType)) {
+            return false;
+        }
+        try {
+            int plusShiftType = Integer.parseInt(configPlusShiftType.trim());
+            return plusShiftType == NIGHT_PLUS_SHIFT_TYPE
+                    || plusShiftType == MORNING_PLUS_SHIFT_TYPE
+                    || plusShiftType == AFTERNOON_PLUS_SHIFT_TYPE;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 解析班次枚举对应的参数配置值。
+     *
+     * @param shiftEnum 班次枚举
+     * @return 1-晚班，2-早班，3-中班；无法识别返回 null
+     */
+    private static Integer resolveShiftTypeValue(ShiftEnum shiftEnum) {
+        if (ShiftEnum.NIGHT_SHIFT == shiftEnum) {
+            return NIGHT_PLUS_SHIFT_TYPE;
+        }
+        if (ShiftEnum.MORNING_SHIFT == shiftEnum) {
+            return MORNING_PLUS_SHIFT_TYPE;
+        }
+        if (ShiftEnum.AFTERNOON_SHIFT == shiftEnum) {
+            return AFTERNOON_PLUS_SHIFT_TYPE;
+        }
+        return null;
+    }
+
+    /**
      * 按统一业务口径解析班次产能。
      * <p>当前口径分两类：</p>
      * <p>1. 有班产主数据：按“整班班产 × 可用时间占比”折算，使用 {@link RoundingMode#DOWN} 向下取整；</p>
@@ -227,6 +468,33 @@ public final class ShiftCapacityResolverUtil {
             return 0;
         }
         return (int) (effectiveAvailableSeconds / lhTimeSeconds) * resolvedMouldQty;
+    }
+
+    /**
+     * 按统一业务口径解析班次产能，并在指定排程流程内应用奇数班产班别修正。
+     *
+     * @param shift 当前班次
+     * @param shiftCapacity 原始班产
+     * @param lhTimeSeconds 硫化时长（秒）
+     * @param mouldQty 模台数
+     * @param shiftDurationSeconds 班次总时长（秒）
+     * @param availableSeconds 有效可生产时长（秒）
+     * @param configPlusShiftType 配置的加一班别
+     * @param scheduleType 排程类型
+     * @return 班次可排计划量
+     */
+    public static int resolveShiftCapacity(LhShiftConfigVO shift,
+                                           int shiftCapacity,
+                                           int lhTimeSeconds,
+                                           int mouldQty,
+                                           long shiftDurationSeconds,
+                                           long availableSeconds,
+                                           String configPlusShiftType,
+                                           String scheduleType) {
+        int actualShiftCapacity = resolveActualShiftPlanQty(
+                shiftCapacity, shift, configPlusShiftType, scheduleType);
+        return resolveShiftCapacity(actualShiftCapacity, lhTimeSeconds, mouldQty,
+                shiftDurationSeconds, availableSeconds);
     }
 
     /**
@@ -429,6 +697,44 @@ public final class ShiftCapacityResolverUtil {
     }
 
     /**
+     * 计算扣减停机、清洗后的班次最大计划量，并按指定排程流程应用奇数班产班别修正。
+     *
+     * @param devicePlanShutList 设备停机计划
+     * @param cleaningWindowList 清洗时间窗口
+     * @param machineCode 机台编号
+     * @param windowStartTime 时间窗开始时间
+     * @param windowEndTime 时间窗结束时间
+     * @param shiftCapacity 原始班产
+     * @param lhTimeSeconds 硫化时长（秒）
+     * @param mouldQty 模台数
+     * @param shiftDurationSeconds 班次总时长（秒）
+     * @param dryIceLossQty 干冰清洗损失数量
+     * @param dryIceDurationHours 干冰标准清洗时长（小时）
+     * @param shift 当前班次
+     * @param configPlusShiftType 配置的加一班别
+     * @param scheduleType 排程类型
+     * @return 扣减后的班次最大计划量
+     */
+    public static int resolveShiftCapacityWithDowntime(List<MdmDevicePlanShut> devicePlanShutList,
+                                                       List<MachineCleaningWindowDTO> cleaningWindowList,
+                                                       String machineCode,
+                                                       Date windowStartTime,
+                                                       Date windowEndTime,
+                                                       int shiftCapacity,
+                                                       int lhTimeSeconds,
+                                                       int mouldQty,
+                                                       long shiftDurationSeconds,
+                                                       int dryIceLossQty,
+                                                       int dryIceDurationHours,
+                                                       LhShiftConfigVO shift,
+                                                       String configPlusShiftType,
+                                                       String scheduleType) {
+        return resolveShiftCapacityWithDowntime(devicePlanShutList, cleaningWindowList, null, machineCode,
+                windowStartTime, windowEndTime, shiftCapacity, lhTimeSeconds, mouldQty, shiftDurationSeconds,
+                dryIceLossQty, dryIceDurationHours, shift, configPlusShiftType, scheduleType);
+    }
+
+    /**
      * 计算扣减停机、清洗与保养后的班次最大计划量。
      *
      * @param devicePlanShutList 设备停机计划
@@ -477,6 +783,48 @@ public final class ShiftCapacityResolverUtil {
         boolean shouldNormalizeResidual = (shiftDurationSeconds > 0 && maintenanceAdjustedSeconds < shiftDurationSeconds)
                 || cleaningLossQty > 0;
         return normalizeQtyToMouldMultiple(finalQty, mouldQty, shouldNormalizeResidual);
+    }
+
+    /**
+     * 计算扣减停机、清洗与保养后的班次最大计划量，并按指定排程流程应用奇数班产班别修正。
+     *
+     * @param devicePlanShutList 设备停机计划
+     * @param cleaningWindowList 清洗时间窗口
+     * @param maintenanceWindowList 保养时间窗口
+     * @param machineCode 机台编号
+     * @param windowStartTime 时间窗开始时间
+     * @param windowEndTime 时间窗结束时间
+     * @param shiftCapacity 原始班产
+     * @param lhTimeSeconds 硫化时长（秒）
+     * @param mouldQty 模台数
+     * @param shiftDurationSeconds 班次总时长（秒）
+     * @param dryIceLossQty 干冰清洗损失数量
+     * @param dryIceDurationHours 干冰标准清洗时长（小时）
+     * @param shift 当前班次
+     * @param configPlusShiftType 配置的加一班别
+     * @param scheduleType 排程类型
+     * @return 扣减后的班次最大计划量
+     */
+    public static int resolveShiftCapacityWithDowntime(List<MdmDevicePlanShut> devicePlanShutList,
+                                                       List<MachineCleaningWindowDTO> cleaningWindowList,
+                                                       List<MachineMaintenanceWindowDTO> maintenanceWindowList,
+                                                       String machineCode,
+                                                       Date windowStartTime,
+                                                       Date windowEndTime,
+                                                       int shiftCapacity,
+                                                       int lhTimeSeconds,
+                                                       int mouldQty,
+                                                       long shiftDurationSeconds,
+                                                       int dryIceLossQty,
+                                                       int dryIceDurationHours,
+                                                       LhShiftConfigVO shift,
+                                                       String configPlusShiftType,
+                                                       String scheduleType) {
+        int actualShiftCapacity = resolveActualShiftPlanQty(
+                shiftCapacity, shift, configPlusShiftType, scheduleType);
+        return resolveShiftCapacityWithDowntime(devicePlanShutList, cleaningWindowList, maintenanceWindowList,
+                machineCode, windowStartTime, windowEndTime, actualShiftCapacity, lhTimeSeconds, mouldQty,
+                shiftDurationSeconds, dryIceLossQty, dryIceDurationHours);
     }
 
     /**

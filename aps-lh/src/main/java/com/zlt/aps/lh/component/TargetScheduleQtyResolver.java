@@ -112,6 +112,29 @@ public class TargetScheduleQtyResolver {
                                                 Date switchStartTime,
                                                 Date productionStartTime,
                                                 List<LhShiftConfigVO> shifts) {
+        return refineTargetQtyByMachineCapacity(context, sku, machine, switchStartTime,
+                productionStartTime, shifts, null);
+    }
+
+    /**
+     * 按机台实际开产时间收敛目标排产量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machine 机台
+     * @param switchStartTime 切换开始时间
+     * @param productionStartTime 实际开产时间
+     * @param shifts 排程窗口班次
+     * @param scheduleType 排程类型
+     * @return 收敛后的目标排产量
+     */
+    public int refineTargetQtyByMachineCapacity(LhScheduleContext context,
+                                                SkuScheduleDTO sku,
+                                                MachineScheduleDTO machine,
+                                                Date switchStartTime,
+                                                Date productionStartTime,
+                                                List<LhShiftConfigVO> shifts,
+                                                String scheduleType) {
         if (Objects.isNull(sku)) {
             return 0;
         }
@@ -121,7 +144,8 @@ public class TargetScheduleQtyResolver {
         if (currentTargetQty <= 0 || !isFullCapacityMode(context) || sku.isStrictTargetQty()) {
             return Math.max(currentTargetQty, 0);
         }
-        int actualCapacityQty = resolveActualWindowCapacity(context, sku, machine, switchStartTime, productionStartTime, shifts);
+        int actualCapacityQty = resolveActualWindowCapacity(
+                context, sku, machine, switchStartTime, productionStartTime, shifts, scheduleType);
         if (actualCapacityQty <= 0) {
             return 0;
         }
@@ -193,6 +217,29 @@ public class TargetScheduleQtyResolver {
                                             Date switchStartTime,
                                             Date productionStartTime,
                                             List<LhShiftConfigVO> shifts) {
+        return resolveActualWindowCapacity(context, sku, machine, switchStartTime,
+                productionStartTime, shifts, null);
+    }
+
+    /**
+     * 解析机台在剩余窗口内的实际可排产量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machine 机台
+     * @param switchStartTime 切换开始时间
+     * @param productionStartTime 实际开产时间
+     * @param shifts 排程窗口班次
+     * @param scheduleType 排程类型
+     * @return 实际可排产量
+     */
+    private int resolveActualWindowCapacity(LhScheduleContext context,
+                                            SkuScheduleDTO sku,
+                                            MachineScheduleDTO machine,
+                                            Date switchStartTime,
+                                            Date productionStartTime,
+                                            List<LhShiftConfigVO> shifts,
+                                            String scheduleType) {
         if (Objects.isNull(context)
                 || Objects.isNull(sku)
                 || Objects.isNull(machine)
@@ -224,6 +271,7 @@ public class TargetScheduleQtyResolver {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
 
         Date cursorStartTime = firstProductionStartTime;
         int totalQty = 0;
@@ -253,7 +301,10 @@ public class TargetScheduleQtyResolver {
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
-                    dryIceDurationHours);
+                    dryIceDurationHours,
+                    shift,
+                    configPlusShiftType,
+                    scheduleType);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;
@@ -491,6 +542,29 @@ public class TargetScheduleQtyResolver {
                                                        Date productionStartTime,
                                                        List<LhShiftConfigVO> shifts) {
         return resolveActualWindowCapacity(context, sku, machine, switchStartTime, productionStartTime, shifts);
+    }
+
+    /**
+     * 按指定开产时刻计算机台在剩余窗口内的实际可排产量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machine 机台
+     * @param switchStartTime 切换开始时间
+     * @param productionStartTime 实际开产时间
+     * @param shifts 排程窗口班次
+     * @param scheduleType 排程类型
+     * @return 机台在剩余窗口内的实际可排产量
+     */
+    public int calcMachineAvailableCapacityByStartTime(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       MachineScheduleDTO machine,
+                                                       Date switchStartTime,
+                                                       Date productionStartTime,
+                                                       List<LhShiftConfigVO> shifts,
+                                                       String scheduleType) {
+        return resolveActualWindowCapacity(context, sku, machine, switchStartTime,
+                productionStartTime, shifts, scheduleType);
     }
 
     /**

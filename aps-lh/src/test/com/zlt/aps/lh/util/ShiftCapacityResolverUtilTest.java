@@ -3,6 +3,7 @@ package com.zlt.aps.lh.util;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.junit.jupiter.api.Test;
@@ -237,6 +238,72 @@ class ShiftCapacityResolverUtilTest {
         assertEquals(20, shiftQty, "保养占用中班 1 小时后，应按剩余 7/8 时间折算班产并向上收敛到双模偶数");
         assertEquals(dateTime(2026, 4, 22, 22, 22, 7), completionTime,
                 "向上收敛到 20 条需跨过保养窗口，完工时间超出班末");
+    }
+
+    @Test
+    void resolveActualShiftPlanQty_shouldKeepOriginalWhenConfigMissingInvalidEvenOrSceneNotMatched() {
+        LhShiftConfigVO morningShift = findMorningShift(date(2026, 4, 17));
+
+        assertEquals(17, ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
+                17, morningShift, null, ScheduleTypeEnum.NEW_SPEC.getCode()));
+        assertEquals(17, ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
+                17, morningShift, "", ScheduleTypeEnum.NEW_SPEC.getCode()));
+        assertEquals(17, ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
+                17, morningShift, "9", ScheduleTypeEnum.NEW_SPEC.getCode()));
+        assertEquals(18, ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
+                18, morningShift, "2", ScheduleTypeEnum.NEW_SPEC.getCode()));
+        assertEquals(17, ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
+                17, morningShift, "2", "99"));
+    }
+
+    @Test
+    void resolveActualShiftPlanQty_shouldAdjustMorningShiftWhenConfigIsTwo() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 4, 17));
+
+        assertEquals(18, actualQty(shifts, 1, "2"));
+        assertEquals(16, actualQty(shifts, 2, "2"));
+        assertEquals(16, actualQty(shifts, 3, "2"));
+        assertEquals(18, actualQty(shifts, 4, "2"));
+        assertEquals(16, actualQty(shifts, 5, "2"));
+        assertEquals(16, actualQty(shifts, 6, "2"));
+        assertEquals(18, actualQty(shifts, 7, "2"));
+        assertEquals(16, actualQty(shifts, 8, "2"));
+    }
+
+    @Test
+    void resolveActualShiftPlanQty_shouldAdjustAfternoonShiftWhenConfigIsThree() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 4, 17));
+
+        assertEquals(16, actualQty(shifts, 1, "3"));
+        assertEquals(18, actualQty(shifts, 2, "3"));
+        assertEquals(16, actualQty(shifts, 3, "3"));
+        assertEquals(16, actualQty(shifts, 4, "3"));
+        assertEquals(18, actualQty(shifts, 5, "3"));
+        assertEquals(16, actualQty(shifts, 6, "3"));
+        assertEquals(16, actualQty(shifts, 7, "3"));
+        assertEquals(18, actualQty(shifts, 8, "3"));
+    }
+
+    @Test
+    void resolveActualShiftPlanQty_shouldAdjustNightShiftWhenConfigIsOne() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 4, 17));
+
+        assertEquals(16, actualQty(shifts, 1, "1"));
+        assertEquals(16, actualQty(shifts, 2, "1"));
+        assertEquals(18, actualQty(shifts, 3, "1"));
+        assertEquals(16, actualQty(shifts, 4, "1"));
+        assertEquals(16, actualQty(shifts, 5, "1"));
+        assertEquals(18, actualQty(shifts, 6, "1"));
+        assertEquals(16, actualQty(shifts, 7, "1"));
+        assertEquals(16, actualQty(shifts, 8, "1"));
+    }
+
+    private int actualQty(List<LhShiftConfigVO> shifts, int shiftIndex, String configPlusShiftType) {
+        return ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
+                17, shifts.get(shiftIndex - 1), configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
     }
 
     private LhShiftConfigVO findMorningShift(Date scheduleDate) {

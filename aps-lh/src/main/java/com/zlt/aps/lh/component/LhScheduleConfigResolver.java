@@ -206,6 +206,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS, 1);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD,
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, 0);
+        putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE,
+                LhScheduleConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE,
                 LhScheduleConstant.ENABLE_CHANGEOVER_BALANCE);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS,

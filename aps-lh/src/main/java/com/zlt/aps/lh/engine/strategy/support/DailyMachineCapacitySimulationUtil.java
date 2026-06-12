@@ -138,7 +138,8 @@ public final class DailyMachineCapacitySimulationUtil {
                 request, decision.getProductionDate(), forcedShortageWindowMode);
         if (Objects.nonNull(nextProductionDate)) {
             nextDayPlanQty = resolveTodayPlanQty(request.getDailyPlanQuotaMap().get(nextProductionDate));
-            nextDayThreeShiftCapacityQty = resolveNextDayThreeShiftCapacityQty(request, activeMachines);
+            nextDayThreeShiftCapacityQty = resolveDailyTheoryCapacityQty(
+                    request, nextProductionDate, activeMachines);
         }
         int demandQty;
         int capacityQty;
@@ -319,13 +320,25 @@ public final class DailyMachineCapacitySimulationUtil {
         if (request == null || request.getShiftCapacity() <= 0) {
             return 0;
         }
+        int singleMachineWindowCapacityQty = request.getSingleMachineWindowCapacityQty();
+        if (singleMachineWindowCapacityQty > 0) {
+            return Math.max(0, activeMachines) * singleMachineWindowCapacityQty;
+        }
         return Math.max(0, activeMachines) * Math.max(0, request.getShiftCapacity()) * WINDOW_TOTAL_SHIFT_COUNT;
     }
 
-    private static int resolveNextDayThreeShiftCapacityQty(DailyMachineCapacitySimulationRequest request,
-                                                           int activeMachines) {
+    private static int resolveDailyTheoryCapacityQty(DailyMachineCapacitySimulationRequest request,
+                                                     LocalDate productionDate,
+                                                     int activeMachines) {
         if (request == null || request.getShiftCapacity() <= 0) {
             return 0;
+        }
+        if (!CollectionUtils.isEmpty(request.getSingleMachineDailyCapacityMap())
+                && Objects.nonNull(productionDate)) {
+            Integer singleMachineDailyCapacityQty = request.getSingleMachineDailyCapacityMap().get(productionDate);
+            if (singleMachineDailyCapacityQty != null && singleMachineDailyCapacityQty > 0) {
+                return Math.max(0, activeMachines) * singleMachineDailyCapacityQty;
+            }
         }
         return Math.max(0, activeMachines) * Math.max(0, request.getShiftCapacity()) * NEXT_DAY_SHIFT_COUNT;
     }
@@ -334,7 +347,8 @@ public final class DailyMachineCapacitySimulationUtil {
                                                               DailyMachineCapacityDayDecision decision,
                                                               int activeMachines) {
         return Objects.nonNull(decision)
-                && decision.getTodayPlanQty() > resolveNextDayThreeShiftCapacityQty(request, activeMachines);
+                && decision.getTodayPlanQty() > resolveDailyTheoryCapacityQty(
+                request, decision.getProductionDate(), activeMachines);
     }
 
     private static boolean shouldCheckNextDayThreeShiftCapacity(DailyMachineCapacitySimulationRequest request,

@@ -31,6 +31,12 @@ public class DailyMachineCapacitySimulationRequest implements Serializable {
     /** 单台机台班产，仅用于8班窗口总产能和后一天3班理论产能判断 */
     private int shiftCapacity;
 
+    /** 单台机台8班窗口理论产能；配置奇数班产修正时按班别逐班累加 */
+    private int singleMachineWindowCapacityQty;
+
+    /** 单台机台按业务日汇总的理论产能；配置奇数班产修正时按班别逐班累加 */
+    private Map<LocalDate, Integer> singleMachineDailyCapacityMap;
+
     /** 向后观察天数，不含当天 */
     private int shortageLookAheadDays;
 

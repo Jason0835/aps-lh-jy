@@ -336,6 +336,9 @@ public final class LhScheduleConstant {
     /** 续作收尾小余量允许欠产偏差值默认值 */
     public static final int CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY = 2;
 
+    /** 奇数班产计划量加一班别默认值，空值表示不启用 */
+    public static final String ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE = "";
+
     /** 新增排产换模均衡开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_CHANGEOVER_BALANCE = 1;
 

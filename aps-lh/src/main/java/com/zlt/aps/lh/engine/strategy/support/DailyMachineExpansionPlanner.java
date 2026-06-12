@@ -3,9 +3,11 @@ package com.zlt.aps.lh.engine.strategy.support;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.CollectionUtils;
@@ -239,6 +241,22 @@ public final class DailyMachineExpansionPlanner {
     public static boolean isDailyLookAheadCapacitySatisfied(LhScheduleContext context,
                                                             SkuScheduleDTO sku,
                                                             int activeMachineCount) {
+        return isDailyLookAheadCapacitySatisfied(context, sku, activeMachineCount, null);
+    }
+
+    /**
+     * 判断当前机台数是否已满足欠产未超阈值时的逐日后看规则。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param activeMachineCount 当前已承接机台数
+     * @param scheduleType 排程类型
+     * @return true-后续日计划已满足
+     */
+    public static boolean isDailyLookAheadCapacitySatisfied(LhScheduleContext context,
+                                                            SkuScheduleDTO sku,
+                                                            int activeMachineCount,
+                                                            String scheduleType) {
         if (Objects.isNull(sku) || sku.isStrictNewSpecShortageOnly()
                 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())
                 || Math.max(0, sku.getWindowPlanQty()) <= 0
@@ -251,12 +269,21 @@ public final class DailyMachineExpansionPlanner {
         if (threshold <= 0 || historyShortageQty > threshold) {
             return false;
         }
-        int threeShiftCapacityQty = Math.max(0, activeMachineCount) * Math.max(0, sku.getShiftCapacity()) * 3;
+        Map<LocalDate, Integer> singleMachineDailyCapacityMap = new LinkedHashMap<LocalDate, Integer>(4);
+        if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleDate())) {
+            List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
+            singleMachineDailyCapacityMap.putAll(ShiftCapacityResolverUtil.sumActualShiftPlanQtyByWorkDate(
+                    shifts, Math.max(0, sku.getShiftCapacity()),
+                    ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context), scheduleType));
+        }
         LocalDate previousDate = null;
         for (LocalDate productionDate : sku.getDailyPlanQuotaMap().keySet()) {
             if (Objects.nonNull(previousDate)) {
                 SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(productionDate);
                 int dayPlanQty = quota == null ? 0 : Math.max(0, quota.getDayPlanQty());
+                int threeShiftCapacityQty = Math.max(0, activeMachineCount)
+                        * singleMachineDailyCapacityMap.getOrDefault(
+                        productionDate, Math.max(0, sku.getShiftCapacity()) * 3);
                 if (dayPlanQty > threeShiftCapacityQty) {
                     return false;
                 }
