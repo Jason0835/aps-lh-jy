@@ -293,6 +293,30 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 多机台续作窗口内日计划仍有需求且后续下降时，即使前置收尾标记命中，也必须按天降模。
+     */
+    @Test
+    public void shouldReduceEndingMarkedContinuousByWorkDateWhenFutureDayPlanDrops() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002326", 16, 425, buildQuotaMapByShifts(shifts, 192, 192, 30));
+        String[] machineCodes = new String[]{"K1516", "K1607", "K1905", "K1924"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult("3302002326", machineCode, 16, shifts, "1");
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        LocalDate secondDay = resolveShiftWorkDate(shifts, 2);
+        LocalDate thirdDay = resolveShiftWorkDate(shifts, 3);
+        Assertions.assertTrue(sumPlanQtyByWorkDate(context.getScheduleResultList(), shifts, secondDay) >= 192);
+        Assertions.assertEquals(1, countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, thirdDay));
+    }
+
+    /**
      * 收尾续作即使左右单控来自不同运行态对象，也必须按同物料硫化余量严格控量。
      */
     @Test
@@ -595,6 +619,23 @@ public class SchedulingStrategyRegressionTest {
             }
         }
         return count;
+    }
+
+    private int sumPlanQtyByWorkDate(List<LhScheduleResult> results,
+                                     List<LhShiftConfigVO> shifts,
+                                     LocalDate workDate) {
+        int totalQty = 0;
+        for (LhScheduleResult result : results) {
+            for (LhShiftConfigVO shift : shifts) {
+                LocalDate currentDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                if (!workDate.equals(currentDate)) {
+                    continue;
+                }
+                Integer shiftPlanQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                totalQty += shiftPlanQty == null ? 0 : Math.max(0, shiftPlanQty);
+            }
+        }
+        return totalQty;
     }
 
     private LocalDate resolveShiftWorkDate(List<LhShiftConfigVO> shifts, int dayIndex) {

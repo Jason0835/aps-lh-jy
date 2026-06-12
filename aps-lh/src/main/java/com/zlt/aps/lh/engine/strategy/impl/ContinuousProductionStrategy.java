@@ -780,12 +780,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                        List<LhScheduleResult> skuResults,
                                                        List<LhShiftConfigVO> shifts) {
         if (sourceSku == null
-                || hasEndingResult(skuResults)
                 || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())
                 || sourceSku.getDailyPlanQuotaMap().size() <= 1
                 || CollectionUtils.isEmpty(shifts)) {
             return false;
         }
+        // 续作前置收尾判定可能因窗口总余量命中，但只要窗口内仍有正向日计划下降，就必须按天降模保留后续补量机会。
         Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate = groupShiftsByWorkDate(shifts);
         for (LocalDate productionDate : shiftMapByDate.keySet()) {
             if (hasPositiveDayPlanDropAroundDate(sourceSku, shiftMapByDate, productionDate)) {
