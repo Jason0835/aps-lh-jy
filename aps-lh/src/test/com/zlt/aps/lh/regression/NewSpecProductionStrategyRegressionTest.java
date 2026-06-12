@@ -2674,6 +2674,56 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldSkipHistoryShortageOnlySkuWhenPreviousScheduleAlreadyProduced() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302003999");
+        sku.setMaterialDesc("仅历史欠产且最近已排物料");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(64);
+        sku.setDailyPlanQty(0);
+        sku.setTargetScheduleQty(64);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(64);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(64);
+        sku.setFutureMonthPlanQtyAfterWindow(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setMaterialCode(sku.getMaterialCode());
+        previousResult.setDailyPlanQty(64);
+        context.getPreviousScheduleResultList().add(previousResult);
+
+        MachineScheduleDTO k1105 = buildMachine("K1105", dateTime(2026, 5, 1, 6, 0));
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(k1105),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(),
+                "仅历史欠产且最近一次已排过时，本次新增排产应跳过该SKU");
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "跳过后应从新增待排队列移除");
+        assertEquals(1, context.getUnscheduledResultList().size(), "跳过补排时应写入未排结果");
+        assertEquals(sku.getMaterialCode(), context.getUnscheduledResultList().get(0).getMaterialCode());
+        assertEquals(Integer.valueOf(64), context.getUnscheduledResultList().get(0).getUnscheduledQty());
+        assertEquals("仅历史欠产、后续无月计划，且最近一次排程已排过，本次跳过补排",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    @Test
     void scheduleNewSpecs_shouldFillFormalSingleMachineToWindowEndWhenNoExtraMachineNeeded() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

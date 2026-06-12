@@ -109,6 +109,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String NEW_SPEC_SCHEDULE_TYPE = "02";
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
+    private static final String HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_SCHEDULED_UNSCHEDULED_REASON =
+            "仅历史欠产、后续无月计划，且最近一次排程已排过，本次跳过补排";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚收尾仅按硫化余量，余量为0且胎胚库存不可用，收尾目标量为0";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
@@ -378,6 +380,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             SkuScheduleDTO sku = iterator.next();
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
+            if (shouldSkipHistoryShortageOnlyPreviousScheduledSku(context, sku, isEnding)) {
+                int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
+                addUnscheduledResult(context, sku, historyShortageQty,
+                        HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_SCHEDULED_UNSCHEDULED_REASON,
+                        unscheduledReasonCountMap);
+                removeCurrentNewSpecSku(context, iterator, sku);
+                progressed = true;
+                log.info("新增SKU仅历史欠产且最近一次已排过，本次跳过补排, materialCode: {}, "
+                                + "historyShortageQty: {}, scheduleDate: {}, previousScheduled: {}",
+                        sku.getMaterialCode(), historyShortageQty,
+                        LhScheduleTimeUtil.formatDate(context.getScheduleDate()), true);
+                continue;
+            }
             boolean forceEndingByNoFuturePlan = prepareNewSpecShortageQuota(context, sku);
             if (forceEndingByNoFuturePlan) {
                 // 窗口和月底均无未来计划时，新增按收尾清量处理，目标量允许结合胎胚库存上调。
@@ -851,6 +866,72 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private boolean prepareNewSpecShortageQuota(LhScheduleContext context, SkuScheduleDTO sku) {
         return DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "新增排产")
                 .isForceEndingByNoFuturePlan();
+    }
+
+    /**
+     * 判断仅历史欠产且后续无计划的SKU是否需要跳过本轮新增补排。
+     * <p>该规则只限制原始非收尾、非续作补偿的新增SKU；窗口 dayN 与月底后续计划均为0，
+     * 且最近一次排程已经有该SKU有效排产量时，避免本轮重复补排历史欠产。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 新增排产SKU
+     * @param originalEnding 原始收尾判断结果
+     * @return true-跳过本轮新增补排；false-继续原新增排产逻辑
+     */
+    private boolean shouldSkipHistoryShortageOnlyPreviousScheduledSku(LhScheduleContext context,
+                                                                      SkuScheduleDTO sku,
+                                                                      boolean originalEnding) {
+        if (Objects.isNull(context) || Objects.isNull(sku)
+                || originalEnding || sku.isContinuousCompensationSku()) {
+            return false;
+        }
+        if (Math.max(0, sku.getMonthlyHistoryShortageQty()) <= 0) {
+            return false;
+        }
+        if (!isWindowDayPlanEmpty(sku) || Math.max(0, sku.getFutureMonthPlanQtyAfterWindow()) > 0) {
+            return false;
+        }
+        return hasPreviousScheduledResult(context, sku.getMaterialCode());
+    }
+
+    /**
+     * 判断当前排程窗口 dayN 月计划量是否全为0。
+     *
+     * @param sku SKU
+     * @return true-窗口内无 dayN 月计划量；false-仍有窗口计划或账本缺失
+     */
+    private boolean isWindowDayPlanEmpty(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        for (SkuDailyPlanQuotaDTO quota : sku.getDailyPlanQuotaMap().values()) {
+            if (Objects.nonNull(quota) && Math.max(0, quota.getDayPlanQty()) > 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 判断最近一次排程结果中该SKU是否已有有效排产量。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @return true-最近一次已排过；false-未排过
+     */
+    private boolean hasPreviousScheduledResult(LhScheduleContext context, String materialCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(materialCode)
+                || CollectionUtils.isEmpty(context.getPreviousScheduleResultList())) {
+            return false;
+        }
+        for (LhScheduleResult result : context.getPreviousScheduleResultList()) {
+            if (Objects.nonNull(result)
+                    && StringUtils.equals(materialCode, result.getMaterialCode())
+                    && resolveResultScheduledQty(result) > 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
