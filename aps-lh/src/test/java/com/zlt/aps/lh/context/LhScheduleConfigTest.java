@@ -112,6 +112,38 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：续作收尾小余量允许欠产偏差默认2，配置后按配置值读取。
+     */
+    @Test
+    public void shouldReadContinuousEndingSurplusToleranceConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals(2, defaultConfig.getContinuousEndingSurplusToleranceQty());
+
+        Map<String, String> paramMap = new HashMap<>(1);
+        paramMap.put(LhScheduleParamConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY, "3");
+
+        LhScheduleConfig config = new LhScheduleConfig(paramMap);
+
+        Assertions.assertEquals(3, config.getContinuousEndingSurplusToleranceQty());
+    }
+
+    /**
+     * 用例说明：续作收尾小余量允许欠产偏差异常配置按默认2处理。
+     */
+    @Test
+    public void shouldFallbackDefaultWhenContinuousEndingSurplusToleranceInvalid() {
+        Map<String, String> negativeParamMap = new HashMap<>(1);
+        negativeParamMap.put(LhScheduleParamConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY, "-1");
+        LhScheduleConfig negativeConfig = new LhScheduleConfig(negativeParamMap);
+        Assertions.assertEquals(2, negativeConfig.getContinuousEndingSurplusToleranceQty());
+
+        Map<String, String> textParamMap = new HashMap<>(1);
+        textParamMap.put(LhScheduleParamConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY, "abc");
+        LhScheduleConfig textConfig = new LhScheduleConfig(textParamMap);
+        Assertions.assertEquals(2, textConfig.getContinuousEndingSurplusToleranceQty());
+    }
+
+    /**
      * 用例说明：新增排产/续作补偿共用欠产增机台阈值，异常值按默认200处理。
      */
     @Test

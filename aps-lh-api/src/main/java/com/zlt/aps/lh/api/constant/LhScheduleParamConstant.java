@@ -192,6 +192,8 @@ public final class LhScheduleParamConstant {
     public static final String NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = "SYS0304015";
     /** 新增排产欠产增机台阈值 */
     public static final String NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD = "SYS0304022";
+    /** 续作收尾小余量允许欠产偏差值 */
+    public static final String CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY = "SYS0304023";
     /** 是否开启换模均衡（0-关闭，1-开启） */
     public static final String ENABLE_CHANGEOVER_BALANCE = "SYS0304021";
     /** 续作欠产追补判断天数 */

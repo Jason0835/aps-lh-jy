@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
@@ -14,6 +15,7 @@ import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
+import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacityDayDecision;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationRequest;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationResult;
@@ -411,6 +413,64 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作收尾小余量在允许欠产偏差内时，应直接写未排并释放原续作机台。
+     */
+    @Test
+    public void shouldSkipSmallSurplusEndingContinuousAndReleaseMachine() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002999", 16, 2, buildQuotaMapByShifts(shifts, 2, 0, 0));
+        sku.setContinuousMachineCode("K1201");
+        sku.setSurplusQty(2);
+        context.getContinuousSkuList().add(sku);
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1201");
+        machine.setCurrentMaterialCode("3302002999");
+        machine.setEstimatedEndTime(shifts.get(0).getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getInitialMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        strategy.scheduleContinuousEnding(context);
+
+        Assertions.assertEquals(0, context.getScheduleResultList().size());
+        Assertions.assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1201"));
+        Assertions.assertTrue(context.getTypeBlockReleasedContinuousMachineCodeSet().contains("K1201"));
+        Assertions.assertEquals(1, context.getUnscheduledResultList().size());
+        LhUnscheduledResult unscheduledResult = context.getUnscheduledResultList().get(0);
+        Assertions.assertEquals("3302002999", unscheduledResult.getMaterialCode());
+        Assertions.assertEquals(Integer.valueOf(2), unscheduledResult.getUnscheduledQty());
+        Assertions.assertEquals("收尾余量小于等于允许欠产偏差值，本次不排产",
+                unscheduledResult.getUnscheduledReason());
+    }
+
+    /**
+     * 续作收尾小余量释放机台应优先进入换活字块候选。
+     */
+    @Test
+    public void shouldUseSmallSurplusReleasedMachineAsTypeBlockCandidate() throws Exception {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1201");
+        machine.setCurrentMaterialCode("3302002999");
+        machine.setEstimatedEndTime(context.getScheduleWindowShifts().get(0).getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getTypeBlockReleasedContinuousMachineCodeSet().add(machine.getMachineCode());
+
+        Method method = TypeBlockProductionStrategy.class.getDeclaredMethod(
+                "resolveReleasedTypeBlockMachines", LhScheduleContext.class);
+        method.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<MachineScheduleDTO> candidateMachines =
+                (List<MachineScheduleDTO>) method.invoke(strategy, context);
+
+        Assertions.assertEquals(1, candidateMachines.size());
+        Assertions.assertEquals("K1201", candidateMachines.get(0).getMachineCode());
+    }
+
+    /**
      * 欠产未超过阈值时，T+2 也必须继续后看 T+3 日计划量决定是否保留/新增机台。
      */
     @Test
@@ -753,6 +813,29 @@ public class SchedulingStrategyRegressionTest {
                 return 1;
             }
         });
+        setField(strategy, "endingJudgmentStrategy", new IEndingJudgmentStrategy() {
+            @Override
+            public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+                return true;
+            }
+
+            @Override
+            public int calculateEndingShifts(LhScheduleContext context, SkuScheduleDTO sku) {
+                return 1;
+            }
+
+            @Override
+            public int calculateEndingDays(LhScheduleContext context, SkuScheduleDTO sku) {
+                return 1;
+            }
+        });
+    }
+
+    private void injectContinuousEndingDependencies(ContinuousProductionStrategy strategy) throws Exception {
+        OrderNoGenerator orderNoGenerator = new OrderNoGenerator();
+        setField(orderNoGenerator, "useRedis", false);
+        setField(strategy, "orderNoGenerator", orderNoGenerator);
+        setField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
         setField(strategy, "endingJudgmentStrategy", new IEndingJudgmentStrategy() {
             @Override
             public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {

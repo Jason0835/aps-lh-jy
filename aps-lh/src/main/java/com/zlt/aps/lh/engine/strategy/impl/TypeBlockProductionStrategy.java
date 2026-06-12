@@ -89,6 +89,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private static final String TYPE_BLOCK_TRIGGER_ENDING = "收尾触发";
     private static final String TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE =
             "续作首日无计划释放触发";
+    private static final String TYPE_BLOCK_TRIGGER_SMALL_ENDING_SURPLUS_RELEASE =
+            "续作收尾小余量释放触发";
     private static final String TYPE_BLOCK_TRIGGER_FALLBACK = "在机前规格兜底触发";
     private static final String TYPE_BLOCK_SKIP_REASON_T1_NOT_END =
             "T-1 最新记录未收尾，跳过兜底反查";
@@ -139,7 +141,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             machineTriggerSourceMap.put(endingMachine.getMachineCode(), TYPE_BLOCK_TRIGGER_ENDING);
         }
 
-        List<MachineScheduleDTO> releasedMachines = resolveFirstDayNoPlanReleasedTypeBlockMachines(context);
+        List<MachineScheduleDTO> releasedMachines = resolveReleasedTypeBlockMachines(context);
         releasedMachines.sort(Comparator.comparing(
                 MachineScheduleDTO::getEstimatedEndTime, Comparator.nullsLast(Comparator.naturalOrder())));
         for (MachineScheduleDTO releasedMachine : releasedMachines) {
@@ -148,9 +150,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 continue;
             }
             candidateMachines.add(releasedMachine);
-            machineTriggerSourceMap.put(machineCode, TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE);
-            log.info("续作首日无计划释放机台进入换活字块匹配, machineCode: {}, currentMaterialCode: {}",
-                    machineCode, releasedMachine.getCurrentMaterialCode());
+            String triggerSource = resolveReleasedTypeBlockTriggerSource(context, machineCode);
+            machineTriggerSourceMap.put(machineCode, triggerSource);
+            log.info("续作释放机台进入换活字块匹配, machineCode: {}, currentMaterialCode: {}, triggerSource: {}",
+                    machineCode, releasedMachine.getCurrentMaterialCode(), triggerSource);
         }
 
         List<MachineScheduleDTO> fallbackMachines = resolveTypeBlockFallbackMachines(context);
@@ -164,7 +167,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             machineTriggerSourceMap.put(machineCode, TYPE_BLOCK_TRIGGER_FALLBACK);
         }
         traceEndingMachineOrder(context, candidateMachines, machineTriggerSourceMap);
-        log.info("换活字块候选机台准备完成, 收尾机台: {}, 首日无计划释放机台: {}, 兜底机台: {}, 候选机台: {}, 待排新增SKU: {}",
+        log.info("换活字块候选机台准备完成, 收尾机台: {}, 续作释放机台: {}, 兜底机台: {}, 候选机台: {}, 待排新增SKU: {}",
                 endingMachines.size(), releasedMachines.size(), fallbackMachines.size(), candidateMachines.size(),
                 context.getNewSpecSkuList().size());
 
@@ -1984,19 +1987,28 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
-     * 识别首日无计划释放后可参与换活字块的续作机台。
+     * 识别释放后可优先参与换活字块的续作机台。
+     *
+     * <p>包括首日无计划释放机台和续作收尾小余量异常偏差不排产释放机台。该入口只扩展 S4.4
+     * 换活字块候选机台来源，不改变 S4.5 新增排序和机台筛选规则。</p>
      *
      * @param context 排程上下文
      * @return 释放机台列表
      */
-    private List<MachineScheduleDTO> resolveFirstDayNoPlanReleasedTypeBlockMachines(LhScheduleContext context) {
+    private List<MachineScheduleDTO> resolveReleasedTypeBlockMachines(LhScheduleContext context) {
         List<MachineScheduleDTO> releasedMachineList = new ArrayList<>();
         if (context == null
-                || CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())
                 || CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
             return releasedMachineList;
         }
-        for (String machineCode : context.getFirstDayNoPlanReleasedContinuousMachineCodeSet()) {
+        Set<String> releasedMachineCodeSet = new LinkedHashSet<String>(16);
+        if (!CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())) {
+            releasedMachineCodeSet.addAll(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet());
+        }
+        if (!CollectionUtils.isEmpty(context.getTypeBlockReleasedContinuousMachineCodeSet())) {
+            releasedMachineCodeSet.addAll(context.getTypeBlockReleasedContinuousMachineCodeSet());
+        }
+        for (String machineCode : releasedMachineCodeSet) {
             if (StringUtils.isEmpty(machineCode)) {
                 continue;
             }
@@ -2007,13 +2019,30 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 continue;
             }
             if (isMachineAssignedContinuousResult(context, machineCode)) {
-                log.info("续作首日无计划释放机台已有续作分配，跳过换活字块接管, machineCode: {}, currentMaterialCode: {}",
-                        machineCode, machine.getCurrentMaterialCode());
+                log.info("续作释放机台已有续作分配，跳过换活字块接管, machineCode: {}, currentMaterialCode: {}, triggerSource: {}",
+                        machineCode, machine.getCurrentMaterialCode(),
+                        resolveReleasedTypeBlockTriggerSource(context, machineCode));
                 continue;
             }
             releasedMachineList.add(machine);
         }
         return releasedMachineList;
+    }
+
+    /**
+     * 解析续作释放机台进入换活字块的触发来源。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return 触发来源
+     */
+    private String resolveReleasedTypeBlockTriggerSource(LhScheduleContext context, String machineCode) {
+        if (context != null && StringUtils.isNotEmpty(machineCode)
+                && !CollectionUtils.isEmpty(context.getTypeBlockReleasedContinuousMachineCodeSet())
+                && context.getTypeBlockReleasedContinuousMachineCodeSet().contains(machineCode)) {
+            return TYPE_BLOCK_TRIGGER_SMALL_ENDING_SURPLUS_RELEASE;
+        }
+        return TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE;
     }
 
     /**

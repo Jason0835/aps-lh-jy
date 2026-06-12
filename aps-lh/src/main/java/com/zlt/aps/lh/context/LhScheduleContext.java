@@ -207,6 +207,8 @@ public class LhScheduleContext {
     private boolean continuousDailyQuotaSynced;
     /** 续作首日/窗口无计划释放的机台集合，仅用于S4.5选机降优先级，不代表禁止生产 */
     private Set<String> releasedContinuousMachineCodeSet = new LinkedHashSet<>();
+    /** 续作收尾小余量释放后可优先进入换活字块匹配的机台集合 */
+    private Set<String> typeBlockReleasedContinuousMachineCodeSet = new LinkedHashSet<>();
     /** 首日无计划但后续有计划的续作释放机台集合，供S4.4/S4.5稳定识别占位结果，不受后续账本扣减影响 */
     private Set<String> firstDayNoPlanReleasedContinuousMachineCodeSet = new LinkedHashSet<>();
     /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中，供后置校验回到原始日计划账本 */

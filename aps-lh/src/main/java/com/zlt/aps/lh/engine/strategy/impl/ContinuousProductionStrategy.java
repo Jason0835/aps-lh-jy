@@ -101,6 +101,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             "共用胎胚收尾仅按硫化余量，余量为0且胎胚库存不可用，收尾目标量为0";
     private static final String WINDOW_NO_PLAN_UNSCHEDULED_REASON =
             "当前排程窗口内无日计划量，等待后续滚动窗口排产";
+    private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
+            "收尾余量小于等于允许欠产偏差值，本次不排产";
     private static final int TYPE_BLOCK_SWITCH_MAX_ATTEMPTS = 16;
 
     @Resource
@@ -181,6 +183,20 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 applyContinuousNoFutureEndingStrictTarget(sku, shortageQuotaPlan);
             } else if (sku.isStrictNewSpecShortageOnly()) {
                 isEnding = false;
+            }
+            if (shouldSkipSmallEndingSurplusContinuous(context, sku, isEnding)) {
+                // 续作收尾小余量异常偏差不排产：小尾量允许滚动欠产，本次释放原续作机台给换活字块/新增链路。
+                appendSmallEndingSurplusUnscheduledResult(context, sku);
+                registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(),
+                        "续作收尾小余量异常偏差不排产");
+                registerTypeBlockReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(),
+                        "续作收尾小余量异常偏差不排产");
+                context.removePendingSkuFromStructureMap(sku);
+                getTargetScheduleQtyResolver().removeActiveEmbryoSku(
+                        context, sku, SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON);
+                traceSmallEndingSurplusSkip(context, sku, machineCode,
+                        resolveContinuousEndingSurplusToleranceQty(context));
+                continue;
             }
             sku.setStrictTargetQty(ProductionQuantityPolicy.from(sku, isEnding).isStrictUpperLimit());
             boolean isSingleMachine = continuationGroupMachineCountMap
@@ -972,6 +988,110 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         return shortageQuotaPlan != null
                 && shortageQuotaPlan.isNoWindowPlan()
                 && Math.max(0, shortageQuotaPlan.getHistoryShortageQty()) <= 0;
+    }
+
+    /**
+     * 判断续作收尾小余量是否允许本次不排产。
+     *
+     * <p>这是“续作收尾小余量异常偏差不排产”的特殊规则，只在 S4.4 续作收尾场景生效；
+     * 非收尾 SKU 不进入该规则，收尾余量大于参数值时继续沿用原收尾排产规则。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 续作SKU
+     * @param isEnding 是否收尾
+     * @return true-本次不排产并释放续作机台；false-继续按原规则排产
+     */
+    private boolean shouldSkipSmallEndingSurplusContinuous(LhScheduleContext context,
+                                                           SkuScheduleDTO sku,
+                                                           boolean isEnding) {
+        if (!isEnding || sku == null) {
+            return false;
+        }
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int toleranceQty = resolveContinuousEndingSurplusToleranceQty(context);
+        boolean skip = surplusQty <= toleranceQty;
+        log.info("续作收尾小余量异常偏差判断, materialCode: {}, machineCode: {}, isEnding: {}, surplusQty: {}, "
+                        + "toleranceQty: {}, skipSchedule: {}",
+                sku.getMaterialCode(), sku.getContinuousMachineCode(), isEnding, surplusQty, toleranceQty, skip);
+        return skip;
+    }
+
+    /**
+     * 获取续作收尾小余量允许欠产偏差值。
+     *
+     * @param context 排程上下文
+     * @return 允许不排产的最大收尾余量
+     */
+    private int resolveContinuousEndingSurplusToleranceQty(LhScheduleContext context) {
+        if (context == null || context.getScheduleConfig() == null) {
+            return LhScheduleConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY;
+        }
+        return context.getScheduleConfig().getContinuousEndingSurplusToleranceQty();
+    }
+
+    /**
+     * 写入续作收尾小余量未排结果。
+     *
+     * @param context 排程上下文
+     * @param sku 续作SKU
+     */
+    private void appendSmallEndingSurplusUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return;
+        }
+        LhUnscheduledResult existing = findUnscheduledResultByMaterial(context, sku.getMaterialCode());
+        if (existing != null) {
+            existing.setUnscheduledReason(SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON);
+            existing.setUnscheduledQty(Math.max(0, sku.getSurplusQty()));
+            return;
+        }
+        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+        unscheduled.setFactoryCode(context.getFactoryCode());
+        unscheduled.setBatchNo(context.getBatchNo());
+        unscheduled.setScheduleDate(context.getScheduleTargetDate());
+        unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setMaterialDesc(sku.getMaterialDesc());
+        unscheduled.setStructureName(sku.getStructureName());
+        unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
+        unscheduled.setSpecCode(sku.getSpecCode());
+        unscheduled.setEmbryoCode(sku.getEmbryoCode());
+        unscheduled.setMouldQty(sku.getMouldQty());
+        unscheduled.setUnscheduledQty(Math.max(0, sku.getSurplusQty()));
+        unscheduled.setUnscheduledReason(SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON);
+        unscheduled.setDataSource(AUTO_DATA_SOURCE);
+        unscheduled.setIsDelete(0);
+        context.getUnscheduledResultList().add(unscheduled);
+    }
+
+    /**
+     * 输出续作收尾小余量不排产的应用日志和过程日志。
+     *
+     * @param context 排程上下文
+     * @param sku 续作SKU
+     * @param machineCode 释放机台编码
+     * @param toleranceQty 允许欠产偏差值
+     */
+    private void traceSmallEndingSurplusSkip(LhScheduleContext context,
+                                             SkuScheduleDTO sku,
+                                             String machineCode,
+                                             int toleranceQty) {
+        if (sku == null) {
+            return;
+        }
+        StringBuilder detail = new StringBuilder(160);
+        detail.append("续作收尾小余量异常偏差不排产, materialCode: ")
+                .append(sku.getMaterialCode())
+                .append(", machineCode: ")
+                .append(machineCode)
+                .append(", surplusQty: ")
+                .append(Math.max(0, sku.getSurplusQty()))
+                .append(", toleranceQty: ")
+                .append(toleranceQty)
+                .append(", unscheduledReason: ")
+                .append(SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON)
+                .append(", flow: 释放机台优先进入换活字块，不满足后进入S4.5换模新增");
+        log.info(detail.toString());
+        PriorityTraceLogHelper.appendProcessLog(context, "续作收尾小余量不排产", detail.toString());
     }
 
     /**
@@ -4986,6 +5106,28 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (added) {
             log.info("登记续作释放机台, materialCode: {}, machineCode: {}, reason: {}, "
                             + "effect: S4.4换活字块可识别，S4.5新增选机仅降优先级",
+                    materialCode, machineCode, reason);
+        }
+    }
+
+    /**
+     * 登记可优先进入换活字块匹配的续作释放机台。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param materialCode 续作SKU物料编码
+     * @param reason 释放原因
+     */
+    private void registerTypeBlockReleasedContinuousMachine(LhScheduleContext context,
+                                                            String machineCode,
+                                                            String materialCode,
+                                                            String reason) {
+        if (context == null || StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        boolean added = context.getTypeBlockReleasedContinuousMachineCodeSet().add(machineCode);
+        if (added) {
+            log.info("登记续作释放机台优先进入换活字块, materialCode: {}, machineCode: {}, reason: {}",
                     materialCode, machineCode, reason);
         }
     }
