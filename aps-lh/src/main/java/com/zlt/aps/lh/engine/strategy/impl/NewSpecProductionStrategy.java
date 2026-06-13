@@ -379,6 +379,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
         while (iterator.hasNext()) {
             SkuScheduleDTO sku = iterator.next();
+            boolean currentSkuRemoved = false;
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
             if (shouldSkipHistoryShortageOnlyPreviousScheduledSku(context, sku, isEnding)) {
@@ -788,6 +789,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 if (remainingQty <= 0 || !needMoreMachine(context, sku)) {
                     // 全部排完（总量满足 且 每日额度满足），移出待排队列
                     removeCurrentNewSpecSku(context, iterator, sku);
+                    currentSkuRemoved = true;
                     if (remainingQty <= 0) {
                         log.info("新增SKU多机台排产全部完成, materialCode: {}, 使用机台数: {}, 总排产量: {}",
                                 sku.getMaterialCode(), excludedMachineCodes.size() + 1, totalScheduledQty);
@@ -836,14 +838,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
             } else {
                 // 即使部分成功（remainingQty > 0 但无更多候选机台），也记录
-                if (remainingQty > 0 && needMoreMachine(context, sku)) {
+                if (!currentSkuRemoved && remainingQty > 0 && needMoreMachine(context, sku)) {
                     log.warn("新增SKU多机台排产未全部完成, materialCode: {}, 已排: {}, 剩余: {}, 满班超排: {}, 候选机台已耗尽",
                             sku.getMaterialCode(), totalScheduledQty, remainingQty, sku.getShiftFillOverQty());
                     // 剩余未排量计入未排结果
                     addUnscheduledResult(context, sku, remainingQty,
                             "多机台产能不足，剩余" + remainingQty + "未排", unscheduledReasonCountMap);
                     removeCurrentNewSpecSku(context, iterator, sku);
-                } else if (remainingQty > 0) {
+                } else if (!currentSkuRemoved && remainingQty > 0) {
                     // 总量上仍有剩余（可能来自欠产传导），但日计划额度已满足，移出待排队列
                     log.info("新增SKU日计划额度已满足但总量仍有剩余, materialCode: {}, 已排: {}, 总量剩余: {}, 满班超排: {}",
                             sku.getMaterialCode(), totalScheduledQty, remainingQty, sku.getShiftFillOverQty());

@@ -361,6 +361,44 @@ public class NewSpecProductionStrategyTest {
     }
 
     /**
+     * 用例说明：单胎胚收尾目标量被胎胚库存上调后，日计划账本也要同步到收尾目标，
+     * 避免新增排产后续按原 dayN 额度把 26 回裁成 5。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldSyncEndingQuotaWhenSingleEmbryoTargetUpsizedByEmbryoStock() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002216");
+        sku.setEmbryoCode("215101840");
+        sku.setTargetScheduleQty(5);
+        sku.setRemainingScheduleQty(5);
+        sku.setWindowPlanQty(5);
+        sku.setWindowRemainingPlanQty(5);
+        sku.setSurplusQty(0);
+        sku.setEmbryoStock(26);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>(4);
+        quotaMap.put(LocalDate.of(2026, 5, 25), buildQuota(5, 5));
+        quotaMap.put(LocalDate.of(2026, 5, 26), buildQuota(0, 0));
+        quotaMap.put(LocalDate.of(2026, 5, 27), buildQuota(0, 0));
+        sku.setDailyPlanQuotaMap(quotaMap);
+
+        resolver.upsizeEndingTargetQty(new LhScheduleContext(), sku);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveSchedulableRemainingQty", SkuScheduleDTO.class);
+        method.setAccessible(true);
+        Integer remainingQty = (Integer) method.invoke(strategy, sku);
+
+        Assertions.assertEquals(26, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(26, sku.getWindowPlanQty());
+        Assertions.assertEquals(26, sku.getWindowRemainingPlanQty());
+        Assertions.assertEquals(26, remainingQty.intValue());
+    }
+
+    /**
      * 用例说明：量试非收尾按正式SKU处理，最后已开班班次允许补满，
      * 不能因为 sku.isTrial=true 被日计划账本回裁到严格上限。
      *

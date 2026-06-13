@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -19,6 +20,7 @@ import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
+import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -793,10 +795,60 @@ public class TargetScheduleQtyResolver {
                 windowPlanQty, windowRemainingPlanQty, embryoStock, surplusQty, unscheduledReason);
         sku.setTargetScheduleQty(endingTargetQty);
         sku.setRemainingScheduleQty(endingTargetQty);
+        syncEndingDailyQuotaToTargetQty(sku, endingTargetQty, windowRemainingPlanQty);
         if (endingTargetQty <= 0) {
             removeActiveEmbryoSku(context, sku, unscheduledReason);
         }
         return endingTargetQty;
+    }
+
+    /**
+     * 将收尾目标量同步到运行态日计划账本。
+     * <p>收尾 SKU 的业务目标不受窗口 dayN 限制；若只上调 targetScheduleQty，
+     * 后续新增排产或换活字块按账本消费时仍会被原 dayN 剩余额度回裁。</p>
+     *
+     * @param sku 当前收尾 SKU
+     * @param endingTargetQty 收尾目标量
+     * @param originalWindowRemainingQty 原窗口剩余额度
+     */
+    private void syncEndingDailyQuotaToTargetQty(SkuScheduleDTO sku,
+                                                 int endingTargetQty,
+                                                 int originalWindowRemainingQty) {
+        if (Objects.isNull(sku) || endingTargetQty <= 0) {
+            return;
+        }
+        sku.setWindowPlanQty(Math.max(Math.max(0, sku.getWindowPlanQty()), endingTargetQty));
+        sku.setWindowRemainingPlanQty(Math.max(Math.max(0, sku.getWindowRemainingPlanQty()), endingTargetQty));
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
+        if (CollectionUtils.isEmpty(quotaMap)) {
+            return;
+        }
+        int currentRemainingQty = SkuDailyPlanQuotaUtil.sumRemainingQty(quotaMap);
+        int appendQty = endingTargetQty - currentRemainingQty;
+        if (appendQty <= 0) {
+            return;
+        }
+        Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> firstEntry = null;
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            if (Objects.nonNull(entry) && Objects.nonNull(entry.getValue())) {
+                firstEntry = entry;
+                break;
+            }
+        }
+        if (Objects.isNull(firstEntry)) {
+            return;
+        }
+        SkuDailyPlanQuotaDTO quota = firstEntry.getValue();
+        quota.setProductionDate(firstEntry.getKey());
+        // 收尾清量允许突破原 dayN，把差额补入首日运行态账本，后续统一由账本消费链路扣减。
+        quota.setDayPlanQty(Math.max(0, quota.getDayPlanQty()) + appendQty);
+        quota.setRemainingQty(Math.max(0, quota.getRemainingQty()) + appendQty);
+        quota.setCompleted(false);
+        SkuDailyPlanQuotaUtil.refreshRollingFields(quotaMap);
+        log.info("收尾SKU日计划账本同步, materialCode: {}, targetQty: {}, 原窗口剩余: {}, "
+                        + "原账本剩余: {}, 补齐量: {}, 同步日期: {}",
+                sku.getMaterialCode(), endingTargetQty, originalWindowRemainingQty,
+                currentRemainingQty, appendQty, firstEntry.getKey());
     }
 
     /**
