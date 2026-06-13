@@ -9,11 +9,13 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
@@ -275,6 +277,10 @@ public class TargetScheduleQtyResolver {
 
         Date cursorStartTime = firstProductionStartTime;
         int totalQty = 0;
+        Date mouldChangeCompleteTime = resolveMouldChangeCompleteTime(context, switchStartTime, scheduleType);
+        int firstInspectionShiftIndex = FirstInspectionQtyUtil.resolveAttributionShiftIndex(
+                shifts, mouldChangeCompleteTime);
+        int firstInspectionQty = FirstInspectionQtyUtil.getFirstInspectionQty(context);
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
             if (!started) {
@@ -306,13 +312,45 @@ public class TargetScheduleQtyResolver {
                     configPlusShiftType,
                     scheduleType);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+            shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
+                    context, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
+                    shiftCapacity, scheduleType);
             if (shiftMaxQty <= 0) {
                 continue;
             }
             totalQty += shiftMaxQty;
             cursorStartTime = effectiveEndTime;
         }
+        totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
+                context, shifts, mouldChangeCompleteTime, firstProductionStartTime,
+                shiftCapacity, totalQty, scheduleType);
         return Math.max(totalQty, 0);
+    }
+
+    private Date resolveMouldChangeCompleteTime(LhScheduleContext context, Date switchStartTime, String scheduleType) {
+        if (!StringUtils.equals(ScheduleTypeEnum.NEW_SPEC.getCode(), scheduleType) || Objects.isNull(switchStartTime)) {
+            return null;
+        }
+        return LhScheduleTimeUtil.addHours(switchStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+    }
+
+    private int resolveFirstInspectionCapacityOutsideProductionWindow(LhScheduleContext context,
+                                                                       List<LhShiftConfigVO> shifts,
+                                                                       Date mouldChangeCompleteTime,
+                                                                       Date firstProductionStartTime,
+                                                                       int shiftCapacity,
+                                                                       int remainingQty,
+                                                                       String scheduleType) {
+        LhShiftConfigVO attributionShift = FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime);
+        if (Objects.isNull(attributionShift) || Objects.isNull(firstProductionStartTime)
+                || firstProductionStartTime.before(attributionShift.getShiftEndDateTime())) {
+            return 0;
+        }
+        Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
+                context, shifts, mouldChangeCompleteTime, new LinkedHashMap<Integer, Integer>(0),
+                shiftCapacity, Math.max(remainingQty, FirstInspectionQtyUtil.getFirstInspectionQty(context)), scheduleType);
+        Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());
+        return Math.max(0, firstInspectionQty == null ? 0 : firstInspectionQty);
     }
 
     /**

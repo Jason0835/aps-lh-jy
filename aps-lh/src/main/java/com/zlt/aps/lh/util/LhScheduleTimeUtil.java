@@ -270,6 +270,19 @@ public final class LhScheduleTimeUtil {
     }
 
     /**
+     * 获取普通换模首检数量。
+     *
+     * @param context 排程上下文
+     * @return 首检数量，默认4
+     */
+    public static int getFirstInspectionQty(LhScheduleContext context) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleConfig())) {
+            return LhScheduleConstant.FIRST_INSPECTION_QTY;
+        }
+        return context.getScheduleConfig().getFirstInspectionQty();
+    }
+
+    /**
      * 获取维保重叠时的切换耗时（小时）
      *
      * @param context 排程上下文

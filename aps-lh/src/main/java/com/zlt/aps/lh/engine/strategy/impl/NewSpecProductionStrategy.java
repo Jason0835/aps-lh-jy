@@ -44,6 +44,7 @@ import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
+import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
@@ -635,6 +636,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 Map<Integer, Integer> shiftCapacityMap = calculateShiftCapacityMap(
                         context, candidateMachine, sku, firstProductionStartTime, mouldChangeStartTime,
                         shifts, machineMouldQty, runtimeShiftCapacity, isEnding);
+                // 普通换模8小时已包含首检：首检数量按换模完成落班计入产能，不额外推迟开产时间。
+                shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
+                        context, shifts, mouldChangeCompleteTime, shiftCapacityMap, runtimeShiftCapacity,
+                        dynamicTargetQty, ScheduleTypeEnum.NEW_SPEC.getCode());
                 int maxQtyToWindowEnd = sumShiftCapacity(shiftCapacityMap);
                 MachineProductionSegment segment = buildMachineProductionSegment(
                         context, sku, machineCode, mouldChangeStartTime, firstProductionStartTime,
@@ -3234,6 +3239,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Map<Integer, Integer> shiftCapacityMap = calculateShiftCapacityMap(
                 context, candidate, sku, firstProductionStartTime, mouldChangeStartTime,
                 shifts, machineMouldQty, runtimeShiftCapacity, policy != null && policy.isEnding());
+        shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
+                context, shifts, mouldChangeCompleteTime, shiftCapacityMap, runtimeShiftCapacity,
+                sku.resolveTargetScheduleQty(), ScheduleTypeEnum.NEW_SPEC.getCode());
         MachineProductionSegment simulationSegment = buildMachineProductionSegment(
                 context, sku, candidate.getMachineCode(), mouldChangeStartTime,
                 firstProductionStartTime, sumShiftCapacity(shiftCapacityMap),
@@ -4423,7 +4431,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         // 保存真实换模开始时间，供下游换模计划表直接复用。
         result.setMouldChangeStartTime(mouldChangeStartTime);
 
-        // 按班次分配计划量
+        // 按班次分配计划量；普通换模首检数量按换模完成时间落班，8小时换模耗时不再额外增加。
         int pendingQty = sku.resolveTargetScheduleQty();
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
                 context, result.getLhMachineCode(), mouldChangeStartTime, startTime);
@@ -4431,7 +4439,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, result.getLhMachineCode());
         distributeToShifts(context, result, shifts, startTime,
                 runtimeShiftCapacity, sku.getLhTimeSeconds(), mouldQty, pendingQty, cleaningWindowList,
-                maintenanceWindowList, sku, isEnding);
+                maintenanceWindowList, sku, isEnding, mouldChangeEndTime);
         refreshResultSummary(context, result);
         applyCleaningMouldChangeAnalysis(context, result);
         return result;
@@ -5761,10 +5769,24 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                    List<MachineCleaningWindowDTO> cleaningWindowList,
                                    List<MachineMaintenanceWindowDTO> maintenanceWindowList,
                                    SkuScheduleDTO sku,
-                                   boolean isEnding) {
+                                   boolean isEnding,
+                                   Date mouldChangeCompleteTime) {
         if (lhTimeSeconds <= 0 || mouldQty <= 0 || remaining <= 0 || startTime == null) {
             return remaining;
         }
+        /*
+         * 普通换模首检数量归属口径：
+         * 1. 换模8小时已包含首检，不额外增加首检时间；
+         * 2. 首检只影响数量归属和班产占用；
+         * 3. 归属班次由换模完成时间落点决定；
+         * 4. 首检数量参与排产量、余量消耗和班产上限校验。
+         */
+        int firstInspectionShiftIndex = FirstInspectionQtyUtil.resolveAttributionShiftIndex(
+                shifts, mouldChangeCompleteTime);
+        int firstInspectionQty = FirstInspectionQtyUtil.addFirstInspectionQtyToResult(
+                context, result, shifts, mouldChangeCompleteTime, shiftCapacity, remaining,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+        remaining -= firstInspectionQty;
         Map<Integer, ShiftRuntimeState> stateMap = context.getShiftRuntimeStateMap();
         int dryIceLossQty = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
@@ -5819,6 +5841,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     configPlusShiftType,
                     ScheduleTypeEnum.NEW_SPEC.getCode());
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+            shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
+                    context, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
+                    shiftCapacity, ScheduleTypeEnum.NEW_SPEC.getCode());
             if (shiftMaxQty <= 0) {
                 continue;
             }
@@ -5849,7 +5874,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         effectiveEnd,
                         shiftQty,
                         shiftMaxQty);
-                setShiftPlanQty(result, shift.getShiftIndex(), shiftQty, effectiveStart, shiftPlanEndTime);
+                Integer existingQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                Date existingStartTime = ShiftFieldUtil.getShiftStartTime(result, shift.getShiftIndex());
+                int mergedQty = Math.max(0, existingQty == null ? 0 : existingQty) + shiftQty;
+                setShiftPlanQty(result, shift.getShiftIndex(), mergedQty,
+                        existingStartTime == null ? effectiveStart : existingStartTime, shiftPlanEndTime);
                 remaining -= shiftQty;
 
                 // 更新本轮分配内该日已消费的日计划额度

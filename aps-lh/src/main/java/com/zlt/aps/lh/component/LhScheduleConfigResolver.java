@@ -107,6 +107,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.FIRST_INSPECTION_HOURS);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MAX_FIRST_INSPECTION_PER_SHIFT,
                 LhScheduleConstant.MAX_FIRST_INSPECTION_PER_SHIFT);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.FIRST_INSPECTION_QTY,
+                LhScheduleConstant.FIRST_INSPECTION_QTY, 0);
 
         // 收尾判定参数
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENDING_DETECT_DAYS, LhScheduleConstant.DEFAULT_ENDING_DAYS);

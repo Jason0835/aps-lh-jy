@@ -23,6 +23,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationUtil
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
+import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -117,6 +118,30 @@ public class SchedulingStrategyRegressionTest {
 
         Assertions.assertEquals(dateTime(2026, 6, 1, 8, 0), allocatedTime);
         Assertions.assertArrayEquals(new int[]{9, 0}, context.getDailyMouldChangeCountMap().get("2026-06-01"));
+    }
+
+    /**
+     * 普通换模 8 小时已包含首检，首检数量只归属到换模完成落点班次并占用该班次计划量。
+     */
+    @Test
+    public void shouldAssignFirstInspectionQtyToChangeoverCompletionShiftWithoutIncreasingTargetQty() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectNewSpecBuildDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        MachineScheduleDTO machine = buildNewSpecMachine("K1101");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+
+        LhScheduleResult result = invokeBuildNewSpecScheduleResult(
+                strategy, context, machine, sku,
+                dateTime(2026, 6, 1, 14, 0),
+                dateTime(2026, 6, 1, 6, 0),
+                dateTime(2026, 6, 1, 14, 0),
+                context.getScheduleWindowShifts(), 1, false);
+
+        Assertions.assertEquals(4, ShiftFieldUtil.getShiftPlanQty(result, 1));
+        Assertions.assertEquals(12, ShiftFieldUtil.getShiftPlanQty(result, 2));
+        Assertions.assertEquals(16, result.getDailyPlanQty());
     }
 
     /**
@@ -852,6 +877,69 @@ public class SchedulingStrategyRegressionTest {
                 return 1;
             }
         });
+    }
+
+    private void injectNewSpecBuildDependencies(NewSpecProductionStrategy strategy) throws Exception {
+        OrderNoGenerator orderNoGenerator = new OrderNoGenerator();
+        setField(orderNoGenerator, "useRedis", false);
+        setField(strategy, "orderNoGenerator", orderNoGenerator);
+        setField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+    }
+
+    private LhScheduleContext buildNewSpecFirstInspectionContext() {
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        context.setBatchNo("TEST_BATCH");
+        context.setFactoryCode("116");
+        context.setScheduleTargetDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleResultList(new ArrayList<LhScheduleResult>());
+        context.setNewSpecSkuList(new ArrayList<SkuScheduleDTO>());
+        return context;
+    }
+
+    private MachineScheduleDTO buildNewSpecMachine(String machineCode) {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setMachineName(machineCode);
+        machine.setMaxMoldNum(1);
+        return machine;
+    }
+
+    private SkuScheduleDTO buildNewSpecFirstInspectionSku(int targetQty) {
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001888");
+        sku.setMaterialDesc("首检数量测试SKU");
+        sku.setSpecCode("TEST_SPEC");
+        sku.setSpecDesc("TEST_SPEC_DESC");
+        sku.setEmbryoCode("E1888");
+        sku.setShiftCapacity(16);
+        sku.setLhTimeSeconds(1800);
+        sku.setTargetScheduleQty(targetQty);
+        sku.setRemainingScheduleQty(targetQty);
+        sku.setWindowPlanQty(targetQty);
+        sku.setWindowRemainingPlanQty(targetQty);
+        sku.setSurplusQty(targetQty);
+        sku.setEmbryoStock(targetQty);
+        sku.setMonthPlanQty(targetQty);
+        return sku;
+    }
+
+    private LhScheduleResult invokeBuildNewSpecScheduleResult(NewSpecProductionStrategy strategy,
+                                                              LhScheduleContext context,
+                                                              MachineScheduleDTO machine,
+                                                              SkuScheduleDTO sku,
+                                                              Date startTime,
+                                                              Date mouldChangeStartTime,
+                                                              Date mouldChangeEndTime,
+                                                              List<LhShiftConfigVO> shifts,
+                                                              int mouldQty,
+                                                              boolean isEnding) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "buildNewSpecScheduleResult", LhScheduleContext.class, MachineScheduleDTO.class,
+                SkuScheduleDTO.class, Date.class, Date.class, Date.class, List.class, int.class,
+                boolean.class, MouldResourceAllocationResult.class);
+        method.setAccessible(true);
+        return (LhScheduleResult) method.invoke(strategy, context, machine, sku, startTime,
+                mouldChangeStartTime, mouldChangeEndTime, shifts, mouldQty, isEnding, null);
     }
 
     private LhScheduleContext buildTypeBlockAppendContext() {

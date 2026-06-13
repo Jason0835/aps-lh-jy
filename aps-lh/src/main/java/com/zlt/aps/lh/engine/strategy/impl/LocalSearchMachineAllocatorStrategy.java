@@ -15,6 +15,7 @@ import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
+import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -432,6 +433,11 @@ public class LocalSearchMachineAllocatorStrategy {
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
 
         Date cursorStartTime = productionStartTime;
+        Date mouldChangeCompleteTime = mouldChangeStartTime == null ? null
+                : LhScheduleTimeUtil.addHours(mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+        int firstInspectionShiftIndex = FirstInspectionQtyUtil.resolveAttributionShiftIndex(
+                shifts, mouldChangeCompleteTime);
+        int firstInspectionQty = FirstInspectionQtyUtil.getFirstInspectionQty(context);
         Date specEndTime = null;
         int totalQty = 0;
         boolean started = false;
@@ -468,6 +474,9 @@ public class LocalSearchMachineAllocatorStrategy {
                     dryIceLossQty,
                     dryIceDurationHours);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+            shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
+                    context, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
+                    shiftCapacity, null);
             if (shiftMaxQty <= 0) {
                 continue;
             }
@@ -490,12 +499,32 @@ public class LocalSearchMachineAllocatorStrategy {
             // 当前班次结束后再推进到下一班次，避免跨班次重叠计算
             cursorStartTime = effectiveEndTime;
         }
+        totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
+                context, shifts, mouldChangeCompleteTime, productionStartTime, shiftCapacity, totalQty);
 
         if (totalQty <= 0 || specEndTime == null) {
             return LocalSearchCapacityEstimate.empty();
         }
         long penaltyScore = productionStartTime.getTime() / MILLIS_PER_MINUTE + (long) remainingQty * INFEASIBLE_PENALTY;
         return new LocalSearchCapacityEstimate(totalQty, specEndTime, penaltyScore);
+    }
+
+    private int resolveFirstInspectionCapacityOutsideProductionWindow(LhScheduleContext context,
+                                                                       List<LhShiftConfigVO> shifts,
+                                                                       Date mouldChangeCompleteTime,
+                                                                       Date productionStartTime,
+                                                                       int shiftCapacity,
+                                                                       int remainingQty) {
+        LhShiftConfigVO attributionShift = FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime);
+        if (attributionShift == null || productionStartTime == null
+                || productionStartTime.before(attributionShift.getShiftEndDateTime())) {
+            return 0;
+        }
+        Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
+                context, shifts, mouldChangeCompleteTime, new HashMap<Integer, Integer>(0),
+                shiftCapacity, Math.max(remainingQty, FirstInspectionQtyUtil.getFirstInspectionQty(context)), null);
+        Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());
+        return Math.max(0, firstInspectionQty == null ? 0 : firstInspectionQty);
     }
 
     /**
