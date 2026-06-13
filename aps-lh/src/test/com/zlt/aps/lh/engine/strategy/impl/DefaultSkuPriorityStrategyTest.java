@@ -695,6 +695,28 @@ class DefaultSkuPriorityStrategyTest {
     }
 
     @Test
+    void sortByPriority_shouldKeepUnifiedSortForDynamicSingleEmbryoEnding() {
+        SkuScheduleDTO normalHighPrioritySku = sku("MAT-H");
+        normalHighPrioritySku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        normalHighPrioritySku.setDelayDays(-10);
+        normalHighPrioritySku.setHighPriorityPendingQty(1000);
+
+        SkuScheduleDTO dynamicSingleEndingSku = sku("MAT-D");
+        dynamicSingleEndingSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        dynamicSingleEndingSku.setDelayDays(2);
+        dynamicSingleEndingSku.setTargetScheduleQty(160);
+
+        LhScheduleContext context = contextWithNewSpec(normalHighPrioritySku, dynamicSingleEndingSku);
+        context.getDynamicSingleEmbryoEndingMaterialSet().add("MAT-D");
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-H", context.getNewSpecSkuList().get(0).getMaterialCode(),
+                "动态单胎胚收尾只影响胎胚关系和目标量，不应改变新增SKU统一排序");
+        assertEquals("MAT-D", context.getNewSpecSkuList().get(1).getMaterialCode());
+    }
+
+    @Test
     void sortByPriority_shouldUseActualEndingDaysForStructurePriorityGate() {
         DefaultSkuPriorityStrategy localStrategy = new DefaultSkuPriorityStrategy();
         ReflectionTestUtils.setField(localStrategy, "endingJudgmentStrategy", new ActualEndingDaysStub());

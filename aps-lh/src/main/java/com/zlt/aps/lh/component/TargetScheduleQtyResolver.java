@@ -775,7 +775,7 @@ public class TargetScheduleQtyResolver {
             endingBaseQty = surplusQty;
             qtySource = "共用胎胚-仅按硫化余量";
             if (surplusQty <= 0) {
-                unscheduledReason = "共用胎胚收尾仅按硫化余量，余量小于等于0";
+                unscheduledReason = "共用胎胚且硫化余量为0";
             }
         } else {
             endingBaseQty = Math.max(embryoStock, surplusQty);

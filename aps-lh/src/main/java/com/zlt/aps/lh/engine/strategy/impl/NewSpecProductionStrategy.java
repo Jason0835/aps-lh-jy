@@ -113,7 +113,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_SCHEDULED_UNSCHEDULED_REASON =
             "仅历史欠产、后续无月计划，且最近一次排程已排过，本次跳过补排";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
-            "共用胎胚收尾仅按硫化余量，余量为0且胎胚库存不可用，收尾目标量为0";
+            "共用胎胚且硫化余量为0";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
     private static final Set<String> EMPTY_STRING_SET = Collections.emptySet();

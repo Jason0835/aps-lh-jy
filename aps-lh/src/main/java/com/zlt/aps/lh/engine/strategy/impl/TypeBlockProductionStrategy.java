@@ -97,7 +97,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private static final String TYPE_BLOCK_SKIP_REASON_LIMIT_SPECIFY_RESERVED =
             "机台存在需走新增换模链路的定点物料，当前阶段预留给S4.5";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
-            "共用胎胚物料硫化余量为0，不允许换活字块排产";
+            "共用胎胚且硫化余量为0";
     private static final String YES_FLAG = "1";
     private static final String NO_FLAG = "0";
     private static final String AUTO_DATA_SOURCE = "0";

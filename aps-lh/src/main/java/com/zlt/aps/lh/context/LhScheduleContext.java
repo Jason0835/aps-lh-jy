@@ -244,6 +244,8 @@ public class LhScheduleContext {
     private Map<String, Boolean> materialSharedEmbryoMap = new LinkedHashMap<>();
     /** 当前仍有效参与排产的胎胚SKU集合, key=embryoCode, value=有效待排物料编码列表 */
     private Map<String, List<String>> activeEmbryoSkuMap = new LinkedHashMap<>();
+    /** 共用胎胚剔除零余量SKU后动态转为单胎胚收尾的物料编码集合 */
+    private Set<String> dynamicSingleEmbryoEndingMaterialSet = new LinkedHashSet<>();
     /** 换模/换活字块日上限阻塞原因, key=materialCode, value=未排原因 */
     private Map<String, String> mouldChangeLimitBlockedReasonMap = new LinkedHashMap<>();
     /** 每日首检计数, key=dateString, value=[早班首检数, 中班首检数] */

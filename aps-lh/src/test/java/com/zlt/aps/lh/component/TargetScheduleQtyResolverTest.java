@@ -148,7 +148,7 @@ public class TargetScheduleQtyResolverTest {
         LhUnscheduledResult unscheduled = context.getUnscheduledResultList().get(0);
         Assertions.assertEquals("3302002369", unscheduled.getMaterialCode());
         Assertions.assertEquals(Integer.valueOf(0), unscheduled.getUnscheduledQty());
-        Assertions.assertTrue(unscheduled.getUnscheduledReason().contains("共用胎胚收尾仅按硫化余量"));
+        Assertions.assertTrue(unscheduled.getUnscheduledReason().contains("共用胎胚且硫化余量为0"));
         Assertions.assertEquals(1, context.getNewSpecSkuList().size());
         Assertions.assertEquals("3302002370", context.getNewSpecSkuList().get(0).getMaterialCode());
     }

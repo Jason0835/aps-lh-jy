@@ -560,7 +560,7 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 共用胎胚物料硫化余量为0时，换活字块不能按班产补量，也不能继续回流新增排产。
+     * 共用胎胚且硫化余量为0时，换活字块不能按班产补量，也不能继续回流新增排产。
      */
     @Test
     public void shouldBlockTypeBlockWhenSharedEmbryoSurplusIsZero() throws Exception {
@@ -589,7 +589,7 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(0, context.getScheduleResultList().size());
         Assertions.assertEquals(1, context.getUnscheduledResultList().size());
         Assertions.assertFalse(context.getNewSpecSkuList().contains(sku));
-        Assertions.assertTrue(failureReason.toString().contains("共用胎胚物料硫化余量为0"));
+        Assertions.assertTrue(failureReason.toString().contains("共用胎胚且硫化余量为0"));
     }
 
     /**

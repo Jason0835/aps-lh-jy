@@ -98,7 +98,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "续作结果裁剪为0";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
-            "共用胎胚收尾仅按硫化余量，余量为0且胎胚库存不可用，收尾目标量为0";
+            "共用胎胚且硫化余量为0";
     private static final String WINDOW_NO_PLAN_UNSCHEDULED_REASON =
             "当前排程窗口内无日计划量，等待后续滚动窗口排产";
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =

@@ -732,7 +732,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                         levelNames = Arrays.asList(
                                 "L1_分组优先级", "L2_定点机台", "L3_锁交期", "L4_延误天数",
                                 "L5_结构全收尾", "L6_最晚收尾日", "L7_高优待排", "L8_周期待排",
-                                "L9_中优待排", "L10_常规待排", "L11_开产靠后分", "L12_排产量", "L13_物料编码");
+                                "L9_中优待排", "L10_常规待排", "L11_开产靠后分",
+                                "L12_排产量", "L13_物料编码");
                         sortKeyLevels = Arrays.asList(
                                 "L1_分组优先级=" + groupDesc,
                                 "L2_定点机台=" + (isSpecifyMachine ? 1 : 0),
