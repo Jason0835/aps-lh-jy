@@ -81,6 +81,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /** 共用胎胚余量为0未排提示 */
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
+    /** 上月超欠产有效标识 */
+    private static final String LAST_MONTH_OVERDUE_VALID_FLAG = "1";
     /** 自动排程数据来源 */
     private static final String DATA_SOURCE_AUTO = "0";
     /** 正常删除标识 */
@@ -167,7 +169,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /**
      * 从月度计划获取T日SKU数据，按产品结构归集，计算硫化余量
      * <p>
-     * 硫化余量 = 月度计划量 - 硫化已完成量
+     * 硫化余量 = Max(月度计划总量 - 已完成量 + 有效上月超欠产量, 0)
      * </p>
      *
      * @param context 排程上下文
@@ -185,7 +187,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         List<SkuScheduleDTO> validScheduleSkuList = new ArrayList<>(monthPlanList.size());
 
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
-            // 计算硫化余量：当前代码统一使用月计划总量减完成量，不再读取月余量表作为兜底。
+            // 计算硫化余量：统一使用月计划、已完成量与有效上月超欠产量，不读取月余量表作为兜底。
             SurplusCalculation surplus = calculateSurplusQty(context, plan);
             SkuScheduleDTO dto = buildSkuScheduleDTO(context, plan, surplus, embryoStandardCapacitySumMap);
 
@@ -513,7 +515,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /**
      * 计算SKU的硫化余量
      * <p>
-     * 硫化余量 = Max(月度计划总量 - 已完成量, 0)，已完成量超过月计划总量时余量为0。
+     * 硫化余量 = Max(月度计划总量 - 已完成量 + 有效上月超欠产量, 0)。
      * 不再将逐日超产量加回剩余需求，避免月累计完成量已超月计划时余量被虚增。
      * </p>
      *
@@ -524,10 +526,33 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private SurplusCalculation calculateSurplusQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
         int totalPlanQty = plan.getTotalQty() != null ? plan.getTotalQty() : 0;
         int actualFinishedQty = calculateFinishedQty(context, plan);
-        int remainingDemandQty = Math.max(0, totalPlanQty - actualFinishedQty);
+        int scheDayFinishQty = resolveScheDayFinishQty(context, plan.getMaterialCode());
+        int lastMonthOverdueQty = resolveEffectiveLastMonthOverdueQty(plan);
+        int remainingDemandQty = Math.max(0, totalPlanQty - actualFinishedQty + lastMonthOverdueQty);
         // 保留逐日超产统计用于诊断日志，不参与余量计算
         int ignoredOverProductionQty = calculateIgnoredOverProductionQty(context, plan);
-        return new SurplusCalculation(remainingDemandQty, actualFinishedQty, ignoredOverProductionQty);
+        if (lastMonthOverdueQty > 0 || scheDayFinishQty > 0) {
+            log.info("硫化余量计算完成, materialCode: {}, monthPlanQty: {}, monthFinishedAndScheDayQty: {}, "
+                            + "scheDayFinishQty: {}, lastMonthValidFlag: {}, lastMonthOverdueQty: {}, surplusQty: {}",
+                    plan.getMaterialCode(), totalPlanQty, actualFinishedQty, scheDayFinishQty,
+                    plan.getLastMonthValidFlag(), lastMonthOverdueQty, remainingDemandQty);
+        }
+        return new SurplusCalculation(remainingDemandQty, actualFinishedQty, ignoredOverProductionQty,
+                lastMonthOverdueQty);
+    }
+
+    /**
+     * 解析有效上月超欠产数量。
+     *
+     * @param plan 月生产计划记录
+     * @return 有效上月超欠产数量
+     */
+    private int resolveEffectiveLastMonthOverdueQty(FactoryMonthPlanProductionFinalResult plan) {
+        if (Objects.isNull(plan) || !StringUtils.equals(LAST_MONTH_OVERDUE_VALID_FLAG,
+                StringUtils.trimToEmpty(plan.getLastMonthValidFlag()))) {
+            return 0;
+        }
+        return Math.max(0, safeInt(plan.getLastMonthOverdueQty()));
     }
 
     /**
@@ -714,10 +739,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         fillDailyCapacity(dto, capacity);
         dto.setTargetScheduleQty(getTargetScheduleQtyResolver().resolveInitialTargetQty(context, dto));
         appendOpenProductionShortageIfNecessary(context, dto);
-        log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 窗口剩余: {}, 已完成: {}, 忽略超产: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
+        log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 窗口剩余: {}, "
+                        + "已完成: {}, 有效上月超欠产: {}, 忽略超产: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
                 dto.getMaterialCode(), dto.getStructureName(), dto.getMonthPlanQty(), dto.getWindowPlanQty(),
-                dto.getWindowRemainingPlanQty(), dto.getFinishedQty(), surplus.getIgnoredOverProductionQty(),
-                dto.getSurplusQty(), dto.getPendingQty(),
+                dto.getWindowRemainingPlanQty(), dto.getFinishedQty(), surplus.getLastMonthOverdueQty(),
+                surplus.getIgnoredOverProductionQty(), dto.getSurplusQty(), dto.getPendingQty(),
                 dto.getTargetScheduleQty(), dto.getShiftCapacity());
         if (context.isRollingScheduleHandoff() || inheritedPlanQty > 0) {
             log.info("滚动待排量拆解, 物料: {}, 窗口计划量: {}, 已继承量: {}, 本月历史欠产量: {}, 待排量: {}, 余量: {}, 目标量: {}",
@@ -1962,11 +1988,14 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         private final int surplusQty;
         private final int actualFinishedQty;
         private final int ignoredOverProductionQty;
+        private final int lastMonthOverdueQty;
 
-        private SurplusCalculation(int surplusQty, int actualFinishedQty, int ignoredOverProductionQty) {
+        private SurplusCalculation(int surplusQty, int actualFinishedQty, int ignoredOverProductionQty,
+                                   int lastMonthOverdueQty) {
             this.surplusQty = surplusQty;
             this.actualFinishedQty = Math.max(0, actualFinishedQty);
             this.ignoredOverProductionQty = Math.max(0, ignoredOverProductionQty);
+            this.lastMonthOverdueQty = Math.max(0, lastMonthOverdueQty);
         }
 
         public int getSurplusQty() {
@@ -1979,6 +2008,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         public int getIgnoredOverProductionQty() {
             return ignoredOverProductionQty;
+        }
+
+        public int getLastMonthOverdueQty() {
+            return lastMonthOverdueQty;
         }
     }
 

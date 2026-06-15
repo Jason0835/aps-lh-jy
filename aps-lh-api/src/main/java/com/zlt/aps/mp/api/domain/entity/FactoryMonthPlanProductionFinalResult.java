@@ -73,6 +73,20 @@ public class FactoryMonthPlanProductionFinalResult extends BaseEntity {
     private String lastMonthPlanVersion;
 
     /**
+     * 上月超欠产是否有效，1-有效，其他-无效
+     */
+    @ApiModelProperty(value = "上月超欠产是否有效，1-有效，其他-无效", name = "lastMonthValidFlag")
+    @TableField(value = "LAST_MONTH_VALID_FLAG")
+    private String lastMonthValidFlag;
+
+    /**
+     * 上月超欠产数量，仅在上月超欠产有效时参与硫化余量计算
+     */
+    @ApiModelProperty(value = "上月超欠产数量", name = "lastMonthOverdueQty")
+    @TableField(value = "LAST_MONTH_OVERDUE_QTY")
+    private Integer lastMonthOverdueQty;
+
+    /**
      * 排产计划版本
      */
     @Excel(name = "ui.data.column.FactoryMonthPlanFinalResult.productionVersion")

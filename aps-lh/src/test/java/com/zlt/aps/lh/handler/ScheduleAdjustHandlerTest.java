@@ -107,6 +107,62 @@ public class ScheduleAdjustHandlerTest {
     }
 
     /**
+     * 用例说明：上月超欠产标志有效时，硫化余量需要在扣减月累计完成量和T日晚班完成量后叠加上月超欠产。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldIncludeValidLastMonthOverdueQtyWhenCalculatingSurplus() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 3)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 3)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        plan.setLastMonthValidFlag("1");
+        plan.setLastMonthOverdueQty(30);
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575", 70);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575", 20);
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(90, sku.getFinishedQty());
+        Assertions.assertEquals(20, sku.getScheduleDayFinishQty());
+        Assertions.assertEquals(40, sku.getSurplusQty());
+        Assertions.assertEquals(40, sku.getPendingQty());
+    }
+
+    /**
+     * 用例说明：上月超欠产标志无效时，上月超欠产数量不参与硫化余量计算。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldIgnoreInvalidLastMonthOverdueQtyWhenCalculatingSurplus() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 3)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 3)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        plan.setLastMonthValidFlag("0");
+        plan.setLastMonthOverdueQty(30);
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575", 70);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575", 20);
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(90, sku.getFinishedQty());
+        Assertions.assertEquals(20, sku.getScheduleDayFinishQty());
+        Assertions.assertEquals(10, sku.getSurplusQty());
+        Assertions.assertEquals(10, sku.getPendingQty());
+    }
+
+    /**
      * 用例说明：本月历史多日欠产需要累计进入当前排程日。
      *
      * @throws Exception 反射调用异常
