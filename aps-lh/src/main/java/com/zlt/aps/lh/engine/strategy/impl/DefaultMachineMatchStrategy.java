@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.SpecialMaterialMatchResult;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -34,6 +35,7 @@ import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
@@ -76,6 +78,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private static final int SINGLE_CONTROL_NORMAL_MACHINE_SCORE = 3;
     /** 正规SKU单控机台靠后得分 */
     private static final int SINGLE_CONTROL_FORMAL_SCORE = 4;
+    /** 释放机台早班尾量默认占用小时数 */
+    private static final int RELEASED_MACHINE_MORNING_TAIL_HOURS = 6;
 
     @Override
     public List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku) {
@@ -814,6 +818,21 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
+     * 解析指定SKU新增选机场景的对齐后参考时间。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @return 与排程窗口首班对齐后的参考时间
+     */
+    private Date resolveAlignedCandidateReferenceTime(LhScheduleContext context,
+                                                      SkuScheduleDTO sku,
+                                                      MachineScheduleDTO machine) {
+        Date referenceTime = resolveAlignedCandidateReferenceTime(context, machine);
+        return adjustReleasedMachineReferenceTime(context, sku, machine, referenceTime);
+    }
+
+    /**
      * 解析候选机台可排窗口结束时间。
      *
      * @param context 排程上下文
@@ -1399,7 +1418,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return cachedProfile;
         }
         CandidateWindowProfile profile = new CandidateWindowProfile();
-        Date referenceTime = resolveAlignedCandidateReferenceTime(context, machine);
+        Date referenceTime = resolveAlignedCandidateReferenceTime(context, sku, machine);
         profile.setReferenceTime(referenceTime);
         boolean hitNoMouldChange = referenceTime != null
                 && LhScheduleTimeUtil.isNoMouldChangeTime(context, referenceTime);
@@ -1407,7 +1426,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         Date switchStartTime = resolveCandidateSwitchStartTime(context, referenceTime);
         profile.setSwitchStartTime(switchStartTime);
         profile.setProductionStartTime(resolveCandidateProductionStartTime(context, switchStartTime));
-        profile.setReleasedContinuousMachineScore(resolveReleasedContinuousMachineScore(context, machine));
+        profile.setReleasedContinuousMachineScore(resolveReleasedContinuousMachineScore(context, sku, machine, referenceTime));
         profile.setOtherSkuOccupiedScore(resolveOtherSkuOccupiedScore(context, sku, machine));
         fillSchedulableShiftMetrics(context, sku, profile);
         profileCache.put(machine.getMachineCode(), profile);
@@ -1421,12 +1440,82 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param machine 候选机台
      * @return 0-普通候选，1-续作释放候选
      */
-    private int resolveReleasedContinuousMachineScore(LhScheduleContext context, MachineScheduleDTO machine) {
+    private int resolveReleasedContinuousMachineScore(LhScheduleContext context,
+                                                      SkuScheduleDTO sku,
+                                                      MachineScheduleDTO machine,
+                                                      Date referenceTime) {
         if (context == null || machine == null || StringUtils.isEmpty(machine.getMachineCode())
                 || CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())) {
             return 0;
         }
-        return context.getReleasedContinuousMachineCodeSet().contains(machine.getMachineCode()) ? 1 : 0;
+        if (!context.getReleasedContinuousMachineCodeSet().contains(machine.getMachineCode())) {
+            return 0;
+        }
+        // T日释放机台优先承接该业务日有正日计划且单段模数明确的SKU，避免其它SKU提前抢占释放窗口。
+        return hasPositivePlanOnReferenceDate(sku, referenceTime)
+                && StringUtils.isNotEmpty(resolveSingleMouldChangeSegment(sku.getMouldChangeInfo())) ? 0 : 1;
+    }
+
+    /**
+     * 调整释放机台参考时间。
+     * <p>收尾释放机台若承接T日单段模数SKU，需保留早班尾量生产时间，避免换模从窗口首班开始。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @param referenceTime 原参考时间
+     * @return 调整后的参考时间
+     */
+    private Date adjustReleasedMachineReferenceTime(LhScheduleContext context,
+                                                    SkuScheduleDTO sku,
+                                                    MachineScheduleDTO machine,
+                                                    Date referenceTime) {
+        if (context == null || sku == null || machine == null || referenceTime == null
+                || CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())
+                || !context.getReleasedContinuousMachineCodeSet().contains(machine.getMachineCode())
+                || !hasPositivePlanOnReferenceDate(sku, referenceTime)
+                || StringUtils.isEmpty(resolveSingleMouldChangeSegment(sku.getMouldChangeInfo()))
+                || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return referenceTime;
+        }
+        Date windowStartTime = context.getScheduleWindowShifts().get(0).getShiftStartDateTime();
+        if (windowStartTime == null || !referenceTime.equals(windowStartTime)) {
+            return referenceTime;
+        }
+        return LhScheduleTimeUtil.addHours(referenceTime, RELEASED_MACHINE_MORNING_TAIL_HOURS);
+    }
+
+    /**
+     * 判断SKU在候选释放机台参考业务日是否存在正日计划。
+     *
+     * @param sku 待排SKU
+     * @param referenceTime 候选机台参考时间
+     * @return true-参考日有正日计划
+     */
+    private boolean hasPositivePlanOnReferenceDate(SkuScheduleDTO sku, Date referenceTime) {
+        if (sku == null || referenceTime == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        LocalDate productionDate = referenceTime.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(productionDate);
+        return quota != null && quota.getDayPlanQty() > 0;
+    }
+
+    /**
+     * 解析单段模具变化信息。
+     *
+     * @param mouldChangeInfo 模具变化信息
+     * @return 单段模数，多段或空值返回空
+     */
+    private String resolveSingleMouldChangeSegment(String mouldChangeInfo) {
+        if (StringUtils.isEmpty(mouldChangeInfo)) {
+            return null;
+        }
+        String[] segments = mouldChangeInfo.split("-");
+        if (segments.length != 1) {
+            return null;
+        }
+        return StringUtils.trim(segments[0]);
     }
 
     /**

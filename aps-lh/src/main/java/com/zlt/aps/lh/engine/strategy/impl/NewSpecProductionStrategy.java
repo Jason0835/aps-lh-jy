@@ -116,6 +116,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             "共用胎胚且硫化余量为0";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
+    private static final int RELEASED_MACHINE_MORNING_TAIL_HOURS = 6;
     private static final Set<String> EMPTY_STRING_SET = Collections.emptySet();
     private static final Map<String, String> EMPTY_STRING_MAP = Collections.emptyMap();
     @Resource
@@ -543,6 +544,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, machineCode, switchReadyTime);
                 switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
                 switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
+                switchReadyTime = adjustReleasedMachineSwitchReadyTime(context, sku, candidateMachine, switchReadyTime);
 
                 // 4. 分配换模窗口；晚班不可换模、换模上限和维保重叠都在分配器中统一收口。
                 // 基础换模时间永远执行，换模均衡仅在开关开启时介入。
@@ -3215,6 +3217,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, candidate.getMachineCode(), switchReadyTime);
         switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
         switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
+        switchReadyTime = adjustReleasedMachineSwitchReadyTime(context, sku, candidate, switchReadyTime);
         int switchDurationHours = maintenanceOverlapSwitch
                 ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                 : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
@@ -6182,6 +6185,72 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return context.getScheduleDate();
         }
         return null;
+    }
+
+    /**
+     * 调整续作释放机台的新增换模就绪时间。
+     * <p>收尾SKU首日降模释放出的机台，若承接同日有计划且单段换模的新SKU，需要保留早班尾量生产窗口。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 新增SKU
+     * @param machine 候选机台
+     * @param switchReadyTime 原换模就绪时间
+     * @return 调整后的换模就绪时间
+     */
+    private Date adjustReleasedMachineSwitchReadyTime(LhScheduleContext context,
+                                                      SkuScheduleDTO sku,
+                                                      MachineScheduleDTO machine,
+                                                      Date switchReadyTime) {
+        if (context == null || sku == null || machine == null || switchReadyTime == null
+                || CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())
+                || !context.getReleasedContinuousMachineCodeSet().contains(machine.getMachineCode())
+                || !hasPositivePlanOnSwitchReadyDate(sku, switchReadyTime)
+                || StringUtils.isEmpty(resolveSingleMouldChangeSegment(sku.getMouldChangeInfo()))) {
+            return switchReadyTime;
+        }
+        Date windowStartTime = resolveScheduleWindowStartTime(context, context.getScheduleWindowShifts());
+        if (windowStartTime == null || !switchReadyTime.equals(windowStartTime)) {
+            return switchReadyTime;
+        }
+        Date adjustedTime = LhScheduleTimeUtil.addHours(switchReadyTime, RELEASED_MACHINE_MORNING_TAIL_HOURS);
+        log.info("新增SKU释放机台保留早班尾量, materialCode: {}, machineCode: {}, beforeReadyTime: {}, afterReadyTime: {}",
+                sku.getMaterialCode(), machine.getMachineCode(),
+                LhScheduleTimeUtil.formatDateTime(switchReadyTime),
+                LhScheduleTimeUtil.formatDateTime(adjustedTime));
+        return adjustedTime;
+    }
+
+    /**
+     * 判断SKU在换模就绪业务日是否有正日计划。
+     *
+     * @param sku 新增SKU
+     * @param switchReadyTime 换模就绪时间
+     * @return true-存在正日计划
+     */
+    private boolean hasPositivePlanOnSwitchReadyDate(SkuScheduleDTO sku, Date switchReadyTime) {
+        if (sku == null || switchReadyTime == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        LocalDate productionDate = switchReadyTime.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(productionDate);
+        return quota != null && quota.getDayPlanQty() > 0;
+    }
+
+    /**
+     * 解析单段换模信息。
+     *
+     * @param mouldChangeInfo 换模信息
+     * @return 单段换模值，多段或空值返回空
+     */
+    private String resolveSingleMouldChangeSegment(String mouldChangeInfo) {
+        if (StringUtils.isEmpty(mouldChangeInfo)) {
+            return null;
+        }
+        String[] segments = StringUtils.split(mouldChangeInfo, ",");
+        if (segments == null || segments.length != 1) {
+            return null;
+        }
+        return StringUtils.trimToNull(segments[0]);
     }
 
     private List<MachineCleaningWindowDTO> resolveMachineCleaningWindowList(LhScheduleContext context, String machineCode) {

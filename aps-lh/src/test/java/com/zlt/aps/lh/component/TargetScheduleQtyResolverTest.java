@@ -105,6 +105,24 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
+     * 用例说明：双模收尾 SKU 目标量为奇数时，应按模台数向上收敛到偶数。
+     */
+    @Test
+    public void shouldRoundEndingTargetUpToMouldMultipleForDoubleMouldSku() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = buildSku("3302002530", "EMB-02", 3, 3, 3);
+        sku.setMouldQty(2);
+        context.setNewSpecSkuList(Collections.singletonList(sku));
+        resolver.refreshActiveEmbryoSkuMap(context);
+
+        int targetQty = resolver.upsizeEndingTargetQty(context, sku);
+
+        Assertions.assertEquals(4, targetQty);
+        Assertions.assertEquals(4, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(4, sku.getRemainingScheduleQty());
+    }
+
+    /**
      * 用例说明：当前SKU初始目标量已经为0时，仍要先按动态有效SKU集合识别共用胎胚。
      */
     @Test

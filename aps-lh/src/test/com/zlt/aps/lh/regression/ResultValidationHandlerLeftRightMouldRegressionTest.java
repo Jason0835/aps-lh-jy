@@ -30,6 +30,30 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class ResultValidationHandlerLeftRightMouldRegressionTest {
 
     @Test
+    void postValidation_shouldRoundDoubleMouldOddShiftQtyBeforeSave() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        LhScheduleResult result = new LhScheduleResult();
+        result.setFactoryCode("116");
+        result.setBatchNo("LHPC20260614001");
+        result.setLhMachineCode("K1902");
+        result.setMaterialCode("3302002530");
+        result.setScheduleType("02");
+        result.setMouldQty(2);
+        result.setIsRelease("0");
+        result.setClass3PlanQty(3);
+        result.setClass3StartTime(dateTime(2026, 6, 13, 22, 0));
+        result.setClass3EndTime(dateTime(2026, 6, 14, 6, 0));
+        result.setSpecEndTime(dateTime(2026, 6, 14, 6, 0));
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "postValidation", context);
+
+        assertEquals(Integer.valueOf(4), result.getClass3PlanQty());
+        assertEquals(Integer.valueOf(4), result.getDailyPlanQty());
+    }
+
+    @Test
     void validateFormalQuantityPolicy_shouldAllowExactlyOneShiftFillOver() {
         ResultValidationHandler handler = new ResultValidationHandler();
         LhScheduleContext context = newContext();

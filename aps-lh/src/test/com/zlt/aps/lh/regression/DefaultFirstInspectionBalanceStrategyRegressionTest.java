@@ -79,6 +79,17 @@ class DefaultFirstInspectionBalanceStrategyRegressionTest {
         assertEquals(dateTime(2026, 4, 11, 14, 0), secondMorning, "早班达到上限后应顺延到中班");
     }
 
+    @Test
+    void allocateInspection_shouldKeepAfternoonWhenMouldChangeCompletesAtNoChangeBoundary() {
+        LhScheduleContext context = newContext("-1");
+        Date afternoonBoundaryTime = dateTime(2026, 4, 11, 20, 0);
+
+        Date allocated = strategy.allocateInspection(context, "K1516", afternoonBoundaryTime);
+
+        assertEquals(afternoonBoundaryTime, allocated,
+                "普通换模完成正好落在20点边界时，首检数量应归属中班，不应顺延到次日早班");
+    }
+
     private LhScheduleContext newContext(String maxFirstInspectionPerShift) {
         LhScheduleContext context = new LhScheduleContext();
         if (maxFirstInspectionPerShift != null) {

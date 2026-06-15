@@ -67,7 +67,7 @@ public class DefaultFirstInspectionBalanceStrategy implements IFirstInspectionBa
             }
 
             if (LhScheduleTimeUtil.isAfternoonShift(context, inspectionTime)) {
-                // 检查中班时间窗口是否足够（14:00-20:00之内可以首检）
+                // 检查中班时间窗口是否足够（14:00-20:00边界可以归属中班）
                 if (canAllocateInShift(counts[IDX_AFTERNOON], maxPerShift, unlimitedPerShift)
                         && isAfternoonWindowValid(context, inspectionTime)) {
                     counts[IDX_AFTERNOON]++;
@@ -115,18 +115,17 @@ public class DefaultFirstInspectionBalanceStrategy implements IFirstInspectionBa
 
     /**
      * 中班时间窗口有效性检查
-     * <p>中班可安排首检的时间窗口：14:00-20:00（禁止换模开始时间之前），需能完成换模+首检</p>
+     * <p>中班可安排首检的时间窗口：14:00-20:00，普通换模完成正好落在20:00时仍归属中班首检数量。</p>
      */
     private boolean isAfternoonWindowValid(LhScheduleContext context, Date inspectionTime) {
         int noMouldChangeStartHour = LhScheduleTimeUtil.getNoMouldChangeStartHour(context);
-        // 首检需在20:00前开始
+        // 普通换模8小时完成时已包含首检数量归属，20:00边界仍计入中班。
         java.util.Calendar cal = java.util.Calendar.getInstance();
         cal.setTime(inspectionTime);
         int hour = cal.get(java.util.Calendar.HOUR_OF_DAY);
         int minute = cal.get(java.util.Calendar.MINUTE);
-        // 首检时间必须在20:00之前，且首检耗时1小时内能完成
         return hour < noMouldChangeStartHour
-                || (hour == noMouldChangeStartHour - 1 && minute == 0);
+                || (hour == noMouldChangeStartHour && minute == 0);
     }
 
     /**

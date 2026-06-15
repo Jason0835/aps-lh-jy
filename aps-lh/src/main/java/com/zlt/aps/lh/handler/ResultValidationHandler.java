@@ -28,6 +28,7 @@ import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
+import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -175,6 +176,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             if (result.getIsRelease() == null) {
                 result.setIsRelease("0");
             }
+            normalizeMouldMultiplePlanQty(context, result);
             requireField(result.getBatchNo(), "batchNo", context, result);
             requireField(result.getFactoryCode(), "factoryCode", context, result);
             requireField(result.getLhMachineCode(), "lhMachineCode", context, result);
@@ -195,6 +197,46 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 //        validateProductionQuantityPolicy(context);
 
         log.info("排程后置校验完成");
+    }
+
+    /**
+     * 保存前统一收敛双模/多模班次计划量。
+     * <p>最终结果落库前不允许双模机台出现奇数计划量；目标尾量为奇数时按模台数向上取整。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     */
+    private void normalizeMouldMultiplePlanQty(LhScheduleContext context, LhScheduleResult result) {
+        if (Objects.isNull(result)) {
+            return;
+        }
+        Integer mouldQtyValue = result.getMouldQty();
+        int mouldQty = Objects.isNull(mouldQtyValue) ? 0 : mouldQtyValue;
+        if (mouldQty <= 1) {
+            return;
+        }
+        boolean adjusted = false;
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            if (Objects.isNull(planQty) || planQty <= 0) {
+                continue;
+            }
+            int normalizedQty = ShiftCapacityResolverUtil.roundUpQtyToMouldMultiple(planQty, mouldQty);
+            if (normalizedQty == planQty) {
+                continue;
+            }
+            ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, normalizedQty,
+                    ShiftFieldUtil.getShiftStartTime(result, shiftIndex),
+                    ShiftFieldUtil.getShiftEndTime(result, shiftIndex));
+            adjusted = true;
+            log.info("双模计划量保存前收敛, batchNo: {}, materialCode: {}, machineCode: {}, "
+                            + "shiftIndex: {}, mouldQty: {}, 原计划量: {}, 收敛后: {}",
+                    context.getBatchNo(), result.getMaterialCode(), result.getLhMachineCode(),
+                    shiftIndex, mouldQty, planQty, normalizedQty);
+        }
+        if (adjusted) {
+            ShiftFieldUtil.syncDailyPlanQty(result);
+        }
     }
 
     /**

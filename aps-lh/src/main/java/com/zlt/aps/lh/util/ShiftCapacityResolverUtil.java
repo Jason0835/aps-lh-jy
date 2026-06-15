@@ -850,6 +850,25 @@ public final class ShiftCapacityResolverUtil {
     }
 
     /**
+     * 按模台数向上收敛目标量。
+     * <p>用于收尾目标量等业务目标口径，双模/多模即使尾量小于模台数也需要保留一模，不沿用残班归零语义。</p>
+     *
+     * @param qty 当前目标量
+     * @param mouldQty 模台数
+     * @return 向上收敛后的目标量
+     */
+    public static int roundUpQtyToMouldMultiple(int qty, int mouldQty) {
+        if (qty <= 0) {
+            return qty;
+        }
+        int resolvedMouldQty = resolveMachineMouldQty(mouldQty);
+        if (resolvedMouldQty <= 1) {
+            return qty;
+        }
+        return ((qty + resolvedMouldQty - 1) / resolvedMouldQty) * resolvedMouldQty;
+    }
+
+    /**
      * 统一收敛班次实际落点计划量，避免双模残班落成奇数；奇数向上收敛到模台数整数倍。
      *
      * @param allocationQty 当前拟分配计划量

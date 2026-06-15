@@ -1010,6 +1010,33 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void scheduleReduceMould_shouldKeepOneMachineForEndingSkuWhenFirstDayPlanDropsToSingleMachineDemand() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildThreeMachineEndingContinuationContext();
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(2, countPositiveResults(context), "收尾SKU首日降模后应保留早班尾量和一台续作机台");
+        assertEquals(30, sumScheduledQty(context), "收尾SKU降模后应按首日dayN需求收口，不应保留三台满班续作量");
+        assertEquals(12, findResultByMachineCode(context, "K1516").getDailyPlanQty().intValue(),
+                "K1516早班尾量应保留，供后续换模判断使用");
+        assertEquals(18, findResultByMachineCode(context, "K1905").getDailyPlanQty().intValue(),
+                "剩余首日计划量应由一台续作机台承接");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldKeepOneMachineForEndingSkuWhenOnlyFirstDayQuotaExists() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildThreeMachineEndingContinuationContext();
+        replaceContinuousQuotaWithFirstDayOnly(context, 30);
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(2, countPositiveResults(context), "收尾SKU仅首日账本有计划时，也应只保留早班尾量和一台续作机台");
+        assertEquals(30, sumScheduledQty(context), "单日账本收尾SKU应按首日计划量收口");
+    }
+
+    @Test
     public void scheduleReduceMould_shouldReduceMachineFromSecondDayWhenLaterDayPlanDrops() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiDayContinuationContext(
@@ -1832,6 +1859,67 @@ public class ContinuousProductionStrategyTest {
         return context;
     }
 
+    private LhScheduleContext buildThreeMachineEndingContinuationContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-TEST-CONTINUATION-ENDING");
+        context.setScheduleDate(toDate(2026, 6, 13, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 6, 14, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+
+        addMachine(context, "K1516", 1);
+        addMachine(context, "K1905", 10);
+        addMachine(context, "K1924", 5);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO nextDayShift = resolveNextWorkDateShift(shifts, firstShift);
+        LhShiftConfigVO thirdDayShift = resolveNextWorkDateShift(shifts, nextDayShift);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(
+                firstShift, nextDayShift, thirdDayShift, 30, 0, 0);
+
+        SkuScheduleDTO firstSku = buildContinuationSku(
+                "3302002326", ConstructionStageEnum.FORMAL.getCode(), true, 74, quotaMap);
+        firstSku.setContinuousMachineCode("K1516");
+        SkuScheduleDTO secondSku = buildContinuationSku(
+                "3302002326", ConstructionStageEnum.FORMAL.getCode(), true, 74, quotaMap);
+        secondSku.setContinuousMachineCode("K1905");
+        SkuScheduleDTO thirdSku = buildContinuationSku(
+                "3302002326", ConstructionStageEnum.FORMAL.getCode(), true, 74, quotaMap);
+        thirdSku.setContinuousMachineCode("K1924");
+        context.setContinuousSkuList(Arrays.asList(firstSku, secondSku, thirdSku));
+
+        LhScheduleResult firstResult = buildContinuationResult(
+                "3302002326", "K1516", true, shifts, 12, 0, 0);
+        LhScheduleResult secondResult = buildContinuationResult(
+                "3302002326", "K1905", true, shifts, 16, 16, 16);
+        LhScheduleResult thirdResult = buildContinuationResult(
+                "3302002326", "K1924", true, shifts, 16, 16, 16);
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultList().add(thirdResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, firstSku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, secondSku);
+        context.getScheduleResultSourceSkuMap().put(thirdResult, thirdSku);
+        context.getMachineAssignmentMap().put("K1516",
+                new ArrayList<LhScheduleResult>(Collections.singletonList(firstResult)));
+        context.getMachineAssignmentMap().put("K1905",
+                new ArrayList<LhScheduleResult>(Collections.singletonList(secondResult)));
+        context.getMachineAssignmentMap().put("K1924",
+                new ArrayList<LhScheduleResult>(Collections.singletonList(thirdResult)));
+        return context;
+    }
+
+    private void replaceContinuousQuotaWithFirstDayOnly(LhScheduleContext context, int firstDayPlanQty) {
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(2);
+        quotaMap.put(toLocalDate(firstShift), quota("3302002326", toLocalDate(firstShift), firstDayPlanQty));
+        for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
+            sku.setDailyPlanQuotaMap(quotaMap);
+        }
+    }
+
     private LhScheduleContext buildMultiDayContinuationContext(String constructionStage,
                                                                int targetQty,
                                                                int firstDayQty,
@@ -2075,6 +2163,16 @@ public class ContinuousProductionStrategyTest {
         int total = 0;
         for (LhScheduleResult result : context.getScheduleResultList()) {
             total += ShiftFieldUtil.resolveScheduledQty(result);
+        }
+        return total;
+    }
+
+    private int countPositiveResults(LhScheduleContext context) {
+        int total = 0;
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (ShiftFieldUtil.resolveScheduledQty(result) > 0) {
+                total++;
+            }
         }
         return total;
     }

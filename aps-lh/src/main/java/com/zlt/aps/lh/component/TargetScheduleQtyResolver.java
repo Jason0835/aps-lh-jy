@@ -781,17 +781,17 @@ public class TargetScheduleQtyResolver {
             endingBaseQty = Math.max(embryoStock, surplusQty);
             qtySource = embryoStock > surplusQty ? "单胎胚-取胎胚库存" : "单胎胚-取硫化余量";
         }
-        int endingTargetQty = endingBaseQty;
+        int endingTargetQty = ShiftCapacityResolverUtil.roundUpQtyToMouldMultiple(endingBaseQty, sku.getMouldQty());
         String direction = endingTargetQty > currentTargetQty ? "上调"
                 : endingTargetQty < currentTargetQty ? "下调" : "保持";
         int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
         log.info("收尾SKU目标量{}, materialCode: {}, 胎胚编码: {}, 原始共用SKU数: {}, "
                         + "有效共用SKU数: {}, 是否动态共用胎胚: {}, 目标量取值来源: {}, "
-                        + "原目标量: {}, 调整后: {}, 窗口日计划总量: {}, 窗口日计划剩余: {}, "
+                        + "原目标量: {}, 基础目标量: {}, 模台数: {}, 调整后: {}, 窗口日计划总量: {}, 窗口日计划剩余: {}, "
                         + "胎胚库存: {}, 月计划余量: {}, 未排原因: {}",
                 direction, sku.getMaterialCode(), sku.getEmbryoCode(), originalSkuCount,
                 activeSkuCount, sharedEmbryo, qtySource,
-                currentTargetQty, endingTargetQty,
+                currentTargetQty, endingBaseQty, sku.getMouldQty(), endingTargetQty,
                 windowPlanQty, windowRemainingPlanQty, embryoStock, surplusQty, unscheduledReason);
         sku.setTargetScheduleQty(endingTargetQty);
         sku.setRemainingScheduleQty(endingTargetQty);
