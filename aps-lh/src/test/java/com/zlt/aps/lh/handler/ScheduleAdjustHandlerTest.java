@@ -5,10 +5,13 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -21,6 +24,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * ScheduleAdjustHandler 胎胚库存分摊测试。
@@ -30,27 +34,63 @@ import java.util.Map;
 public class ScheduleAdjustHandlerTest {
 
     /**
-     * 用例说明：同胎胚库存应按 SKU 日硫化量分摊，而不是按标准产能分摊。
+     * 用例说明：不同 SKU 共用胎胚但不是同一天收尾时，不进入共用胎胚库存分摊。
      *
      * @throws Exception 反射调用异常
      */
     @Test
-    public void shouldAllocateEmbryoStockByDailyPlanQty() throws Exception {
-        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
-        LhScheduleContext context = new LhScheduleContext();
-
-        FactoryMonthPlanProductionFinalResult firstPlan = buildMonthPlan("3302001575", "EMB-01", 20);
-        FactoryMonthPlanProductionFinalResult secondPlan = buildMonthPlan("3302001724", "EMB-01", 80);
+    public void shouldNotAllocateSharedEmbryoStockWhenEndingDaysAreDifferent() throws Exception {
+        ScheduleAdjustHandler handler = buildHandlerWithEndingDays(
+                buildEndingDaysMap("3302001575", 1, "3302001724", 2));
+        LhScheduleContext context = buildEmbryoAllocationContext();
+        FactoryMonthPlanProductionFinalResult firstPlan = buildSchedulePlan("3302001575", "结构A", 100, 20, 0, 0);
+        firstPlan.setEmbryoCode("EMB-01");
+        FactoryMonthPlanProductionFinalResult secondPlan = buildSchedulePlan("3302001724", "结构A", 100, 20, 0, 0);
+        secondPlan.setEmbryoCode("EMB-01");
         context.setMonthPlanList(Arrays.asList(firstPlan, secondPlan));
         context.getEmbryoRealtimeStockMap().put("EMB-01", 100);
-
         context.getSkuLhCapacityMap().put("3302001575", buildCapacity(100));
         context.getSkuLhCapacityMap().put("3302001724", buildCapacity(100));
 
-        Map<String, Integer> embryoSumMap = invokeBuildEmbryoStandardCapacitySumMap(handler, context);
-        int allocatedStock = invokeResolveAllocatedEmbryoStock(handler, context, firstPlan, embryoSumMap);
+        invokeDoHandle(handler, context);
 
-        Assertions.assertEquals(20, allocatedStock);
+        SkuScheduleDTO firstSku = findNewSpecSku(context, "3302001575");
+        SkuScheduleDTO secondSku = findNewSpecSku(context, "3302001724");
+        Assertions.assertEquals(100, firstSku.getEmbryoStock());
+        Assertions.assertEquals(100, secondSku.getEmbryoStock());
+    }
+
+    /**
+     * 用例说明：不同 SKU 共用胎胚且同一天收尾时，按标准产能占比分摊，最后一个 SKU 承接尾差。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldAllocateSameDayEndingSharedEmbryoStockAndGiveRemainderToLastSku() throws Exception {
+        ScheduleAdjustHandler handler = buildHandlerWithEndingDays(
+                buildEndingDaysMap("3302001575", 1, "3302001724", 1));
+        LhScheduleContext context = buildEmbryoAllocationContext();
+
+        FactoryMonthPlanProductionFinalResult firstPlan = buildMonthPlan("3302001575", "EMB-01", 20);
+        FactoryMonthPlanProductionFinalResult secondPlan = buildMonthPlan("3302001724", "EMB-01", 80);
+        firstPlan.setStructureName("结构A");
+        firstPlan.setTotalQty(100);
+        firstPlan.setDay1(20);
+        secondPlan.setStructureName("结构A");
+        secondPlan.setTotalQty(100);
+        secondPlan.setDay1(80);
+        context.setMonthPlanList(Arrays.asList(firstPlan, secondPlan));
+        context.getEmbryoRealtimeStockMap().put("EMB-01", 100);
+
+        context.getSkuLhCapacityMap().put("3302001575", buildCapacity(1));
+        context.getSkuLhCapacityMap().put("3302001724", buildCapacity(2));
+
+        invokeDoHandle(handler, context);
+
+        SkuScheduleDTO firstSku = findNewSpecSku(context, "3302001575");
+        SkuScheduleDTO secondSku = findNewSpecSku(context, "3302001724");
+        Assertions.assertEquals(33, firstSku.getEmbryoStock());
+        Assertions.assertEquals(67, secondSku.getEmbryoStock());
     }
 
     /**
@@ -237,27 +277,6 @@ public class ScheduleAdjustHandlerTest {
         Assertions.assertEquals("K1115", copy.getContinuousMachineCode());
     }
 
-    private Map<String, Integer> invokeBuildEmbryoStandardCapacitySumMap(ScheduleAdjustHandler handler,
-                                                                         LhScheduleContext context) throws Exception {
-        Method method = ScheduleAdjustHandler.class.getDeclaredMethod(
-                "buildEmbryoStandardCapacitySumMap", LhScheduleContext.class);
-        method.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        Map<String, Integer> result = (Map<String, Integer>) method.invoke(handler, context);
-        return result;
-    }
-
-    private int invokeResolveAllocatedEmbryoStock(ScheduleAdjustHandler handler,
-                                                  LhScheduleContext context,
-                                                  FactoryMonthPlanProductionFinalResult plan,
-                                                  Map<String, Integer> embryoSumMap) throws Exception {
-        Method method = ScheduleAdjustHandler.class.getDeclaredMethod(
-                "resolveAllocatedEmbryoStock", LhScheduleContext.class,
-                FactoryMonthPlanProductionFinalResult.class, Map.class);
-        method.setAccessible(true);
-        return (Integer) method.invoke(handler, context, plan, embryoSumMap);
-    }
-
     private void invokeAdjustPreviousSchedule(ScheduleAdjustHandler handler,
                                               LhScheduleContext context) throws Exception {
         Method method = ScheduleAdjustHandler.class.getDeclaredMethod(
@@ -268,6 +287,7 @@ public class ScheduleAdjustHandlerTest {
 
     private void invokeGatherSkuByStructure(ScheduleAdjustHandler handler,
                                             LhScheduleContext context) throws Exception {
+        ensureWindowEndDate(context);
         Method method = ScheduleAdjustHandler.class.getDeclaredMethod(
                 "gatherSkuByStructure", LhScheduleContext.class);
         method.setAccessible(true);
@@ -293,6 +313,14 @@ public class ScheduleAdjustHandlerTest {
         return (SkuScheduleDTO) method.invoke(handler, source, machineCode);
     }
 
+    private void invokeDoHandle(ScheduleAdjustHandler handler,
+                                LhScheduleContext context) throws Exception {
+        ensureWindowEndDate(context);
+        Method method = ScheduleAdjustHandler.class.getDeclaredMethod("doHandle", LhScheduleContext.class);
+        method.setAccessible(true);
+        method.invoke(handler, context);
+    }
+
     private SkuScheduleDTO getFirstGatheredSku(LhScheduleContext context) {
         List<SkuScheduleDTO> skuList = context.getStructureSkuMap().values().iterator().next();
         return skuList.get(0);
@@ -300,6 +328,15 @@ public class ScheduleAdjustHandlerTest {
 
     private SkuDailyPlanQuotaDTO getQuota(SkuScheduleDTO sku, LocalDate productionDate) {
         return sku.getDailyPlanQuotaMap().get(productionDate);
+    }
+
+    private SkuScheduleDTO findNewSpecSku(LhScheduleContext context, String materialCode) {
+        for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
+            if (Objects.nonNull(sku) && materialCode.equals(sku.getMaterialCode())) {
+                return sku;
+            }
+        }
+        return null;
     }
 
     private void setMonthDailyFinishedQtyMap(LhScheduleContext context,
@@ -336,6 +373,58 @@ public class ScheduleAdjustHandlerTest {
         return plan;
     }
 
+    private LhScheduleContext buildEmbryoAllocationContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 10)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 11)));
+        context.setWindowEndDate(toDate(LocalDate.of(2026, 6, 12)));
+        return context;
+    }
+
+    private ScheduleAdjustHandler buildHandlerWithEndingDays(final Map<String, Integer> endingDaysMap) {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        ReflectionTestUtils.setField(handler, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new IEndingJudgmentStrategy() {
+            @Override
+            public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+                return Objects.nonNull(sku) && endingDaysMap.containsKey(sku.getMaterialCode());
+            }
+
+            @Override
+            public int calculateEndingShifts(LhScheduleContext context, SkuScheduleDTO sku) {
+                return 1;
+            }
+
+            @Override
+            public int calculateEndingDays(LhScheduleContext context, SkuScheduleDTO sku) {
+                Integer endingDays = endingDaysMap.get(sku.getMaterialCode());
+                return Objects.nonNull(endingDays) ? endingDays : -1;
+            }
+        });
+        return handler;
+    }
+
+    private Map<String, Integer> buildEndingDaysMap(String firstMaterialCode,
+                                                    int firstEndingDays,
+                                                    String secondMaterialCode,
+                                                    int secondEndingDays) {
+        Map<String, Integer> endingDaysMap = new LinkedHashMap<String, Integer>(4);
+        endingDaysMap.put(firstMaterialCode, firstEndingDays);
+        endingDaysMap.put(secondMaterialCode, secondEndingDays);
+        return endingDaysMap;
+    }
+
+    private void ensureWindowEndDate(LhScheduleContext context) {
+        if (Objects.isNull(context) || Objects.nonNull(context.getWindowEndDate())
+                || Objects.isNull(context.getScheduleDate())) {
+            return;
+        }
+        LocalDate scheduleDate = context.getScheduleDate().toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        context.setWindowEndDate(toDate(scheduleDate.plusDays(2)));
+    }
+
     private Date toDate(LocalDate date) {
         return Date.from(date.atStartOfDay(ZoneId.systemDefault()).toInstant());
     }
@@ -359,6 +448,7 @@ public class ScheduleAdjustHandlerTest {
     private MdmSkuLhCapacity buildCapacity(int standardCapacity) {
         MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
         capacity.setStandardCapacity(standardCapacity);
+        capacity.setClassCapacity(standardCapacity);
         return capacity;
     }
 }

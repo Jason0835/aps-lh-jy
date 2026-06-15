@@ -89,6 +89,47 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
+     * 用例说明：共用胎胚中一个 SKU 收尾完成后，后续分摊必须剔除该 SKU，并让最后一个 SKU 承接尾差。
+     */
+    @Test
+    public void shouldReallocateSharedEmbryoStockAfterCompletedSkuRemoved() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO completedSku = buildEndingSku("3302002369", "EMB-01", 1, 30, 1);
+        SkuScheduleDTO firstRemainingSku = buildEndingSku("3302002370", "EMB-01", 1, 30, 1);
+        SkuScheduleDTO secondRemainingSku = buildEndingSku("3302002371", "EMB-01", 1, 30, 2);
+        context.setNewSpecSkuList(Arrays.asList(completedSku, firstRemainingSku, secondRemainingSku));
+        context.getEmbryoRealtimeStockMap().put("EMB-01", 100);
+        resolver.refreshActiveEmbryoSkuMap(context);
+
+        resolver.removeActiveEmbryoSku(context, completedSku, "收尾完成");
+
+        Assertions.assertEquals(Arrays.asList("3302002370", "3302002371"),
+                context.getActiveEmbryoSkuMap().get("EMB-01"));
+        Assertions.assertEquals(33, firstRemainingSku.getEmbryoStock());
+        Assertions.assertEquals(67, secondRemainingSku.getEmbryoStock());
+    }
+
+    /**
+     * 用例说明：共用胎胚剔除后只剩一个 SKU 时，后续应按单胎胚使用完整胎胚库存。
+     */
+    @Test
+    public void shouldUseFullEmbryoStockWhenOnlyOneSkuRemainsAfterRemoval() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO completedSku = buildEndingSku("3302002369", "EMB-01", 1, 45, 1);
+        SkuScheduleDTO remainingSku = buildEndingSku("3302002370", "EMB-01", 1, 55, 1);
+        context.setNewSpecSkuList(Arrays.asList(completedSku, remainingSku));
+        context.getEmbryoRealtimeStockMap().put("EMB-01", 100);
+        resolver.refreshActiveEmbryoSkuMap(context);
+
+        resolver.removeActiveEmbryoSku(context, completedSku, "收尾完成");
+
+        Assertions.assertEquals(Collections.singletonList("3302002370"),
+                context.getActiveEmbryoSkuMap().get("EMB-01"));
+        Assertions.assertEquals(100, remainingSku.getEmbryoStock());
+        Assertions.assertFalse(resolver.isSharedEmbryoInWindow(context, remainingSku));
+    }
+
+    /**
      * 用例说明：非共用胎胚收尾 SKU 余量为0且胎胚库存大于0时，仍按 MAX 规则排产。
      */
     @Test
@@ -196,6 +237,18 @@ public class TargetScheduleQtyResolverTest {
         sku.setEmbryoStock(embryoStock);
         sku.setTargetScheduleQty(targetScheduleQty);
         sku.setRemainingScheduleQty(targetScheduleQty);
+        return sku;
+    }
+
+    private SkuScheduleDTO buildEndingSku(String materialCode,
+                                          String embryoCode,
+                                          int endingDays,
+                                          int embryoStock,
+                                          int dailyCapacity) {
+        SkuScheduleDTO sku = buildSku(materialCode, embryoCode, 10, embryoStock, 10);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(endingDays);
+        sku.setDailyCapacity(dailyCapacity);
         return sku;
     }
 }

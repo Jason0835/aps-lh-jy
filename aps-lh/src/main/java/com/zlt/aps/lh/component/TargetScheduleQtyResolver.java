@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
@@ -21,6 +22,7 @@ import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -992,6 +994,210 @@ public class TargetScheduleQtyResolver {
         log.info("刷新胎胚有效SKU集合, materialCode: {}, embryoCode: {}, 剩余有效SKU数: {}, 原因: {}",
                 sku.getMaterialCode(), sku.getEmbryoCode(),
                 CollectionUtils.isEmpty(activeSkuList) ? 0 : activeSkuList.size(), reason);
+        refreshSharedEmbryoStockAllocation(context, sku.getEmbryoCode(), reason);
+    }
+
+    /**
+     * 刷新全部活跃共用胎胚库存分摊。
+     * <p>只在不同SKU共用同一胎胚且同一天收尾时分摊；其它场景恢复为单SKU完整库存口径。</p>
+     *
+     * @param context 排程上下文
+     * @param reason 刷新原因
+     */
+    public void refreshAllSharedEmbryoStockAllocations(LhScheduleContext context, String reason) {
+        if (Objects.isNull(context)) {
+            return;
+        }
+        if (CollectionUtils.isEmpty(context.getActiveEmbryoSkuMap())) {
+            refreshActiveEmbryoSkuMap(context);
+        }
+        if (CollectionUtils.isEmpty(context.getActiveEmbryoSkuMap())) {
+            return;
+        }
+        Set<String> embryoCodeSet = new HashSet<String>(context.getActiveEmbryoSkuMap().keySet());
+        for (String embryoCode : embryoCodeSet) {
+            refreshSharedEmbryoStockAllocation(context, embryoCode, reason);
+        }
+    }
+
+    /**
+     * 按当前活跃SKU集合刷新单个胎胚库存分摊。
+     *
+     * @param context 排程上下文
+     * @param embryoCode 胎胚编码
+     * @param reason 刷新原因
+     */
+    private void refreshSharedEmbryoStockAllocation(LhScheduleContext context, String embryoCode, String reason) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(embryoCode)
+                || !context.getEmbryoRealtimeStockMap().containsKey(embryoCode)) {
+            return;
+        }
+        Integer rawEmbryoStock = context.getEmbryoRealtimeStockMap().get(embryoCode);
+        if (Objects.isNull(rawEmbryoStock)) {
+            return;
+        }
+        List<SkuScheduleDTO> activeSkuList = collectActiveSkusByEmbryo(context, embryoCode);
+        if (CollectionUtils.isEmpty(activeSkuList)) {
+            return;
+        }
+        if (activeSkuList.size() == 1) {
+            SkuScheduleDTO sku = activeSkuList.get(0);
+            sku.setEmbryoStock(rawEmbryoStock);
+            log.info("共用胎胚动态转单胎胚库存口径, embryoCode: {}, embryoDesc: {}, 剩余SKU: {}, "
+                            + "胎胚库存: {}, 原因: {}",
+                    embryoCode, sku.getMainMaterialDesc(), sku.getMaterialCode(), rawEmbryoStock, reason);
+            return;
+        }
+        Integer endingDay = resolveSameEndingDay(activeSkuList);
+        if (Objects.isNull(endingDay)) {
+            resetFullEmbryoStock(activeSkuList, rawEmbryoStock);
+            log.info("共用胎胚库存不分摊, embryoCode: {}, embryoDesc: {}, 当前SKU列表: {}, "
+                            + "是否满足不同SKU同一天收尾: false, 胎胚库存: {}, 原因: {}",
+                    embryoCode, resolveEmbryoDesc(activeSkuList), collectMaterialCodes(activeSkuList),
+                    rawEmbryoStock, reason);
+            return;
+        }
+        allocateSharedEmbryoStockByCapacity(context, embryoCode, rawEmbryoStock, activeSkuList, endingDay, reason);
+    }
+
+    private List<SkuScheduleDTO> collectActiveSkusByEmbryo(LhScheduleContext context, String embryoCode) {
+        List<String> activeMaterialList = context.getActiveEmbryoSkuMap().get(embryoCode);
+        if (CollectionUtils.isEmpty(activeMaterialList)) {
+            return new ArrayList<SkuScheduleDTO>(0);
+        }
+        Set<String> activeMaterialSet = new HashSet<String>(activeMaterialList);
+        List<SkuScheduleDTO> activeSkuList = new ArrayList<SkuScheduleDTO>(activeMaterialList.size());
+        for (SkuScheduleDTO sku : collectCandidateSkus(context)) {
+            if (Objects.nonNull(sku) && activeMaterialSet.contains(sku.getMaterialCode())
+                    && StringUtils.equals(embryoCode, sku.getEmbryoCode())) {
+                activeSkuList.add(sku);
+            }
+        }
+        return activeSkuList;
+    }
+
+    private Integer resolveSameEndingDay(List<SkuScheduleDTO> skuList) {
+        Integer endingDay = null;
+        for (SkuScheduleDTO sku : skuList) {
+            if (Objects.isNull(sku) || !StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag())
+                    || sku.getEndingDaysRemaining() <= 0) {
+                return null;
+            }
+            if (Objects.isNull(endingDay)) {
+                endingDay = sku.getEndingDaysRemaining();
+                continue;
+            }
+            if (!endingDay.equals(sku.getEndingDaysRemaining())) {
+                return null;
+            }
+        }
+        return endingDay;
+    }
+
+    private void allocateSharedEmbryoStockByCapacity(LhScheduleContext context,
+                                                     String embryoCode,
+                                                     int rawEmbryoStock,
+                                                     List<SkuScheduleDTO> skuList,
+                                                     int endingDay,
+                                                     String reason) {
+        if (rawEmbryoStock <= 0) {
+            for (SkuScheduleDTO sku : skuList) {
+                sku.setEmbryoStock(0);
+            }
+            log.info("共用胎胚库存为0，分摊结果全部为0, embryoCode: {}, 当前SKU列表: {}, 原因: {}",
+                    embryoCode, collectMaterialCodes(skuList), reason);
+            return;
+        }
+        Map<String, Integer> weightMap = buildAllocationWeightMap(context, skuList);
+        int totalWeight = sumAllocationWeight(weightMap);
+        if (totalWeight <= 0) {
+            resetFullEmbryoStock(skuList, rawEmbryoStock);
+            log.warn("共用胎胚库存分摊权重异常，按完整库存口径保留, embryoCode: {}, 当前SKU列表: {}, "
+                            + "weightMap: {}, 胎胚库存: {}, 原因: {}",
+                    embryoCode, collectMaterialCodes(skuList), weightMap, rawEmbryoStock, reason);
+            return;
+        }
+        int allocatedSum = 0;
+        Map<String, Integer> allocatedMap = new LinkedHashMap<String, Integer>(skuList.size());
+        for (int index = 0; index < skuList.size(); index++) {
+            SkuScheduleDTO sku = skuList.get(index);
+            int allocatedStock;
+            if (index == skuList.size() - 1) {
+                allocatedStock = rawEmbryoStock - allocatedSum;
+            } else {
+                int weight = Math.max(0, weightMap.getOrDefault(sku.getMaterialCode(), 0));
+                allocatedStock = (int) (rawEmbryoStock * (long) weight / totalWeight);
+                allocatedSum += allocatedStock;
+            }
+            sku.setEmbryoStock(Math.max(0, allocatedStock));
+            allocatedMap.put(sku.getMaterialCode(), sku.getEmbryoStock());
+        }
+        log.info("共用胎胚库存按标准产能分摊完成, embryoCode: {}, embryoDesc: {}, 当前SKU列表: {}, "
+                        + "是否满足不同SKU同一天收尾: true, 收尾天数: {}, 标准产能权重: {}, 总权重: {}, "
+                        + "胎胚库存: {}, 分摊结果: {}, 尾差处理后汇总: {}, 原因: {}",
+                embryoCode, resolveEmbryoDesc(skuList), collectMaterialCodes(skuList), endingDay,
+                weightMap, totalWeight, rawEmbryoStock, allocatedMap, sumAllocationWeight(allocatedMap), reason);
+    }
+
+    private Map<String, Integer> buildAllocationWeightMap(LhScheduleContext context, List<SkuScheduleDTO> skuList) {
+        Map<String, Integer> weightMap = new LinkedHashMap<String, Integer>(skuList.size());
+        for (SkuScheduleDTO sku : skuList) {
+            weightMap.put(sku.getMaterialCode(), resolveAllocationWeight(context, sku));
+        }
+        return weightMap;
+    }
+
+    private int resolveAllocationWeight(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return 0;
+        }
+        MdmSkuLhCapacity capacity = context.getSkuLhCapacityMap().get(sku.getMaterialCode());
+        if (Objects.nonNull(capacity) && Objects.nonNull(capacity.getStandardCapacity())
+                && capacity.getStandardCapacity() > 0) {
+            return capacity.getStandardCapacity();
+        }
+        return Math.max(0, sku.getDailyCapacity());
+    }
+
+    private int sumAllocationWeight(Map<String, Integer> weightMap) {
+        int totalWeight = 0;
+        if (CollectionUtils.isEmpty(weightMap)) {
+            return totalWeight;
+        }
+        for (Integer weight : weightMap.values()) {
+            totalWeight += Math.max(0, Objects.isNull(weight) ? 0 : weight);
+        }
+        return totalWeight;
+    }
+
+    private void resetFullEmbryoStock(List<SkuScheduleDTO> skuList, int rawEmbryoStock) {
+        for (SkuScheduleDTO sku : skuList) {
+            if (Objects.nonNull(sku)) {
+                sku.setEmbryoStock(rawEmbryoStock);
+            }
+        }
+    }
+
+    private List<String> collectMaterialCodes(List<SkuScheduleDTO> skuList) {
+        List<String> materialCodeList = new ArrayList<String>(skuList.size());
+        for (SkuScheduleDTO sku : skuList) {
+            if (Objects.nonNull(sku) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
+                materialCodeList.add(sku.getMaterialCode());
+            }
+        }
+        return materialCodeList;
+    }
+
+    private String resolveEmbryoDesc(List<SkuScheduleDTO> skuList) {
+        if (CollectionUtils.isEmpty(skuList)) {
+            return "";
+        }
+        for (SkuScheduleDTO sku : skuList) {
+            if (Objects.nonNull(sku) && StringUtils.isNotEmpty(sku.getMainMaterialDesc())) {
+                return sku.getMainMaterialDesc();
+            }
+        }
+        return "";
     }
 
     private List<SkuScheduleDTO> collectCandidateSkus(LhScheduleContext context) {

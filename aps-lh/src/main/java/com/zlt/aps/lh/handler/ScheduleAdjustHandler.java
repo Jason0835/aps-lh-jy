@@ -113,6 +113,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // S4.3.3 标注收尾SKU（3天内可收尾）
         markEndingSkus(context);
+        // 共用胎胚库存只有在不同SKU同一天收尾时才按标准产能分摊，依赖收尾标注结果统一刷新。
+        targetScheduleQtyResolver.refreshAllSharedEmbryoStockAllocations(context, "S4.3收尾标注完成");
 
         // S4.3.3.1 共用胎胚零余量SKU先出队，后续排产只使用动态归一化后的胎胚组
         pruneSharedEmbryoZeroSurplusSkus(context);
@@ -183,13 +185,12 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // 按结构归集SKU（key=结构名称，value=该结构下的SKU排程DTO列表）
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
-        Map<String, Integer> embryoStandardCapacitySumMap = buildEmbryoStandardCapacitySumMap(context);
         List<SkuScheduleDTO> validScheduleSkuList = new ArrayList<>(monthPlanList.size());
 
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
             // 计算硫化余量：统一使用月计划、已完成量与有效上月超欠产量，不读取月余量表作为兜底。
             SurplusCalculation surplus = calculateSurplusQty(context, plan);
-            SkuScheduleDTO dto = buildSkuScheduleDTO(context, plan, surplus, embryoStandardCapacitySumMap);
+            SkuScheduleDTO dto = buildSkuScheduleDTO(context, plan, surplus);
 
             // 产品结构为空，跳过
             if (StringUtils.isEmpty(plan.getStructureName())) {
@@ -658,13 +659,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * @param context    排程上下文
      * @param plan       月生产计划记录
      * @param surplus 硫化余量
-     * @param embryoStandardCapacitySumMap 同胎胚标准产能汇总Map
      * @return SKU排程DTO
      */
     private SkuScheduleDTO buildSkuScheduleDTO(LhScheduleContext context,
                                                FactoryMonthPlanProductionFinalResult plan,
-                                               SurplusCalculation surplus,
-                                               Map<String, Integer> embryoStandardCapacitySumMap) {
+                                               SurplusCalculation surplus) {
         SkuScheduleDTO dto = new SkuScheduleDTO();
         dto.setMaterialCode(plan.getMaterialCode());
         dto.setMaterialDesc(plan.getMaterialDesc());
@@ -710,7 +709,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setWindowRemainingPlanQty(windowRemainingPlanQty);
 
         dto.setSurplusQty(surplus.getSurplusQty());
-        dto.setEmbryoStock(resolveAllocatedEmbryoStock(context, plan, embryoStandardCapacitySumMap));
+        dto.setEmbryoStock(resolveRawEmbryoStock(context, plan));
         // 待排量保持"需求口径"：使用月计划余量扣减滚动继承量，再与胎胚库存取大。
         // 本月历史欠产已体现在首日日计划账本中，不能再次重复叠加。
         int basePendingQty = resolveBasePendingQty(surplus.getSurplusQty(), inheritedPlanQty, dto.getEmbryoStock());
@@ -827,37 +826,15 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 构建同胎胚分摊权重汇总Map。
-     * <p>优先按 SKU 标准产能分摊；缺少标准产能时回退到日硫化量，兼容旧数据场景。</p>
-     *
-     * @param context 排程上下文
-     * @return 同胎胚日硫化量汇总Map，key=胎胚编号
-     */
-    private Map<String, Integer> buildEmbryoStandardCapacitySumMap(LhScheduleContext context) {
-        Map<String, Integer> embryoStandardCapacitySumMap = new LinkedHashMap<>();
-        for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
-            if (StringUtils.isEmpty(plan.getEmbryoCode())) {
-                continue;
-            }
-            int allocationWeight = resolveEmbryoAllocationWeight(context, plan);
-            if (allocationWeight > 0) {
-                embryoStandardCapacitySumMap.merge(plan.getEmbryoCode(), allocationWeight, Integer::sum);
-            }
-        }
-        return embryoStandardCapacitySumMap;
-    }
-
-    /**
-     * 解析SKU分摊后的胎胚库存。
+     * 解析SKU原始胎胚库存。
+     * <p>共用胎胚是否分摊依赖收尾标注结果，不能在DTO构建阶段提前分摊。</p>
      *
      * @param context 排程上下文
      * @param plan 月计划
-     * @param embryoStandardCapacitySumMap 同胎胚日硫化量汇总Map
-     * @return SKU分摊胎胚库存，-1表示库存未知
+     * @return SKU原始胎胚库存，-1表示库存未知
      */
-    private int resolveAllocatedEmbryoStock(LhScheduleContext context,
-                                            FactoryMonthPlanProductionFinalResult plan,
-                                            Map<String, Integer> embryoStandardCapacitySumMap) {
+    private int resolveRawEmbryoStock(LhScheduleContext context,
+                                      FactoryMonthPlanProductionFinalResult plan) {
         if (StringUtils.isEmpty(plan.getEmbryoCode())
                 || !context.getEmbryoRealtimeStockMap().containsKey(plan.getEmbryoCode())) {
             return -1;
@@ -866,39 +843,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         if (Objects.isNull(embryoStock)) {
             return -1;
         }
-        Integer embryoStandardCapacitySum = embryoStandardCapacitySumMap.get(plan.getEmbryoCode());
-        int allocationWeight = resolveEmbryoAllocationWeight(context, plan);
-        if (allocationWeight <= 0
-                || Objects.isNull(embryoStandardCapacitySum) || embryoStandardCapacitySum <= 0) {
-            return embryoStock;
-        }
-        int allocatedStock = (int) (embryoStock.longValue() * allocationWeight
-                / embryoStandardCapacitySum);
-        log.debug("同胎胚库存按分摊权重分摊, materialCode: {}, embryoCode: {}, allocationWeight: {}, "
-                        + "embryoWeightSum: {}, embryoStock: {}, allocatedStock: {}",
-                plan.getMaterialCode(), plan.getEmbryoCode(), allocationWeight,
-                embryoStandardCapacitySum, embryoStock, allocatedStock);
-        return allocatedStock;
-    }
-
-    /**
-     * 解析胎胚库存分摊权重。
-     * <p>优先使用 SKU 标准产能；老数据未维护标准产能时，回退到日硫化量。</p>
-     *
-     * @param context 排程上下文
-     * @param plan 月计划
-     * @return 分摊权重
-     */
-    private int resolveEmbryoAllocationWeight(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
-        if (context == null || plan == null || StringUtils.isEmpty(plan.getMaterialCode())) {
-            return 0;
-        }
-        MdmSkuLhCapacity capacity = context.getSkuLhCapacityMap().get(plan.getMaterialCode());
-        if (capacity != null && Objects.nonNull(capacity.getStandardCapacity())
-                && capacity.getStandardCapacity() > 0) {
-            return capacity.getStandardCapacity();
-        }
-        return safeInt(plan.getDayVulcanizationQty());
+        return embryoStock;
     }
 
     /**
