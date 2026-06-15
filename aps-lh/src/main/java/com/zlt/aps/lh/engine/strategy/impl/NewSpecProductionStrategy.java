@@ -110,8 +110,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String NEW_SPEC_SCHEDULE_TYPE = "02";
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
-    private static final String HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_SCHEDULED_UNSCHEDULED_REASON =
-            "仅历史欠产、后续无月计划，且最近一次排程已排过，本次跳过补排";
+    private static final String HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON =
+            "仅历史欠产、后续无月计划，且前日已有完成量或前日排程结果已排过，本次跳过补排";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
@@ -383,17 +383,25 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             boolean currentSkuRemoved = false;
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
-            if (shouldSkipHistoryShortageOnlyPreviousScheduledSku(context, sku, isEnding)) {
+            int previousDayFinishedQty = resolvePreviousDayFinishedQty(context, sku.getMaterialCode());
+            boolean previousScheduled = previousDayFinishedQty <= 0
+                    && hasPreviousScheduledResult(context, sku.getMaterialCode());
+            if (shouldSkipHistoryShortageOnlyPreviousProducedSku(context, sku,
+                    previousDayFinishedQty, previousScheduled)) {
                 int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
                 addUnscheduledResult(context, sku, historyShortageQty,
-                        HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_SCHEDULED_UNSCHEDULED_REASON,
+                        HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON,
                         unscheduledReasonCountMap);
                 removeCurrentNewSpecSku(context, iterator, sku);
                 progressed = true;
-                log.info("新增SKU仅历史欠产且最近一次已排过，本次跳过补排, materialCode: {}, "
-                                + "historyShortageQty: {}, scheduleDate: {}, previousScheduled: {}",
+                log.info("新增SKU仅历史欠产且前日已有生产记录，本次跳过补排, materialCode: {}, "
+                                + "historyShortageQty: {}, scheduleDate: {}, previousDayFinishedQty: {}, "
+                                + "previousScheduled: {}, reason: {}",
                         sku.getMaterialCode(), historyShortageQty,
-                        LhScheduleTimeUtil.formatDate(context.getScheduleDate()), true);
+                        LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                        previousDayFinishedQty,
+                        previousScheduled,
+                        HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON);
                 continue;
             }
             boolean forceEndingByNoFuturePlan = prepareNewSpecShortageQuota(context, sku);
@@ -879,19 +887,22 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 判断仅历史欠产且后续无计划的SKU是否需要跳过本轮新增补排。
-     * <p>该规则只限制原始非收尾、非续作补偿的新增SKU；窗口 dayN 与月底后续计划均为0，
-     * 且最近一次排程已经有该SKU有效排产量时，避免本轮重复补排历史欠产。</p>
+     * <p>该规则只限制非续作补偿的新增SKU；窗口 dayN 与月底后续计划均为0，
+     * 且前日日完成量大于0时，避免本轮重复补排历史欠产；若日完成量为空或为0，
+     * 再兜底查看接口目标日前一日排程结果是否有有效排产量。</p>
      *
      * @param context 排程上下文
      * @param sku 新增排产SKU
-     * @param originalEnding 原始收尾判断结果
+     * @param previousDayFinishedQty 前日日完成量
+     * @param previousScheduled 接口目标日前一日排程结果是否有排过
      * @return true-跳过本轮新增补排；false-继续原新增排产逻辑
      */
-    private boolean shouldSkipHistoryShortageOnlyPreviousScheduledSku(LhScheduleContext context,
-                                                                      SkuScheduleDTO sku,
-                                                                      boolean originalEnding) {
+    private boolean shouldSkipHistoryShortageOnlyPreviousProducedSku(LhScheduleContext context,
+                                                                     SkuScheduleDTO sku,
+                                                                     int previousDayFinishedQty,
+                                                                     boolean previousScheduled) {
         if (Objects.isNull(context) || Objects.isNull(sku)
-                || originalEnding || sku.isContinuousCompensationSku()) {
+                || sku.isContinuousCompensationSku()) {
             return false;
         }
         if (Math.max(0, sku.getMonthlyHistoryShortageQty()) <= 0) {
@@ -900,7 +911,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (!isWindowDayPlanEmpty(sku) || Math.max(0, sku.getFutureMonthPlanQtyAfterWindow()) > 0) {
             return false;
         }
-        return hasPreviousScheduledResult(context, sku.getMaterialCode());
+        // 优先以T日前日完成量判断；完成量缺失或为0时，再使用目标日前一日排程结果作为兜底依据。
+        return previousDayFinishedQty > 0 || previousScheduled;
     }
 
     /**
@@ -922,18 +934,47 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 判断最近一次排程结果中该SKU是否已有有效排产量。
+     * 解析当前排程日T前一日的日完成量。
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
-     * @return true-最近一次已排过；false-未排过
+     * @return 前日日完成量，无记录时返回0
+     */
+    private int resolvePreviousDayFinishedQty(LhScheduleContext context, String materialCode) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleDate())
+                || StringUtils.isEmpty(materialCode)) {
+            return 0;
+        }
+        Date previousDay = LhScheduleTimeUtil.clearTime(LhScheduleTimeUtil.addDays(context.getScheduleDate(), -1));
+        Integer finishedQty = context.getMaterialDayFinishedQtyMap()
+                .get(buildMaterialDayKey(materialCode, previousDay));
+        return Objects.nonNull(finishedQty) ? Math.max(finishedQty, 0) : 0;
+    }
+
+    /**
+     * 构建物料日完成量聚合Key。
+     *
+     * @param materialCode 物料编码
+     * @param finishDate 完成日期
+     * @return 聚合Key
+     */
+    private String buildMaterialDayKey(String materialCode, Date finishDate) {
+        return materialCode + "_" + LhScheduleTimeUtil.formatDate(LhScheduleTimeUtil.clearTime(finishDate));
+    }
+
+    /**
+     * 判断接口目标日前一日排程结果中该SKU是否已有有效排产量。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @return true-接口目标日前一日排程结果已排过；false-未排过
      */
     private boolean hasPreviousScheduledResult(LhScheduleContext context, String materialCode) {
         if (Objects.isNull(context) || StringUtils.isEmpty(materialCode)
-                || CollectionUtils.isEmpty(context.getPreviousScheduleResultList())) {
+                || CollectionUtils.isEmpty(context.getTargetPreviousScheduleResultList())) {
             return false;
         }
-        for (LhScheduleResult result : context.getPreviousScheduleResultList()) {
+        for (LhScheduleResult result : context.getTargetPreviousScheduleResultList()) {
             if (Objects.nonNull(result)
                     && StringUtils.equals(materialCode, result.getMaterialCode())
                     && resolveResultScheduledQty(result) > 0) {

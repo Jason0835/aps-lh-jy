@@ -302,6 +302,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 runDataInitTaskAsync("前日硫化排程结果",
                         () -> loadPreviousScheduleResults(context, factoryCode, targetDate),
                         () -> sizeOf(context.getPreviousScheduleResultList())),
+                runDataInitTaskAsync("目标日前一日硫化排程结果",
+                        () -> loadTargetPreviousScheduleResults(context, factoryCode, targetDate),
+                        () -> sizeOf(context.getTargetPreviousScheduleResultList())),
                 runDataInitTaskAsync("前日模具交替计划",
                         () -> loadPreviousMouldChangePlans(context, factoryCode, targetDate),
                         () -> sizeOf(context.getPreviousMouldChangePlanList())),
@@ -503,6 +506,27 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
         context.setPreviousScheduleResultList(list);
         log.info("前日排程基础数据加载完成, 数量: {}, 日期: {}", list.size(), LhScheduleTimeUtil.formatDate(previousDate));
+    }
+
+    /**
+     * 加载业务目标日前一日硫化排程结果。
+     * <p>强制重排下 {@code previousScheduleResultList} 服务于窗口T日前一日滚动衔接；
+     * 新增历史欠产兜底判断需要按接口目标日前一日判断是否已排过，两者日期口径不能混用。</p>
+     *
+     * @param context 排程上下文
+     * @param factoryCode 分厂编号
+     * @param targetDate 排程目标日
+     */
+    private void loadTargetPreviousScheduleResults(LhScheduleContext context, String factoryCode, Date targetDate) {
+        Date targetPreviousDate = LhScheduleTimeUtil.clearTime(LhScheduleTimeUtil.addDays(targetDate, -1));
+        List<LhScheduleResult> list = lhScheduleResultMapper.selectList(new LambdaQueryWrapper<LhScheduleResult>()
+                .eq(LhScheduleResult::getFactoryCode, factoryCode)
+                .eq(LhScheduleResult::getScheduleDate, targetPreviousDate)
+                .eq(LhScheduleResult::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
+        context.setTargetPreviousScheduleResultList(list != null ? list : new ArrayList<>());
+        log.info("目标日前一日排程结果加载完成, 数量: {}, 日期: {}",
+                context.getTargetPreviousScheduleResultList().size(),
+                LhScheduleTimeUtil.formatDate(targetPreviousDate));
     }
 
     /**

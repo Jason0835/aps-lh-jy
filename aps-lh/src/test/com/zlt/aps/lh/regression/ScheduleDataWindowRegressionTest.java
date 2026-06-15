@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.zlt.aps.cx.api.domain.entity.CxStock;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
@@ -29,9 +30,11 @@ import com.zlt.aps.lh.mapper.MdmDevicePlanShutMapper;
 import com.zlt.aps.lh.mapper.MdmCapsuleChuckMapper;
 import com.zlt.aps.lh.mapper.LhMachineOnlineInfoMapper;
 import com.zlt.aps.lh.mapper.LhRepairCapsuleMapper;
+import com.zlt.aps.lh.mapper.LhScheFinishQtyMapper;
 import com.zlt.aps.lh.mapper.MdmMaterialInfoMapper;
 import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
+import com.zlt.aps.lh.mapper.MdmSkuConstructionRefMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
@@ -59,6 +62,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.Executor;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -118,6 +122,10 @@ class ScheduleDataWindowRegressionTest {
     private LhScheduleResultMapper lhScheduleResultMapper;
     @Mock
     private CxStockMapper cxStockMapper;
+    @Mock
+    private LhScheFinishQtyMapper lhScheFinishQtyMapper;
+    @Mock
+    private MdmSkuConstructionRefMapper skuConstructionRefMapper;
 
     @InjectMocks
     private LhBaseDataServiceImpl lhBaseDataService;
@@ -157,7 +165,7 @@ class ScheduleDataWindowRegressionTest {
         prepareRequiredBaseMocks();
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode(factoryCode);
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -175,7 +183,7 @@ class ScheduleDataWindowRegressionTest {
         assertWrapperContainsDate(cleaningPlanWrapper, startDate);
         assertWrapperContainsDate(cleaningPlanWrapper, endDate);
         assertWrapperNotContainsDate(cleaningPlanWrapper, controlStartDate);
-        verify(lhScheduleResultMapper).selectList(any());
+        verify(lhScheduleResultMapper, times(2)).selectList(any());
     }
 
     @Test
@@ -187,7 +195,7 @@ class ScheduleDataWindowRegressionTest {
         prepareRequiredBaseMocks();
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode(factoryCode);
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -195,8 +203,11 @@ class ScheduleDataWindowRegressionTest {
 
         lhBaseDataService.loadAllBaseData(context);
 
-        assertQueryContainsExpectedDate(captureScheduleResultWrapper(),
+        List<LambdaQueryWrapper<LhScheduleResult>> scheduleResultWrappers = captureScheduleResultWrappers();
+        assertQueryContainsExpectedDate(scheduleResultWrappers.get(0),
                 stripTime(date(2026, 4, 23)), stripTime(date(2026, 4, 25)));
+        assertQueryContainsExpectedDate(scheduleResultWrappers.get(1),
+                stripTime(date(2026, 4, 25)), stripTime(date(2026, 4, 23)));
         assertQueryContainsExpectedDate(captureMouldChangePlanWrapper(),
                 stripTime(date(2026, 4, 23)), stripTime(date(2026, 4, 25)));
     }
@@ -208,7 +219,7 @@ class ScheduleDataWindowRegressionTest {
         prepareRequiredBaseMocks();
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -255,7 +266,7 @@ class ScheduleDataWindowRegressionTest {
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(
                 Arrays.asList(machineARecent, machineAOld, machineBRecentByUpdateTime, machineBOldByUpdateTime));
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -273,7 +284,7 @@ class ScheduleDataWindowRegressionTest {
         Date scheduleDate = LhScheduleTimeUtil.clearTime(date(2026, 4, 15));
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleDate(scheduleDate);
 
@@ -292,7 +303,7 @@ class ScheduleDataWindowRegressionTest {
         prepareRequiredBaseMocks();
         when(lhMachineOnlineInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -334,7 +345,7 @@ class ScheduleDataWindowRegressionTest {
                 Collections.singletonList(previousDayFinishQty),
                 Arrays.asList(monthFinishQtyA, monthFinishQtyB, otherMaterialMonthFinishQty));
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -380,7 +391,7 @@ class ScheduleDataWindowRegressionTest {
         stockB.setStockNum(9);
         when(cxStockMapper.selectList(any())).thenReturn(Arrays.asList(stockA1, stockA2, stockB));
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -419,7 +430,7 @@ class ScheduleDataWindowRegressionTest {
         structureBom.setCategory("03");
         when(lhSpecialMaterialBomEntityMapper.selectList(any())).thenReturn(Arrays.asList(materialBom, structureBom));
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -458,7 +469,7 @@ class ScheduleDataWindowRegressionTest {
                 Collections.singletonList(previousDayFinishQty),
                 Arrays.asList(targetMonthFinishQtyA, targetMonthFinishQtyB));
 
-        LhScheduleContext context = new LhScheduleContext();
+        LhScheduleContext context = newScheduleContext();
         context.setFactoryCode("FC01");
         context.setScheduleTargetDate(target);
         context.setScheduleDate(scheduleDate);
@@ -488,6 +499,7 @@ class ScheduleDataWindowRegressionTest {
     }
 
     private void prepareRequiredBaseMocks() {
+        ReflectionTestUtils.setField(lhBaseDataService, "lhDataInitExecutor", (Executor) Runnable::run);
         MpFactoryProductionVersion finalVersion = new MpFactoryProductionVersion();
         finalVersion.setProductionVersion("PV_REGRESSION_01");
         when(mpFactoryProductionVersionMapper.selectList(any())).thenReturn(Collections.singletonList(finalVersion));
@@ -496,8 +508,8 @@ class ScheduleDataWindowRegressionTest {
         when(workCalendarMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(skuLhCapacityMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(devicePlanShutMapper.selectList(any())).thenReturn(Collections.emptyList());
-        when(skuMouldRelMapper.selectList(any())).thenReturn(Collections.emptyList());
-        when(mdmModelInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
+        lenient().when(skuMouldRelMapper.selectList(any())).thenReturn(Collections.emptyList());
+        lenient().when(mdmModelInfoMapper.selectList(any())).thenReturn(Collections.emptyList());
         lenient().when(lhSpecialMaterialBomEntityMapper.selectList(any())).thenReturn(Collections.emptyList());
 
         LhMachineInfo machine = new LhMachineInfo();
@@ -516,6 +528,19 @@ class ScheduleDataWindowRegressionTest {
         when(lhRepairCapsuleMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(lhPrecisionPlanMapper.selectList(any())).thenReturn(Collections.emptyList());
         when(lhScheduleResultMapper.selectList(any())).thenReturn(Collections.emptyList());
+        when(lhScheFinishQtyMapper.selectList(any())).thenReturn(Collections.emptyList());
+        when(skuConstructionRefMapper.selectList(any())).thenReturn(Collections.emptyList());
+    }
+
+    /**
+     * 构建带默认配置快照的排程上下文，避免基础数据初始化测试缺少配置对象。
+     *
+     * @return 排程上下文
+     */
+    private LhScheduleContext newScheduleContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.emptyMap()));
+        return context;
     }
 
     /**
@@ -537,11 +562,11 @@ class ScheduleDataWindowRegressionTest {
      * @return 前日排程查询 wrapper
      */
     @SuppressWarnings("unchecked")
-    private LambdaQueryWrapper<LhScheduleResult> captureScheduleResultWrapper() {
+    private List<LambdaQueryWrapper<LhScheduleResult>> captureScheduleResultWrappers() {
         initializeTableInfo(LhScheduleResult.class);
         ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
-        verify(lhScheduleResultMapper).selectList(captor.capture());
-        return (LambdaQueryWrapper<LhScheduleResult>) captor.getValue();
+        verify(lhScheduleResultMapper, times(2)).selectList(captor.capture());
+        return (List<LambdaQueryWrapper<LhScheduleResult>>) (List<?>) captor.getAllValues();
     }
 
     /**
