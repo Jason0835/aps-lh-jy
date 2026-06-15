@@ -460,7 +460,7 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 续作收尾小余量在允许欠产偏差内时，应直接写未排并释放原续作机台。
+     * 续作收尾小余量在允许欠产偏差内，且前日 T+1 夜班未排满时，应直接写未排并释放原续作机台。
      */
     @Test
     public void shouldSkipSmallSurplusEndingContinuousAndReleaseMachine() throws Exception {
@@ -472,6 +472,7 @@ public class SchedulingStrategyRegressionTest {
         sku.setContinuousMachineCode("K1201");
         sku.setSurplusQty(2);
         context.getContinuousSkuList().add(sku);
+        appendTargetPreviousT1NightResult(context, sku.getMaterialCode(), 8);
         MachineScheduleDTO machine = new MachineScheduleDTO();
         machine.setMachineCode("K1201");
         machine.setCurrentMaterialCode("3302002999");
@@ -488,8 +489,69 @@ public class SchedulingStrategyRegressionTest {
         LhUnscheduledResult unscheduledResult = context.getUnscheduledResultList().get(0);
         Assertions.assertEquals("3302002999", unscheduledResult.getMaterialCode());
         Assertions.assertEquals(Integer.valueOf(2), unscheduledResult.getUnscheduledQty());
-        Assertions.assertEquals("收尾余量小于等于允许欠产偏差值，本次不排产",
+        Assertions.assertEquals("收尾余量小于等于允许欠产偏差值，且前日 T+1 夜班未排满，本次不排产",
                 unscheduledResult.getUnscheduledReason());
+    }
+
+    /**
+     * 续作收尾小余量若前日 T+1 夜班已排满，应继续按原续作规则排产。
+     */
+    @Test
+    public void shouldKeepSmallSurplusEndingContinuousWhenPreviousT1NightFull() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302003000", 16, 2, buildQuotaMapByShifts(shifts, 2, 0, 0));
+        sku.setContinuousMachineCode("K1202");
+        sku.setSurplusQty(2);
+        context.getContinuousSkuList().add(sku);
+        appendTargetPreviousT1NightResult(context, sku.getMaterialCode(), 16);
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1202");
+        machine.setCurrentMaterialCode("3302003000");
+        machine.setEstimatedEndTime(shifts.get(0).getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getInitialMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        strategy.scheduleContinuousEnding(context);
+
+        Assertions.assertEquals(1, context.getScheduleResultList().size());
+        Assertions.assertFalse(context.getReleasedContinuousMachineCodeSet().contains("K1202"));
+        Assertions.assertTrue(context.getUnscheduledResultList().isEmpty());
+    }
+
+    /**
+     * 强制重排下，收尾小余量规则仍应取业务目标日前一日结果，不受窗口T日前一日滚动基线影响。
+     */
+    @Test
+    public void shouldUseTargetPreviousResultForSmallSurplusRuleWhenForceReschedule() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "1");
+        context.setScheduleTargetDate(dateTime(2026, 6, 14, 0, 0));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302003001", 16, 2, buildQuotaMapByShifts(shifts, 2, 0, 0));
+        sku.setContinuousMachineCode("K1203");
+        sku.setSurplusQty(2);
+        context.getContinuousSkuList().add(sku);
+        appendPreviousT1NightResult(context, sku.getMaterialCode(), 16);
+        appendTargetPreviousT1NightResult(context, sku.getMaterialCode(), 8);
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1203");
+        machine.setCurrentMaterialCode("3302003001");
+        machine.setEstimatedEndTime(shifts.get(0).getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getInitialMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        strategy.scheduleContinuousEnding(context);
+
+        Assertions.assertEquals(0, context.getScheduleResultList().size());
+        Assertions.assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1203"));
+        Assertions.assertEquals(1, context.getUnscheduledResultList().size());
+        Assertions.assertEquals("收尾余量小于等于允许欠产偏差值，且前日 T+1 夜班未排满，本次不排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
     /**
@@ -773,6 +835,28 @@ public class SchedulingStrategyRegressionTest {
         }
         ShiftFieldUtil.syncDailyPlanQty(result);
         return result;
+    }
+
+    private void appendPreviousT1NightResult(LhScheduleContext context, String materialCode, int nightPlanQty) {
+        Integer nightShiftIndex = LhScheduleTimeUtil.findFirstNightShiftIndexWithOffset(
+                context.getScheduleWindowShifts(), 1);
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setMaterialCode(materialCode);
+        previousResult.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(previousResult, nightShiftIndex, nightPlanQty, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(previousResult);
+        context.getPreviousScheduleResultList().add(previousResult);
+    }
+
+    private void appendTargetPreviousT1NightResult(LhScheduleContext context, String materialCode, int nightPlanQty) {
+        Integer nightShiftIndex = LhScheduleTimeUtil.findFirstNightShiftIndexWithOffset(
+                context.getScheduleWindowShifts(), 1);
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setMaterialCode(materialCode);
+        previousResult.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(previousResult, nightShiftIndex, nightPlanQty, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(previousResult);
+        context.getTargetPreviousScheduleResultList().add(previousResult);
     }
 
     private Map<LocalDate, SkuDailyPlanQuotaDTO> buildQuotaMapByShifts(List<LhShiftConfigVO> shifts,

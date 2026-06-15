@@ -30,6 +30,7 @@ import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineShortageQuotaPlan;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
+import com.zlt.aps.lh.engine.strategy.support.SmallEndingSurplusSkipRule;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -104,7 +105,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private static final String WINDOW_NO_PLAN_UNSCHEDULED_REASON =
             "当前排程窗口内无日计划量，等待后续滚动窗口排产";
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
-            "收尾余量小于等于允许欠产偏差值，本次不排产";
+            SmallEndingSurplusSkipRule.UNSCHEDULED_REASON;
     private static final int TYPE_BLOCK_SWITCH_MAX_ATTEMPTS = 16;
 
     @Resource
@@ -187,12 +188,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 isEnding = false;
             }
             if (shouldSkipSmallEndingSurplusContinuous(context, sku, isEnding)) {
-                // 续作收尾小余量异常偏差不排产：小尾量允许滚动欠产，本次释放原续作机台给换活字块/新增链路。
+                // 收尾小余量 + 前日 T+1 夜班未排满不排产：释放原续作机台给换活字块/新增链路。
                 appendSmallEndingSurplusUnscheduledResult(context, sku);
                 registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(),
-                        "续作收尾小余量异常偏差不排产");
+                        "收尾小余量且前日T+1夜班未排满不排产");
                 registerTypeBlockReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(),
-                        "续作收尾小余量异常偏差不排产");
+                        "收尾小余量且前日T+1夜班未排满不排产");
                 context.removePendingSkuFromStructureMap(sku);
                 getTargetScheduleQtyResolver().removeActiveEmbryoSku(
                         context, sku, SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON);
@@ -1260,8 +1261,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     /**
      * 判断续作收尾小余量是否允许本次不排产。
      *
-     * <p>这是“续作收尾小余量异常偏差不排产”的特殊规则，只在 S4.4 续作收尾场景生效；
-     * 非收尾 SKU 不进入该规则，收尾余量大于参数值时继续沿用原收尾排产规则。</p>
+     * <p>这是“收尾小余量 + 前日 T+1 夜班未排满”的特殊不排产规则；
+     * 非收尾 SKU、余量大于参数值或前日 T+1 夜班已排满时继续沿用原收尾排产规则。</p>
      *
      * @param context 排程上下文
      * @param sku 续作SKU
@@ -1275,25 +1276,27 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return false;
         }
         int surplusQty = Math.max(0, sku.getSurplusQty());
-        int toleranceQty = resolveContinuousEndingSurplusToleranceQty(context);
-        boolean skip = surplusQty <= toleranceQty;
-        log.info("续作收尾小余量异常偏差判断, materialCode: {}, machineCode: {}, isEnding: {}, surplusQty: {}, "
-                        + "toleranceQty: {}, skipSchedule: {}",
-                sku.getMaterialCode(), sku.getContinuousMachineCode(), isEnding, surplusQty, toleranceQty, skip);
+        int toleranceQty = SmallEndingSurplusSkipRule.resolveToleranceQty(context);
+        int previousNightPlanQty = SmallEndingSurplusSkipRule.resolveTargetPreviousT1NightPlanQty(
+                context, sku.getMaterialCode());
+        boolean previousNightFull = SmallEndingSurplusSkipRule.isTargetPreviousT1NightFull(context, sku);
+        boolean skip = SmallEndingSurplusSkipRule.shouldSkip(context, sku, isEnding);
+        log.info("续作收尾小余量业务目标日前一日夜班判断, materialCode: {}, machineCode: {}, isEnding: {}, surplusQty: {}, "
+                        + "toleranceQty: {}, targetPreviousT1NightPlanQty: {}, shiftCapacity: {}, targetPreviousT1NightFull: {}, "
+                        + "skipSchedule: {}",
+                sku.getMaterialCode(), sku.getContinuousMachineCode(), isEnding, surplusQty, toleranceQty,
+                previousNightPlanQty, sku.getShiftCapacity(), previousNightFull, skip);
         return skip;
     }
 
     /**
-     * 获取续作收尾小余量允许欠产偏差值。
+     * 获取收尾小余量允许欠产偏差值。
      *
      * @param context 排程上下文
      * @return 允许不排产的最大收尾余量
      */
     private int resolveContinuousEndingSurplusToleranceQty(LhScheduleContext context) {
-        if (context == null || context.getScheduleConfig() == null) {
-            return LhScheduleConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY;
-        }
-        return context.getScheduleConfig().getContinuousEndingSurplusToleranceQty();
+        return SmallEndingSurplusSkipRule.resolveToleranceQty(context);
     }
 
     /**
@@ -1346,7 +1349,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return;
         }
         StringBuilder detail = new StringBuilder(160);
-        detail.append("续作收尾小余量异常偏差不排产, materialCode: ")
+        detail.append("续作收尾小余量且前日T+1夜班未排满不排产, materialCode: ")
                 .append(sku.getMaterialCode())
                 .append(", machineCode: ")
                 .append(machineCode)
@@ -1354,6 +1357,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 .append(Math.max(0, sku.getSurplusQty()))
                 .append(", toleranceQty: ")
                 .append(toleranceQty)
+                .append(", targetPreviousT1NightPlanQty: ")
+                .append(SmallEndingSurplusSkipRule.resolveTargetPreviousT1NightPlanQty(context, sku.getMaterialCode()))
+                .append(", shiftCapacity: ")
+                .append(sku.getShiftCapacity())
                 .append(", unscheduledReason: ")
                 .append(SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON)
                 .append(", flow: 释放机台优先进入换活字块，不满足后进入S4.5换模新增");

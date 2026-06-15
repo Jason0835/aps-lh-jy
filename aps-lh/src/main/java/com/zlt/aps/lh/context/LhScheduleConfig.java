@@ -502,9 +502,10 @@ public class LhScheduleConfig {
     }
 
     /**
-     * 获取续作收尾小余量允许欠产偏差值。
+     * 获取收尾小余量允许欠产偏差值。
      *
-     * <p>该参数仅用于 S4.4 续作收尾小余量场景，未配置、负数或非数字时按默认值处理。</p>
+     * <p>该参数用于 S4.4 续作和 S4.5 新增的收尾小余量场景，
+     * 未配置、负数或非数字时按默认值处理。</p>
      *
      * @return 允许不排产的最大收尾余量
      */
@@ -518,12 +519,12 @@ public class LhScheduleConfig {
             if (toleranceQty >= 0) {
                 return toleranceQty;
             }
-            log.warn("续作收尾小余量允许欠产偏差值配置异常, paramCode: {}, value: {}, 使用默认值: {}",
+            log.warn("收尾小余量允许欠产偏差值配置异常, paramCode: {}, value: {}, 使用默认值: {}",
                     LhScheduleParamConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY, value,
                     LhScheduleConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY);
             return LhScheduleConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY;
         } catch (NumberFormatException e) {
-            log.warn("续作收尾小余量允许欠产偏差值解析失败, paramCode: {}, value: {}, 使用默认值: {}",
+            log.warn("收尾小余量允许欠产偏差值解析失败, paramCode: {}, value: {}, 使用默认值: {}",
                     LhScheduleParamConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY, value,
                     LhScheduleConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY);
             return LhScheduleConstant.CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY;

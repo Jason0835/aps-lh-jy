@@ -43,6 +43,7 @@ import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
+import com.zlt.aps.lh.engine.strategy.support.SmallEndingSurplusSkipRule;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
@@ -114,6 +115,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             "仅历史欠产、后续无月计划，且前日已有完成量或前日排程结果已排过，本次跳过补排";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
+    private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
+            SmallEndingSurplusSkipRule.UNSCHEDULED_REASON;
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
     private static final int RELEASED_MACHINE_MORNING_TAIL_HOURS = 6;
@@ -411,6 +414,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             } else if (sku.isStrictNewSpecShortageOnly()) {
                 // 窗口无计划但月底仍有计划时，仅补本月历史欠产，不按收尾满清，也不触发满班超排。
                 isEnding = false;
+            }
+            if (handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku, isEnding, unscheduledReasonCountMap)) {
+                progressed = true;
+                continue;
             }
             // 收尾SKU在排产前上调目标量（考虑胎胚库存），非收尾SKU保持按余量计算的目标量
             boolean sharedEmbryoZeroSurplusEnding = false;
@@ -1382,6 +1389,95 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         log.info("新增共用胎胚收尾零余量写入未排, materialCode: {}, embryoCode: {}, surplusQty: {}, embryoStock: {}",
                 sku.getMaterialCode(), sku.getEmbryoCode(), sku.getSurplusQty(), sku.getEmbryoStock());
         return true;
+    }
+
+    /**
+     * 处理新增收尾小余量且前日 T+1 夜班未排满的不排产规则。
+     *
+     * <p>该规则必须在收尾目标量上调前执行，判断依据仍是 SKU 原始硫化余量，避免被
+     * MAX(余量, 胎胚库存) 口径放大后漏判。</p>
+     *
+     * @param context 排程上下文
+     * @param iterator 新增SKU迭代器
+     * @param sku 当前SKU
+     * @param isEnding 是否收尾
+     * @param unscheduledReasonCountMap 未排原因统计
+     * @return true-已写未排并移出待排队列；false-不需要处理
+     */
+    private boolean handleSmallEndingSurplusSkipIfNecessary(LhScheduleContext context,
+                                                            Iterator<SkuScheduleDTO> iterator,
+                                                            SkuScheduleDTO sku,
+                                                            boolean isEnding,
+                                                            Map<String, Integer> unscheduledReasonCountMap) {
+        if (!SmallEndingSurplusSkipRule.shouldSkip(context, sku, isEnding)) {
+            if (isSmallEndingSurplusToleranceMatched(context, sku, isEnding)) {
+                traceSmallEndingSurplusJudge(context, sku, isEnding, false);
+            }
+            return false;
+        }
+        addUnscheduledResult(context, sku, Math.max(0, sku.getSurplusQty()),
+                SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON, unscheduledReasonCountMap);
+        getTargetScheduleQtyResolver().removeActiveEmbryoSku(
+                context, sku, SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON);
+        removeCurrentNewSpecSku(context, iterator, sku);
+        traceSmallEndingSurplusJudge(context, sku, isEnding, true);
+        return true;
+    }
+
+    /**
+     * 判断新增 SKU 是否已进入收尾小余量阈值范围。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param isEnding 是否收尾
+     * @return true-收尾且余量小于等于参数值；false-不进入前日夜班判断
+     */
+    private boolean isSmallEndingSurplusToleranceMatched(LhScheduleContext context,
+                                                         SkuScheduleDTO sku,
+                                                         boolean isEnding) {
+        return isEnding && Objects.nonNull(sku)
+                && Math.max(0, sku.getSurplusQty()) <= SmallEndingSurplusSkipRule.resolveToleranceQty(context);
+    }
+
+    /**
+     * 输出新增收尾小余量规则判断日志。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param isEnding 是否收尾
+     * @param skipped 是否跳过排产
+     */
+    private void traceSmallEndingSurplusJudge(LhScheduleContext context,
+                                              SkuScheduleDTO sku,
+                                              boolean isEnding,
+                                              boolean skipped) {
+        if (Objects.isNull(sku) || !isEnding) {
+            return;
+        }
+        int toleranceQty = SmallEndingSurplusSkipRule.resolveToleranceQty(context);
+        int previousNightPlanQty = SmallEndingSurplusSkipRule.resolveTargetPreviousT1NightPlanQty(
+                context, sku.getMaterialCode());
+        boolean previousNightFull = SmallEndingSurplusSkipRule.isTargetPreviousT1NightFull(context, sku);
+        StringBuilder detail = new StringBuilder(192);
+        detail.append("新增收尾小余量业务目标日前一日夜班判断, materialCode: ")
+                .append(sku.getMaterialCode())
+                .append(", surplusQty: ")
+                .append(Math.max(0, sku.getSurplusQty()))
+                .append(", toleranceQty: ")
+                .append(toleranceQty)
+                .append(", targetPreviousT1NightPlanQty: ")
+                .append(previousNightPlanQty)
+                .append(", shiftCapacity: ")
+                .append(sku.getShiftCapacity())
+                .append(", targetPreviousT1NightFull: ")
+                .append(previousNightFull)
+                .append(", skipSchedule: ")
+                .append(skipped);
+        if (skipped) {
+            detail.append(", unscheduledReason: ").append(SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON);
+        }
+        log.info(detail.toString());
+        PriorityTraceLogHelper.appendProcessLog(context, "新增收尾小余量不排产", detail.toString());
     }
 
     /**

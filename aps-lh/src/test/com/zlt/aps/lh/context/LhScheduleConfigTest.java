@@ -112,7 +112,7 @@ public class LhScheduleConfigTest {
     }
 
     /**
-     * 用例说明：续作收尾小余量允许欠产偏差默认2，配置后按配置值读取。
+     * 用例说明：收尾小余量允许欠产偏差默认2，配置后按配置值读取。
      */
     @Test
     public void shouldReadContinuousEndingSurplusToleranceConfig() {
@@ -147,7 +147,7 @@ public class LhScheduleConfigTest {
     }
 
     /**
-     * 用例说明：续作收尾小余量允许欠产偏差异常配置按默认2处理。
+     * 用例说明：收尾小余量允许欠产偏差异常配置按默认2处理。
      */
     @Test
     public void shouldFallbackDefaultWhenContinuousEndingSurplusToleranceInvalid() {

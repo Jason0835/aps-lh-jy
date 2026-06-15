@@ -194,7 +194,7 @@ public final class LhScheduleParamConstant {
     public static final String NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = "SYS0304015";
     /** 新增排产欠产增机台阈值 */
     public static final String NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD = "SYS0304022";
-    /** 续作收尾小余量允许欠产偏差值 */
+    /** 收尾小余量允许欠产偏差值 */
     public static final String CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY = "SYS0304023";
     /** 奇数班产计划量加一班别（1-晚班，2-早班，3-中班；空值不启用） */
     public static final String ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE = "SYS0304024";

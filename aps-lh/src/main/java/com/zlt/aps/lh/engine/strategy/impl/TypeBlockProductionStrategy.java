@@ -1993,7 +1993,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     /**
      * 识别释放后可优先参与换活字块的续作机台。
      *
-     * <p>包括首日无计划释放机台和续作收尾小余量异常偏差不排产释放机台。该入口只扩展 S4.4
+     * <p>包括首日无计划释放机台和续作收尾小余量且前日 T+1 夜班未排满不排产释放机台。该入口只扩展 S4.4
      * 换活字块候选机台来源，不改变 S4.5 新增排序和机台筛选规则。</p>
      *
      * @param context 排程上下文

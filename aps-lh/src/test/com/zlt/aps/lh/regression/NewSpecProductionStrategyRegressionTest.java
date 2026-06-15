@@ -2839,6 +2839,45 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldSkipSmallSurplusEndingWhenPreviousT1NightNotFull() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+
+        LhScheduleContext context = buildContext();
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302004001");
+        sku.setMaterialDesc("新增收尾小余量物料");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(2);
+        sku.setDailyPlanQty(2);
+        sku.setTargetScheduleQty(2);
+        sku.setWindowPlanQty(2);
+        sku.setWindowRemainingPlanQty(2);
+        sku.setSurplusQty(2);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 2, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+        appendTargetPreviousT1NightResult(context, sku.getMaterialCode(), 8);
+
+        MachineScheduleDTO k1105 = buildMachine("K1105", dateTime(2026, 4, 17, 6, 0));
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(k1105),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(),
+                "新增收尾小余量且前日T+1夜班未排满时，本次新增排产应跳过该SKU");
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "跳过后应从新增待排队列移除");
+        assertEquals(1, context.getUnscheduledResultList().size(), "跳过新增收尾小余量时应写入未排结果");
+        assertEquals(sku.getMaterialCode(), context.getUnscheduledResultList().get(0).getMaterialCode());
+        assertEquals(Integer.valueOf(2), context.getUnscheduledResultList().get(0).getUnscheduledQty());
+        assertEquals("收尾余量小于等于允许欠产偏差值，且前日 T+1 夜班未排满，本次不排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    @Test
     void scheduleNewSpecs_shouldFillFormalSingleMachineToWindowEndWhenNoExtraMachineNeeded() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
@@ -5063,6 +5102,17 @@ class NewSpecProductionStrategyRegressionTest {
         result.setLhTime(3600);
         result.setMouldQty(1);
         return result;
+    }
+
+    private void appendTargetPreviousT1NightResult(LhScheduleContext context, String materialCode, int nightPlanQty) {
+        Integer nightShiftIndex = LhScheduleTimeUtil.findFirstNightShiftIndexWithOffset(
+                context.getScheduleWindowShifts(), 1);
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setMaterialCode(materialCode);
+        previousResult.setSingleMouldShiftQty(16);
+        ShiftFieldUtil.setShiftPlanQty(previousResult, nightShiftIndex, nightPlanQty, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(previousResult);
+        context.getTargetPreviousScheduleResultList().add(previousResult);
     }
 
     private void invokeAdjustSameSkuMultiMachineAllocation(NewSpecProductionStrategy strategy,

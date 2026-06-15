@@ -333,7 +333,7 @@ public final class LhScheduleConstant {
     /** 新增排产欠产增机台阈值默认值 */
     public static final int NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD = 200;
 
-    /** 续作收尾小余量允许欠产偏差值默认值 */
+    /** 收尾小余量允许欠产偏差值默认值 */
     public static final int CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY = 2;
 
     /** 奇数班产计划量加一班别默认值，空值表示不启用 */
