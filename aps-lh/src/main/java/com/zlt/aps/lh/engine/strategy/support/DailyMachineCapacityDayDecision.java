@@ -22,6 +22,9 @@ public class DailyMachineCapacityDayDecision implements Serializable {
     /** 当前 dayN 日计划量 */
     private int todayPlanQty;
 
+    /** 扣减T日晚班已完成量后的当前日计划判断量 */
+    private int currentDayPlanQty;
+
     /** 进入当前日之前累计待追补量 */
     private int carryShortageQty;
 
@@ -70,8 +73,17 @@ public class DailyMachineCapacityDayDecision implements Serializable {
     /** 后一天日月计划量 */
     private int nextDayPlanQty;
 
+    /** 后看生产日期 */
+    private LocalDate nextProductionDate;
+
     /** 当前启用机台后一天3班理论产能 */
     private int nextDayThreeShiftCapacityQty;
+
+    /** 当前日月计划量是否已被当前机台产能满足 */
+    private boolean currentDayPlanSatisfied;
+
+    /** 是否进入后看下一日计划判断 */
+    private boolean nextDayLookAheadEntered;
 
     /** 当天模拟后的启用机台数 */
     private int activeMachineCount;

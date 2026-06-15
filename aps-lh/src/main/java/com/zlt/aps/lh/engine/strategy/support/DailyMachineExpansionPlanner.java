@@ -257,17 +257,33 @@ public final class DailyMachineExpansionPlanner {
                                                             SkuScheduleDTO sku,
                                                             int activeMachineCount,
                                                             String scheduleType) {
+        return Objects.isNull(resolveFirstDailyLookAheadAddMachineDate(context, sku, activeMachineCount, scheduleType));
+    }
+
+    /**
+     * 解析欠产未超阈值时首次需要加机台的业务日期。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param activeMachineCount 当前已承接机台数
+     * @param scheduleType 排程类型
+     * @return 首次需要加机台的业务日期；null 表示当前机台数已满足逐日后看规则
+     */
+    public static LocalDate resolveFirstDailyLookAheadAddMachineDate(LhScheduleContext context,
+                                                                     SkuScheduleDTO sku,
+                                                                     int activeMachineCount,
+                                                                     String scheduleType) {
         if (Objects.isNull(sku) || sku.isStrictNewSpecShortageOnly()
                 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())
                 || Math.max(0, sku.getWindowPlanQty()) <= 0
                 || Math.max(0, activeMachineCount) <= 0
                 || Math.max(0, sku.getShiftCapacity()) <= 0) {
-            return false;
+            return null;
         }
         int threshold = Math.max(0, resolveShortageAddMachineThreshold(context));
         int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         if (threshold <= 0 || historyShortageQty > threshold) {
-            return false;
+            return null;
         }
         Map<LocalDate, Integer> singleMachineDailyCapacityMap = new LinkedHashMap<LocalDate, Integer>(4);
         if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleDate())) {
@@ -276,21 +292,91 @@ public final class DailyMachineExpansionPlanner {
                     shifts, Math.max(0, sku.getShiftCapacity()),
                     ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context), scheduleType));
         }
-        LocalDate previousDate = null;
+        LocalDate firstProductionDate = sku.getDailyPlanQuotaMap().keySet().iterator().next();
         for (LocalDate productionDate : sku.getDailyPlanQuotaMap().keySet()) {
-            if (Objects.nonNull(previousDate)) {
-                SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(productionDate);
-                int dayPlanQty = quota == null ? 0 : Math.max(0, quota.getDayPlanQty());
-                int threeShiftCapacityQty = Math.max(0, activeMachineCount)
-                        * singleMachineDailyCapacityMap.getOrDefault(
-                        productionDate, Math.max(0, sku.getShiftCapacity()) * 3);
-                if (dayPlanQty > threeShiftCapacityQty) {
-                    return false;
+            SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(productionDate);
+            int dayPlanQty = quota == null ? 0 : Math.max(0, quota.getDayPlanQty());
+            int currentDayPlanQty = resolveCurrentDayPlanQty(sku, productionDate, firstProductionDate, dayPlanQty);
+            int currentDayCapacityQty = resolveDailyTheoryCapacityQty(
+                    singleMachineDailyCapacityMap, productionDate, activeMachineCount, sku.getShiftCapacity());
+            boolean currentDayPlanSatisfied = currentDayPlanQty <= currentDayCapacityQty;
+            if (currentDayPlanSatisfied) {
+                log.info("小欠产加机台逐日判断当前日已满足，不进入后看, materialCode: {}, productionDate: {}, "
+                                + "activeMachineCount: {}, currentDayCapacityQty: {}, dayPlanQty: {}, "
+                                + "currentDayPlanQty: {}, scheduleDayFinishQty: {}, currentDayPlanSatisfied: {}, "
+                                + "nextDayLookAheadEntered: {}, addMachine: {}",
+                        sku.getMaterialCode(), productionDate, activeMachineCount, currentDayCapacityQty,
+                        dayPlanQty, currentDayPlanQty, resolveFirstDayFinishQty(sku, productionDate, firstProductionDate),
+                        true, false, false);
+                continue;
+            }
+            LocalDate nextProductionDate = resolveNextProductionDate(sku.getDailyPlanQuotaMap(), productionDate);
+            if (Objects.nonNull(nextProductionDate)) {
+                SkuDailyPlanQuotaDTO nextQuota = sku.getDailyPlanQuotaMap().get(nextProductionDate);
+                int nextDayPlanQty = nextQuota == null ? 0 : Math.max(0, nextQuota.getDayPlanQty());
+                int nextDayCapacityQty = resolveDailyTheoryCapacityQty(
+                        singleMachineDailyCapacityMap, nextProductionDate,
+                        activeMachineCount, sku.getShiftCapacity());
+                boolean addMachine = nextDayPlanQty > nextDayCapacityQty;
+                log.info("小欠产加机台逐日后看判断, materialCode: {}, productionDate: {}, "
+                                + "activeMachineCount: {}, currentDayCapacityQty: {}, dayPlanQty: {}, "
+                                + "currentDayPlanQty: {}, scheduleDayFinishQty: {}, currentDayPlanSatisfied: {}, "
+                                + "nextDayLookAheadEntered: {}, "
+                                + "nextProductionDate: {}, nextDayPlanQty: {}, nextDayCapacityQty: {}, "
+                                + "addMachine: {}",
+                        sku.getMaterialCode(), productionDate, activeMachineCount, currentDayCapacityQty,
+                        dayPlanQty, currentDayPlanQty, resolveFirstDayFinishQty(sku, productionDate, firstProductionDate),
+                        false, true, nextProductionDate, nextDayPlanQty,
+                        nextDayCapacityQty, addMachine);
+                if (addMachine) {
+                    return productionDate;
                 }
             }
-            previousDate = productionDate;
         }
-        return true;
+        return null;
+    }
+
+    private static int resolveCurrentDayPlanQty(SkuScheduleDTO sku,
+                                                LocalDate productionDate,
+                                                LocalDate firstProductionDate,
+                                                int dayPlanQty) {
+        // 首日判断沿用日计划账本口径，扣除T日晚班已完成量后再决定是否后看下一日。
+        return Math.max(0, dayPlanQty - resolveFirstDayFinishQty(sku, productionDate, firstProductionDate));
+    }
+
+    private static int resolveFirstDayFinishQty(SkuScheduleDTO sku,
+                                                LocalDate productionDate,
+                                                LocalDate firstProductionDate) {
+        if (Objects.isNull(sku) || Objects.isNull(productionDate) || Objects.isNull(firstProductionDate)
+                || !productionDate.equals(firstProductionDate)) {
+            return 0;
+        }
+        return Math.max(0, sku.getScheduleDayFinishQty());
+    }
+
+    private static int resolveDailyTheoryCapacityQty(Map<LocalDate, Integer> singleMachineDailyCapacityMap,
+                                                     LocalDate productionDate,
+                                                     int activeMachineCount,
+                                                     int shiftCapacity) {
+        int singleMachineDailyCapacityQty = CollectionUtils.isEmpty(singleMachineDailyCapacityMap)
+                ? 0 : singleMachineDailyCapacityMap.getOrDefault(productionDate, 0);
+        if (singleMachineDailyCapacityQty <= 0) {
+            singleMachineDailyCapacityQty = Math.max(0, shiftCapacity) * LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY;
+        }
+        return Math.max(0, activeMachineCount) * singleMachineDailyCapacityQty;
+    }
+
+    private static LocalDate resolveNextProductionDate(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+                                                       LocalDate productionDate) {
+        if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(productionDate)) {
+            return null;
+        }
+        for (LocalDate nextProductionDate : quotaMap.keySet()) {
+            if (Objects.nonNull(nextProductionDate) && nextProductionDate.isAfter(productionDate)) {
+                return nextProductionDate;
+            }
+        }
+        return null;
     }
 
     private static boolean isZeroHistoryWindowSpilloverScenario(SkuScheduleDTO sku) {

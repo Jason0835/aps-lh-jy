@@ -2284,7 +2284,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 新增非收尾首日无日计划时，将首个可排时间推进到首个有计划的生产日。
+     * 新增非收尾首日无可用日计划额度时，将首个可排时间推进到首个可承接的生产日。
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -2304,11 +2304,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         LocalDate productionDate = firstProductionStartTime.toInstant()
                 .atZone(ZoneId.systemDefault()).toLocalDate();
         SkuDailyPlanQuotaDTO currentQuota = sku.getDailyPlanQuotaMap().get(productionDate);
-        if (hasPositiveDailyPlanQuota(currentQuota)) {
+        if (hasSchedulableDailyPlanQuota(sku, currentQuota)) {
             return firstProductionStartTime;
         }
         LocalDate nextPlanDate = resolveNextPositiveDailyPlanDate(
-                sku.getDailyPlanQuotaMap(), productionDate, resolveScheduleTargetLocalDate(context));
+                sku, sku.getDailyPlanQuotaMap(), productionDate, resolveScheduleTargetLocalDate(context));
         if (Objects.isNull(nextPlanDate)) {
             return firstProductionStartTime;
         }
@@ -2316,6 +2316,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (Objects.isNull(nextPlanDateStartTime) || !nextPlanDateStartTime.after(firstProductionStartTime)) {
             return firstProductionStartTime;
         }
+        log.info("新增SKU首个可排时间按日计划额度顺延, materialCode: {}, compensationSku: {}, "
+                        + "fromProductionDate: {}, toProductionDate: {}, fromStartTime: {}, toStartTime: {}",
+                sku.getMaterialCode(), sku.isContinuousCompensationSku(), productionDate, nextPlanDate,
+                LhScheduleTimeUtil.formatDateTime(firstProductionStartTime),
+                LhScheduleTimeUtil.formatDateTime(nextPlanDateStartTime));
         return nextPlanDateStartTime;
     }
 
@@ -2326,10 +2331,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return false;
         }
-        if (sku.isContinuousCompensationSku() || Math.max(0, sku.getMonthlyHistoryShortageQty()) > 0) {
+        if (sku.isContinuousCompensationSku()) {
+            return true;
+        }
+        if (Math.max(0, sku.getMonthlyHistoryShortageQty()) > 0) {
             return false;
         }
         return !StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage());
+    }
+
+    private boolean hasSchedulableDailyPlanQuota(SkuScheduleDTO sku, SkuDailyPlanQuotaDTO quota) {
+        if (Objects.nonNull(sku) && sku.isContinuousCompensationSku()) {
+            // 续作补偿只能承接 S4.4 后剩余的日计划额度，首日已满足时不能在首日借用后续额度换模补量。
+            return Objects.nonNull(quota) && Math.max(0, quota.getRemainingQty()) > 0;
+        }
+        return hasPositiveDailyPlanQuota(quota);
     }
 
     private boolean hasPositiveDailyPlanQuota(SkuDailyPlanQuotaDTO quota) {
@@ -2337,7 +2353,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 && (Math.max(0, quota.getDayPlanQty()) > 0 || Math.max(0, quota.getRemainingQty()) > 0);
     }
 
-    private LocalDate resolveNextPositiveDailyPlanDate(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+    private LocalDate resolveNextPositiveDailyPlanDate(SkuScheduleDTO sku,
+                                                       Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
                                                        LocalDate productionDate,
                                                        LocalDate windowEndDate) {
         if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(productionDate)) {
@@ -2349,7 +2366,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     || (Objects.nonNull(windowEndDate) && date.isAfter(windowEndDate))) {
                 continue;
             }
-            if (hasPositiveDailyPlanQuota(entry.getValue())) {
+            if (hasSchedulableDailyPlanQuota(sku, entry.getValue())) {
                 return date;
             }
         }
@@ -3274,22 +3291,25 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         for (DailyMachineCapacityDayDecision decision : simulationResult.getDayDecisionList()) {
             log.info("新增SKU dayN机台模拟, materialCode: {}, 当前机台: {}, 日期: {}, 追补截止: {}, "
-                            + "dayN计划: {}, carryShortage: {}, 当日需求: {}, 当日产能: {}, "
-                            + "当日欠产: {}, 决策模式: {}, 是否超过阈值: {}, 窗口8班产能: {}, "
+                            + "dayN计划: {}, 当前日判断计划: {}, carryShortage: {}, 当日需求: {}, 当日产能: {}, "
+                            + "当日欠产: {}, 当前日计划满足: {}, 是否进入后看: {}, 后看日期: {}, "
+                            + "决策模式: {}, 是否超过阈值: {}, 窗口8班产能: {}, "
                             + "窗口计划总量: {}, 欠产阈值: {}, T日晚班完成: {}, 窗口有效产能: {}, "
                             + "窗口后剩余欠产: {}, 后一天计划: {}, 后一天3班产能: {}, 累计需求: {}, "
-                            + "累计产能: {}, 启用机台: {}, 新增机台: {}, 未满足: {}, 原因: {}",
+                            + "累计产能: {}, 启用机台: {}, 新增机台: {}, 是否加机台: {}, 未满足: {}, 原因: {}",
                     sku.getMaterialCode(), segment.getMachineCode(), decision.getProductionDate(),
-                    decision.getLookAheadEndDate(), decision.getTodayPlanQty(), decision.getCarryShortageQty(),
-                    decision.getTodayRequiredQty(), decision.getTodayCapacityQty(), decision.getDayShortageQty(),
-                    decision.getDecisionMode(), decision.isShortageThresholdExceeded(),
+                    decision.getLookAheadEndDate(), decision.getTodayPlanQty(), decision.getCurrentDayPlanQty(),
+                    decision.getCarryShortageQty(), decision.getTodayRequiredQty(),
+                    decision.getTodayCapacityQty(), decision.getDayShortageQty(),
+                    decision.isCurrentDayPlanSatisfied(), decision.isNextDayLookAheadEntered(),
+                    decision.getNextProductionDate(), decision.getDecisionMode(), decision.isShortageThresholdExceeded(),
                     decision.getWindowTotalCapacityQty(), decision.getWindowPlanQty(),
                     decision.getShortageAddMachineThreshold(), decision.getScheduleDayFinishQty(),
                     decision.getWindowEffectiveCapacityQty(), decision.getWindowRemainingShortageQty(),
                     decision.getNextDayPlanQty(), decision.getNextDayThreeShiftCapacityQty(),
                     decision.getDemandQty(), decision.getCapacityQty(),
                     decision.getActiveMachineCount(), decision.getAddedMachineCount(),
-                    decision.getUnmetQty(), decision.getReason());
+                    decision.getAddedMachineCount() > 0, decision.getUnmetQty(), decision.getReason());
         }
     }
 

@@ -414,6 +414,28 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作小欠产逐日判断首日应扣减T日晚班已完成量，避免首日计划实际已满足时提前转新增加机台。
+     */
+    @Test
+    public void shouldStillRequireContinuousCompensationWhenSecondDayPlanNotCovered() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001589", 16, 128,
+                buildQuotaMapByShifts(shifts, 48, 96, 96));
+        sku.setMonthlyHistoryShortageQty(32);
+        sku.setWindowPlanQty(240);
+        sku.setScheduleDayFinishQty(16);
+
+        boolean satisfied = DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        Assertions.assertFalse(satisfied);
+        Assertions.assertEquals(new ArrayList<LocalDate>(sku.getDailyPlanQuotaMap().keySet()).get(1), addMachineDate);
+    }
+
+    /**
      * 非收尾续作首日有日计划时，即使额度被T日晚班扣完，也应从窗口首班起排满在机班次。
      */
     @Test
@@ -496,13 +518,13 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 欠产未超过阈值时，T+2 也必须继续后看 T+3 日计划量决定是否保留/新增机台。
+     * 欠产未超过阈值且当前日计划未满足时，T+2 仍需后看 T+3 日计划量决定是否保留/新增机台。
      */
     @Test
     public void shouldLookAheadNextDayPlanOnWindowLastDayWhenSmallShortage() {
         DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
         request.setMaterialCode("3302001236");
-        request.setDailyPlanQuotaMap(buildQuotaMap(0, 8, 48, 96));
+        request.setDailyPlanQuotaMap(buildQuotaMap(0, 8, 64, 96));
         request.setMachineDailyCapacityList(buildDailyCapacityMaps(2));
         request.setInitialActiveMachines(1);
         request.setShiftCapacity(16);
@@ -522,6 +544,34 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(LocalDate.of(2026, 5, 4), windowLastDayDecision.getLookAheadEndDate());
         Assertions.assertEquals(96, windowLastDayDecision.getNextDayPlanQty());
         Assertions.assertEquals(1, windowLastDayDecision.getAddedMachineCount());
+    }
+
+    /**
+     * 欠产未超过阈值时，当前日计划已被当前机台数满足，应直接停止当日加机台判断，不再后看下一日计划。
+     */
+    @Test
+    public void shouldSkipNextDayLookAheadWhenCurrentDayPlanSatisfied() {
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001237");
+        request.setDailyPlanQuotaMap(buildQuotaMap(32, 144, 0));
+        request.setMachineDailyCapacityList(buildDailyCapacityMaps(3));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(1);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setWindowLastDayNextPlanLookAheadEnabled(true);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        DailyMachineCapacityDayDecision firstDayDecision = result.getDayDecisionList().get(0);
+        Assertions.assertEquals(LocalDate.of(2026, 5, 1), firstDayDecision.getProductionDate());
+        Assertions.assertTrue(firstDayDecision.isCurrentDayPlanSatisfied());
+        Assertions.assertFalse(firstDayDecision.isNextDayLookAheadEntered());
+        Assertions.assertEquals(0, firstDayDecision.getAddedMachineCount());
     }
 
     /**

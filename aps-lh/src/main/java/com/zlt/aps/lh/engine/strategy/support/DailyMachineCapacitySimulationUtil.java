@@ -20,6 +20,7 @@ public final class DailyMachineCapacitySimulationUtil {
     private static final String MODE_FORCED_SHORTAGE_WINDOW = "欠产阈值窗口回落";
     private static final String MODE_WINDOW_TOTAL_CAPACITY = "8班窗口总产能";
     private static final String MODE_TODAY_CAPACITY = "当前日有效产能";
+    private static final String MODE_CURRENT_DAY_PLAN_SATISFIED = "当前日计划已满足";
     private static final String MODE_NEXT_DAY_CAPACITY = "后一天3班产能";
     private static final String MODE_WINDOW_LAST_DAY = "窗口末日";
 
@@ -116,8 +117,6 @@ public final class DailyMachineCapacitySimulationUtil {
             DailyMachineCapacityDayDecision decision,
             int activeMachines,
             LocalDate firstProductionDate) {
-        // todayRequiredQty 是当前日需要承接的量：当日计划量 + 前序模拟滚动下来的欠产量。
-        int todayRequiredQty = decision.getCarryShortageQty() + decision.getTodayPlanQty();
         int todayCapacityQty = sumCapacityQty(request, decision.getProductionDate(),
                 decision.getProductionDate(), activeMachines);
         int currentShortageQty = resolveCurrentThresholdShortage(request, decision, firstProductionDate);
@@ -129,6 +128,10 @@ public final class DailyMachineCapacitySimulationUtil {
         int windowTotalCapacityQty = resolveWindowTotalCapacityQty(request, activeMachines);
         int windowMonthPlanQty = resolveWindowMonthPlanQty(request);
         int scheduleDayFinishQty = Math.max(0, request.getScheduleDayFinishQty());
+        int currentDayPlanQty = resolveCurrentDayPlanQty(decision, firstProductionDate, scheduleDayFinishQty);
+        // todayRequiredQty 是当前日需要承接的量：当前日判断计划量 + 前序模拟滚动下来的欠产量。
+        int todayRequiredQty = decision.getCarryShortageQty() + currentDayPlanQty;
+        boolean currentDayPlanSatisfied = currentDayPlanQty <= todayCapacityQty;
         int windowEffectiveCapacityQty = sumCapacityQty(request, firstProductionDate,
                 request.getWindowEndDate(), activeMachines);
         int windowRemainingShortageQty = 0;
@@ -144,6 +147,7 @@ public final class DailyMachineCapacitySimulationUtil {
         int demandQty;
         int capacityQty;
         String decisionMode;
+        boolean nextDayLookAheadEntered = false;
         if (forcedShortageWindowMode) {
             /*
              * 本月前日累计欠产超过阈值后，只把阈值作为强制判断入口：
@@ -163,6 +167,15 @@ public final class DailyMachineCapacitySimulationUtil {
             capacityQty = sumCapacityQty(request, decision.getProductionDate(),
                     decision.getLookAheadEndDate(), activeMachines);
             decisionMode = MODE_WINDOW_DEMAND;
+        } else if (currentDayPlanSatisfied) {
+            /*
+             * 欠产未超过阈值时，每个业务日先判断当前机台数是否已满足当前日月计划量。
+             * 窗口首日按日计划账本口径扣除T日晚班已完成量，避免完成量已覆盖的首日计划继续后看。
+             * 当前日已满足则不继续后看下一日，避免因为后续高日计划提前在当前日盲目加机台。
+             */
+            demandQty = currentDayPlanQty;
+            capacityQty = todayCapacityQty;
+            decisionMode = MODE_CURRENT_DAY_PLAN_SATISFIED;
         } else if (shouldCheckNextDayThreeShiftCapacity(
                 request, decision, firstProductionDate, nextDayPlanQty, nextDayThreeShiftCapacityQty)) {
             /*
@@ -172,6 +185,7 @@ public final class DailyMachineCapacitySimulationUtil {
             demandQty = nextDayPlanQty;
             capacityQty = nextDayThreeShiftCapacityQty;
             decisionMode = MODE_NEXT_DAY_CAPACITY;
+            nextDayLookAheadEntered = true;
         } else if (windowTotalCapacityQty >= windowPlanQty) {
             // 欠产未超阈值且 8 班理论产能可覆盖窗口计划：不因换模后当日残班不足继续加机台。
             demandQty = windowPlanQty;
@@ -197,8 +211,10 @@ public final class DailyMachineCapacitySimulationUtil {
                 demandQty = nextDayPlanQty;
                 capacityQty = nextDayThreeShiftCapacityQty;
                 decisionMode = MODE_NEXT_DAY_CAPACITY;
+                nextDayLookAheadEntered = true;
             }
         }
+        decision.setCurrentDayPlanQty(currentDayPlanQty);
         decision.setTodayRequiredQty(todayRequiredQty);
         decision.setTodayCapacityQty(todayCapacityQty);
         decision.setDayShortageQty(Math.max(0, todayRequiredQty - todayCapacityQty));
@@ -214,7 +230,10 @@ public final class DailyMachineCapacitySimulationUtil {
         decision.setShortageAddMachineThreshold(Math.max(0, request.getShortageAddMachineThreshold()));
         decision.setShortageThresholdExceeded(forcedShortageWindowMode);
         decision.setNextDayPlanQty(nextDayPlanQty);
+        decision.setNextProductionDate(nextProductionDate);
         decision.setNextDayThreeShiftCapacityQty(nextDayThreeShiftCapacityQty);
+        decision.setCurrentDayPlanSatisfied(currentDayPlanSatisfied);
+        decision.setNextDayLookAheadEntered(nextDayLookAheadEntered);
         if (forcedShortageWindowMode) {
             decision.setUnmetQty(Math.max(0,
                     windowRemainingShortageQty - Math.max(0, request.getShortageAddMachineThreshold())));
@@ -222,6 +241,17 @@ public final class DailyMachineCapacitySimulationUtil {
             decision.setUnmetQty(Math.max(0, demandQty - capacityQty));
         }
         return decision;
+    }
+
+    private static int resolveCurrentDayPlanQty(DailyMachineCapacityDayDecision decision,
+                                                LocalDate firstProductionDate,
+                                                int scheduleDayFinishQty) {
+        if (Objects.isNull(decision) || Objects.isNull(decision.getProductionDate())
+                || Objects.isNull(firstProductionDate)
+                || !decision.getProductionDate().equals(firstProductionDate)) {
+            return Math.max(0, Objects.isNull(decision) ? 0 : decision.getTodayPlanQty());
+        }
+        return Math.max(0, decision.getTodayPlanQty() - Math.max(0, scheduleDayFinishQty));
     }
 
     /**
