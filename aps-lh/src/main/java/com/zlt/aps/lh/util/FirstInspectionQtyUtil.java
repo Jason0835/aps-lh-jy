@@ -25,11 +25,17 @@ import java.util.Objects;
 @Slf4j
 public final class FirstInspectionQtyUtil {
 
+    /** 单控机台首检数量折算系数，与单控班产 /2 口径一致 */
+    private static final int SINGLE_CONTROL_FIRST_INSPECTION_DIVISOR = 2;
+
     private FirstInspectionQtyUtil() {
     }
 
     /**
-     * 获取首检数量。
+     * 获取普通机台首检数量。
+     *
+     * <p>单控机台（机台编码以 L/R 结尾）首检数量需折半，请使用
+     * {@link #getFirstInspectionQty(LhScheduleContext, String)}。</p>
      *
      * @param context 排程上下文
      * @return 首检数量，未配置时默认 4，负数按 0 处理
@@ -40,6 +46,27 @@ public final class FirstInspectionQtyUtil {
             return LhScheduleConstant.FIRST_INSPECTION_QTY;
         }
         return Math.max(0, config.getFirstInspectionQty());
+    }
+
+    /**
+     * 获取按机台类型折算后的首检数量。
+     *
+     * <p>业务口径：普通机台首检数量 = 硫化参数 firstInspectionQty（默认 4）；
+     * 单控机台（机台编码以 L/R 结尾，例如 K1501L、K1501R）首检数量 = firstInspectionQty / 2，
+     * 向下取整，与 {@link ShiftCapacityResolverUtil#resolveRuntimeShiftCapacity} 的单控班产折半口径一致。
+     * 单控首检数量同样计入硫化余量和排产量。</p>
+     *
+     * @param context     排程上下文
+     * @param machineCode 运行态机台编码
+     * @return 折算后的首检数量，单控机台按参数折半向下取整
+     */
+    public static int getFirstInspectionQty(LhScheduleContext context, String machineCode) {
+        int configuredQty = getFirstInspectionQty(context);
+        if (!LhSingleControlMachineUtil.isSingleMouldMachine(machineCode)) {
+            return configuredQty;
+        }
+        // 单控机台首检数量折半，向下取整，与单控班产 /2 口径对齐
+        return configuredQty / SINGLE_CONTROL_FIRST_INSPECTION_DIVISOR;
     }
 
     /**
@@ -74,7 +101,8 @@ public final class FirstInspectionQtyUtil {
     /**
      * 将普通换模首检数量写入归属班次。
      *
-     * <p>首检数量参与排产量和硫化余量消耗，因此写入结果前会按剩余目标量与班产上限收敛。</p>
+     * <p>首检数量参与排产量和硫化余量消耗，因此写入结果前会按剩余目标量与班产上限收敛。
+     * 单控机台（L/R）首检数量按参数折半向下取整。</p>
      *
      * @param context 排程上下文
      * @param result 排程结果
@@ -94,7 +122,8 @@ public final class FirstInspectionQtyUtil {
                                                     String scheduleType) {
         LhShiftConfigVO attributionShift = resolveAttributionShift(shifts, mouldChangeCompleteTime);
         int firstInspectionQty = resolveEffectiveFirstInspectionQty(
-                context, attributionShift, shiftCapacity, remainingQty, scheduleType);
+                context, attributionShift, shiftCapacity, remainingQty, scheduleType,
+                Objects.isNull(result) ? null : result.getLhMachineCode());
         if (Objects.isNull(result) || Objects.isNull(attributionShift) || firstInspectionQty <= 0) {
             return 0;
         }
@@ -102,12 +131,13 @@ public final class FirstInspectionQtyUtil {
         int mergedQty = Math.max(0, existingQty == null ? 0 : existingQty) + firstInspectionQty;
         ShiftFieldUtil.setShiftPlanQty(result, attributionShift.getShiftIndex(), mergedQty,
                 attributionShift.getShiftStartDateTime(), attributionShift.getShiftEndDateTime());
+        boolean singleControl = LhSingleControlMachineUtil.isSingleMouldMachine(result.getLhMachineCode());
         log.info("普通换模首检数量归属班次, batchNo: {}, materialCode: {}, machineCode: {}, "
-                        + "换模完成: {}, 归属班次: {}, 首检数量: {}, 班产上限: {}, 说明: 换模8小时已包含首检，"
-                        + "首检只影响数量归属和班产占用",
+                        + "换模完成: {}, 归属班次: {}, 首检数量: {}, 单控折半: {}, 班产上限: {}, "
+                        + "说明: 换模8小时已包含首检，首检只影响数量归属和班产占用",
                 result.getBatchNo(), result.getMaterialCode(), result.getLhMachineCode(),
                 LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime), attributionShift.getShiftIndex(),
-                firstInspectionQty, resolveShiftCapacityCap(context, attributionShift, shiftCapacity, scheduleType));
+                firstInspectionQty, singleControl, resolveShiftCapacityCap(context, attributionShift, shiftCapacity, scheduleType));
         return firstInspectionQty;
     }
 
@@ -115,7 +145,8 @@ public final class FirstInspectionQtyUtil {
      * 按首检数量调整班次产能图。
      *
      * <p>首检落在开产班次之前时，补入该班次首检数量；落在开产班次内时，
-     * 首检数量和正常生产量共享该班次班产上限。</p>
+     * 首检数量和正常生产量共享该班次班产上限。
+     * 单控机台（L/R）首检数量按参数折半向下取整。</p>
      *
      * @param context 排程上下文
      * @param shifts 排程窗口班次
@@ -124,6 +155,7 @@ public final class FirstInspectionQtyUtil {
      * @param shiftCapacity 运行态班产
      * @param remainingQty 当前剩余目标量
      * @param scheduleType 排程类型
+     * @param machineCode 运行态机台编码，用于单控折半
      * @return 调整后的产能图
      */
     public static Map<Integer, Integer> applyFirstInspectionQtyToCapacityMap(
@@ -133,7 +165,8 @@ public final class FirstInspectionQtyUtil {
             Map<Integer, Integer> shiftCapacityMap,
             int shiftCapacity,
             int remainingQty,
-            String scheduleType) {
+            String scheduleType,
+            String machineCode) {
         Map<Integer, Integer> adjustedMap = new LinkedHashMap<Integer, Integer>(
                 CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
         if (CollectionUtils.isEmpty(shifts)) {
@@ -141,7 +174,7 @@ public final class FirstInspectionQtyUtil {
         }
         LhShiftConfigVO attributionShift = resolveAttributionShift(shifts, mouldChangeCompleteTime);
         int firstInspectionQty = resolveEffectiveFirstInspectionQty(
-                context, attributionShift, shiftCapacity, remainingQty, scheduleType);
+                context, attributionShift, shiftCapacity, remainingQty, scheduleType, machineCode);
         for (LhShiftConfigVO shift : shifts) {
             if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
                 continue;
@@ -208,11 +241,13 @@ public final class FirstInspectionQtyUtil {
                                                           LhShiftConfigVO attributionShift,
                                                           int shiftCapacity,
                                                           int remainingQty,
-                                                          String scheduleType) {
+                                                          String scheduleType,
+                                                          String machineCode) {
         if (Objects.isNull(attributionShift) || remainingQty <= 0) {
             return 0;
         }
-        int configuredQty = getFirstInspectionQty(context);
+        // 按机台类型折算首检数量：单控机台（L/R）按参数折半向下取整
+        int configuredQty = getFirstInspectionQty(context, machineCode);
         if (configuredQty <= 0) {
             return 0;
         }

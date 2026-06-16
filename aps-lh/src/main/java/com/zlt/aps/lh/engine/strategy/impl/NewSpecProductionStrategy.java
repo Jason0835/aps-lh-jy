@@ -653,7 +653,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 // 普通换模8小时已包含首检：首检数量按换模完成落班计入产能，不额外推迟开产时间。
                 shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                         context, shifts, mouldChangeCompleteTime, shiftCapacityMap, runtimeShiftCapacity,
-                        dynamicTargetQty, ScheduleTypeEnum.NEW_SPEC.getCode());
+                        dynamicTargetQty, ScheduleTypeEnum.NEW_SPEC.getCode(), machineCode);
                 shiftCapacityMap = applyDailyStandardCapacityAdjust(
                         context, sku, machineCode, shifts, shiftCapacityMap, runtimeShiftCapacity);
                 int maxQtyToWindowEnd = sumShiftCapacity(shiftCapacityMap);
@@ -3782,7 +3782,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 shifts, machineMouldQty, runtimeShiftCapacity, policy != null && policy.isEnding());
         shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                 context, shifts, mouldChangeCompleteTime, shiftCapacityMap, runtimeShiftCapacity,
-                sku.resolveTargetScheduleQty(), ScheduleTypeEnum.NEW_SPEC.getCode());
+                sku.resolveTargetScheduleQty(), ScheduleTypeEnum.NEW_SPEC.getCode(), candidate.getMachineCode());
         shiftCapacityMap = applyDailyStandardCapacityAdjust(
                 context, sku, candidate.getMachineCode(), shifts, shiftCapacityMap, runtimeShiftCapacity);
         MachineProductionSegment simulationSegment = buildMachineProductionSegment(

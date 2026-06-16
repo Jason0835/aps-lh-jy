@@ -437,7 +437,7 @@ public class LocalSearchMachineAllocatorStrategy {
                 : LhScheduleTimeUtil.addHours(mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
         int firstInspectionShiftIndex = FirstInspectionQtyUtil.resolveAttributionShiftIndex(
                 shifts, mouldChangeCompleteTime);
-        int firstInspectionQty = FirstInspectionQtyUtil.getFirstInspectionQty(context);
+        int firstInspectionQty = FirstInspectionQtyUtil.getFirstInspectionQty(context, machine.getMachineCode());
         Date specEndTime = null;
         int totalQty = 0;
         boolean started = false;
@@ -500,7 +500,8 @@ public class LocalSearchMachineAllocatorStrategy {
             cursorStartTime = effectiveEndTime;
         }
         totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
-                context, shifts, mouldChangeCompleteTime, productionStartTime, shiftCapacity, totalQty);
+                context, shifts, mouldChangeCompleteTime, productionStartTime, shiftCapacity, totalQty,
+                machine.getMachineCode());
 
         if (totalQty <= 0 || specEndTime == null) {
             return LocalSearchCapacityEstimate.empty();
@@ -514,7 +515,8 @@ public class LocalSearchMachineAllocatorStrategy {
                                                                        Date mouldChangeCompleteTime,
                                                                        Date productionStartTime,
                                                                        int shiftCapacity,
-                                                                       int remainingQty) {
+                                                                       int remainingQty,
+                                                                       String machineCode) {
         LhShiftConfigVO attributionShift = FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime);
         if (attributionShift == null || productionStartTime == null
                 || productionStartTime.before(attributionShift.getShiftEndDateTime())) {
@@ -522,7 +524,8 @@ public class LocalSearchMachineAllocatorStrategy {
         }
         Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                 context, shifts, mouldChangeCompleteTime, new HashMap<Integer, Integer>(0),
-                shiftCapacity, Math.max(remainingQty, FirstInspectionQtyUtil.getFirstInspectionQty(context)), null);
+                shiftCapacity, Math.max(remainingQty, FirstInspectionQtyUtil.getFirstInspectionQty(context, machineCode)),
+                null, machineCode);
         Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());
         return Math.max(0, firstInspectionQty == null ? 0 : firstInspectionQty);
     }
