@@ -14,6 +14,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
@@ -967,6 +968,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             CandidateWindowProfile leftProfile = resolveCandidateWindowProfile(context, sku, left, profileCache);
             CandidateWindowProfile rightProfile = resolveCandidateWindowProfile(context, sku, right, profileCache);
 
+            compareResult = compareTodayIdlePriority(leftProfile, rightProfile);
+            if (compareResult != 0) {
+                return compareResult;
+            }
+
             compareResult = compareReleasedContinuousMachinePriority(leftProfile, rightProfile);
             if (compareResult != 0) {
                 return compareResult;
@@ -1079,6 +1085,17 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         return Integer.compare(resolveSpecialSupportCapabilityCount(left),
                 resolveSpecialSupportCapabilityCount(right));
+    }
+
+    /**
+     * 比较当天空闲机台优先级。
+     *
+     * @param leftProfile 左机台画像
+     * @param rightProfile 右机台画像
+     * @return 比较结果
+     */
+    private int compareTodayIdlePriority(CandidateWindowProfile leftProfile, CandidateWindowProfile rightProfile) {
+        return Integer.compare(leftProfile.getTodayIdleScore(), rightProfile.getTodayIdleScore());
     }
 
     /**
@@ -1425,10 +1442,12 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         profile.setHitNoMouldChange(hitNoMouldChange);
         Date switchStartTime = resolveCandidateSwitchStartTime(context, referenceTime);
         profile.setSwitchStartTime(switchStartTime);
+        profile.setFirstSwitchShiftIndex(resolveShiftIndex(context, switchStartTime));
         profile.setProductionStartTime(resolveCandidateProductionStartTime(context, switchStartTime));
         profile.setReleasedContinuousMachineScore(resolveReleasedContinuousMachineScore(context, sku, machine, referenceTime));
         profile.setOtherSkuOccupiedScore(resolveOtherSkuOccupiedScore(context, sku, machine));
         fillSchedulableShiftMetrics(context, sku, profile);
+        profile.setTodayIdleScore(resolveTodayIdleScore(context, sku, machine, profile));
         profileCache.put(machine.getMachineCode(), profile);
         return profile;
     }
@@ -1615,7 +1634,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (context == null || machine == null || CollectionUtils.isEmpty(context.getMachineAssignmentMap())) {
             return 0;
         }
-        List<LhScheduleResult> assignedResults = context.getMachineAssignmentMap().get(machine.getMachineCode());
+        List<LhScheduleResult> assignedResults = CollectionUtils.isEmpty(context.getMachineAssignmentMap())
+                ? null : context.getMachineAssignmentMap().get(machine.getMachineCode());
         if (CollectionUtils.isEmpty(assignedResults)) {
             return 0;
         }
@@ -1634,6 +1654,127 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
         return 0;
+    }
+
+    /**
+     * 解析当天空闲机台优先得分。
+     * <p>仅在当前 SKU 首日确实需要排产时生效；当天无有效占用且可首班承接的机台优先。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待排 SKU
+     * @param machine 候选机台
+     * @param profile 候选机台窗口画像
+     * @return 0-当天空闲且可首班承接，1-非当天空闲
+     */
+    private int resolveTodayIdleScore(LhScheduleContext context,
+                                      SkuScheduleDTO sku,
+                                      MachineScheduleDTO machine,
+                                      CandidateWindowProfile profile) {
+        if (!isTodayIdleMachinePriorityEnabled(context)
+                || !isSkuNeedScheduleOnFirstDay(context, sku)
+                || context == null || machine == null || profile == null
+                || StringUtils.isEmpty(machine.getMachineCode())) {
+            return 1;
+        }
+        List<LhScheduleResult> assignedResults = CollectionUtils.isEmpty(context.getMachineAssignmentMap())
+                ? null : context.getMachineAssignmentMap().get(machine.getMachineCode());
+        if (!CollectionUtils.isEmpty(assignedResults)) {
+            for (LhScheduleResult assignedResult : assignedResults) {
+                if (!shouldIgnoreReleasedContinuousPlaceholder(context, assignedResult)) {
+                    return 1;
+                }
+            }
+        }
+        Date referenceTime = profile.getReferenceTime();
+        if (referenceTime == null || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return 1;
+        }
+        Date windowStartTime = context.getScheduleWindowShifts().get(0).getShiftStartDateTime();
+        if (windowStartTime == null || referenceTime.after(windowStartTime)) {
+            return 1;
+        }
+        return 0;
+    }
+
+    /**
+     * 判断当天空闲机台优先规则是否启用。
+     *
+     * @param context 排程上下文
+     * @return true-启用
+     */
+    private boolean isTodayIdleMachinePriorityEnabled(LhScheduleContext context) {
+        return context != null && context.getParamIntValue(
+                LhScheduleParamConstant.ENABLE_TODAY_IDLE_MACHINE_PRIORITY,
+                LhScheduleConstant.ENABLE_TODAY_IDLE_MACHINE_PRIORITY) == 1;
+    }
+
+    /**
+     * 判断 SKU 是否需要在窗口首日排产。
+     *
+     * @param context 排程上下文
+     * @param sku 待排 SKU
+     * @return true-首日需要排产
+     */
+    private boolean isSkuNeedScheduleOnFirstDay(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (context == null || sku == null) {
+            return false;
+        }
+        LocalDate firstShiftDate = resolveFirstShiftDate(context);
+        if (firstShiftDate != null && !CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(firstShiftDate);
+            if (quota != null && (quota.getDayPlanQty() > 0 || quota.getRemainingQty() > 0)) {
+                return true;
+            }
+        }
+        if (sku.getDailyPlanQty() > 0) {
+            return true;
+        }
+        if (sku.getEffectiveCarryForwardQty() > 0 || sku.getMonthlyHistoryShortageQty() > 0) {
+            return true;
+        }
+        int targetQty = sku.getRemainingScheduleQty() > 0
+                ? sku.getRemainingScheduleQty() : sku.resolveTargetScheduleQty();
+        return targetQty > 0 && StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag());
+    }
+
+    /**
+     * 解析排程窗口首班业务日期。
+     *
+     * @param context 排程上下文
+     * @return 首班业务日期
+     */
+    private LocalDate resolveFirstShiftDate(LhScheduleContext context) {
+        if (context == null || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return null;
+        }
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        if (firstShift == null || firstShift.getWorkDate() == null) {
+            return null;
+        }
+        return firstShift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+    }
+
+    /**
+     * 解析指定时间命中的班次序号。
+     *
+     * @param context 排程上下文
+     * @param date 时间
+     * @return 班次序号，未命中时返回窗口外默认值
+     */
+    private int resolveShiftIndex(LhScheduleContext context, Date date) {
+        if (context == null || date == null || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1;
+        }
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (shift == null || shift.getShiftIndex() == null
+                    || shift.getShiftStartDateTime() == null || shift.getShiftEndDateTime() == null) {
+                continue;
+            }
+            if (!date.before(shift.getShiftStartDateTime()) && date.before(shift.getShiftEndDateTime())) {
+                return shift.getShiftIndex();
+            }
+        }
+        return LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1;
     }
 
     /**
@@ -1793,10 +1934,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         int topCount = Math.min(topN, PriorityTraceLogHelper.sizeOf(candidates));
         PriorityTraceLogHelper.appendLine(detailBuilder, "TOP" + topCount + "候选排序:");
         List<String> levelNames = java.util.Arrays.asList(
-                "L1_定点机台", "L2_单控拆分", "L3_续作释放降级", "L4_其他SKU占用", "L5_最早可开产班次",
-                "L6_连续可生产班次", "L7_可用总产能", "L8_尾部零散产能", "L9_普通机台优先",
-                "L10_特殊支持能力数量", "L11_收尾时间", "L12_同规格", "L13_同英寸", "L14_英寸接近度",
-                "L15_胶囊共用", "L16_胎胚共用");
+                "L1_定点机台", "L2_单控拆分", "L3_当天空闲优先", "L4_续作释放降级", "L5_其他SKU占用",
+                "L6_最早可开产班次", "L7_连续可生产班次", "L8_可用总产能", "L9_尾部零散产能",
+                "L10_普通机台优先", "L11_特殊支持能力数量", "L12_收尾时间", "L13_同规格", "L14_同英寸",
+                "L15_英寸接近度", "L16_胶囊共用", "L17_胎胚共用");
         for (int i = 0; i < topCount; i++) {
             MachineScheduleDTO machine = candidates.get(i);
             CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, machine, profileCache);
@@ -1815,27 +1956,30 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             boolean specialMatched = LhMachineHardMatchUtil.isSpecialMaterialSupported(matchResult, machine);
             boolean specialSupportMachine = !LhMachineHardMatchUtil.isNormalMachine(machine);
             String skuShellStandard = resolveSkuShellStandardDisplay(context, sku);
+            boolean skuNeedScheduleOnFirstDay = isSkuNeedScheduleOnFirstDay(context, sku);
 
             List<String> sortKeyLevels = java.util.Arrays.asList(
                     "L1_定点机台=" + (specifyScore == 0 ? 1 : 0),
                     "L2_单控拆分=" + (isSingleControlMachine(context, machine.getMachineCode()) ? 1 : 0),
-                    "L3_续作释放降级=" + profile.getReleasedContinuousMachineScore(),
-                    "L4_其他SKU占用=" + profile.getOtherSkuOccupiedScore(),
-                    "L5_最早可开产班次=" + profile.getFirstProductionShiftIndex(),
-                    "L6_连续可生产班次=" + profile.getContinuousSchedulableShiftCount(),
-                    "L7_可用总产能=" + profile.getAvailableCapacityQty(),
-                    "L8_尾部零散产能=" + profile.getTailFragmentScore(),
-                    "L9_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
-                    "L10_特殊支持能力数量=" + specialSupportCapabilityCount,
-                    "L11_收尾时间=" + PriorityTraceLogHelper.formatDateTime(profile.getReferenceTime()),
-                    "L12_同规格=" + (specMatchScore == 0 ? 1 : 0),
-                    "L13_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
-                    "L14_英寸接近度=" + formatInchDistance(inchDistance),
-                    "L15_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
-                    "L16_胎胚共用=" + embryoShareCount);
+                    "L3_当天空闲优先=" + profile.getTodayIdleScore(),
+                    "L4_续作释放降级=" + profile.getReleasedContinuousMachineScore(),
+                    "L5_其他SKU占用=" + profile.getOtherSkuOccupiedScore(),
+                    "L6_最早可开产班次=" + profile.getFirstProductionShiftIndex(),
+                    "L7_连续可生产班次=" + profile.getContinuousSchedulableShiftCount(),
+                    "L8_可用总产能=" + profile.getAvailableCapacityQty(),
+                    "L9_尾部零散产能=" + profile.getTailFragmentScore(),
+                    "L10_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
+                    "L11_特殊支持能力数量=" + specialSupportCapabilityCount,
+                    "L12_收尾时间=" + PriorityTraceLogHelper.formatDateTime(profile.getReferenceTime()),
+                    "L13_同规格=" + (specMatchScore == 0 ? 1 : 0),
+                    "L14_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
+                    "L15_英寸接近度=" + formatInchDistance(inchDistance),
+                    "L16_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
+                    "L17_胎胚共用=" + embryoShareCount);
             List<Integer> scores = java.util.Arrays.asList(
                     specifyScore,
                     singleCtrlScore,
+                    profile.getTodayIdleScore(),
                     profile.getReleasedContinuousMachineScore(),
                     profile.getOtherSkuOccupiedScore(),
                     profile.getFirstProductionShiftIndex(),
@@ -1850,8 +1994,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                     safeInchDistanceScore(inchDistance),
                     capsuleScore,
                     embryoShareCount);
-            List<Integer> defaultScores = java.util.Arrays.asList(1, 1, 0, 0, 0,
-                    0, LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1, 0, 0, 1, 0, 1, 1, 0, 1, 0);
+            List<Integer> defaultScores = java.util.Arrays.asList(1, SINGLE_CONTROL_NORMAL_MACHINE_SCORE, 1, 0, 0,
+                    LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0);
             String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
             String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
 
@@ -1870,6 +2014,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                             + ", " + PriorityTraceLogHelper.kv("特殊支持能力数量", specialSupportCapabilityCount)
                             + ", " + PriorityTraceLogHelper.kv("机台偏好原因", resolveMachinePreferenceReason(context, sku, machine))
                             + ", " + PriorityTraceLogHelper.kv("定点", PriorityTraceLogHelper.oneZero(specifyScore == 0))
+                            + ", " + PriorityTraceLogHelper.kv("当天需排产", PriorityTraceLogHelper.oneZero(skuNeedScheduleOnFirstDay))
+                            + ", " + PriorityTraceLogHelper.kv("当天空闲", PriorityTraceLogHelper.oneZero(profile.getTodayIdleScore() == 0))
                             + ", " + PriorityTraceLogHelper.kv("续作释放机台", PriorityTraceLogHelper.oneZero(profile.getReleasedContinuousMachineScore() > 0))
                             + ", " + PriorityTraceLogHelper.kv("支持SKU", PriorityTraceLogHelper.oneZero(true))
                             + ", " + PriorityTraceLogHelper.kv("英寸匹配", PriorityTraceLogHelper.oneZero(inchMatched))
@@ -1882,6 +2028,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                             + ", " + PriorityTraceLogHelper.kv("特殊材料匹配", PriorityTraceLogHelper.oneZero(specialMatched))
                             + ", " + PriorityTraceLogHelper.kv("当前在机", machine.getPreviousMaterialCode())
                             + ", " + PriorityTraceLogHelper.kv("最早换模时间", PriorityTraceLogHelper.formatDateTime(profile.getSwitchStartTime()))
+                            + ", " + PriorityTraceLogHelper.kv("最早可换模班次", profile.getFirstSwitchShiftIndex())
                             + ", " + PriorityTraceLogHelper.kv("最早可开产时间", PriorityTraceLogHelper.formatDateTime(profile.getProductionStartTime()))
                             + ", " + PriorityTraceLogHelper.kv("最早可开产班次", profile.getFirstProductionShiftIndex())
                             + ", " + PriorityTraceLogHelper.kv("连续可生产班次数", profile.getContinuousSchedulableShiftCount())
@@ -1950,6 +2097,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         if (profile.getOtherSkuOccupiedScore() == 0) {
             reasons.add("未被其他SKU占用");
+        }
+        if (profile.getTodayIdleScore() == 0) {
+            reasons.add("当天空闲机台优先");
         }
         if (profile.getReleasedContinuousMachineScore() > 0) {
             reasons.add("续作释放机台仅降优先级，不禁止生产");
@@ -2089,6 +2239,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         private Date referenceTime;
         /** 最早可换模时间 */
         private Date switchStartTime;
+        /** 最早可换模班次 */
+        private int firstSwitchShiftIndex = LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1;
         /** 最早可开产时间 */
         private Date productionStartTime;
         /** 最早可开产班次 */
@@ -2103,6 +2255,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         private int releasedContinuousMachineScore;
         /** 被其他SKU占用得分，0=未占用，1=已占用 */
         private int otherSkuOccupiedScore;
+        /** 当天空闲且可首班承接得分，0=当天空闲可首班承接，1=非当天空闲机台 */
+        private int todayIdleScore = 1;
         /** 尾部零散产能得分，0=否，1=是 */
         private int tailFragmentScore;
         /** 是否命中晚班不能换模 */
@@ -2126,6 +2280,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
         private void setSwitchStartTime(Date switchStartTime) {
             this.switchStartTime = switchStartTime;
+        }
+
+        private int getFirstSwitchShiftIndex() {
+            return firstSwitchShiftIndex;
+        }
+
+        private void setFirstSwitchShiftIndex(int firstSwitchShiftIndex) {
+            this.firstSwitchShiftIndex = firstSwitchShiftIndex;
         }
 
         private Date getProductionStartTime() {
@@ -2182,6 +2344,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
         private void setOtherSkuOccupiedScore(int otherSkuOccupiedScore) {
             this.otherSkuOccupiedScore = otherSkuOccupiedScore;
+        }
+
+        private int getTodayIdleScore() {
+            return todayIdleScore;
+        }
+
+        private void setTodayIdleScore(int todayIdleScore) {
+            this.todayIdleScore = todayIdleScore;
         }
 
         private int getTailFragmentScore() {

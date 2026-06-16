@@ -543,6 +543,16 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 判断新增选机是否启用当天空闲机台优先。
+     *
+     * @return true-启用；false-关闭
+     */
+    public boolean isTodayIdleMachinePriorityEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.ENABLE_TODAY_IDLE_MACHINE_PRIORITY,
+                LhScheduleConstant.ENABLE_TODAY_IDLE_MACHINE_PRIORITY) == 1;
+    }
+
+    /**
      * 判断新增排产是否启用换模均衡。
      *
      * @return true-启用；false-关闭

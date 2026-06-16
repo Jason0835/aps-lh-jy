@@ -10,6 +10,7 @@ import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
+import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -182,6 +183,74 @@ public class NewSpecProductionStrategyTest {
         Assertions.assertNotNull(selected);
         Assertions.assertEquals("K1105", selected.getMachineCode(),
                 "补偿SKU轮到自己选机时，应优先锁回原续作机台");
+    }
+
+    /**
+     * 用例说明：补偿锁回机台若当天已有有效占用，且同作用域存在当天空闲候选，
+     * 应优先使用空闲机台，避免覆盖机台排序结果。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldPreferTodayIdleMachineOverPreferredContinuousMachineWhenFirstDayDemandExists() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildTodayIdleContext();
+
+        SkuScheduleDTO sku = buildFirstDayDemandSku("3302002319", 32);
+        sku.setContinuousCompensationSku(true);
+        ReflectionTestUtils.setField(sku, "preferredContinuousMachineCode", "K1407");
+
+        MachineScheduleDTO idleMachine = buildReadyMachine("K1105", toDate(2026, 4, 20, 8, 0, 0));
+        MachineScheduleDTO preferredBusyMachine = buildReadyMachine("K1407", toDate(2026, 4, 21, 8, 0, 0));
+        context.getMachineAssignmentMap().put("K1407", Collections.singletonList(
+                buildAssignedResult("K1407", "3302001465", toDate(2026, 4, 21, 14, 0, 0))));
+        List<MachineScheduleDTO> candidates = Arrays.asList(idleMachine, preferredBusyMachine);
+
+        MachineScheduleDTO selected = invokeSelectCandidateMachineFromScopedList(
+                strategy, context, sku, candidates, new FirstCandidateMachineMatchStrategy(),
+                null, ProductionQuantityPolicy.from(sku, false));
+
+        Assertions.assertNotNull(selected);
+        Assertions.assertEquals("K1105", selected.getMachineCode(),
+                "当天有空闲候选时，补偿锁回不得覆盖空闲优先");
+    }
+
+    /**
+     * 用例说明：可单机收完剩余量的候选中存在当天空闲机台时，
+     * 应优先选择空闲机台而不是列表中更靠前的占用机台。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldPreferTodayIdleMachineWhenMultipleMachinesCanFinishRemainingQty() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectTargetScheduleQtyResolver(strategy, new TargetScheduleQtyResolver() {
+            @Override
+            public int calcMachineAvailableCapacityInWindow(LhScheduleContext context,
+                                                            SkuScheduleDTO sku,
+                                                            MachineScheduleDTO machine) {
+                if ("K1407".equals(machine.getMachineCode()) || "K1105".equals(machine.getMachineCode())) {
+                    return 40;
+                }
+                return 0;
+            }
+        });
+        LhScheduleContext context = buildTodayIdleContext();
+
+        SkuScheduleDTO sku = buildFirstDayDemandSku("3302002319", 32);
+        MachineScheduleDTO busyMachine = buildReadyMachine("K1407", toDate(2026, 4, 21, 8, 0, 0));
+        MachineScheduleDTO idleMachine = buildReadyMachine("K1105", toDate(2026, 4, 20, 8, 0, 0));
+        context.getMachineAssignmentMap().put("K1407", Collections.singletonList(
+                buildAssignedResult("K1407", "3302001465", toDate(2026, 4, 21, 14, 0, 0))));
+        List<MachineScheduleDTO> candidates = Arrays.asList(busyMachine, idleMachine);
+
+        MachineScheduleDTO selected = invokeSelectCandidateMachineFromScopedList(
+                strategy, context, sku, candidates, new FirstCandidateMachineMatchStrategy(),
+                null, ProductionQuantityPolicy.from(sku, false));
+
+        Assertions.assertNotNull(selected);
+        Assertions.assertEquals("K1105", selected.getMachineCode(),
+                "多台机台均可单机收完时，应优先当天空闲机台");
     }
 
     /**
@@ -574,15 +643,77 @@ public class NewSpecProductionStrategyTest {
                 "selectCandidateMachine",
                 LhScheduleContext.class,
                 SkuScheduleDTO.class,
-                List.class,
+                NewSpecCandidateCache.class,
                 Set.class,
                 IMachineMatchStrategy.class,
                 MachineScheduleDTO.class,
                 ProductionQuantityPolicy.class);
         method.setAccessible(true);
+        NewSpecCandidateCache candidateCache = NewSpecCandidateCache.from(candidates,
+                candidate -> Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(
+                        strategy, "isSingleControlMachine", context, candidate.getMachineCode())));
         return (MachineScheduleDTO) method.invoke(
-                strategy, context, sku, candidates, new HashSet<String>(excludedMachineCodes),
+                strategy, context, sku, candidateCache, new HashSet<String>(excludedMachineCodes),
                 machineMatch, preferredTrialMachine, quantityPolicy);
+    }
+
+    private MachineScheduleDTO invokeSelectCandidateMachineFromScopedList(NewSpecProductionStrategy strategy,
+                                                                          LhScheduleContext context,
+                                                                          SkuScheduleDTO sku,
+                                                                          List<MachineScheduleDTO> candidates,
+                                                                          IMachineMatchStrategy machineMatch,
+                                                                          MachineScheduleDTO preferredTrialMachine,
+                                                                          ProductionQuantityPolicy quantityPolicy) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "selectCandidateMachineFromScopedList",
+                LhScheduleContext.class,
+                SkuScheduleDTO.class,
+                List.class,
+                IMachineMatchStrategy.class,
+                MachineScheduleDTO.class,
+                ProductionQuantityPolicy.class,
+                NewSpecCandidateCache.class);
+        method.setAccessible(true);
+        NewSpecCandidateCache candidateCache = NewSpecCandidateCache.from(candidates, candidate -> false);
+        return (MachineScheduleDTO) method.invoke(
+                strategy, context, sku, candidates, machineMatch, preferredTrialMachine,
+                quantityPolicy, candidateCache);
+    }
+
+    private LhScheduleContext buildTodayIdleContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 4, 21, 7, 0, 0));
+        context.setScheduleTargetDate(context.getScheduleDate());
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setMachineAssignmentMap(new LinkedHashMap<String, List<LhScheduleResult>>());
+        return context;
+    }
+
+    private SkuScheduleDTO buildFirstDayDemandSku(String materialCode, int demandQty) {
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode(materialCode);
+        sku.setDailyPlanQty(demandQty);
+        sku.setRemainingScheduleQty(demandQty);
+        sku.setTargetScheduleQty(demandQty);
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        return sku;
+    }
+
+    private MachineScheduleDTO buildReadyMachine(String machineCode, Date estimatedEndTime) {
+        MachineScheduleDTO machine = buildMachine(machineCode, 1);
+        machine.setEstimatedEndTime(estimatedEndTime);
+        machine.setStatus("1");
+        return machine;
+    }
+
+    private LhScheduleResult buildAssignedResult(String machineCode, String materialCode, Date specEndTime) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setLhMachineCode(machineCode);
+        result.setMaterialCode(materialCode);
+        result.setScheduleType("02");
+        result.setDailyPlanQty(16);
+        result.setSpecEndTime(specEndTime);
+        return result;
     }
 
     private MouldResourceAllocationResult invokeTryAllocateMouldResourceForAddMachine(
