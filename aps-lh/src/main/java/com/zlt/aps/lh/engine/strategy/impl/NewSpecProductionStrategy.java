@@ -112,7 +112,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
     private static final String HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON =
-            "仅历史欠产、后续无月计划，且前日已有完成量或前日排程结果已排过，本次跳过补排";
+            "仅历史欠产、后续无月计划，且前日已有完成量，本次跳过补排";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
@@ -387,10 +387,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
             int previousDayFinishedQty = resolvePreviousDayFinishedQty(context, sku.getMaterialCode());
-            boolean previousScheduled = previousDayFinishedQty <= 0
-                    && hasPreviousScheduledResult(context, sku.getMaterialCode());
             if (shouldSkipHistoryShortageOnlyPreviousProducedSku(context, sku,
-                    previousDayFinishedQty, previousScheduled)) {
+                    previousDayFinishedQty)) {
                 int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
                 addUnscheduledResult(context, sku, historyShortageQty,
                         HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON,
@@ -398,12 +396,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 removeCurrentNewSpecSku(context, iterator, sku);
                 progressed = true;
                 log.info("新增SKU仅历史欠产且前日已有生产记录，本次跳过补排, materialCode: {}, "
-                                + "historyShortageQty: {}, scheduleDate: {}, previousDayFinishedQty: {}, "
-                                + "previousScheduled: {}, reason: {}",
+                                + "historyShortageQty: {}, scheduleDate: {}, previousDayFinishedQty: {}, reason: {}",
                         sku.getMaterialCode(), historyShortageQty,
                         LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
                         previousDayFinishedQty,
-                        previousScheduled,
                         HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON);
                 continue;
             }
@@ -895,19 +891,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     /**
      * 判断仅历史欠产且后续无计划的SKU是否需要跳过本轮新增补排。
      * <p>该规则只限制非续作补偿的新增SKU；窗口 dayN 与月底后续计划均为0，
-     * 且前日日完成量大于0时，避免本轮重复补排历史欠产；若日完成量为空或为0，
-     * 再兜底查看接口目标日前一日排程结果是否有有效排产量。</p>
+     * 且前日日完成量大于0时，避免本轮重复补排历史欠产。</p>
      *
      * @param context 排程上下文
      * @param sku 新增排产SKU
      * @param previousDayFinishedQty 前日日完成量
-     * @param previousScheduled 接口目标日前一日排程结果是否有排过
      * @return true-跳过本轮新增补排；false-继续原新增排产逻辑
      */
     private boolean shouldSkipHistoryShortageOnlyPreviousProducedSku(LhScheduleContext context,
                                                                      SkuScheduleDTO sku,
-                                                                     int previousDayFinishedQty,
-                                                                     boolean previousScheduled) {
+                                                                     int previousDayFinishedQty) {
         if (Objects.isNull(context) || Objects.isNull(sku)
                 || sku.isContinuousCompensationSku()) {
             return false;
@@ -918,8 +911,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (!isWindowDayPlanEmpty(sku) || Math.max(0, sku.getFutureMonthPlanQtyAfterWindow()) > 0) {
             return false;
         }
-        // 优先以T日前日完成量判断；完成量缺失或为0时，再使用目标日前一日排程结果作为兜底依据。
-        return previousDayFinishedQty > 0 || previousScheduled;
+        // 仅以T日前日完成量判断是否已生产过
+        return previousDayFinishedQty > 0;
     }
 
     /**
