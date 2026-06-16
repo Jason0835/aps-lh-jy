@@ -387,6 +387,41 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 多机台续作已判定收尾时，应统一按收尾目标量收口，不能继续按窗口日计划保留两台单控机台。
+     */
+    @Test
+    public void shouldCapMultiMachineEndingContinuousByMaxSurplusAndEmbryoStock() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002706", 8, 108, buildQuotaMapByShifts(shifts, 48, 48, 12));
+        sku.setSurplusQty(9);
+        sku.setEmbryoStock(7);
+        sku.setSkuTag(SkuTagEnum.ENDING.getCode());
+        LhScheduleResult leftResult = buildContinuousResult("3302002706", "K1501L", 8, shifts, "1");
+        LhScheduleResult rightResult = buildContinuousResult("3302002706", "K1501R", 8, shifts, "1");
+        leftResult.setMouldQty(1);
+        rightResult.setMouldQty(1);
+        context.getScheduleResultList().add(leftResult);
+        context.getScheduleResultList().add(rightResult);
+        context.getScheduleResultSourceSkuMap().put(leftResult, sku);
+        context.getScheduleResultSourceSkuMap().put(rightResult, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        int totalPlanQty = context.getScheduleResultList().stream()
+                .filter(result -> "3302002706".equals(result.getMaterialCode()))
+                .mapToInt(ShiftFieldUtil::resolveScheduledQty)
+                .sum();
+        long activeMachineCount = context.getScheduleResultList().stream()
+                .filter(result -> "3302002706".equals(result.getMaterialCode()))
+                .filter(result -> ShiftFieldUtil.resolveScheduledQty(result) > 0)
+                .count();
+        Assertions.assertEquals(9, totalPlanQty);
+        Assertions.assertEquals(1L, activeMachineCount);
+    }
+
+    /**
      * 续作单机理论窗口产能已覆盖硫化余量时，不应仅因窗口日计划账本剩余额度继续转新增补机台。
      */
     @Test

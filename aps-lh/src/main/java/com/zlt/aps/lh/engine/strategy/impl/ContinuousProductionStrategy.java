@@ -742,13 +742,16 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
 
+            applyMultiMachineEndingTargetRule(context, sourceSku, skuResults);
             log.info("续作同SKU多机台识别, materialCode: {}, 机台列表: {}, 是否多机台: {}",
                     sourceSku.getMaterialCode(), joinMachineCodes(skuResults), true);
             if (capEndingFirstDayOnlyContinuationGroup(context, sourceSku, skuResults, shifts)) {
+                capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
             }
             if (shouldReduceContinuationByWorkDate(sourceSku, skuResults, shifts)) {
                 reduceContinuationMachinesByWorkDate(context, sourceSku, skuResults, shifts);
+                capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
             }
             // 非收尾多机台续作不降模，跳过降模流程保留初始排程结果（8班次全满）
@@ -770,6 +773,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (targetQty <= 0) {
                 allocateContinuationQtyForKeptMachines(context, sourceSku, skuResults,
                         new ArrayList<LhScheduleResult>(0), machineDailyCapacityMap, targetQty, shifts);
+                capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
             }
             if (hasEndingResult(skuResults) && totalPlanQty <= targetQty) {
@@ -789,6 +793,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             allocateContinuationQtyForKeptMachines(context, sourceSku, skuResults,
                     keptResults, machineDailyCapacityMap, targetQty, shifts);
+            capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
         }
         capEndingFirstDayOnlyContinuationGroups(context, shifts);
         // 日额度账本必须在最终结果收口后再同步，并以回裁后的结果驱动零计划与机台状态。
@@ -1206,6 +1211,55 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return sourceSku.getMaterialCode() + "#STRICT_ENDING";
         }
         return buildContinuationGroupKey(sourceSku);
+    }
+
+    /**
+     * 多机台续作收尾目标量决策。
+     * <p>同一收尾 SKU 同时在多台机台续作时，必须先统一按中心收尾口径
+     * {@code MAX(硫化余量, 胎胚库存)} 收口，再进入降模释放机台。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param skuResults 同SKU续作结果
+     */
+    private void applyMultiMachineEndingTargetRule(LhScheduleContext context,
+                                                   SkuScheduleDTO sourceSku,
+                                                   List<LhScheduleResult> skuResults) {
+        if (context == null || sourceSku == null || CollectionUtils.isEmpty(skuResults)
+                || !hasEndingResult(skuResults)) {
+            return;
+        }
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, true);
+        if (!policy.isStrictUpperLimit()) {
+            return;
+        }
+        int originalTargetQty = sourceSku.resolveTargetScheduleQty();
+        int endingTargetQty = resolveMultiMachineEndingTargetQty(context, sourceSku, skuResults);
+        if (originalTargetQty != endingTargetQty) {
+            endingTargetQty = getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sourceSku);
+        }
+        log.info("续作多机台收尾目标量决策, materialCode: {}, 机台列表: {}, 原目标量: {}, "
+                        + "收尾目标量: {}, surplusQty: {}, embryoStock: {}, rule: 多机台收尾MAX(余量,胎胚库存)",
+                sourceSku.getMaterialCode(), joinMachineCodes(skuResults), originalTargetQty,
+                endingTargetQty, Math.max(0, sourceSku.getSurplusQty()),
+                Math.max(0, sourceSku.getEmbryoStock()));
+    }
+
+    /**
+     * 解析多机台续作收尾目标量。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param skuResults 同SKU续作结果
+     * @return 收尾目标量
+     */
+    private int resolveMultiMachineEndingTargetQty(LhScheduleContext context,
+                                                   SkuScheduleDTO sourceSku,
+                                                   List<LhScheduleResult> skuResults) {
+        int endingDemandQty = !CollectionUtils.isEmpty(skuResults)
+                ? resolveEndingDemandQty(context, skuResults.get(0))
+                : Math.max(Math.max(0, sourceSku.getSurplusQty()), Math.max(0, sourceSku.getEmbryoStock()));
+        return ShiftCapacityResolverUtil.roundUpQtyToMouldMultiple(endingDemandQty, sourceSku.getMouldQty());
     }
 
     /**
@@ -2344,6 +2398,55 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 严格收尾多机台结果最终总量复核。
+     * <p>按天降模过程中可能因下机机台补当前班导致结果仍超过收尾目标，
+     * 此处从下机优先级最低的机台开始回裁，保证落库前同组总量不突破业务目标。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param skuResults 同SKU续作结果
+     * @param shifts 全窗口班次
+     */
+    private void capStrictEndingContinuationGroupToTarget(LhScheduleContext context,
+                                                          SkuScheduleDTO sourceSku,
+                                                          List<LhScheduleResult> skuResults,
+                                                          List<LhShiftConfigVO> shifts) {
+        if (context == null || sourceSku == null || CollectionUtils.isEmpty(skuResults)
+                || CollectionUtils.isEmpty(shifts) || !hasEndingResult(skuResults)) {
+            return;
+        }
+        ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, true);
+        if (!policy.isStrictUpperLimit()) {
+            return;
+        }
+        int targetQty = Math.max(0, sourceSku.resolveTargetScheduleQty());
+        int totalPlanQty = skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum();
+        int overQty = totalPlanQty - targetQty;
+        if (overQty <= 0) {
+            return;
+        }
+        List<LhScheduleResult> trimOrder = selectMachinesToRemoveForContinuation(
+                context, skuResults, Collections.<LhScheduleResult>emptyList());
+        for (LhScheduleResult result : trimOrder) {
+            if (overQty <= 0) {
+                break;
+            }
+            int currentQty = ShiftFieldUtil.resolveScheduledQty(result);
+            if (currentQty <= 0) {
+                continue;
+            }
+            int nextQty = Math.max(0, currentQty - overQty);
+            capResultShiftQtyToTarget(context, result, shifts, nextQty);
+            overQty -= currentQty - ShiftFieldUtil.resolveScheduledQty(result);
+        }
+        log.info("续作多机台严格收尾最终收口, materialCode: {}, 目标量: {}, 原总量: {}, "
+                        + "收口后总量: {}, 机台列表: {}",
+                sourceSku.getMaterialCode(), targetQty, totalPlanQty,
+                skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum(),
+                joinMachineCodes(skuResults));
+    }
+
+    /**
      * 应用指定业务日的续作多机台降模结果。
      *
      * @param context 排程上下文
@@ -2384,7 +2487,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     sourceSku.getMaterialCode(), productionDate, result.getLhMachineCode(), allocation,
                     machineCapacity, fillKeptMachineCapacity, effectiveDemandQty, remainingTargetQty, ending);
         }
-        List<LhScheduleResult> supplementResults = selectDaySupplementMachines(context, activeResults, keptResults);
+        List<LhScheduleResult> supplementResults = policy.isStrictUpperLimit() && remainingDemandQty <= 0
+                ? new ArrayList<LhScheduleResult>(0)
+                : selectDaySupplementMachines(context, activeResults, keptResults);
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, activeResults, keptResults);
         for (LhScheduleResult result : supplementResults) {
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
