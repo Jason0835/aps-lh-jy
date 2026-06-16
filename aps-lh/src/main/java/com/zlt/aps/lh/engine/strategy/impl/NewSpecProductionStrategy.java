@@ -654,6 +654,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                         context, shifts, mouldChangeCompleteTime, shiftCapacityMap, runtimeShiftCapacity,
                         dynamicTargetQty, ScheduleTypeEnum.NEW_SPEC.getCode());
+                shiftCapacityMap = applyDailyStandardCapacityAdjust(
+                        context, sku, machineCode, shifts, shiftCapacityMap, runtimeShiftCapacity);
                 int maxQtyToWindowEnd = sumShiftCapacity(shiftCapacityMap);
                 MachineProductionSegment segment = buildMachineProductionSegment(
                         context, sku, machineCode, mouldChangeStartTime, firstProductionStartTime,
@@ -2562,6 +2564,39 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 按SKU日标准产量修正新增排程班次计划量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param machineCode 机台编码
+     * @param shifts 班次列表
+     * @param shiftCapacityMap 原班次计划量
+     * @param runtimeShiftCapacity 运行态班产
+     * @return 修正后的班次计划量
+     */
+    private Map<Integer, Integer> applyDailyStandardCapacityAdjust(LhScheduleContext context,
+                                                                   SkuScheduleDTO sku,
+                                                                   String machineCode,
+                                                                   List<LhShiftConfigVO> shifts,
+                                                                   Map<Integer, Integer> shiftCapacityMap,
+                                                                   int runtimeShiftCapacity) {
+        String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
+        boolean singleControlMachine = isSingleControlMachine(context, machineCode);
+        int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(context, sku.getMaterialCode());
+        Map<Integer, Integer> adjustedMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
+                shifts, shiftCapacityMap, dailyStandardQty, runtimeShiftCapacity,
+                remainShiftType, singleControlMachine, ScheduleTypeEnum.NEW_SPEC.getCode());
+        if (!Objects.equals(shiftCapacityMap, adjustedMap)) {
+            log.info("日标准产量班次计划量修正, 当前流程: 新增排程, materialCode: {}, machineCode: {}, "
+                            + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 日标准产量剩余班次参数值: {}, "
+                            + "修正前班次计划量: {}, 修正后班次计划量: {}",
+                    sku.getMaterialCode(), machineCode, singleControlMachine, dailyStandardQty,
+                    runtimeShiftCapacity, remainShiftType, shiftCapacityMap, adjustedMap);
+        }
+        return adjustedMap;
+    }
+
+    /**
      * 构建机台生产段，用于记录角色判断和关键日志。
      *
      * @param context 排程上下文
@@ -3748,6 +3783,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                 context, shifts, mouldChangeCompleteTime, shiftCapacityMap, runtimeShiftCapacity,
                 sku.resolveTargetScheduleQty(), ScheduleTypeEnum.NEW_SPEC.getCode());
+        shiftCapacityMap = applyDailyStandardCapacityAdjust(
+                context, sku, candidate.getMachineCode(), shifts, shiftCapacityMap, runtimeShiftCapacity);
         MachineProductionSegment simulationSegment = buildMachineProductionSegment(
                 context, sku, candidate.getMachineCode(), mouldChangeStartTime,
                 firstProductionStartTime, sumShiftCapacity(shiftCapacityMap),
@@ -5894,20 +5931,39 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (realSurplusRemainingQty <= 0) {
             return false;
         }
+        Integer currentShiftExistingQty = ShiftFieldUtil.getShiftPlanQty(result, currentShift.getShiftIndex());
+        int currentShiftBeforeQty = currentShiftExistingQty == null ? 0 : Math.max(0, currentShiftExistingQty);
+        int currentShiftAvailableQty = Math.max(0,
+                resolveAvailableShiftQtyForEndingStagger(context, result, currentShift) - currentShiftBeforeQty);
+        // 晚班不可换模衔接时，当前中班仍可生产的产能先补满，再承接下一晚班。
+        int currentShiftFillQty = Math.min(currentShiftAvailableQty, realSurplusRemainingQty);
+        int beforeFillRealSurplusRemainingQty = realSurplusRemainingQty;
+        if (currentShiftFillQty > 0) {
+            Date currentShiftStartTime = ShiftFieldUtil.getShiftStartTime(result, currentShift.getShiftIndex());
+            setShiftPlanQty(result, currentShift.getShiftIndex(), currentShiftBeforeQty + currentShiftFillQty,
+                    currentShiftStartTime == null ? currentShift.getShiftStartDateTime() : currentShiftStartTime,
+                    currentShift.getShiftEndDateTime());
+            realSurplusRemainingQty = Math.max(0, realSurplusRemainingQty - currentShiftFillQty);
+        }
         Integer existingQty = ShiftFieldUtil.getShiftPlanQty(result, nextShift.getShiftIndex());
         int currentQty = existingQty == null ? 0 : Math.max(0, existingQty);
         int availableQty = Math.max(0, resolveAvailableShiftQtyForEndingStagger(context, result, nextShift) - currentQty);
         int fillQty = Math.min(availableQty, realSurplusRemainingQty);
-        if (fillQty <= 0) {
-            return currentQty > 0;
+        if (fillQty <= 0 && currentShiftFillQty <= 0) {
+            return currentQty > 0 || currentShiftBeforeQty > 0;
         }
-        setShiftPlanQty(result, nextShift.getShiftIndex(), currentQty + fillQty,
-                nextShift.getShiftStartDateTime(), null);
+        if (fillQty > 0) {
+            setShiftPlanQty(result, nextShift.getShiftIndex(), currentQty + fillQty,
+                    nextShift.getShiftStartDateTime(), null);
+        }
+        int nightShiftAfterQty = currentQty + fillQty;
         refreshResultSummary(context, result);
         log.info("晚班不可换模续作补满命中, materialCode: {}, 机台: {}, 当前收尾班次: {}, 晚班班次: {}, "
+                        + "当前班次补前: {}, 当前班次补后: {}, 晚班补前: {}, 晚班补后: {}, "
                         + "补满数量: {}, 真实余量剩余: {}, 原因: 晚班不可换模且当前SKU可无换模续作",
                 sku.getMaterialCode(), result.getLhMachineCode(), lastShiftIndex, nextShift.getShiftIndex(),
-                fillQty, realSurplusRemainingQty);
+                currentShiftBeforeQty, currentShiftBeforeQty + currentShiftFillQty, currentQty, nightShiftAfterQty,
+                currentShiftFillQty + fillQty, beforeFillRealSurplusRemainingQty);
         return true;
     }
 

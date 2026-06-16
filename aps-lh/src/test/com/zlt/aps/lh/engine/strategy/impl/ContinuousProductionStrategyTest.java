@@ -1107,6 +1107,50 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void applyNoMouldChangeNightFillBeforeRelease_shouldFillCurrentAfternoonBeforeNightShift() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-TEST-CONTINUATION-NIGHT-FILL");
+        context.setScheduleDate(toDate(2026, 6, 14, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 6, 16, 0, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        addMachine(context, "K1902", 0);
+
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMap(
+                shifts.get(0), shifts.get(3), shifts.get(6), 100, 100, 100);
+        SkuScheduleDTO sourceSku = buildContinuationSku(
+                "3302001069", ConstructionStageEnum.FORMAL.getCode(), false, 300, quotaMap);
+        sourceSku.setShiftCapacity(18);
+        sourceSku.setSurplusQty(916);
+        sourceSku.setContinuousMachineCode("K1902");
+
+        LhScheduleResult result = baseContinuationResult(sourceSku.getMaterialCode(), "K1902", false);
+        result.setSingleMouldShiftQty(18);
+        ShiftFieldUtil.setShiftPlanQty(result, 3, 10,
+                shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, 4, 18,
+                shifts.get(3).getShiftStartDateTime(), shifts.get(3).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, 5, 8,
+                shifts.get(4).getShiftStartDateTime(), shifts.get(4).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sourceSku);
+
+        Boolean filled = ReflectionTestUtils.invokeMethod(strategy, "applyNoMouldChangeNightFillBeforeRelease",
+                context, sourceSku, result, shifts, false);
+
+        assertTrue(Boolean.TRUE.equals(filled), "续作中班结束后进入不可换模晚班时应命中补满规则");
+        assertEquals(Integer.valueOf(18), ShiftFieldUtil.getShiftPlanQty(result, 5),
+                "续作晚班补满前，应先把仍可生产的当前中班补到班产");
+        assertEquals(Integer.valueOf(18), ShiftFieldUtil.getShiftPlanQty(result, 6),
+                "当前中班补满后，下一不可换模晚班仍应补满班产");
+        assertEquals(64, result.getDailyPlanQty().intValue(),
+                "续作前班次和晚班补满后结果汇总量应刷新");
+    }
+
+    @Test
     public void scheduleReduceMould_shouldReduceByLookAheadEvenWhenFutureDayPlanDoesNotDrop() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiDayContinuationContext(

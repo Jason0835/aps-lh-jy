@@ -339,6 +339,9 @@ public final class LhScheduleConstant {
     /** 奇数班产计划量加一班别默认值，空值表示不启用 */
     public static final String ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE = "";
 
+    /** 日标准产量剩余班次默认值，3-中班 */
+    public static final int DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE = 3;
+
     /** 当天空闲机台优先开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_TODAY_IDLE_MACHINE_PRIORITY = 1;
 

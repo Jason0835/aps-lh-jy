@@ -543,6 +543,21 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 获取日标准产量剩余班次配置。
+     * <p>合法值：1-晚班，2-早班，3-中班；未配置或非法时默认中班。</p>
+     *
+     * @return 剩余班次配置值
+     */
+    public String getDailyStandardCapacityRemainShiftType() {
+        int shiftType = getParamIntValue(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE,
+                LhScheduleConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE);
+        if (shiftType == 1 || shiftType == 2 || shiftType == 3) {
+            return String.valueOf(shiftType);
+        }
+        return String.valueOf(LhScheduleConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE);
+    }
+
+    /**
      * 判断新增选机是否启用当天空闲机台优先。
      *
      * @return true-启用；false-关闭

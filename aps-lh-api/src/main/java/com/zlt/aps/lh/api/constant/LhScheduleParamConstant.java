@@ -200,6 +200,8 @@ public final class LhScheduleParamConstant {
     public static final String ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE = "SYS0304024";
     /** 当天空闲机台优先开关（0-关闭，1-开启） */
     public static final String ENABLE_TODAY_IDLE_MACHINE_PRIORITY = "SYS0304025";
+    /** 日标准产量剩余班次（1-晚班，2-早班，3-中班） */
+    public static final String DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE = "SYS0304026";
     /** 是否开启换模均衡（0-关闭，1-开启） */
     public static final String ENABLE_CHANGEOVER_BALANCE = "SYS0304021";
     /** 续作欠产追补判断天数 */

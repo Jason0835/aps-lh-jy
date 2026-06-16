@@ -6,12 +6,15 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -301,9 +304,115 @@ class ShiftCapacityResolverUtilTest {
         assertEquals(16, actualQty(shifts, 8, "1"));
     }
 
+    @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldPutRemainderOnDefaultAfternoonShift() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 4, 17));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 1, 16, 2, 16, 3, 16);
+
+        int morningQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                46, 16, 16, shifts.get(0), "3", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+        int nightQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                46, 16, 16, shifts.get(2), "3", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+        int afternoonQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                46, 16, 16, shifts.get(1), "3", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+
+        assertEquals(16, morningQty, "早班不是剩余班次，应保持班产上限");
+        assertEquals(16, nightQty, "晚班不是剩余班次，应保持班产上限");
+        assertEquals(14, afternoonQty, "中班为剩余班次时，应承接日标准产量余量");
+    }
+
+    @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldSupportNightAndMorningRemainShift() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 4, 17));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 1, 16, 2, 16, 3, 16);
+
+        int nightQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                46, 16, 16, shifts.get(2), "1", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.CONTINUOUS.getCode());
+        int morningQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                46, 16, 16, shifts.get(0), "2", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.TYPE_BLOCK.getCode());
+
+        assertEquals(14, nightQty, "参数配置晚班时，晚班应承接余量");
+        assertEquals(14, morningQty, "参数配置早班时，早班应承接余量");
+    }
+
+    @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldUseClassCapacityWhenOtherShiftNotFull() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 4, 17));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 1, 0, 2, 16, 3, 16);
+
+        int afternoonQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                46, 16, 16, shifts.get(1), "3", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+
+        assertEquals(16, afternoonQty, "其他班次不足班产时，剩余班次应按班产排");
+    }
+
+    @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldKeepAfternoonFullWhenNightShiftNotFull() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 6, 14));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 3, 10, 4, 18, 5, 18);
+
+        int afternoonQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                52, 18, 18, shifts.get(4), "3", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+
+        assertEquals(18, afternoonQty, "同一业务日晚班不足班产时，中班不应按日标准余量回裁为16");
+    }
+
+    @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldKeepSingleControlAndNeverExceedClassCapacity() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 4, 17));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 1, 16, 2, 16, 3, 16);
+
+        int singleControlQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                46, 16, 16, shifts.get(1), "3", sameDayPlanQtyMap, true,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+        int cappedQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                60, 16, 20, shifts.get(0), "3", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+
+        assertEquals(16, singleControlQty, "单控机台不应用日标准产量班次修正");
+        assertEquals(16, cappedQty, "普通机台班次计划量不能超过原始班产");
+    }
+
+    @Test
+    void resolveDailyStandardQty_shouldUseStandardCapacityOnly() {
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setStandardCapacity(46);
+        capacity.setApsCapacity(99);
+
+        int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(capacity);
+
+        assertEquals(46, dailyStandardQty, "日标准产量修正规则必须取SKU日硫化产能的标准产能字段");
+    }
+
     private int actualQty(List<LhShiftConfigVO> shifts, int shiftIndex, String configPlusShiftType) {
         return ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
                 17, shifts.get(shiftIndex - 1), configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
+    }
+
+    private Map<Integer, Integer> sameDayPlanQtyMap(List<LhShiftConfigVO> shifts,
+                                                    int firstShiftIndex,
+                                                    int firstQty,
+                                                    int secondShiftIndex,
+                                                    int secondQty,
+                                                    int thirdShiftIndex,
+                                                    int thirdQty) {
+        Map<Integer, Integer> sameDayPlanQtyMap = new LinkedHashMap<Integer, Integer>(3);
+        sameDayPlanQtyMap.put(shifts.get(firstShiftIndex - 1).getShiftIndex(), firstQty);
+        sameDayPlanQtyMap.put(shifts.get(secondShiftIndex - 1).getShiftIndex(), secondQty);
+        sameDayPlanQtyMap.put(shifts.get(thirdShiftIndex - 1).getShiftIndex(), thirdQty);
+        return sameDayPlanQtyMap;
     }
 
     private LhShiftConfigVO findMorningShift(Date scheduleDate) {

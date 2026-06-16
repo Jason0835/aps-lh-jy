@@ -31,6 +31,7 @@ import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.LhMouldCodeUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
@@ -58,9 +59,11 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -2381,6 +2384,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
+        Map<Integer, Integer> dailyStandardShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
+                context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
+                cleaningWindowList, maintenanceWindowList);
 
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
@@ -2434,6 +2440,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     configPlusShiftType,
                     ScheduleTypeEnum.TYPE_BLOCK.getCode());
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+            shiftMaxQty = dailyStandardShiftCapacityMap.getOrDefault(shift.getShiftIndex(), shiftMaxQty);
             if (shiftMaxQty <= 0) {
                 continue;
             }
@@ -2470,6 +2477,89 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             }
         }
         return remaining;
+    }
+
+    /**
+     * 按SKU日标准产量修正换活字块班次最大计划量。
+     *
+     * @param context 排程上下文
+     * @param result 换活字块结果
+     * @param shifts 班次列表
+     * @param startTime 首个可排开始时间
+     * @param shiftCapacity 运行态班产
+     * @param lhTimeSeconds 硫化时长
+     * @param mouldQty 模台数
+     * @param cleaningWindowList 清洗窗口
+     * @param maintenanceWindowList 保养窗口
+     * @return 修正后的班次最大计划量
+     */
+    private Map<Integer, Integer> calculateDailyStandardShiftCapacityMap(LhScheduleContext context,
+                                                                         LhScheduleResult result,
+                                                                         List<LhShiftConfigVO> shifts,
+                                                                         Date startTime,
+                                                                         int shiftCapacity,
+                                                                         int lhTimeSeconds,
+                                                                         int mouldQty,
+                                                                         List<MachineCleaningWindowDTO> cleaningWindowList,
+                                                                         List<MachineMaintenanceWindowDTO> maintenanceWindowList) {
+        Map<Integer, Integer> rawShiftCapacityMap = new LinkedHashMap<Integer, Integer>(
+                CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
+        if (context == null || result == null || CollectionUtils.isEmpty(shifts)
+                || shiftCapacity <= 0 || lhTimeSeconds <= 0 || mouldQty <= 0) {
+            return rawShiftCapacityMap;
+        }
+        int dryIceLossQty = context.getParamIntValue(
+                LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
+        int dryIceDurationHours = context.getParamIntValue(
+                LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
+        boolean started = false;
+        for (LhShiftConfigVO shift : shifts) {
+            if (!started) {
+                if (startTime != null && !startTime.before(shift.getShiftEndDateTime())
+                        && shift != shifts.get(shifts.size() - 1)) {
+                    continue;
+                }
+                started = true;
+            }
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, startTime);
+            if (control == null || !control.isCanSchedule()) {
+                continue;
+            }
+            int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                    context.getDevicePlanShutList(),
+                    cleaningWindowList,
+                    maintenanceWindowList,
+                    result.getLhMachineCode(),
+                    control.getEffectiveStartTime(),
+                    control.getEffectiveEndTime(),
+                    shiftCapacity,
+                    lhTimeSeconds,
+                    mouldQty,
+                    ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
+                    dryIceLossQty,
+                    dryIceDurationHours,
+                    shift,
+                    configPlusShiftType,
+                    ScheduleTypeEnum.TYPE_BLOCK.getCode());
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+            rawShiftCapacityMap.put(shift.getShiftIndex(), Math.max(0, shiftMaxQty));
+        }
+        int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(context, result.getMaterialCode());
+        String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
+        boolean singleControlMachine = LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
+                context, result.getLhMachineCode());
+        Map<Integer, Integer> adjustedMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
+                shifts, rawShiftCapacityMap, dailyStandardQty, shiftCapacity, remainShiftType,
+                singleControlMachine, ScheduleTypeEnum.TYPE_BLOCK.getCode());
+        if (!Objects.equals(rawShiftCapacityMap, adjustedMap)) {
+            log.info("日标准产量班次计划量修正, 当前流程: 换活字块排产, materialCode: {}, machineCode: {}, "
+                            + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 日标准产量剩余班次参数值: {}, "
+                            + "修正前班次计划量: {}, 修正后班次计划量: {}",
+                    result.getMaterialCode(), result.getLhMachineCode(), singleControlMachine,
+                    dailyStandardQty, shiftCapacity, remainShiftType, rawShiftCapacityMap, adjustedMap);
+        }
+        return adjustedMap;
     }
 
     /**

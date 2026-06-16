@@ -4,11 +4,13 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
@@ -174,6 +176,143 @@ public final class ShiftCapacityResolverUtil {
             capacityMap.merge(workDate, Math.max(0, shiftPlanQty), Integer::sum);
         }
         return capacityMap;
+    }
+
+    /**
+     * 按日标准产量修正当前班次计划量。
+     * <p>仅普通机台的新增、续作、换活字块流程启用；单控机台保持原计划量不变。</p>
+     *
+     * @param dailyStandardQty SKU日标准产量
+     * @param classCapacity 原始班产
+     * @param currentShiftPlanQty 当前班次原计划量
+     * @param currentShift 当前班次
+     * @param remainShiftType 剩余班次配置，1-晚班，2-早班，3-中班
+     * @param sameDayShiftPlanQtyMap 同一业务日班次计划量，key=班次序号，value=计划量
+     * @param singleControlMachine 是否单控机台
+     * @param scheduleType 排程类型
+     * @return 修正后的当前班次计划量
+     */
+    public static int calculateShiftPlanQtyByDailyStandard(int dailyStandardQty,
+                                                           int classCapacity,
+                                                           int currentShiftPlanQty,
+                                                           LhShiftConfigVO currentShift,
+                                                           String remainShiftType,
+                                                           Map<Integer, Integer> sameDayShiftPlanQtyMap,
+                                                           boolean singleControlMachine,
+                                                           String scheduleType) {
+        if (singleControlMachine || !isSupportedScheduleType(scheduleType)) {
+            return currentShiftPlanQty;
+        }
+        if (classCapacity <= 0 || currentShiftPlanQty <= 0 || Objects.isNull(currentShift)
+                || !isValidPlusShiftType(remainShiftType)) {
+            return Math.max(0, Math.min(currentShiftPlanQty, classCapacity));
+        }
+        int currentPlanQty = Math.min(currentShiftPlanQty, classCapacity);
+        Integer currentShiftType = resolveShiftTypeValue(currentShift.resolveShiftTypeEnum());
+        if (Objects.isNull(currentShiftType) || currentShiftType != Integer.parseInt(remainShiftType.trim())) {
+            return currentPlanQty;
+        }
+        if (dailyStandardQty <= 0) {
+            return currentPlanQty;
+        }
+        int otherShiftPlanQty = sumOtherShiftPlanQty(currentShift, sameDayShiftPlanQtyMap);
+        if (!isOtherShiftPlanQtyFull(currentShift, sameDayShiftPlanQtyMap, classCapacity)) {
+            return currentPlanQty;
+        }
+        int remainderQty = dailyStandardQty - otherShiftPlanQty;
+        if (remainderQty < 0) {
+            return 0;
+        }
+        if (remainderQty > classCapacity) {
+            return currentPlanQty;
+        }
+        return Math.min(remainderQty, currentPlanQty);
+    }
+
+    /**
+     * 按日标准产量批量修正同一窗口内的班次计划量。
+     *
+     * @param shifts 班次列表
+     * @param rawShiftPlanQtyMap 原班次计划量，key=班次序号
+     * @param dailyStandardQty SKU日标准产量
+     * @param classCapacity 原始班产
+     * @param remainShiftType 剩余班次配置
+     * @param singleControlMachine 是否单控机台
+     * @param scheduleType 排程类型
+     * @return 修正后的班次计划量
+     */
+    public static Map<Integer, Integer> adjustShiftPlanQtyMapByDailyStandard(List<LhShiftConfigVO> shifts,
+                                                                             Map<Integer, Integer> rawShiftPlanQtyMap,
+                                                                             int dailyStandardQty,
+                                                                             int classCapacity,
+                                                                             String remainShiftType,
+                                                                             boolean singleControlMachine,
+                                                                             String scheduleType) {
+        Map<Integer, Integer> adjustedMap = new LinkedHashMap<Integer, Integer>(
+                CollectionUtils.isEmpty(rawShiftPlanQtyMap) ? 0 : rawShiftPlanQtyMap.size());
+        if (CollectionUtils.isEmpty(rawShiftPlanQtyMap)) {
+            return adjustedMap;
+        }
+        if (CollectionUtils.isEmpty(shifts)) {
+            adjustedMap.putAll(rawShiftPlanQtyMap);
+            return adjustedMap;
+        }
+        Map<LocalDate, Map<Integer, Integer>> sameDayPlanQtyMap = buildSameDayShiftPlanQtyMap(shifts, rawShiftPlanQtyMap);
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || !rawShiftPlanQtyMap.containsKey(shift.getShiftIndex())) {
+                continue;
+            }
+            LocalDate workDate = resolveWorkDate(shift);
+            Map<Integer, Integer> currentDayPlanQtyMap = Objects.isNull(workDate)
+                    ? rawShiftPlanQtyMap : sameDayPlanQtyMap.get(workDate);
+            int currentPlanQty = rawShiftPlanQtyMap.get(shift.getShiftIndex()) == null
+                    ? 0 : rawShiftPlanQtyMap.get(shift.getShiftIndex());
+            adjustedMap.put(shift.getShiftIndex(), calculateShiftPlanQtyByDailyStandard(
+                    dailyStandardQty, classCapacity, currentPlanQty, shift, remainShiftType,
+                    currentDayPlanQtyMap, singleControlMachine, scheduleType));
+        }
+        return adjustedMap;
+    }
+
+    /**
+     * 解析SKU日标准产量。
+     * <p>日标准产量修正规则只使用 SKU 日硫化产能主数据的 STANDARD_CAPACITY，不复用 APS 计算日产能。</p>
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @return SKU日标准产量
+     */
+    public static int resolveDailyStandardQty(LhScheduleContext context, String materialCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(materialCode)) {
+            return 0;
+        }
+        return resolveDailyStandardQty(context.getSkuLhCapacityMap().get(materialCode));
+    }
+
+    /**
+     * 解析SKU日标准产量。
+     *
+     * @param capacity SKU日硫化产能主数据
+     * @return SKU日标准产量
+     */
+    public static int resolveDailyStandardQty(MdmSkuLhCapacity capacity) {
+        if (Objects.isNull(capacity) || Objects.isNull(capacity.getStandardCapacity())) {
+            return 0;
+        }
+        return Math.max(0, capacity.getStandardCapacity());
+    }
+
+    /**
+     * 获取日标准产量剩余班次参数。
+     *
+     * @param context 排程上下文
+     * @return 参数值，默认中班
+     */
+    public static String resolveDailyStandardCapacityRemainShiftType(LhScheduleContext context) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleConfig())) {
+            return String.valueOf(AFTERNOON_PLUS_SHIFT_TYPE);
+        }
+        return context.getScheduleConfig().getDailyStandardCapacityRemainShiftType();
     }
 
     /**
@@ -420,6 +559,105 @@ public final class ShiftCapacityResolverUtil {
             return AFTERNOON_PLUS_SHIFT_TYPE;
         }
         return null;
+    }
+
+    /**
+     * 汇总同一业务日其他班次计划量。
+     *
+     * @param currentShift 当前班次
+     * @param sameDayShiftPlanQtyMap 同一业务日班次计划量
+     * @return 其他班次计划量合计
+     */
+    private static int sumOtherShiftPlanQty(LhShiftConfigVO currentShift,
+                                            Map<Integer, Integer> sameDayShiftPlanQtyMap) {
+        if (Objects.isNull(currentShift) || CollectionUtils.isEmpty(sameDayShiftPlanQtyMap)) {
+            return 0;
+        }
+        int totalQty = 0;
+        for (Map.Entry<Integer, Integer> entry : sameDayShiftPlanQtyMap.entrySet()) {
+            if (Objects.isNull(entry) || Objects.isNull(entry.getKey())
+                    || entry.getKey().intValue() == currentShift.getShiftIndex()) {
+                continue;
+            }
+            totalQty += entry.getValue() == null ? 0 : Math.max(0, entry.getValue());
+        }
+        return totalQty;
+    }
+
+    /**
+     * 判断同一业务日其他班次是否都达到班产。
+     *
+     * @param currentShift 当前班次
+     * @param sameDayShiftPlanQtyMap 同一业务日班次计划量
+     * @param classCapacity 原始班产
+     * @return true-其他班次都满足班产
+     */
+    private static boolean isOtherShiftPlanQtyFull(LhShiftConfigVO currentShift,
+                                                   Map<Integer, Integer> sameDayShiftPlanQtyMap,
+                                                   int classCapacity) {
+        if (Objects.isNull(currentShift) || CollectionUtils.isEmpty(sameDayShiftPlanQtyMap)
+                || classCapacity <= 0) {
+            return false;
+        }
+        int otherShiftCount = 0;
+        for (Map.Entry<Integer, Integer> entry : sameDayShiftPlanQtyMap.entrySet()) {
+            if (Objects.isNull(entry) || Objects.isNull(entry.getKey())
+                    || entry.getKey().intValue() == currentShift.getShiftIndex()) {
+                continue;
+            }
+            otherShiftCount++;
+            int planQty = entry.getValue() == null ? 0 : Math.max(0, entry.getValue());
+            if (planQty < classCapacity) {
+                return false;
+            }
+        }
+        return otherShiftCount >= LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY - 1;
+    }
+
+    /**
+     * 按业务日构建班次计划量映射。
+     *
+     * @param shifts 班次列表
+     * @param rawShiftPlanQtyMap 原班次计划量
+     * @return key=业务日，value=该日班次计划量
+     */
+    private static Map<LocalDate, Map<Integer, Integer>> buildSameDayShiftPlanQtyMap(
+            List<LhShiftConfigVO> shifts,
+            Map<Integer, Integer> rawShiftPlanQtyMap) {
+        Map<LocalDate, Map<Integer, Integer>> sameDayPlanQtyMap = new LinkedHashMap<LocalDate, Map<Integer, Integer>>(
+                CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
+        if (CollectionUtils.isEmpty(shifts) || CollectionUtils.isEmpty(rawShiftPlanQtyMap)) {
+            return sameDayPlanQtyMap;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || !rawShiftPlanQtyMap.containsKey(shift.getShiftIndex())) {
+                continue;
+            }
+            LocalDate workDate = resolveWorkDate(shift);
+            if (Objects.isNull(workDate)) {
+                continue;
+            }
+            Map<Integer, Integer> planQtyMap = sameDayPlanQtyMap.get(workDate);
+            if (Objects.isNull(planQtyMap)) {
+                planQtyMap = new LinkedHashMap<Integer, Integer>(LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY);
+                sameDayPlanQtyMap.put(workDate, planQtyMap);
+            }
+            planQtyMap.put(shift.getShiftIndex(), rawShiftPlanQtyMap.get(shift.getShiftIndex()));
+        }
+        return sameDayPlanQtyMap;
+    }
+
+    /**
+     * 解析班次业务日。
+     *
+     * @param shift 班次
+     * @return 业务日
+     */
+    private static LocalDate resolveWorkDate(LhShiftConfigVO shift) {
+        if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())) {
+            return null;
+        }
+        return shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     /**

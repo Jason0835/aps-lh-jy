@@ -147,6 +147,27 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：日标准产量剩余班次默认中班，配置晚班/早班/中班时按配置读取，非法值回退中班。
+     */
+    @Test
+    public void shouldReadDailyStandardCapacityRemainShiftTypeConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals("3", defaultConfig.getDailyStandardCapacityRemainShiftType());
+
+        Map<String, String> nightParamMap = new HashMap<>(1);
+        nightParamMap.put(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE, "1");
+        Assertions.assertEquals("1", new LhScheduleConfig(nightParamMap).getDailyStandardCapacityRemainShiftType());
+
+        Map<String, String> morningParamMap = new HashMap<>(1);
+        morningParamMap.put(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE, "2");
+        Assertions.assertEquals("2", new LhScheduleConfig(morningParamMap).getDailyStandardCapacityRemainShiftType());
+
+        Map<String, String> invalidParamMap = new HashMap<>(1);
+        invalidParamMap.put(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE, "9");
+        Assertions.assertEquals("3", new LhScheduleConfig(invalidParamMap).getDailyStandardCapacityRemainShiftType());
+    }
+
+    /**
      * 用例说明：收尾小余量允许欠产偏差异常配置按默认2处理。
      */
     @Test

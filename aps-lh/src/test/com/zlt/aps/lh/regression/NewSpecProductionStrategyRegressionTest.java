@@ -4072,6 +4072,52 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void applyNightNoMouldChangeContinuationFill_shouldFillCurrentAfternoonBeforeNightShift() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 14, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 16, 0, 0));
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate);
+        context.setScheduleWindowShifts(shifts);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001069");
+        sku.setMaterialDesc("晚班不可换模续作补满前班次");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(18);
+        sku.setMouldQty(1);
+        sku.setSurplusQty(916);
+        sku.setTargetScheduleQty(300);
+        sku.setWindowPlanQty(300);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                shifts, sku.getMaterialCode(), 100, 100, 100));
+
+        LhScheduleResult result = buildEndingResult(context, sku, "K1902");
+        result.setIsEnd("0");
+        result.setScheduleType("02");
+        result.setSingleMouldShiftQty(18);
+        ShiftFieldUtil.setShiftPlanQty(result, 3, 10,
+                shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, 4, 18,
+                shifts.get(3).getShiftStartDateTime(), shifts.get(3).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, 5, 8,
+                shifts.get(4).getShiftStartDateTime(), shifts.get(4).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getMachineScheduleMap().put("K1902", buildMachine("K1902", shifts.get(4).getShiftEndDateTime()));
+
+        invokeNightNoMouldChangeContinuationFill(strategy, context, sku, result, shifts,
+                ProductionQuantityPolicy.from(sku, false));
+
+        assertEquals(18, resolveShiftQty(result, 5), "晚班不可换模补满前，应先把仍可生产的当前中班补到班产");
+        assertEquals(18, resolveShiftQty(result, 6), "当前中班补满后，下一不可换模晚班仍应补满班产");
+        assertEquals(64, result.getDailyPlanQty().intValue(), "前班次和晚班补满后结果汇总量应刷新");
+    }
+
+    @Test
     void applyNightNoMouldChangeContinuationFill_shouldKeepTrialAndEndingWithinTarget() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
