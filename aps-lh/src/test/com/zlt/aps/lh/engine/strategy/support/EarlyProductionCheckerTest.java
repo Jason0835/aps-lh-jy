@@ -1,0 +1,166 @@
+package com.zlt.aps.lh.engine.strategy.support;
+
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.context.LhScheduleContext;
+import org.junit.jupiter.api.Test;
+
+import java.time.LocalDate;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * SKU提前生产准入判断回归测试。
+ */
+class EarlyProductionCheckerTest {
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldAllowFuturePlanSkuWhenStructureMachineNotFull() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, sku, day1, day3, 200);
+
+        assertTrue(allowed, "结构已排机台数小于计划硫化机台数时，应允许后续日SKU提前进入新增判断");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldAllowThirdDayPlanWithinScheduleWindow() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
+                quotaMap(day1, day2, day3, 0, 0, 60));
+
+        boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, sku, day1, day3, 200);
+
+        assertTrue(allowed, "T日应允许判断T+2有日计划量的SKU是否提前进入新增机台判断");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldRejectFuturePlanSkuWhenStructureMachineReachedPlan() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 1);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, sku, day1, day3, 200);
+
+        assertFalse(allowed, "结构已排机台数达到计划机台数时，不应提前生产后续日SKU");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldUseFutureStructurePlanWhenCurrentStructurePlanIsZero() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 2);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, sku, day1, day3, 200);
+
+        assertTrue(allowed, "当前日结构计划为0时，应改用后续第一个计划日的结构计划机台数判断");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldAllowEndingStructureWhenHistoryShortageExceedsSkuDailyCapacity() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 0);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 90, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, sku, day1, day3, 200);
+
+        assertTrue(allowed, "结构已收尾且SKU余量大于已排机台日硫化量时，应允许进入强制加机台判断");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldKeepOriginalLogicWhenCurrentDayHasPlanOrShortageExceeded() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        SkuScheduleDTO currentPlanSku = sku("3302001001", "L1", 0, 40,
+                quotaMap(day1, day2, day3, 20, 60, 0));
+        SkuScheduleDTO shortageExceededSku = sku("3302001002", "L1", 250, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        assertTrue(EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, currentPlanSku, day1, day3, 200), "当前日已有计划量时应直接走原逻辑");
+        assertTrue(EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, shortageExceededSku, day1, day3, 200), "欠产超过阈值时应直接走原强制加机台逻辑");
+    }
+
+    private LhScheduleContext contextWithStructurePlan(LocalDate date, String structureName, int machineCount) {
+        LhScheduleContext context = new LhScheduleContext();
+        context.addStructurePlanMachineCount(date, structureName, machineCount);
+        return context;
+    }
+
+    private SkuScheduleDTO sku(String materialCode,
+                               String structureName,
+                               int historyShortageQty,
+                               int dailyCapacity,
+                               Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode(materialCode);
+        sku.setStructureName(structureName);
+        sku.setMonthlyHistoryShortageQty(historyShortageQty);
+        sku.setDailyCapacity(dailyCapacity);
+        sku.setDailyPlanQuotaMap(quotaMap);
+        return sku;
+    }
+
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap(LocalDate day1,
+                                                          LocalDate day2,
+                                                          LocalDate day3,
+                                                          int day1Qty,
+                                                          int day2Qty,
+                                                          int day3Qty) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        for (LocalDate date : Arrays.asList(day1, day2, day3)) {
+            quotaMap.put(date, quota(date, 0));
+        }
+        quotaMap.get(day1).setDayPlanQty(day1Qty);
+        quotaMap.get(day1).setRemainingQty(day1Qty);
+        quotaMap.get(day2).setDayPlanQty(day2Qty);
+        quotaMap.get(day2).setRemainingQty(day2Qty);
+        quotaMap.get(day3).setDayPlanQty(day3Qty);
+        quotaMap.get(day3).setRemainingQty(day3Qty);
+        return quotaMap;
+    }
+
+    private SkuDailyPlanQuotaDTO quota(LocalDate date, int qty) {
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setProductionDate(date);
+        quota.setDayPlanQty(qty);
+        quota.setRemainingQty(qty);
+        return quota;
+    }
+}

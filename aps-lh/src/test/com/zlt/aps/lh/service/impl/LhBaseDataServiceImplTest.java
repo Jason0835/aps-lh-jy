@@ -30,6 +30,7 @@ import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
+import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
@@ -290,6 +291,7 @@ public class LhBaseDataServiceImplTest {
         injectField(service, "monthPlanMapper", mockMapper(FactoryMonthPlanProductionFinalResultMapper.class));
         injectField(service, "mpFactoryProductionVersionMapper", buildProductionVersionMapper());
         injectField(service, "mpAdjustResultMapper", mockMapper(MpAdjustResultMapper.class));
+        injectField(service, "monthPlanStatisticsMapper", mockMapper(MpMonthPlanStatisticsMapper.class));
         injectField(service, "workCalendarMapper", mockMapper(MdmWorkCalendarMapper.class));
         injectField(service, "skuLhCapacityMapper", mockMapper(MdmSkuLhCapacityMapper.class));
         injectField(service, "devicePlanShutMapper", mockMapper(MdmDevicePlanShutMapper.class));

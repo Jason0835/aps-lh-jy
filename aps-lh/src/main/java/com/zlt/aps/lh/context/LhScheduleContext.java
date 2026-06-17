@@ -33,6 +33,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.*;
 import java.util.Objects;
 
@@ -185,6 +186,15 @@ public class LhScheduleContext {
     private boolean rollingScheduleHandoff;
     /** SKU按结构归集, key=structureName, value=SKU排程DTO列表 */
     private Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+    /** 业务日期 -> 产品结构 -> 计划硫化机台数，来源于月计划统计表 dayN.lhMachines */
+    private Map<LocalDate, Map<String, Integer>> structurePlanMachineCountMap =
+            new LinkedHashMap<LocalDate, Map<String, Integer>>(4);
+    /** 业务日期 -> 产品结构 -> 已排硫化机台编码集合，按 Set 去重后用于提前生产准入判断 */
+    private Map<LocalDate, Map<String, Set<String>>> structureScheduledMachineCodeMap =
+            new LinkedHashMap<LocalDate, Map<String, Set<String>>>(4);
+    /** 业务日期 -> SKU物料编码 -> 已排硫化机台编码集合，用于结构收尾大余量强制加机台判断 */
+    private Map<LocalDate, Map<String, Set<String>>> skuScheduledMachineCodeMap =
+            new LinkedHashMap<LocalDate, Map<String, Set<String>>>(4);
     /** 续作SKU列表，来源于 MES 在机/前批次状态，S4.4 优先排产 */
     private List<SkuScheduleDTO> continuousSkuList = new ArrayList<>();
     /** 新增SKU列表，续作和换活字块未消费完的 SKU 会继续保留到 S4.5 新增链路 */
@@ -278,6 +288,140 @@ public class LhScheduleContext {
     private List<String> validationErrorList = new ArrayList<>();
     /** 优先级跟踪日志静默深度（局部搜索模拟分支时递增） */
     private int priorityTraceMuteDepth = 0;
+
+    /**
+     * 累加结构计划硫化机台数。
+     *
+     * @param productionDate 业务日期
+     * @param structureName 产品结构
+     * @param machineCount 计划硫化机台数
+     */
+    public void addStructurePlanMachineCount(LocalDate productionDate, String structureName, int machineCount) {
+        if (Objects.isNull(productionDate) || StringUtils.isEmpty(structureName)) {
+            return;
+        }
+        Map<String, Integer> structureMap = structurePlanMachineCountMap.computeIfAbsent(
+                productionDate, key -> new LinkedHashMap<String, Integer>(8));
+        Integer oldCount = structureMap.get(structureName);
+        structureMap.put(structureName, Math.max(0, Objects.isNull(oldCount) ? 0 : oldCount)
+                + Math.max(0, machineCount));
+    }
+
+    /**
+     * 获取指定业务日、指定结构的计划硫化机台数。
+     *
+     * @param productionDate 业务日期
+     * @param structureName 产品结构
+     * @return 计划硫化机台数
+     */
+    public int getStructurePlanMachineCount(LocalDate productionDate, String structureName) {
+        if (Objects.isNull(productionDate) || StringUtils.isEmpty(structureName)
+                || CollectionUtils.isEmpty(structurePlanMachineCountMap)) {
+            return 0;
+        }
+        Map<String, Integer> structureMap = structurePlanMachineCountMap.get(productionDate);
+        if (CollectionUtils.isEmpty(structureMap)) {
+            return 0;
+        }
+        Integer machineCount = structureMap.get(structureName);
+        return Objects.isNull(machineCount) ? 0 : Math.max(0, machineCount);
+    }
+
+    /**
+     * 清空结构/SKU已排机台运行态。
+     */
+    public void clearScheduledMachineCountMaps() {
+        structureScheduledMachineCodeMap.clear();
+        skuScheduledMachineCodeMap.clear();
+    }
+
+    /**
+     * 登记已排硫化机台。
+     * <p>结构与 SKU 均按“业务日 + 机台编码”去重，避免同一机台多个班次重复计数。</p>
+     *
+     * @param productionDate 业务日期
+     * @param structureName 产品结构
+     * @param materialCode SKU物料编码
+     * @param machineCode 机台编码
+     */
+    public void recordScheduledMachine(LocalDate productionDate,
+                                       String structureName,
+                                       String materialCode,
+                                       String machineCode) {
+        if (Objects.isNull(productionDate) || StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        if (StringUtils.isNotEmpty(structureName)) {
+            recordMachine(structureScheduledMachineCodeMap, productionDate, structureName, machineCode);
+        }
+        if (StringUtils.isNotEmpty(materialCode)) {
+            recordMachine(skuScheduledMachineCodeMap, productionDate, materialCode, machineCode);
+        }
+    }
+
+    /**
+     * 获取指定业务日、指定结构的已排机台数。
+     *
+     * @param productionDate 业务日期
+     * @param structureName 产品结构
+     * @return 已排机台数
+     */
+    public int getStructureScheduledMachineCount(LocalDate productionDate, String structureName) {
+        return getScheduledMachineCount(structureScheduledMachineCodeMap, productionDate, structureName);
+    }
+
+    /**
+     * 获取指定业务日、指定 SKU 的已排机台数。
+     *
+     * @param productionDate 业务日期
+     * @param materialCode SKU物料编码
+     * @return 已排机台数
+     */
+    public int getSkuScheduledMachineCount(LocalDate productionDate, String materialCode) {
+        return getScheduledMachineCount(skuScheduledMachineCodeMap, productionDate, materialCode);
+    }
+
+    /**
+     * 登记指定维度的机台编码。
+     *
+     * @param targetMap 目标统计Map
+     * @param productionDate 业务日期
+     * @param dimensionKey 结构或SKU编码
+     * @param machineCode 机台编码
+     */
+    private void recordMachine(Map<LocalDate, Map<String, Set<String>>> targetMap,
+                               LocalDate productionDate,
+                               String dimensionKey,
+                               String machineCode) {
+        Map<String, Set<String>> dateMap = targetMap.computeIfAbsent(
+                productionDate, key -> new LinkedHashMap<String, Set<String>>(8));
+        Set<String> machineCodeSet = dateMap.computeIfAbsent(
+                dimensionKey, key -> new LinkedHashSet<String>(4));
+        machineCodeSet.add(machineCode);
+    }
+
+    /**
+     * 获取指定维度已排机台数。
+     *
+     * @param sourceMap 来源统计Map
+     * @param productionDate 业务日期
+     * @param dimensionKey 结构或SKU编码
+     * @return 已排机台数
+     */
+    private int getScheduledMachineCount(Map<LocalDate, Map<String, Set<String>>> sourceMap,
+                                         LocalDate productionDate,
+                                         String dimensionKey) {
+        if (Objects.isNull(productionDate) || StringUtils.isEmpty(dimensionKey)
+                || CollectionUtils.isEmpty(sourceMap)) {
+            return 0;
+        }
+        Map<String, Set<String>> dateMap = sourceMap.get(productionDate);
+        if (CollectionUtils.isEmpty(dateMap)) {
+            return 0;
+        }
+        Set<String> machineCodeSet = dateMap.get(dimensionKey);
+        return CollectionUtils.isEmpty(machineCodeSet) ? 0 : machineCodeSet.size();
+    }
 
     /**
      * 追加一条校验错误信息（空串或 null 将被忽略）

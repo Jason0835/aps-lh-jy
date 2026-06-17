@@ -256,14 +256,16 @@ public final class DailyMachineCapacitySimulationUtil {
 
     /**
      * 判断是否进入欠产阈值强制窗口判断。
-     * <p>只有本月前日累计欠产超过阈值时才进入；T+1/T+2滚动欠产不能反向触发强制增机台。</p>
+     * <p>本月前日累计欠产超过阈值时进入；结构已收尾但SKU余量较大时也可由调用侧显式强制进入。
+     * T+1/T+2滚动欠产不能反向触发强制增机台。</p>
      *
      * @param request 模拟请求
      * @return true-按窗口后剩余欠产判断；false-按原小欠产规则判断
      */
     private static boolean shouldUseForcedShortageWindowMode(DailyMachineCapacitySimulationRequest request) {
         return isShortageThresholdEnabled(request)
-                && Math.max(0, request.getMonthlyHistoryShortageQty()) > request.getShortageAddMachineThreshold();
+                && (request.isForceShortageWindowMode()
+                || Math.max(0, request.getMonthlyHistoryShortageQty()) > request.getShortageAddMachineThreshold());
     }
 
     private static boolean shouldUseLegacyWindowDemandMode(DailyMachineCapacitySimulationRequest request) {

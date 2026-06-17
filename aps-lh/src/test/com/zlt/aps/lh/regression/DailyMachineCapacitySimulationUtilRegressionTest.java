@@ -14,6 +14,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * dayN 机台产能模拟回归。
@@ -376,6 +377,34 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
                 "本月前日累计欠产未超过阈值时，不应因T+1滚动欠产超过阈值切换强制增机台");
         assertEquals(0, result.getTotalAddedMachineCount());
         assertFalse(result.getDayDecisionList().get(1).isShortageThresholdExceeded());
+    }
+
+    @Test
+    void simulateExpansion_shouldUseForcedWindowModeWhenEndingStructureLargeSurplus() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001592");
+        request.setDailyPlanQuotaMap(quotaMap(day1, day2, day3, 0, 60, 60));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 0, 40, 40, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(20);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(100);
+        request.setMonthlyHistoryShortageQty(120);
+        request.setWindowEndDate(day3);
+        request.setForceShortageWindowMode(true);
+        request.setForceShortageWindowReason("结构已收尾且SKU余量较大");
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals("欠产阈值窗口回落", result.getDayDecisionList().get(0).getDecisionMode());
+        assertTrue(result.getDayDecisionList().get(0).isShortageThresholdExceeded(),
+                "结构收尾大余量触发强制模式时，即使欠产未超过阈值，也应按窗口后剩余欠产判断");
+        assertEquals(2, result.getFinalActiveMachines());
     }
 
     private Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap(LocalDate day1,

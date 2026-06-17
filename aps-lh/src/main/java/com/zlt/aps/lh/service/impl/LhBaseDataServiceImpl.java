@@ -37,11 +37,14 @@ import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.mapper.LhSpecialMaterialBomEntityMapper;
+import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
+import com.zlt.aps.lh.domain.entity.MpMonthPlanStatistics;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.service.ILhBaseDataService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
+import com.zlt.aps.lh.util.MonthPlanStatisticsDayUtil;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.mp.api.domain.entity.MdmCapsuleChuck;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -67,6 +70,8 @@ import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
@@ -108,6 +113,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private MpAdjustResultMapper mpAdjustResultMapper;
+
+    @Resource
+    private MpMonthPlanStatisticsMapper monthPlanStatisticsMapper;
 
     @Resource
     private MdmWorkCalendarMapper workCalendarMapper;
@@ -223,6 +231,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         CompletableFuture<Void> monthPlanFuture = runDataInitTaskAsync("月生产计划",
                 () -> loadMonthPlan(context, factoryCode, year, month),
                 () -> sizeOf(context.getMonthPlanList()));
+        CompletableFuture<Void> monthPlanStatisticsFuture = runDataInitTaskAsync("月计划结构机台统计",
+                () -> loadMonthPlanStatistics(context, factoryCode, year, month, startDate, endDate),
+                () -> sizeOf(context.getStructurePlanMachineCountMap()));
         CompletableFuture<Void> specialMaterialBomFuture = runAfterDataInitTask(monthPlanFuture, "特殊物料清单",
                 () -> loadSpecialMaterialBom(context, factoryCode),
                 () -> sizeOf(context.getSpecialMaterialBomList()));
@@ -253,6 +264,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         //      因此此处只需等待顶层 Future 完成即可（底层依赖链会自动传递完成状态）。
         waitForDataInitTasks(
                 monthPlanFuture,
+                monthPlanStatisticsFuture,
                 specialMaterialBomFuture,
                 embryoStockFuture,
                 runDataInitTaskAsync("周程滚动调整结果",
@@ -460,6 +472,77 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      */
     private int sizeOf(Map<?, ?> map) {
         return CollectionUtils.isEmpty(map) ? 0 : map.size();
+    }
+
+    /**
+     * 加载月计划结构维度计划硫化机台数。
+     * <p>提前生产规则只需要 T～T+2 窗口内 dayN.lhMachines，按 structureName 聚合 SUM 后缓存到上下文。</p>
+     *
+     * @param context 排程上下文
+     * @param factoryCode 工厂编号
+     * @param year 年份
+     * @param month 月份
+     * @param startDate 窗口开始日期
+     * @param endDateExclusive 窗口结束日期，不含当天
+     */
+    private void loadMonthPlanStatistics(LhScheduleContext context,
+                                         String factoryCode,
+                                         int year,
+                                         int month,
+                                         Date startDate,
+                                         Date endDateExclusive) {
+        context.setStructurePlanMachineCountMap(new LinkedHashMap<LocalDate, Map<String, Integer>>(4));
+        if (StringUtils.isEmpty(context.getProductionVersion())) {
+            log.warn("月计划结构机台统计跳过加载，排产版本为空, factoryCode: {}, year: {}, month: {}",
+                    factoryCode, year, month);
+            return;
+        }
+        List<MpMonthPlanStatistics> statisticsList = monthPlanStatisticsMapper.selectList(
+                new LambdaQueryWrapper<MpMonthPlanStatistics>()
+                        .eq(MpMonthPlanStatistics::getFactoryCode, factoryCode)
+                        .eq(MpMonthPlanStatistics::getYear, year)
+                        .eq(MpMonthPlanStatistics::getMonth, month)
+                        .eq(MpMonthPlanStatistics::getProductionVersion, context.getProductionVersion())
+                        .and(wrapper -> wrapper.eq(MpMonthPlanStatistics::getTempFlag, "0")
+                                .or().isNull(MpMonthPlanStatistics::getTempFlag)
+                                .or().eq(MpMonthPlanStatistics::getTempFlag, "")));
+        if (CollectionUtils.isEmpty(statisticsList)) {
+            log.warn("月计划结构机台统计无数据, factoryCode: {}, year: {}, month: {}, productionVersion: {}",
+                    factoryCode, year, month, context.getProductionVersion());
+            return;
+        }
+        LocalDate startLocalDate = toLocalDate(startDate);
+        LocalDate endLocalDate = toLocalDate(endDateExclusive);
+        for (MpMonthPlanStatistics row : statisticsList) {
+            if (Objects.isNull(row) || StringUtils.isEmpty(row.getStructureName())) {
+                continue;
+            }
+            for (LocalDate productionDate = startLocalDate; productionDate.isBefore(endLocalDate);
+                 productionDate = productionDate.plusDays(1)) {
+                if (productionDate.getYear() != year || productionDate.getMonthValue() != month) {
+                    continue;
+                }
+                int lhMachines = MonthPlanStatisticsDayUtil.resolveLhMachines(row, productionDate);
+                context.addStructurePlanMachineCount(productionDate, row.getStructureName(), lhMachines);
+            }
+        }
+        log.info("月计划结构机台统计加载完成, factoryCode: {}, year: {}, month: {}, productionVersion: {}, "
+                        + "rowCount: {}, dateCount: {}",
+                factoryCode, year, month, context.getProductionVersion(), statisticsList.size(),
+                context.getStructurePlanMachineCountMap().size());
+    }
+
+    /**
+     * 转换为本地日期。
+     *
+     * @param date 日期
+     * @return 本地日期
+     */
+    private LocalDate toLocalDate(Date date) {
+        if (Objects.isNull(date)) {
+            return null;
+        }
+        return date.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     /**
