@@ -172,6 +172,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * 从月度计划获取T日SKU数据，按产品结构归集，计算硫化余量
      * <p>
      * 硫化余量 = Max(月度计划总量 - 已完成量 + 有效上月超欠产量, 0)
+     * 其中有效上月超欠产量可正可负：正值=欠产（增加余量），负值=超产（扣减余量）
      * </p>
      *
      * @param context 排程上下文
@@ -188,7 +189,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         List<SkuScheduleDTO> validScheduleSkuList = new ArrayList<>(monthPlanList.size());
 
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
-            // 计算硫化余量：统一使用月计划、已完成量与有效上月超欠产量，不读取月余量表作为兜底。
+            // 计算硫化余量：统一使用月计划、已完成量与有效上月超欠产量（含超产负值），不读取月余量表作为兜底。
             SurplusCalculation surplus = calculateSurplusQty(context, plan);
             SkuScheduleDTO dto = buildSkuScheduleDTO(context, plan, surplus);
 
@@ -518,6 +519,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * <p>
      * 硫化余量 = Max(月度计划总量 - 已完成量 + 有效上月超欠产量, 0)。
      * 不再将逐日超产量加回剩余需求，避免月累计完成量已超月计划时余量被虚增。
+     * 有效上月超欠产量可正可负：正值表示欠产（增加余量），负值表示超产（扣减余量）。
      * </p>
      *
      * @param context 排程上下文
@@ -532,7 +534,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int remainingDemandQty = Math.max(0, totalPlanQty - actualFinishedQty + lastMonthOverdueQty);
         // 保留逐日超产统计用于诊断日志，不参与余量计算
         int ignoredOverProductionQty = calculateIgnoredOverProductionQty(context, plan);
-        if (lastMonthOverdueQty > 0 || scheDayFinishQty > 0) {
+        if (lastMonthOverdueQty != 0 || scheDayFinishQty > 0) {
             log.info("硫化余量计算完成, materialCode: {}, monthPlanQty: {}, monthFinishedAndScheDayQty: {}, "
                             + "scheDayFinishQty: {}, lastMonthValidFlag: {}, lastMonthOverdueQty: {}, surplusQty: {}",
                     plan.getMaterialCode(), totalPlanQty, actualFinishedQty, scheDayFinishQty,
@@ -544,16 +546,17 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
     /**
      * 解析有效上月超欠产数量。
+     * <p>正值表示欠产（需补排），负值表示超产（需扣减余量），仅在有效标识为1时生效。</p>
      *
      * @param plan 月生产计划记录
-     * @return 有效上月超欠产数量
+     * @return 有效上月超欠产数量（正=欠产，负=超产）
      */
     private int resolveEffectiveLastMonthOverdueQty(FactoryMonthPlanProductionFinalResult plan) {
         if (Objects.isNull(plan) || !StringUtils.equals(LAST_MONTH_OVERDUE_VALID_FLAG,
                 StringUtils.trimToEmpty(plan.getLastMonthValidFlag()))) {
             return 0;
         }
-        return Math.max(0, safeInt(plan.getLastMonthOverdueQty()));
+        return safeInt(plan.getLastMonthOverdueQty());
     }
 
     /**
@@ -1940,7 +1943,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             this.surplusQty = surplusQty;
             this.actualFinishedQty = Math.max(0, actualFinishedQty);
             this.ignoredOverProductionQty = Math.max(0, ignoredOverProductionQty);
-            this.lastMonthOverdueQty = Math.max(0, lastMonthOverdueQty);
+            this.lastMonthOverdueQty = lastMonthOverdueQty;
         }
 
         public int getSurplusQty() {
@@ -1955,6 +1958,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             return ignoredOverProductionQty;
         }
 
+        /**
+         * 上月超欠产数量。
+         * 正=欠产（增加余量），负=超产（扣减余量），0=无有效超欠产或标志无效。
+         */
         public int getLastMonthOverdueQty() {
             return lastMonthOverdueQty;
         }

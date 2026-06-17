@@ -5,7 +5,7 @@
 已完成量 = 月累计完成量（截至 T-1 日） + T 日排程晚班完成量。
 
 上月超欠产量取值规则：
-- 当月计划 lastMonthValidFlag = 1 时，取 lastMonthOverdueQty；
+- 当月计划 lastMonthValidFlag = 1 时，取 lastMonthOverdueQty（正值=欠产，负值=超产）；
 - 当 lastMonthValidFlag = 0、为空或无效时，按 0 处理。
 
 要求：
