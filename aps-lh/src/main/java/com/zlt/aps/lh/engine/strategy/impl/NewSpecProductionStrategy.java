@@ -38,6 +38,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationResu
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationUtil;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionChecker;
+import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
@@ -632,8 +633,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         runtimeShiftCapacity,
                         sku.getLhTimeSeconds(),
                         machineMouldQty);
+                EarlyProductionDecision earlyProductionDecision = resolveEarlyProductionDecision(
+                        context, sku, firstProductionStartTime, isEnding);
                 firstProductionStartTime = alignFirstProductionStartTimeByDailyPlan(
-                        context, sku, firstProductionStartTime, shifts, isEnding);
+                        context, sku, firstProductionStartTime, shifts, isEnding, earlyProductionDecision);
+                // 提前生产准入只放宽当前日开产，仍需服从逐日模拟确定的实际增机生效日期。
                 firstProductionStartTime = alignAddedMachineProductionStartTime(
                         sku, firstProductionStartTime, shifts, totalScheduledQty,
                         currentAddMachineProductionDate);
@@ -784,6 +788,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
                     continue;
                 }
+                LocalDate resultBusinessDate = firstProductionStartTime.toInstant()
+                        .atZone(ZoneId.systemDefault()).toLocalDate();
+                // 仅对通过既有资源约束且最终有有效计划量的新增结果追加提前生产审计备注。
+                appendEarlyProductionRemark(context, result, earlyProductionDecision, resultBusinessDate);
                 context.getScheduleResultList().add(result);
                 context.getScheduleResultSourceSkuMap().put(result, sku);
                 updateMachineState(context, candidateMachine, sku, result);
@@ -2895,13 +2903,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @param firstProductionStartTime 当前首个可排时间
      * @param shifts 排程窗口班次
      * @param isEnding 是否收尾
+     * @param earlyProductionDecision 提前生产判定结果
      * @return 调整后的首个可排时间
      */
     private Date alignFirstProductionStartTimeByDailyPlan(LhScheduleContext context,
                                                           SkuScheduleDTO sku,
                                                           Date firstProductionStartTime,
                                                           List<LhShiftConfigVO> shifts,
-                                                          boolean isEnding) {
+                                                          boolean isEnding,
+                                                          EarlyProductionDecision earlyProductionDecision) {
         if (Objects.isNull(sku) || Objects.isNull(firstProductionStartTime)
                 || isEnding || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return firstProductionStartTime;
@@ -2920,10 +2930,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return firstProductionStartTime;
         }
         if (!sku.isContinuousCompensationSku()) {
-            boolean canEnterEarlyProduction = EarlyProductionChecker.canEnterEarlyProductionCheck(
-                    context, sku, productionDate, resolveScheduleTargetLocalDate(context),
-                    resolveNewSpecShortageAddMachineThreshold(context));
-            if (canEnterEarlyProduction) {
+            if (Objects.nonNull(earlyProductionDecision) && earlyProductionDecision.isAllowed()) {
                 log.info("新增SKU提前生产准入通过，保留当前业务日开产, materialCode: {}, "
                                 + "fromProductionDate: {}, futurePlanDate: {}, firstProductionStartTime: {}",
                         sku.getMaterialCode(), productionDate, nextPlanDate,
@@ -3012,6 +3019,64 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 LhScheduleTimeUtil.formatDateTime(switchReadyTime),
                 LhScheduleTimeUtil.formatDateTime(addMachineSwitchReadyTime));
         return addMachineSwitchReadyTime;
+    }
+
+    /**
+     * 生成当前候选机台的提前生产判定结果。
+     *
+     * @param context 排程上下文
+     * @param sku 当前 SKU
+     * @param firstProductionStartTime 候选机台首个可排时间
+     * @param isEnding 是否按 SKU 收尾
+     * @return 当前候选机台的提前生产判定结果
+     */
+    private EarlyProductionDecision resolveEarlyProductionDecision(LhScheduleContext context,
+                                                                    SkuScheduleDTO sku,
+                                                                    Date firstProductionStartTime,
+                                                                    boolean isEnding) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(firstProductionStartTime)
+                || isEnding || sku.isContinuousCompensationSku()
+                || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return EarlyProductionDecision.notEarlyProduction(true, "非提前生产判定范围");
+        }
+        LocalDate productionDate = firstProductionStartTime.toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        return EarlyProductionChecker.checkEarlyProduction(context, sku, productionDate,
+                resolveScheduleWindowStartLocalDate(context), resolveScheduleTargetLocalDate(context),
+                resolveNewSpecShortageAddMachineThreshold(context));
+    }
+
+    /**
+     * 将提前生产结构机台数追加到硫化排程结果备注。
+     *
+     * @param context 排程上下文
+     * @param result 硫化排程结果
+     * @param decision 提前生产判定结果
+     * @param businessDate 实际开产业务日期
+     */
+    private void appendEarlyProductionRemark(LhScheduleContext context,
+                                              LhScheduleResult result,
+                                              EarlyProductionDecision decision,
+                                              LocalDate businessDate) {
+        if (Objects.isNull(result) || Objects.isNull(decision)) {
+            return;
+        }
+        String remarkFragment = decision.buildRemark();
+        if (StringUtils.isEmpty(remarkFragment) || StringUtils.contains(result.getRemark(), remarkFragment)) {
+            return;
+        }
+        String oldRemark = result.getRemark();
+        if (StringUtils.isEmpty(oldRemark)) {
+            result.setRemark(remarkFragment);
+        } else {
+            result.setRemark(new StringBuilder(oldRemark.length() + remarkFragment.length() + 1)
+                    .append(oldRemark).append('；').append(remarkFragment).toString());
+        }
+        log.info("提前生产结果备注追加, factoryCode: {}, businessDate: {}, materialCode: {}, "
+                        + "structureName: {}, machineCode: {}, sceneType: {}, remark: {}",
+                Objects.isNull(context) ? null : context.getFactoryCode(), businessDate,
+                result.getMaterialCode(), result.getStructureName(), result.getLhMachineCode(),
+                decision.getSceneType(), result.getRemark());
     }
 
     private boolean shouldDelayFirstProductionForNoPlanDate(SkuScheduleDTO sku,
@@ -8097,7 +8162,30 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 解析排程目标业务日期。
+     * 解析排程窗口 T 日。
+     *
+     * @param context 排程上下文
+     * @return 排程窗口 T 日
+     */
+    private LocalDate resolveScheduleWindowStartLocalDate(LhScheduleContext context) {
+        if (Objects.isNull(context)) {
+            return null;
+        }
+        if (!CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+                if (Objects.nonNull(shift) && Objects.nonNull(shift.getWorkDate())) {
+                    return shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+                }
+            }
+        }
+        if (Objects.isNull(context.getScheduleDate())) {
+            return null;
+        }
+        return context.getScheduleDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+    }
+
+    /**
+     * 解析排程窗口结束业务日期。
      *
      * @param context 排程上下文
      * @return 排程目标业务日期

@@ -27,6 +27,7 @@ import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.LocalSearchMachineAllocatorStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -3550,6 +3551,47 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldAppendEarlyProductionStructurePlanRemark() throws Exception {
+        LhScheduleContext context = scheduleFuturePlanSkuWithStructurePlans(1, 2, 3);
+
+        assertEquals(1, context.getScheduleResultList().size(), "普通提前生产应生成一条新增排产结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals("结构计划硫化机台数：1,2,3", result.getRemark());
+        assertTrue(resolveShiftQty(result, 1) > 0 || resolveShiftQty(result, 2) > 0,
+                "结构机台数未达计划时，应允许后续日SKU提前到T日生产");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldAppendStructureSwitchRemark() throws Exception {
+        LhScheduleContext context = scheduleFuturePlanSkuWithStructurePlans(0, 2, 3);
+
+        assertEquals(1, context.getScheduleResultList().size(), "结构切换提前生产应生成一条新增排产结果");
+        assertEquals("[结构切换] 结构计划硫化机台数：0,2,3",
+                context.getScheduleResultList().get(0).getRemark());
+    }
+
+    @Test
+    void appendEarlyProductionRemark_shouldPreserveExistingRemarkAndAvoidDuplicate() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302002326");
+        result.setStructureName("L1");
+        result.setLhMachineCode("K2024");
+        result.setRemark("原备注");
+        EarlyProductionDecision decision = EarlyProductionDecision.earlyProduction(true,
+                EarlyProductionDecision.SCENE_STRUCTURE_SWITCH, LocalDate.of(2026, 4, 2),
+                Arrays.asList(0, 2, 3), "结构已排机台数未达到计划机台数");
+
+        ReflectionTestUtils.invokeMethod(strategy, "appendEarlyProductionRemark",
+                context, result, decision, LocalDate.of(2026, 4, 1));
+        ReflectionTestUtils.invokeMethod(strategy, "appendEarlyProductionRemark",
+                context, result, decision, LocalDate.of(2026, 4, 1));
+
+        assertEquals("原备注；[结构切换] 结构计划硫化机台数：0,2,3", result.getRemark());
+    }
+
+    @Test
     void scheduleNewSpecs_shouldFillSmallBatchSingleControlMachineToWindowEnd() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
@@ -5066,6 +5108,50 @@ class NewSpecProductionStrategyRegressionTest {
         context.setMachineScheduleMap(new java.util.LinkedHashMap<String, MachineScheduleDTO>());
         context.setMachineAssignmentMap(new java.util.LinkedHashMap<String, List<com.zlt.aps.lh.api.domain.entity.LhScheduleResult>>());
         context.setMaterialInfoMap(new java.util.HashMap<String, MdmMaterialInfo>());
+        return context;
+    }
+
+    private LhScheduleContext scheduleFuturePlanSkuWithStructurePlans(int firstDayMachineCount,
+                                                                      int secondDayMachineCount,
+                                                                      int thirdDayMachineCount) throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 4, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 4, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002326");
+        sku.setStructureName("L1");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(1376);
+        sku.setDailyPlanQty(80);
+        sku.setTargetScheduleQty(128);
+        sku.setWindowPlanQty(80);
+        sku.setWindowRemainingPlanQty(80);
+        sku.setSurplusQty(1376);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 32, 48));
+        context.getNewSpecSkuList().add(sku);
+
+        LocalDate firstDay = toLocalDate(context.getScheduleWindowShifts().get(0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(3));
+        LocalDate thirdDay = toLocalDate(context.getScheduleWindowShifts().get(6));
+        context.addStructurePlanMachineCount(firstDay, sku.getStructureName(), firstDayMachineCount);
+        context.addStructurePlanMachineCount(secondDay, sku.getStructureName(), secondDayMachineCount);
+        context.addStructurePlanMachineCount(thirdDay, sku.getStructureName(), thirdDayMachineCount);
+
+        MachineScheduleDTO machine = buildMachine("K2024", dateTime(2026, 4, 1, 6, 0));
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302002326");
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), skuCapacityCalculate());
         return context;
     }
 
