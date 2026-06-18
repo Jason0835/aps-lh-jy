@@ -509,6 +509,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .eq(MpMonthPlanStatistics::getYear, year)
                         .eq(MpMonthPlanStatistics::getMonth, month)
                         .eq(MpMonthPlanStatistics::getProductionVersion, context.getProductionVersion())
+                        .eq(MpMonthPlanStatistics::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
                         .and(wrapper -> wrapper.eq(MpMonthPlanStatistics::getTempFlag, "0")
                                 .or().isNull(MpMonthPlanStatistics::getTempFlag)
                                 .or().eq(MpMonthPlanStatistics::getTempFlag, "")));
