@@ -2,7 +2,7 @@ package com.zlt.aps.lh.util;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.zlt.aps.lh.domain.entity.MpMonthPlanStatistics;
+import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;

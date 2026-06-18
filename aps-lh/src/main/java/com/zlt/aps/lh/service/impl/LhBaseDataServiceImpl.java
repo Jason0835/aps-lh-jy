@@ -38,7 +38,7 @@ import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.mapper.LhSpecialMaterialBomEntityMapper;
 import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
-import com.zlt.aps.lh.domain.entity.MpMonthPlanStatistics;
+import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.service.ILhBaseDataService;

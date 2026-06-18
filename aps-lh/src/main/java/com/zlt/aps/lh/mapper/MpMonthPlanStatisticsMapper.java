@@ -1,7 +1,7 @@
 package com.zlt.aps.lh.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.zlt.aps.lh.domain.entity.MpMonthPlanStatistics;
+import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import org.apache.ibatis.annotations.Mapper;
 
 /**

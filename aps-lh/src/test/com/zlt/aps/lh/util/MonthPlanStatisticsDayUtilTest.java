@@ -1,6 +1,6 @@
 package com.zlt.aps.lh.util;
 
-import com.zlt.aps.lh.domain.entity.MpMonthPlanStatistics;
+import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
