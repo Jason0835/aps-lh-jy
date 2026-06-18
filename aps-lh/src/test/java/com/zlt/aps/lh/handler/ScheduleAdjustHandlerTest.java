@@ -175,6 +175,64 @@ public class ScheduleAdjustHandlerTest {
     }
 
     /**
+     * 用例说明：上月超欠产标志有效且超欠产为负数（超产）时，硫化余量需要减去超产量。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldSubtractNegativeLastMonthOverdueQtyWhenCalculatingSurplus() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 18)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 18)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        plan.setLastMonthValidFlag("1");
+        plan.setLastMonthOverdueQty(-10);
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575", 50);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575", 20);
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(70, sku.getFinishedQty());
+        Assertions.assertEquals(20, sku.getScheduleDayFinishQty());
+        // 余量 = max(0, 100 - 70 + (-10)) = 20
+        Assertions.assertEquals(20, sku.getSurplusQty());
+        Assertions.assertEquals(20, sku.getPendingQty());
+    }
+
+    /**
+     * 用例说明：上月超欠产标志有效且超产较大时，硫化余量扣减后不低于0。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldClampSurplusToZeroWhenNegativeLastMonthOverdueQtyExceedsRemaining() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 18)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 18)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        plan.setLastMonthValidFlag("1");
+        plan.setLastMonthOverdueQty(-15);
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575", 70);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575", 20);
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(90, sku.getFinishedQty());
+        Assertions.assertEquals(20, sku.getScheduleDayFinishQty());
+        // 余量 = max(0, 100 - 90 + (-15)) = max(0, -5) = 0
+        Assertions.assertEquals(0, sku.getSurplusQty());
+        Assertions.assertEquals(0, sku.getPendingQty());
+    }
+
+    /**
      * 用例说明：上月超欠产标志无效时，上月超欠产数量不参与硫化余量计算。
      *
      * @throws Exception 反射调用异常
@@ -198,6 +256,35 @@ public class ScheduleAdjustHandlerTest {
         SkuScheduleDTO sku = getFirstGatheredSku(context);
         Assertions.assertEquals(90, sku.getFinishedQty());
         Assertions.assertEquals(20, sku.getScheduleDayFinishQty());
+        Assertions.assertEquals(10, sku.getSurplusQty());
+        Assertions.assertEquals(10, sku.getPendingQty());
+    }
+
+    /**
+     * 用例说明：上月超欠产标志无效且超欠产为负数（超产）时，超产量同样不参与硫化余量计算。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldIgnoreNegativeLastMonthOverdueQtyWhenFlagInvalid() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 18)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 18)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        plan.setLastMonthValidFlag("0");
+        plan.setLastMonthOverdueQty(-10);
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575", 70);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575", 20);
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(90, sku.getFinishedQty());
+        Assertions.assertEquals(20, sku.getScheduleDayFinishQty());
+        // 标志无效时超欠产量不参与计算，余量 = max(0, 100 - 90 + 0) = 10
         Assertions.assertEquals(10, sku.getSurplusQty());
         Assertions.assertEquals(10, sku.getPendingQty());
     }
