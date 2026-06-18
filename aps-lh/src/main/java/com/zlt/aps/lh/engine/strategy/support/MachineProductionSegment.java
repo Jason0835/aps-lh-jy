@@ -3,7 +3,10 @@ package com.zlt.aps.lh.engine.strategy.support;
 import lombok.Data;
 
 import java.io.Serializable;
+import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -42,4 +45,6 @@ public class MachineProductionSegment implements Serializable {
     private boolean stopAfterCurrentForSmallShortage;
     /** 因窗口后第一天日计划推导出的保留机台数 */
     private int futureDayDemandMachineCount;
+    /** dayN逐日判断中各新增机台对应的生效业务日期，按新增顺序排列 */
+    private List<LocalDate> addMachineProductionDateList = new ArrayList<LocalDate>(4);
 }

@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.util;
 
+import cn.hutool.core.bean.BeanUtil;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
@@ -17,6 +18,15 @@ public final class MonthPlanStatisticsDayUtil {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private static final String LH_MACHINES_KEY = "lhMachines";
+
+    /** dayN 字段名前缀，对应实体 day1~day31 */
+    private static final String DAY_FIELD_PREFIX = "day";
+
+    /** 月内日期最小序号 */
+    private static final int MIN_DAY_OF_MONTH = 1;
+
+    /** 月内日期最大序号 */
+    private static final int MAX_DAY_OF_MONTH = 31;
 
     private MonthPlanStatisticsDayUtil() {
     }
@@ -71,77 +81,19 @@ public final class MonthPlanStatisticsDayUtil {
 
     /**
      * 读取指定 dayN 字段。
+     * 通过 Hutool BeanUtil 反射读取 day1~day31 属性，避免 31 分支 switch。
      *
      * @param row 月计划结构统计行
      * @param dayOfMonth 月内日期序号
      * @return dayN JSON字符串
      */
     private static String resolveDayJson(MpMonthPlanStatistics row, int dayOfMonth) {
-        switch (dayOfMonth) {
-            case 1:
-                return row.getDay1();
-            case 2:
-                return row.getDay2();
-            case 3:
-                return row.getDay3();
-            case 4:
-                return row.getDay4();
-            case 5:
-                return row.getDay5();
-            case 6:
-                return row.getDay6();
-            case 7:
-                return row.getDay7();
-            case 8:
-                return row.getDay8();
-            case 9:
-                return row.getDay9();
-            case 10:
-                return row.getDay10();
-            case 11:
-                return row.getDay11();
-            case 12:
-                return row.getDay12();
-            case 13:
-                return row.getDay13();
-            case 14:
-                return row.getDay14();
-            case 15:
-                return row.getDay15();
-            case 16:
-                return row.getDay16();
-            case 17:
-                return row.getDay17();
-            case 18:
-                return row.getDay18();
-            case 19:
-                return row.getDay19();
-            case 20:
-                return row.getDay20();
-            case 21:
-                return row.getDay21();
-            case 22:
-                return row.getDay22();
-            case 23:
-                return row.getDay23();
-            case 24:
-                return row.getDay24();
-            case 25:
-                return row.getDay25();
-            case 26:
-                return row.getDay26();
-            case 27:
-                return row.getDay27();
-            case 28:
-                return row.getDay28();
-            case 29:
-                return row.getDay29();
-            case 30:
-                return row.getDay30();
-            case 31:
-                return row.getDay31();
-            default:
-                return null;
+        // 仅处理合法的月内日期序号，越界返回 null 与原语义一致
+        if (dayOfMonth < MIN_DAY_OF_MONTH || dayOfMonth > MAX_DAY_OF_MONTH) {
+            return null;
         }
+        // 拼接属性名 day1~day31，利用 BeanUtil 调用对应 getter
+        Object dayValue = BeanUtil.getProperty(row, DAY_FIELD_PREFIX + dayOfMonth);
+        return Objects.isNull(dayValue) ? null : dayValue.toString();
     }
 }

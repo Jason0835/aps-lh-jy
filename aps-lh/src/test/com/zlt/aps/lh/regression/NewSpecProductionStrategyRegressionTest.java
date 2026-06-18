@@ -32,6 +32,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
@@ -3443,6 +3444,68 @@ class NewSpecProductionStrategyRegressionTest {
                 "1台*16班产*8班=128 已覆盖 8+60+60 时，不应因真实换模后只剩112继续加机台");
         assertEquals("K1313", context.getScheduleResultList().get(0).getLhMachineCode());
         assertEquals(112, context.getScheduleResultList().get(0).getDailyPlanQty().intValue());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldApplyDailyStandardQtyAndStartAddedMachineOnExpansionDate() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001074");
+        sku.setMaterialDesc("日标准产量与增机日期回归");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(928);
+        sku.setTargetScheduleQty(146);
+        sku.setWindowPlanQty(146);
+        sku.setWindowRemainingPlanQty(146);
+        sku.setSurplusQty(928);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setScheduleDayFinishQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 8, 92, 46));
+        context.getNewSpecSkuList().add(sku);
+
+        MdmSkuLhCapacity skuCapacity = new MdmSkuLhCapacity();
+        skuCapacity.setMaterialCode(sku.getMaterialCode());
+        skuCapacity.setClassCapacity(16);
+        skuCapacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), skuCapacity);
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001074-1");
+        MdmSkuMouldRel secondMouldRel = new MdmSkuMouldRel();
+        secondMouldRel.setMaterialCode(sku.getMaterialCode());
+        secondMouldRel.setMouldCode("MOULD-3302001074-2");
+        context.getSkuMouldRelMap().get(sku.getMaterialCode()).add(secondMouldRel);
+        MdmModelInfo secondMouldInfo = new MdmModelInfo();
+        secondMouldInfo.setMouldCode("MOULD-3302001074-2");
+        secondMouldInfo.setMouldStatus(1);
+        context.getModelInfoMap().put(secondMouldInfo.getMouldCode(), secondMouldInfo);
+
+        MachineScheduleDTO k1311 = buildMachine("K1311", dateTime(2026, 6, 1, 6, 0));
+        MachineScheduleDTO k1405 = buildMachine("K1405", dateTime(2026, 6, 1, 6, 0));
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k1311, k1405),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(2, context.getScheduleResultList().size(), "T+1日计划92需要两台机台");
+        LhScheduleResult primaryResult = findResult(context.getScheduleResultList(), "K1311");
+        LhScheduleResult addedResult = findResult(context.getScheduleResultList(), "K1405");
+        assertEquals(14, resolveShiftQty(primaryResult, 5), "T+1中班应承担日标准产量余量14");
+        assertEquals(14, resolveShiftQty(primaryResult, 8), "T+2中班应承担日标准产量余量14");
+        assertEquals(0, resolveShiftQty(addedResult, 1), "第二台应在T+1增机，T日早班不得生产");
+        assertEquals(4, resolveShiftQty(addedResult, 2), "换模完成落在C2结束临界点，首检4应归属C2");
+        assertEquals(16, resolveShiftQty(addedResult, 3), "第二台正常生产仍应从T+1的C3开始");
+        assertEquals(14, resolveShiftQty(addedResult, 5), "第二台T+1中班也应承担日标准产量余量14");
     }
 
     @Test
