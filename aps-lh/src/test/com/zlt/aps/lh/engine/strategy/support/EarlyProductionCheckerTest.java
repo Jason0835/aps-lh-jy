@@ -117,6 +117,41 @@ class EarlyProductionCheckerTest {
                 context, shortageExceededSku, day1, day3, 200), "欠产超过阈值时应直接走原强制加机台逻辑");
     }
 
+    @Test
+    void isEndingStructureLargeSurplus_shouldRejectWhenFuturePlanMachineExists() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 2);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 90, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        boolean endingLargeSurplus = EarlyProductionChecker.isEndingStructureLargeSurplus(
+                context, sku, day1, day2);
+
+        assertFalse(endingLargeSurplus, "后续首个计划日仍有结构计划机台时，不应误判为结构已收尾");
+    }
+
+    @Test
+    void isEndingStructureLargeSurplus_shouldAvoidIntegerOverflow() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 0);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1102");
+        SkuScheduleDTO sku = sku("3302001001", "L1", Integer.MAX_VALUE, Integer.MAX_VALUE,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        boolean endingLargeSurplus = EarlyProductionChecker.isEndingStructureLargeSurplus(
+                context, sku, day1, day2);
+
+        assertFalse(endingLargeSurplus, "已排机台日产乘积超过int范围时，不应因溢出误判为大余量");
+    }
+
     private LhScheduleContext contextWithStructurePlan(LocalDate date, String structureName, int machineCount) {
         LhScheduleContext context = new LhScheduleContext();
         context.addStructurePlanMachineCount(date, structureName, machineCount);

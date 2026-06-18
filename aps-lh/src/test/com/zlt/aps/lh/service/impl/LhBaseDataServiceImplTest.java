@@ -1,5 +1,8 @@
 package com.zlt.aps.lh.service.impl;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.zlt.aps.cx.api.domain.entity.CxStock;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
@@ -35,19 +38,23 @@ import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
+import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
+import org.slf4j.LoggerFactory;
 
 import java.math.BigDecimal;
 import java.lang.reflect.Field;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -286,12 +293,131 @@ public class LhBaseDataServiceImplTest {
                 "模具台账缓存只能保留本次SKU关联模具号");
     }
 
+    /**
+     * 用例说明：月计划结构机台统计整批缺失时按空缓存继续排程。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldContinueWhenMonthPlanStatisticsMissing() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "monthPlanStatisticsMapper", mockMapper(MpMonthPlanStatisticsMapper.class));
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertFalse(context.isInterrupted(), "月计划结构机台统计缺失时不应中断排程");
+        Assertions.assertTrue(context.getStructurePlanMachineCountMap().isEmpty(),
+                "月计划结构机台统计缺失时应保留空缓存");
+    }
+
+    /**
+     * 用例说明：月计划结构机台统计记录全部无有效结构时按空缓存继续排程。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldContinueWhenMonthPlanStatisticsHaveNoValidStructure() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        MpMonthPlanStatistics invalidStatistics = new MpMonthPlanStatistics();
+        MpMonthPlanStatisticsMapper mapper = mockMapper(MpMonthPlanStatisticsMapper.class);
+        Mockito.when(mapper.selectList(ArgumentMatchers.any()))
+                .thenReturn(Collections.singletonList(invalidStatistics));
+        injectField(service, "monthPlanStatisticsMapper", mapper);
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertFalse(context.isInterrupted(), "月计划结构机台统计无有效结构时不应中断排程");
+        Assertions.assertTrue(context.getStructurePlanMachineCountMap().isEmpty(),
+                "无有效结构记录时不应写入结构机台缓存");
+    }
+
+    /**
+     * 用例说明：月计划结构机台统计的结构名全为空格时跳过该记录并继续排程。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldContinueWhenMonthPlanStatisticsStructureIsBlank() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        MpMonthPlanStatistics invalidStatistics = new MpMonthPlanStatistics();
+        invalidStatistics.setStructureName("   ");
+        MpMonthPlanStatisticsMapper mapper = mockMapper(MpMonthPlanStatisticsMapper.class);
+        Mockito.when(mapper.selectList(ArgumentMatchers.any()))
+                .thenReturn(Collections.singletonList(invalidStatistics));
+        injectField(service, "monthPlanStatisticsMapper", mapper);
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertFalse(context.isInterrupted(), "全空格结构名不应中断排程");
+        Assertions.assertTrue(context.getStructurePlanMachineCountMap().isEmpty(),
+                "全空格结构名不能作为有效结构写入缓存");
+    }
+
+    /**
+     * 用例说明：月计划结构机台统计缺失时记录告警并继续输出加载完成日志。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldLogCompletedWhenMonthPlanStatisticsMissing() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "monthPlanStatisticsMapper", mockMapper(MpMonthPlanStatisticsMapper.class));
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        ListAppender<ILoggingEvent> appender = attachAppender();
+        try {
+            service.loadAllBaseData(buildContext());
+
+            List<String> messageList = new ArrayList<String>(appender.list.size());
+            for (ILoggingEvent event : appender.list) {
+                messageList.add(event.getFormattedMessage());
+            }
+            Assertions.assertTrue(messageList.stream().anyMatch(message -> message.contains("月计划结构机台统计无数据")),
+                    "统计缺失时应保留可对账告警");
+            Assertions.assertTrue(messageList.stream().anyMatch(message -> message.contains("基础数据加载完成")),
+                    "统计缺失时应继续完成基础数据加载");
+        } finally {
+            detachAppender(appender);
+        }
+    }
+
+    /**
+     * 用例说明：月计划结构机台统计 dayN 非法JSON时按0处理并继续排程。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldContinueWhenMonthPlanStatisticsDayJsonInvalid() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        MpMonthPlanStatistics statistics = new MpMonthPlanStatistics();
+        statistics.setStructureName("STRUCT-001");
+        statistics.setDay1("invalid-json");
+        MpMonthPlanStatisticsMapper mapper = mockMapper(MpMonthPlanStatisticsMapper.class);
+        Mockito.when(mapper.selectList(ArgumentMatchers.any()))
+                .thenReturn(Collections.singletonList(statistics));
+        injectField(service, "monthPlanStatisticsMapper", mapper);
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertFalse(context.isInterrupted(), "dayN非法JSON不应中断排程");
+        Assertions.assertEquals(0,
+                context.getStructurePlanMachineCount(LocalDate.of(2026, 1, 1), "STRUCT-001"),
+                "dayN非法JSON时当前结构计划机台数应按0处理");
+    }
+
     private LhBaseDataServiceImpl buildServiceWithDefaultMocks() throws Exception {
         LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
         injectField(service, "monthPlanMapper", mockMapper(FactoryMonthPlanProductionFinalResultMapper.class));
         injectField(service, "mpFactoryProductionVersionMapper", buildProductionVersionMapper());
         injectField(service, "mpAdjustResultMapper", mockMapper(MpAdjustResultMapper.class));
-        injectField(service, "monthPlanStatisticsMapper", mockMapper(MpMonthPlanStatisticsMapper.class));
+        injectField(service, "monthPlanStatisticsMapper", buildMonthPlanStatisticsMapper());
         injectField(service, "workCalendarMapper", mockMapper(MdmWorkCalendarMapper.class));
         injectField(service, "skuLhCapacityMapper", mockMapper(MdmSkuLhCapacityMapper.class));
         injectField(service, "devicePlanShutMapper", mockMapper(MdmDevicePlanShutMapper.class));
@@ -321,6 +447,14 @@ public class LhBaseDataServiceImplTest {
         version.setProductionVersion("PV-001");
         MpFactoryProductionVersionMapper mapper = mockMapper(MpFactoryProductionVersionMapper.class);
         Mockito.when(mapper.selectList(ArgumentMatchers.any())).thenReturn(Collections.singletonList(version));
+        return mapper;
+    }
+
+    private MpMonthPlanStatisticsMapper buildMonthPlanStatisticsMapper() {
+        MpMonthPlanStatistics statistics = new MpMonthPlanStatistics();
+        statistics.setStructureName("STRUCT-001");
+        MpMonthPlanStatisticsMapper mapper = mockMapper(MpMonthPlanStatisticsMapper.class);
+        Mockito.when(mapper.selectList(ArgumentMatchers.any())).thenReturn(Collections.singletonList(statistics));
         return mapper;
     }
 
@@ -356,6 +490,20 @@ public class LhBaseDataServiceImplTest {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);
         field.set(target, value);
+    }
+
+    private ListAppender<ILoggingEvent> attachAppender() {
+        Logger logger = (Logger) LoggerFactory.getLogger(LhBaseDataServiceImpl.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        return appender;
+    }
+
+    private void detachAppender(ListAppender<ILoggingEvent> appender) {
+        Logger logger = (Logger) LoggerFactory.getLogger(LhBaseDataServiceImpl.class);
+        logger.detachAppender(appender);
+        appender.stop();
     }
 
     private <T extends BaseMapper<?>> T mockMapper(Class<T> mapperClass) {

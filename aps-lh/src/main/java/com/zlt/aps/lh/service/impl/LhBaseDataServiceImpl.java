@@ -328,6 +328,12 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         () -> sizeOf(context.getPreviousCureFormulaResultList()))
         );
 
+        if (context.isInterrupted()) {
+            log.warn("基础数据加载中断, 工厂: {}, 目标日: {}, T日: {}, 原因: {}",
+                    factoryCode, LhScheduleTimeUtil.formatDate(targetDate),
+                    LhScheduleTimeUtil.formatDate(scheduleDate), context.getInterruptReason());
+            return;
+        }
         log.info("基础数据加载完成, 工厂: {}, 目标日: {}, T日: {}",
                 factoryCode, LhScheduleTimeUtil.formatDate(targetDate), LhScheduleTimeUtil.formatDate(scheduleDate));
         log.info("[DataInit] 全部初始化完成：totalCost={}ms", System.currentTimeMillis() - totalStartTime);
@@ -507,14 +513,15 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                                 .or().isNull(MpMonthPlanStatistics::getTempFlag)
                                 .or().eq(MpMonthPlanStatistics::getTempFlag, "")));
         if (CollectionUtils.isEmpty(statisticsList)) {
-            log.warn("月计划结构机台统计无数据, factoryCode: {}, year: {}, month: {}, productionVersion: {}",
+            log.warn("月计划结构机台统计无数据，按空缓存继续排程, factoryCode: {}, year: {}, month: {}, "
+                            + "productionVersion: {}",
                     factoryCode, year, month, context.getProductionVersion());
             return;
         }
         LocalDate startLocalDate = toLocalDate(startDate);
         LocalDate endLocalDate = toLocalDate(endDateExclusive);
         for (MpMonthPlanStatistics row : statisticsList) {
-            if (Objects.isNull(row) || StringUtils.isEmpty(row.getStructureName())) {
+            if (Objects.isNull(row) || StringUtils.isBlank(row.getStructureName())) {
                 continue;
             }
             for (LocalDate productionDate = startLocalDate; productionDate.isBefore(endLocalDate);
@@ -522,9 +529,25 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 if (productionDate.getYear() != year || productionDate.getMonthValue() != month) {
                     continue;
                 }
-                int lhMachines = MonthPlanStatisticsDayUtil.resolveLhMachines(row, productionDate);
+                int lhMachines;
+                try {
+                    lhMachines = MonthPlanStatisticsDayUtil.resolveLhMachines(row, productionDate);
+                } catch (IllegalArgumentException e) {
+                    // 月计划结构统计只用于提前生产机台数判断，非法JSON按0处理，不阻断排程主流程。
+                    lhMachines = 0;
+                    log.warn("月计划结构机台统计dayN解析失败，按0继续排程, factoryCode: {}, "
+                                    + "productionVersion: {}, structureName: {}, productionDate: {}, reason: {}",
+                            factoryCode, context.getProductionVersion(), row.getStructureName(), productionDate,
+                            e.getMessage());
+                }
                 context.addStructurePlanMachineCount(productionDate, row.getStructureName(), lhMachines);
             }
+        }
+        if (CollectionUtils.isEmpty(context.getStructurePlanMachineCountMap())) {
+            log.warn("月计划结构机台统计无有效结构数据，按空缓存继续排程, factoryCode: {}, year: {}, month: {}, "
+                            + "productionVersion: {}, rowCount: {}",
+                    factoryCode, year, month, context.getProductionVersion(), statisticsList.size());
+            return;
         }
         log.info("月计划结构机台统计加载完成, factoryCode: {}, year: {}, month: {}, productionVersion: {}, "
                         + "rowCount: {}, dateCount: {}",

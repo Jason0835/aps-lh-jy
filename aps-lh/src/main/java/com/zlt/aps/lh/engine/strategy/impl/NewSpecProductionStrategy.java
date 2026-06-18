@@ -2825,8 +2825,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 || isEnding || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return firstProductionStartTime;
         }
-        LocalDate productionDate = firstProductionStartTime.toInstant()
-                .atZone(ZoneId.systemDefault()).toLocalDate();
+        LocalDate productionDate = resolveProductionWorkDate(shifts, firstProductionStartTime);
+        if (Objects.isNull(productionDate)) {
+            return firstProductionStartTime;
+        }
         SkuDailyPlanQuotaDTO currentQuota = sku.getDailyPlanQuotaMap().get(productionDate);
         if (hasSchedulableDailyPlanQuota(sku, currentQuota)) {
             return firstProductionStartTime;
@@ -3023,6 +3025,30 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         LhShiftConfigVO shift = findShiftByIndex(shifts, segment.getStartProductionShiftIndex());
         return resolveShiftWorkDate(shift);
+    }
+
+    /**
+     * 根据生产时刻解析所属班次的业务日期。
+     *
+     * @param shifts 排程窗口班次
+     * @param productionTime 生产时刻
+     * @return 所属班次业务日期；未命中排程窗口返回null
+     */
+    private LocalDate resolveProductionWorkDate(List<LhShiftConfigVO> shifts, Date productionTime) {
+        if (CollectionUtils.isEmpty(shifts) || Objects.isNull(productionTime)) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
+                    || Objects.isNull(shift.getShiftEndDateTime())) {
+                continue;
+            }
+            if (!productionTime.before(shift.getShiftStartDateTime())
+                    && productionTime.before(shift.getShiftEndDateTime())) {
+                return resolveShiftWorkDate(shift);
+            }
+        }
+        return null;
     }
 
     /**
@@ -3382,12 +3408,22 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         request.setWindowEndDate(windowEndDate);
         request.setWindowLastDayNextPlanLookAheadEnabled(true);
         LocalDate currentProductionDate = resolveSegmentStartProductionDate(segment, shifts);
-        if (EarlyProductionChecker.isEndingStructureLargeSurplus(context, sku, currentProductionDate)) {
+        LocalDate firstFuturePlanDate = EarlyProductionChecker.resolveFirstFuturePlanDate(
+                sku, currentProductionDate, windowEndDate);
+        if (EarlyProductionChecker.isEndingStructureLargeSurplus(
+                context, sku, currentProductionDate, firstFuturePlanDate)) {
             request.setForceShortageWindowMode(true);
-            request.setForceShortageWindowReason("结构已收尾且SKU余量较大");
-            log.info("新增SKU结构收尾大余量进入强制加机台模拟, materialCode: {}, structureName: {}, "
-                            + "productionDate: {}, historyShortageQty: {}, skuScheduledMachineCount: {}, dailyCapacity: {}",
-                    sku.getMaterialCode(), sku.getStructureName(), currentProductionDate,
+            int currentPlanMachineCount = context.getStructurePlanMachineCount(
+                    currentProductionDate, sku.getStructureName());
+            int futurePlanMachineCount = context.getStructurePlanMachineCount(
+                    firstFuturePlanDate, sku.getStructureName());
+            log.info("新增SKU结构收尾大余量进入强制加机台模拟, factoryCode: {}, materialCode: {}, "
+                            + "structureName: {}, productionDate: {}, futurePlanDate: {}, "
+                            + "currentPlanMachineCount: {}, futurePlanMachineCount: {}, "
+                            + "historyShortageQty: {}, skuScheduledMachineCount: {}, dailyCapacity: {}, "
+                            + "result: true, reason: 结构已收尾且SKU余量较大",
+                    context.getFactoryCode(), sku.getMaterialCode(), sku.getStructureName(),
+                    currentProductionDate, firstFuturePlanDate, currentPlanMachineCount, futurePlanMachineCount,
                     monthlyHistoryShortageQty,
                     context.getSkuScheduledMachineCount(currentProductionDate, sku.getMaterialCode()),
                     Math.max(0, sku.getDailyCapacity()));

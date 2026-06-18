@@ -72,7 +72,8 @@ public final class EarlyProductionChecker {
                     allowed ? "结构已排机台数未达到计划机台数" : "结构已排机台数已达到计划机台数");
             return allowed;
         }
-        boolean allowedByEndingSurplus = isEndingStructureLargeSurplus(context, sku, currentDate);
+        boolean allowedByEndingSurplus = isEndingStructureLargeSurplus(
+                context, sku, currentDate, firstFuturePlanDate);
         logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, planMachineCount,
                 scheduledStructureCount, scheduledSkuCount, threshold, allowedByEndingSurplus,
                 allowedByEndingSurplus ? "结构已收尾且SKU余量大于已排机台日硫化量" : "结构无有效计划且SKU余量不足");
@@ -85,24 +86,28 @@ public final class EarlyProductionChecker {
      * @param context 排程上下文
      * @param sku SKU
      * @param currentDate 当前业务日期
+     * @param firstFuturePlanDate 后续首个计划日
      * @return true-命中结构收尾大余量；false-未命中
      */
     public static boolean isEndingStructureLargeSurplus(LhScheduleContext context,
                                                         SkuScheduleDTO sku,
-                                                        LocalDate currentDate) {
+                                                        LocalDate currentDate,
+                                                        LocalDate firstFuturePlanDate) {
         if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(currentDate)
                 || StringUtils.isEmpty(sku.getStructureName())) {
             return false;
         }
-        int currentPlanMachineCount = context.getStructurePlanMachineCount(currentDate, sku.getStructureName());
-        if (currentPlanMachineCount > 0) {
+        int effectivePlanMachineCount = resolveEffectiveStructurePlanMachineCount(
+                context, sku, currentDate, firstFuturePlanDate);
+        if (effectivePlanMachineCount > 0) {
             return false;
         }
         int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         int scheduledSkuCount = context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode());
         int dailyCapacity = Math.max(0, sku.getDailyCapacity());
         // 结构已收尾时，用本月前日累计欠产与当前已排SKU机台的日硫化量对比，判断是否仍需进入强制扩机。
-        return dailyCapacity > 0 && historyShortageQty > scheduledSkuCount * dailyCapacity;
+        long scheduledDailyCapacity = (long) scheduledSkuCount * dailyCapacity;
+        return dailyCapacity > 0 && (long) historyShortageQty > scheduledDailyCapacity;
     }
 
     /**

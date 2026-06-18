@@ -61,9 +61,6 @@ public class DailyMachineCapacitySimulationRequest implements Serializable {
     /** 是否强制使用欠产阈值窗口回落模式 */
     private boolean forceShortageWindowMode;
 
-    /** 强制使用欠产阈值窗口回落模式的业务原因 */
-    private String forceShortageWindowReason;
-
     /** 场景类型 */
     private String sceneType;
 }

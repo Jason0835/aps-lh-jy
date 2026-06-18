@@ -672,6 +672,30 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * T+1夜班虽然从T日22点开始，但提前生产判断必须使用T+1业务日，不能使用自然日。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldResolveCrossDayNightShiftByBusinessDate() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(dateTime(2026, 5, 1, 0, 0));
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                context, context.getScheduleDate());
+        LhShiftConfigVO tPlusOneNightShift = shifts.get(2);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveProductionWorkDate", List.class, Date.class);
+        method.setAccessible(true);
+        LocalDate productionWorkDate = (LocalDate) method.invoke(
+                strategy, shifts, tPlusOneNightShift.getShiftStartDateTime());
+
+        Assertions.assertEquals(LocalDate.of(2026, 5, 2), productionWorkDate,
+                "跨日夜班必须按班次业务日判断提前生产");
+    }
+
+    /**
      * 同胎胚同模具且仅存在历史欠产额度时，换活字块必须先准备账本并落 S4.4 结果。
      */
     @Test
