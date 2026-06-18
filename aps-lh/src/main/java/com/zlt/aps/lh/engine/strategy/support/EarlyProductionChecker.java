@@ -8,6 +8,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -36,12 +38,33 @@ public final class EarlyProductionChecker {
                                                        LocalDate currentDate,
                                                        LocalDate windowEndDate,
                                                        int shortageThreshold) {
+        return checkEarlyProduction(context, sku, currentDate, currentDate,
+                windowEndDate, shortageThreshold).isAllowed();
+    }
+
+    /**
+     * 判断 SKU 是否属于提前生产，并返回准入场景及 T～T+2 结构计划机台数。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param currentDate 当前业务日期
+     * @param windowStartDate 排程窗口 T 日
+     * @param windowEndDate 排程窗口结束日期
+     * @param shortageThreshold 欠产增机台阈值
+     * @return 提前生产结构化判定结果
+     */
+    public static EarlyProductionDecision checkEarlyProduction(LhScheduleContext context,
+                                                               SkuScheduleDTO sku,
+                                                               LocalDate currentDate,
+                                                               LocalDate windowStartDate,
+                                                               LocalDate windowEndDate,
+                                                               int shortageThreshold) {
         if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(currentDate)
                 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
-            return true;
+            return EarlyProductionDecision.notEarlyProduction(true, "非提前生产判定范围");
         }
         if (hasCurrentDayPlan(sku, currentDate)) {
-            return true;
+            return EarlyProductionDecision.notEarlyProduction(true, "当前业务日已有日计划量");
         }
         LocalDate firstFuturePlanDate = resolveFirstFuturePlanDate(sku, currentDate, windowEndDate);
         if (Objects.isNull(firstFuturePlanDate)) {
@@ -49,8 +72,10 @@ public final class EarlyProductionChecker {
                     context.getStructureScheduledMachineCount(currentDate, sku.getStructureName()),
                     context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode()),
                     shortageThreshold, false, "窗口后续日期无日计划量");
-            return false;
+            return EarlyProductionDecision.notEarlyProduction(false, "窗口后续日期无日计划量");
         }
+        List<Integer> structurePlanMachineCounts = resolveWindowStructurePlanMachineCounts(
+                context, sku.getStructureName(), windowStartDate);
         int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         int threshold = Math.max(0, shortageThreshold);
         if (historyShortageQty > threshold) {
@@ -58,8 +83,12 @@ public final class EarlyProductionChecker {
                     context.getStructureScheduledMachineCount(currentDate, sku.getStructureName()),
                     context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode()),
                     threshold, true, "本月前日累计欠产超过阈值，复用原强制加机台逻辑");
-            return true;
+            return EarlyProductionDecision.earlyProduction(true, EarlyProductionDecision.SCENE_NORMAL,
+                    firstFuturePlanDate, structurePlanMachineCounts,
+                    "本月前日累计欠产超过阈值，复用原强制加机台逻辑");
         }
+        int currentPlanMachineCount = context.getStructurePlanMachineCount(
+                currentDate, sku.getStructureName());
         int planMachineCount = resolveEffectiveStructurePlanMachineCount(
                 context, sku, currentDate, firstFuturePlanDate);
         int scheduledStructureCount = context.getStructureScheduledMachineCount(
@@ -70,13 +99,43 @@ public final class EarlyProductionChecker {
             logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, planMachineCount,
                     scheduledStructureCount, scheduledSkuCount, threshold, allowed,
                     allowed ? "结构已排机台数未达到计划机台数" : "结构已排机台数已达到计划机台数");
-            return allowed;
+            String sceneType = currentPlanMachineCount > 0
+                    ? EarlyProductionDecision.SCENE_NORMAL : EarlyProductionDecision.SCENE_STRUCTURE_SWITCH;
+            return EarlyProductionDecision.earlyProduction(allowed, sceneType, firstFuturePlanDate,
+                    structurePlanMachineCounts,
+                    allowed ? "结构已排机台数未达到计划机台数" : "结构已排机台数已达到计划机台数");
         }
         boolean allowedByEndingSurplus = isEndingStructureLargeSurplus(context, sku, currentDate);
         logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, planMachineCount,
                 scheduledStructureCount, scheduledSkuCount, threshold, allowedByEndingSurplus,
                 allowedByEndingSurplus ? "结构已收尾且SKU余量大于已排机台日硫化量" : "结构无有效计划且SKU余量不足");
-        return allowedByEndingSurplus;
+        return EarlyProductionDecision.earlyProduction(allowedByEndingSurplus,
+                EarlyProductionDecision.SCENE_STRUCTURE_ENDING, firstFuturePlanDate,
+                structurePlanMachineCounts,
+                allowedByEndingSurplus ? "结构已收尾且SKU余量大于已排机台日硫化量" : "结构无有效计划且SKU余量不足");
+    }
+
+    /**
+     * 获取排程窗口 T～T+2 的结构计划硫化机台数。
+     *
+     * @param context 排程上下文
+     * @param structureName 产品结构
+     * @param windowStartDate 排程窗口 T 日
+     * @return 固定三个业务日的结构计划机台数
+     */
+    private static List<Integer> resolveWindowStructurePlanMachineCounts(LhScheduleContext context,
+                                                                         String structureName,
+                                                                         LocalDate windowStartDate) {
+        List<Integer> machineCounts = new ArrayList<Integer>(3);
+        if (Objects.isNull(context) || Objects.isNull(windowStartDate)
+                || StringUtils.isEmpty(structureName)) {
+            return machineCounts;
+        }
+        for (int dayOffset = 0; dayOffset < 3; dayOffset++) {
+            machineCounts.add(context.getStructurePlanMachineCount(
+                    windowStartDate.plusDays(dayOffset), structureName));
+        }
+        return machineCounts;
     }
 
     /**

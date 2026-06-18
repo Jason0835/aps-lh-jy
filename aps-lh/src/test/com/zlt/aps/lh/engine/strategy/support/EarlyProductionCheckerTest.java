@@ -11,12 +11,88 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * SKU提前生产准入判断回归测试。
  */
 class EarlyProductionCheckerTest {
+
+    @Test
+    void checkEarlyProduction_shouldReturnStructureSwitchRemarkWithThreeDayMachineCounts() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 2);
+        context.addStructurePlanMachineCount(day3, "L1", 4);
+        SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        EarlyProductionDecision decision = EarlyProductionChecker.checkEarlyProduction(
+                context, sku, day1, day1, day3, 200);
+
+        assertTrue(decision.isAllowed());
+        assertTrue(decision.isEarlyProduction());
+        assertEquals(EarlyProductionDecision.SCENE_STRUCTURE_SWITCH, decision.getSceneType());
+        assertEquals(Arrays.asList(0, 2, 4), decision.getStructurePlanMachineCounts());
+        assertEquals("[结构切换] 结构计划硫化机台数：0,2,4", decision.buildRemark());
+    }
+
+    @Test
+    void checkEarlyProduction_shouldReturnStructureEndingRemarkWhenLargeSurplusAllowed() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 90, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        EarlyProductionDecision decision = EarlyProductionChecker.checkEarlyProduction(
+                context, sku, day1, day1, day3, 200);
+
+        assertTrue(decision.isAllowed());
+        assertEquals(EarlyProductionDecision.SCENE_STRUCTURE_ENDING, decision.getSceneType());
+        assertEquals("[结构收尾] 结构计划硫化机台数：0,0,0", decision.buildRemark());
+    }
+
+    @Test
+    void checkEarlyProduction_shouldUseNormalSceneWhenShortageExceedsThreshold() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 2);
+        context.addStructurePlanMachineCount(day3, "L1", 4);
+        SkuScheduleDTO sku = sku("3302001001", "L1", 250, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        EarlyProductionDecision decision = EarlyProductionChecker.checkEarlyProduction(
+                context, sku, day1, day1, day3, 200);
+
+        assertTrue(decision.isAllowed());
+        assertEquals(EarlyProductionDecision.SCENE_NORMAL, decision.getSceneType());
+        assertEquals("结构计划硫化机台数：0,2,4", decision.buildRemark());
+    }
+
+    @Test
+    void checkEarlyProduction_shouldNotBuildRemarkWhenCurrentDayHasPlan() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 1);
+        SkuScheduleDTO sku = sku("3302001001", "L1", 0, 40,
+                quotaMap(day1, day2, day3, 20, 60, 0));
+
+        EarlyProductionDecision decision = EarlyProductionChecker.checkEarlyProduction(
+                context, sku, day1, day1, day3, 200);
+
+        assertTrue(decision.isAllowed());
+        assertFalse(decision.isEarlyProduction());
+        assertEquals("", decision.buildRemark());
+    }
 
     @Test
     void canEnterEarlyProductionCheck_shouldAllowFuturePlanSkuWhenStructureMachineNotFull() {
