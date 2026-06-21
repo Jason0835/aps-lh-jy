@@ -12,6 +12,7 @@ import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -211,6 +212,76 @@ class ContinuousProductionResultQtyRegressionTest {
         assertEquals(22, result.getDailyPlanQty().intValue(), "续作目标总量不变时，剩余量应继续顺延到后续班次");
         assertEquals(12, result.getClass2PlanQty().intValue(), "续作首次分班命中干冰 3 小时时，应按剩余 5/8 时间折算到 12");
         assertEquals(10, result.getClass3PlanQty().intValue(), "首班被压缩后的剩余计划量应顺延到下一班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldTrimFinalAfternoonShiftOnly() {
+        LhScheduleContext context = newContext();
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002218");
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(50);
+        context.getSkuLhCapacityMap().put("3302002218", capacity);
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302002218");
+        result.setLhMachineCode("K1915");
+        result.setScheduleType("01");
+        result.setSingleMouldShiftQty(18);
+        result.setMouldQty(2);
+        result.setClass1PlanQty(18);
+        result.setClass2PlanQty(14);
+        result.setClass3PlanQty(18);
+        result.setClass4PlanQty(18);
+        result.setClass5PlanQty(14);
+        result.setClass6PlanQty(18);
+        result.setClass7PlanQty(18);
+        result.setClass8PlanQty(18);
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(14, result.getClass8PlanQty().intValue(),
+                "续作后置补满后，中班仍应按日标准产量余量回裁");
+        assertEquals(132, ShiftFieldUtil.resolveScheduledQty(result),
+                "续作最终结果应按日标准产量公式收敛");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldRaiseFinalAfternoonShiftToFormulaQty() {
+        LhScheduleContext context = newContext();
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002218");
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(50);
+        context.getSkuLhCapacityMap().put("3302002218", capacity);
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302002218");
+        result.setLhMachineCode("K1514");
+        result.setScheduleType("01");
+        result.setSingleMouldShiftQty(18);
+        result.setMouldQty(2);
+        result.setLhTime(1800);
+        result.setClass1PlanQty(18);
+        result.setClass2PlanQty(14);
+        result.setClass3PlanQty(18);
+        result.setClass4PlanQty(18);
+        result.setClass5PlanQty(14);
+        result.setClass6PlanQty(18);
+        result.setClass7PlanQty(18);
+        result.setClass8PlanQty(10);
+        result.setClass8StartTime(context.getScheduleWindowShifts().get(7).getShiftStartDateTime());
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(14, result.getClass8PlanQty().intValue(),
+                "续作中班原计划量不足公式结果时，应从10修正到14");
+        assertEquals(132, ShiftFieldUtil.resolveScheduledQty(result),
+                "续作最终结果应按日标准产量公式补足剩余班次");
     }
 
     @Test

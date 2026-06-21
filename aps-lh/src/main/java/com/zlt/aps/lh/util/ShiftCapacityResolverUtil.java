@@ -215,8 +215,11 @@ public final class ShiftCapacityResolverUtil {
         if (dailyStandardQty <= 0) {
             return currentPlanQty;
         }
-        int otherShiftPlanQty = sumOtherShiftPlanQty(currentShift, sameDayShiftPlanQtyMap);
-        if (!isOtherShiftPlanQtyFull(currentShift, sameDayShiftPlanQtyMap, classCapacity)) {
+        boolean continuousSchedule = StringUtils.equals(ScheduleTypeEnum.CONTINUOUS.getCode(), scheduleType);
+        int otherShiftPlanQty = sumOtherShiftPlanQty(
+                currentShift, sameDayShiftPlanQtyMap, classCapacity, continuousSchedule);
+        if (!continuousSchedule
+                && !isOtherShiftPlanQtyFull(currentShift, sameDayShiftPlanQtyMap, classCapacity)) {
             return currentPlanQty;
         }
         int remainderQty = dailyStandardQty - otherShiftPlanQty;
@@ -225,6 +228,10 @@ public final class ShiftCapacityResolverUtil {
         }
         if (remainderQty > classCapacity) {
             return currentPlanQty;
+        }
+        if (continuousSchedule) {
+            // 续作剩余班次按日标准产量公式取值，既允许向下回裁，也允许补足原结果中的残班。
+            return remainderQty;
         }
         return Math.min(remainderQty, currentPlanQty);
     }
@@ -566,20 +573,34 @@ public final class ShiftCapacityResolverUtil {
      *
      * @param currentShift 当前班次
      * @param sameDayShiftPlanQtyMap 同一业务日班次计划量
+     * <p>续作窗口首个业务日只有早班和中班，窗口外夜班无法出现在当前班次图中。
+     * 续作按完整业务日应用余量公式时，缺失班次按一个完整班产计入；新增和换活字块保持原口径。</p>
+     *
+     * @param classCapacity 原始班产
+     * @param fillMissingShiftCapacity 是否按班产补齐窗口边界缺失班次
      * @return 其他班次计划量合计
      */
     private static int sumOtherShiftPlanQty(LhShiftConfigVO currentShift,
-                                            Map<Integer, Integer> sameDayShiftPlanQtyMap) {
+                                            Map<Integer, Integer> sameDayShiftPlanQtyMap,
+                                            int classCapacity,
+                                            boolean fillMissingShiftCapacity) {
         if (Objects.isNull(currentShift) || CollectionUtils.isEmpty(sameDayShiftPlanQtyMap)) {
             return 0;
         }
         int totalQty = 0;
+        int otherShiftCount = 0;
         for (Map.Entry<Integer, Integer> entry : sameDayShiftPlanQtyMap.entrySet()) {
             if (Objects.isNull(entry) || Objects.isNull(entry.getKey())
                     || entry.getKey().intValue() == currentShift.getShiftIndex()) {
                 continue;
             }
+            otherShiftCount++;
             totalQty += entry.getValue() == null ? 0 : Math.max(0, entry.getValue());
+        }
+        if (fillMissingShiftCapacity && classCapacity > 0) {
+            int expectedOtherShiftCount = LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY - 1;
+            int missingShiftCount = Math.max(0, expectedOtherShiftCount - otherShiftCount);
+            totalQty += missingShiftCount * classCapacity;
         }
         return totalQty;
     }
