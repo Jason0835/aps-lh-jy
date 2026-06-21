@@ -18,8 +18,6 @@ public final class DailyMachineCapacitySimulationUtil {
     private static final int NEXT_DAY_SHIFT_COUNT = 3;
     private static final String MODE_WINDOW_DEMAND = "窗口需消化量";
     private static final String MODE_FORCED_SHORTAGE_WINDOW = "欠产阈值窗口回落";
-    private static final String MODE_WINDOW_TOTAL_CAPACITY = "8班窗口总产能";
-    private static final String MODE_TODAY_CAPACITY = "当前日有效产能";
     private static final String MODE_CURRENT_DAY_PLAN_SATISFIED = "当前日计划已满足";
     private static final String MODE_NEXT_DAY_CAPACITY = "后一天3班产能";
     private static final String MODE_WINDOW_LAST_DAY = "窗口末日";
@@ -176,43 +174,20 @@ public final class DailyMachineCapacitySimulationUtil {
             demandQty = currentDayPlanQty;
             capacityQty = todayCapacityQty;
             decisionMode = MODE_CURRENT_DAY_PLAN_SATISFIED;
-        } else if (shouldCheckNextDayThreeShiftCapacity(
-                request, decision, firstProductionDate, nextDayPlanQty, nextDayThreeShiftCapacityQty)) {
+        } else if (Objects.nonNull(nextProductionDate)) {
             /*
-             * 窗口首日仍优先按8班理论总产能防止过度扩机；
-             * 进入后续生产日后，如果下一日计划已经超过当前机台3班能力，需要提前一天增机承接。
+             * 欠产未超过阈值时，只有当前机台数同时无法满足当前日和后一天计划，才允许增加机台。
+             * 当前日不满足后必须直接按后一天计划缺口判断，不能再按当前日缺口提前扩机；
+             * T+2 仍通过 nextProductionDate 后看 T+3，但不提前消费 T+3 日计划。
              */
             demandQty = nextDayPlanQty;
             capacityQty = nextDayThreeShiftCapacityQty;
             decisionMode = MODE_NEXT_DAY_CAPACITY;
             nextDayLookAheadEntered = true;
-        } else if (windowTotalCapacityQty >= windowPlanQty) {
-            // 欠产未超阈值且 8 班理论产能可覆盖窗口计划：不因换模后当日残班不足继续加机台。
-            demandQty = windowPlanQty;
-            capacityQty = windowTotalCapacityQty;
-            decisionMode = MODE_WINDOW_TOTAL_CAPACITY;
-        } else if (shouldCheckTodayThreeShiftCapacity(request, decision, activeMachines)
-                && todayRequiredQty > todayCapacityQty) {
-            // 当前日计划已经超过当前机台真实可排能力时，才按当前日有效产能触发扩机。
-            demandQty = todayRequiredQty;
-            capacityQty = todayCapacityQty;
-            decisionMode = MODE_TODAY_CAPACITY;
         } else {
-            if (Objects.isNull(nextProductionDate)) {
-                demandQty = 0;
-                capacityQty = 0;
-                decisionMode = MODE_WINDOW_LAST_DAY;
-            } else {
-                /*
-                 * 当前日可支撑时，再看后一天 3 班产能，防止今天勉强满足但明天计划被拖垮。
-                 * 新增排产小欠产场景下，T+2 也必须判断 T+3 的日月计划量；
-                 * 这里只用于增机台判断，不放开 T+2 结果扣账去提前消耗 T+3 计划。
-                 */
-                demandQty = nextDayPlanQty;
-                capacityQty = nextDayThreeShiftCapacityQty;
-                decisionMode = MODE_NEXT_DAY_CAPACITY;
-                nextDayLookAheadEntered = true;
-            }
+            demandQty = 0;
+            capacityQty = 0;
+            decisionMode = MODE_WINDOW_LAST_DAY;
         }
         decision.setCurrentDayPlanQty(currentDayPlanQty);
         decision.setTodayRequiredQty(todayRequiredQty);
@@ -373,26 +348,6 @@ public final class DailyMachineCapacitySimulationUtil {
             }
         }
         return Math.max(0, activeMachines) * Math.max(0, request.getShiftCapacity()) * NEXT_DAY_SHIFT_COUNT;
-    }
-
-    private static boolean shouldCheckTodayThreeShiftCapacity(DailyMachineCapacitySimulationRequest request,
-                                                              DailyMachineCapacityDayDecision decision,
-                                                              int activeMachines) {
-        return Objects.nonNull(decision)
-                && decision.getTodayPlanQty() > resolveDailyTheoryCapacityQty(
-                request, decision.getProductionDate(), activeMachines);
-    }
-
-    private static boolean shouldCheckNextDayThreeShiftCapacity(DailyMachineCapacitySimulationRequest request,
-                                                                DailyMachineCapacityDayDecision decision,
-                                                                LocalDate firstProductionDate,
-                                                                int nextDayPlanQty,
-                                                                int nextDayThreeShiftCapacityQty) {
-        return Objects.nonNull(decision)
-                && Objects.nonNull(firstProductionDate)
-                && !firstProductionDate.equals(decision.getProductionDate())
-                && resolveTodayPlanQty(request.getDailyPlanQuotaMap().get(firstProductionDate)) <= 0
-                && nextDayPlanQty > nextDayThreeShiftCapacityQty;
     }
 
     private static boolean isShortageThresholdEnabled(DailyMachineCapacitySimulationRequest request) {

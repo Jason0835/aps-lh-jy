@@ -672,6 +672,36 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 欠产未超过阈值时，只有当天和后一天计划均无法由当前机台满足，才允许增加机台。
+     */
+    @Test
+    public void shouldKeepSingleMachineWhenCurrentDayMissesButNextDayIsCovered() {
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001074");
+        request.setDailyPlanQuotaMap(buildQuotaMap(8, 92, 46, 46));
+        request.setMachineDailyCapacityList(buildDailyCapacityMaps(2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(1);
+        request.setShortageAddMachineThreshold(200);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setWindowLastDayNextPlanLookAheadEnabled(true);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        Assertions.assertEquals(1, result.getFinalActiveMachines());
+        DailyMachineCapacityDayDecision secondDayDecision = result.getDayDecisionList().get(1);
+        Assertions.assertFalse(secondDayDecision.isCurrentDayPlanSatisfied());
+        Assertions.assertTrue(secondDayDecision.isNextDayLookAheadEntered());
+        Assertions.assertEquals(LocalDate.of(2026, 5, 3), secondDayDecision.getNextProductionDate());
+        Assertions.assertEquals(46, secondDayDecision.getNextDayPlanQty());
+        Assertions.assertEquals(0, secondDayDecision.getAddedMachineCount());
+    }
+
+    /**
      * T+1夜班虽然从T日22点开始，但提前生产判断必须使用T+1业务日，不能使用自然日。
      *
      * @throws Exception 反射调用异常
