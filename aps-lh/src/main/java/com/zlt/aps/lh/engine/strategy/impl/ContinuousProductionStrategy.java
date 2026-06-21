@@ -842,7 +842,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 || CollectionUtils.isEmpty(shifts)) {
             return false;
         }
-        // 续作前置收尾判定可能因窗口总余量命中，但只要窗口内仍有正向日计划下降，就必须按天降模保留后续补量机会。
+        // 多机台续作统一进入按天最小机台数模拟；日计划恒定时也要释放超过 dayN 需求的冗余机台。
         Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate = groupShiftsByWorkDate(shifts);
         if (hasEndingResult(skuResults) && hasEndingFirstDayPlanOnly(sourceSku, shiftMapByDate)) {
             log.info("续作收尾仅首日有计划，按业务日降模, materialCode: {}", sourceSku.getMaterialCode());
@@ -855,6 +855,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (hasPositiveDayPlanDropAroundDate(sourceSku, shiftMapByDate, productionDate)) {
                 return true;
             }
+        }
+        boolean hasPositiveDayPlan = shiftMapByDate.keySet().stream()
+                .anyMatch(date -> resolveContinuationDayPlanQtyByDate(sourceSku, date) > 0);
+        if (hasPositiveDayPlan && skuResults.size() > 1) {
+            log.info("续作多机台日计划恒定，进入最小机台数降模模拟, materialCode: {}, 机台: {}",
+                    sourceSku.getMaterialCode(), joinMachineCodes(skuResults));
+            return true;
         }
         return false;
     }
@@ -1132,6 +1139,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         int rollingDiffQty = 0;
         boolean ending = hasEndingResult(skuResults);
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, ending);
+        LocalDate firstProductionDate = shiftMapByDate.keySet().iterator().next();
         for (Map.Entry<LocalDate, List<LhShiftConfigVO>> entry : shiftMapByDate.entrySet()) {
             if (CollectionUtils.isEmpty(activeResults)) {
                 break;
@@ -1139,7 +1147,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             LocalDate productionDate = entry.getKey();
             List<LhShiftConfigVO> dayShifts = entry.getValue();
             int dayPlanQty = resolveContinuationDayPlanQtyByDate(sourceSku, productionDate);
-            int demandQty = resolveContinuationDayDemandQtyByDate(sourceSku, productionDate);
+            int demandQty = ending
+                    ? resolveContinuationDayDemandQtyByDate(sourceSku, productionDate)
+                    : resolveContinuationReductionDemandQtyByDate(
+                            sourceSku, productionDate, firstProductionDate);
             int todayRequiredQty = rollingDiffQty + demandQty;
             int effectiveDemandQty = policy.isStrictUpperLimit()
                     ? Math.min(Math.max(0, todayRequiredQty), remainingTargetQty)
@@ -1166,7 +1177,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     demandQty, rollingDiffQty, todayRequiredQty, remainingTargetQty, effectiveDemandQty, totalCapacity,
                     keptTodayCapacity, totalPlanQty, recoverable);
             applyContinuationDayAllocation(context, sourceSku, activeResults, keptResults, capacityMap,
-                    demandQty, effectiveDemandQty, remainingTargetQty, productionDate, dayShifts, shifts);
+                    demandQty, effectiveDemandQty, remainingTargetQty, productionDate, dayShifts, shifts,
+                    recoverable);
             int actualTodayQty = sumScheduledQtyByShifts(activeResults, dayShifts);
             rollingDiffQty = effectiveDemandQty - actualTodayQty;
             remainingTargetQty = Math.max(0, remainingTargetQty - sumScheduledQtyByShifts(activeResults, dayShifts));
@@ -1174,6 +1186,33 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             log.info("续作多机台每日排后差额, materialCode: {}, 日期: {}, actualTodayQty: {}, rollingDiffQty: {}, nextActiveMachines: {}",
                     sourceSku.getMaterialCode(), productionDate, actualTodayQty, rollingDiffQty, joinMachineCodes(activeResults));
         }
+    }
+
+    /**
+     * 解析非收尾续作降模使用的当日需求量。
+     * <p>降模减机台只按当日日计划判断在机数量；首日先扣除排程日晚班已完成量，
+     * 历史欠产继续交由既有欠产阈值与续作补偿链路处理，不能阻止冗余续作机台释放。</p>
+     *
+     * @param sourceSku 来源SKU
+     * @param productionDate 当前业务日
+     * @param firstProductionDate 窗口首个业务日
+     * @return 降模使用的当日需求量
+     */
+    private int resolveContinuationReductionDemandQtyByDate(SkuScheduleDTO sourceSku,
+                                                              LocalDate productionDate,
+                                                              LocalDate firstProductionDate) {
+        int dayPlanQty = resolveContinuationDayPlanQtyByDate(sourceSku, productionDate);
+        int remainingQty = resolveContinuationDayDemandQtyByDate(sourceSku, productionDate);
+        int dailyDemandQty = Math.min(dayPlanQty, remainingQty);
+        if (productionDate != null && productionDate.equals(firstProductionDate)) {
+            dailyDemandQty = Math.min(dailyDemandQty,
+                    Math.max(0, dayPlanQty - Math.max(0, sourceSku.getScheduleDayFinishQty())));
+        }
+        log.debug("续作多机台降模当日需求解析, materialCode: {}, 日期: {}, dayN: {}, 账本剩余: {}, "
+                        + "排程日晚班完成量: {}, 降模需求量: {}",
+                sourceSku.getMaterialCode(), productionDate, dayPlanQty, remainingQty,
+                sourceSku.getScheduleDayFinishQty(), dailyDemandQty);
+        return Math.max(0, dailyDemandQty);
     }
 
     // ==================== 私有辅助方法 ====================
@@ -2462,6 +2501,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param productionDate 业务日
      * @param dayShifts 当日班次
      * @param allShifts 全窗口班次
+     * @param recoverable 保留机台是否满足后续追补需求
      */
     private void applyContinuationDayAllocation(LhScheduleContext context,
                                                 SkuScheduleDTO sourceSku,
@@ -2473,7 +2513,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                 int remainingTargetQty,
                                                 LocalDate productionDate,
                                                 List<LhShiftConfigVO> dayShifts,
-                                                List<LhShiftConfigVO> allShifts) {
+                                                List<LhShiftConfigVO> allShifts,
+                                                boolean recoverable) {
         boolean ending = hasEndingResult(activeResults);
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, ending);
         boolean fillKeptMachineCapacity = !ending
@@ -2500,10 +2541,16 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int allocation = Math.min(remainingDemandQty, machineCapacity);
             redistributeShiftQty(context, result, dayShifts, allocation);
             if (allocation > 0) {
-                applyNoMouldChangeNightFillBeforeRelease(context, sourceSku, result, allShifts, false);
+                if (!recoverable) {
+                    applyNoMouldChangeNightFillBeforeRelease(context, sourceSku, result, allShifts, false);
+                }
+                // 保留机台已满足后续需求时直接降模；确有追补缺口时才保留不可换模晚班。
+                clearContinuationShiftsAfterDate(
+                        context, result, allShifts, productionDate, !recoverable);
+            } else {
+                // 当日无需补量时立即释放机台，不能因不可换模夜班再次保留原续作计划。
+                clearContinuationShiftsFromDate(context, result, allShifts, productionDate);
             }
-            // 按天降模的下机机台只允许补当前业务日，晚班不可换模补量后仍需清掉后续下降日期。
-            clearContinuationShiftsAfterDate(context, result, allShifts, productionDate);
             remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
             log.info("续作多机台当日补量下机机台排量, materialCode: {}, 日期: {}, machineCode: {}, allocation: {}, "
                             + "machineCapacity: {}, 当日剩余需求: {}",
@@ -2515,7 +2562,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
             redistributeShiftQty(context, result, dayShifts, 0);
-            clearContinuationShiftsAfterDate(context, result, allShifts, productionDate);
+            clearContinuationShiftsAfterDate(
+                    context, result, allShifts, productionDate, !recoverable);
         }
         log.info("续作多机台降模结果, materialCode: {}, 日期: {}, 原始机台: {}, 保留机台: {}, 当日补量下机机台: {}, 下机机台: {}, 原始机台明细: {}, "
                         + "保留机台明细: {}, 下机机台明细: {}, 原因: dayN保障量={}，当日生效目标量={}，剩余窗口目标量={}，按胶囊使用次数和机台编码排序",
@@ -2583,11 +2631,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param result 排程结果
      * @param shifts 全窗口班次
      * @param productionDate 当前业务日
+     * @param keepBoundaryNightShift 是否保留当前中班后的不可换模晚班
      */
     private void clearContinuationShiftsAfterDate(LhScheduleContext context,
                                                   LhScheduleResult result,
                                                   List<LhShiftConfigVO> shifts,
-                                                  LocalDate productionDate) {
+                                                  LocalDate productionDate,
+                                                  boolean keepBoundaryNightShift) {
         List<LhShiftConfigVO> shiftsToClear = new ArrayList<LhShiftConfigVO>(4);
         for (LhShiftConfigVO shift : shifts) {
             if (shift == null || shift.getWorkDate() == null) {
@@ -2595,7 +2645,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             LocalDate shiftDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
             if (shiftDate.isAfter(productionDate)) {
-                if (isBoundaryNoMouldChangeNightShiftToKeep(context, result, shifts, shift, productionDate)) {
+                if (keepBoundaryNightShift
+                        && isBoundaryNoMouldChangeNightShiftToKeep(
+                                context, result, shifts, shift, productionDate)) {
                     continue;
                 }
                 shiftsToClear.add(shift);

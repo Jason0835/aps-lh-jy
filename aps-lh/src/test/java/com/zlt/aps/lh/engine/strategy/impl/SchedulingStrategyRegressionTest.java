@@ -26,6 +26,7 @@ import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -317,6 +318,43 @@ public class SchedulingStrategyRegressionTest {
         int thirdDayMachineCount = countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts,
                 resolveShiftWorkDate(shifts, 3));
         Assertions.assertEquals(1, thirdDayMachineCount);
+    }
+
+    /**
+     * 续作日计划恒定且单机日产能可满足时，应立即减少一台续作机台。
+     */
+    @Test
+    public void shouldReduceContinuousMachinesWhenConstantDailyPlanFitsOneMachine() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 46, 46, 46);
+        quotaMap.get(resolveShiftWorkDate(shifts, 1)).setRemainingQty(312);
+        SkuScheduleDTO sku = buildContinuousSku("3302001075", 16, 404, quotaMap);
+        sku.setMonthlyHistoryShortageQty(298);
+        sku.setScheduleDayFinishQty(32);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001075");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001075", capacity);
+        LhScheduleResult firstResult = buildContinuousResult("3302001075", "K1406", 16, shifts, "0");
+        LhScheduleResult secondResult = buildContinuousResult("3302001075", "K1712", 16, shifts, "0");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        for (int dayIndex = 1; dayIndex <= 3; dayIndex++) {
+            LocalDate workDate = resolveShiftWorkDate(shifts, dayIndex);
+            Assertions.assertEquals(1,
+                    countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, workDate),
+                    "业务日应只保留一台续作机台: " + workDate);
+        }
+        Assertions.assertEquals(1, context.getScheduleResultList().size());
+        Assertions.assertEquals(Integer.valueOf(122), context.getScheduleResultList().get(0).getDailyPlanQty());
     }
 
     /**
