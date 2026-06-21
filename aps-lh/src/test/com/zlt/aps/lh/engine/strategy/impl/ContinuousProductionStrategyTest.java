@@ -1688,7 +1688,6 @@ public class ContinuousProductionStrategyTest {
         sku.setSurplusQty(83);
         sku.setEmbryoStock(33);
         sku.setShiftCapacity(18);
-        sku.setMouldQty(2);
         sku.setMonthlyHistoryShortageQty(17);
         MachineScheduleDTO machine = context.getMachineScheduleMap().get("K1712");
         machine.setMaxMoldNum(2);

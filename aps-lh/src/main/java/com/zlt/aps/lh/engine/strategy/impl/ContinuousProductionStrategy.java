@@ -160,6 +160,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                         sku.getMaterialCode(), machineCode, sku.resolveTargetScheduleQty());
                 continue;
             }
+            // 动态收尾目标量需要先按真实机台模数归整，保证目标量、运行态账本和最终落库口径一致。
+            int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+            sku.setMouldQty(machineMouldQty);
             DailyMachineShortageQuotaPlan shortageQuotaPlan =
                     DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "续作排产");
             if (shouldReleaseWindowNoPlanContinuousSku(shortageQuotaPlan)) {
@@ -215,8 +218,6 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     ? tryReserveSpecifySqueezeSwitchStartTime(context, machine, sku, shifts) : null;
             List<LhShiftConfigVO> effectiveShifts = specifySwitchStartTime == null
                     ? shifts : filterShiftsBeforeSwitchStart(shifts, specifySwitchStartTime);
-            int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
-            sku.setMouldQty(machineMouldQty);
             // 滚动继承结果可直接追加班次量，避免同一机台同一SKU拆成两条连续结果。
             // 若当前窗口需要为定点新增物料挤出换模时间，只使用切换前的有效班次构造结果。
             LhScheduleResult inheritedResult = findMergeableRollingInheritedResult(context, machineCode, sku.getMaterialCode());
