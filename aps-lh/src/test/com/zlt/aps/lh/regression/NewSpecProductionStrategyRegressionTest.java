@@ -58,6 +58,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -2676,12 +2677,12 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldSkipHistoryShortageOnlySkuWhenPreviousDayFinishedQtyExists() throws Exception {
+    void scheduleNewSpecs_shouldSkipHistoryShortageOnlySkuWhenLatestPreviousFinishedQtyIsPositive() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
 
         LhScheduleContext context = buildContext();
-        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        Date scheduleDate = dateTime(2026, 6, 14, 0, 0);
         context.setScheduleDate(scheduleDate);
         context.setScheduleTargetDate(scheduleDate);
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
@@ -2706,20 +2707,49 @@ class NewSpecProductionStrategyRegressionTest {
                 context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
         context.getNewSpecSkuList().add(sku);
 
-        context.getMaterialDayFinishedQtyMap().put(sku.getMaterialCode() + "_2026-04-30", 64);
+        // T-1 无完成量时，应继续向前取当前月最近一次非空完成量。
+        context.getMaterialMonthDailyFinishedQtyMap().put(sku.getMaterialCode() + "_2026-06-12", 64);
 
-        MachineScheduleDTO k1105 = buildMachine("K1105", dateTime(2026, 5, 1, 6, 0));
+        MachineScheduleDTO k1105 = buildMachine("K1105", dateTime(2026, 6, 14, 6, 0));
         strategy.scheduleNewSpecs(context, singletonMachineMatch(k1105),
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
         assertEquals(0, context.getScheduleResultList().size(),
-                "仅历史欠产且前日已有完成量时，本次新增排产应跳过该SKU");
+                "仅历史欠产且最近一次非空完成量大于0时，本次新增排产应跳过该SKU");
         assertTrue(context.getNewSpecSkuList().isEmpty(), "跳过后应从新增待排队列移除");
         assertEquals(1, context.getUnscheduledResultList().size(), "跳过补排时应写入未排结果");
         assertEquals(sku.getMaterialCode(), context.getUnscheduledResultList().get(0).getMaterialCode());
         assertEquals(Integer.valueOf(64), context.getUnscheduledResultList().get(0).getUnscheduledQty());
-        assertEquals("仅历史欠产、后续无月计划，且前日已有完成量，本次跳过补排",
+        assertEquals("仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排",
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    @Test
+    void resolveLatestPreviousFinishedQty_shouldStopAtLatestZeroValue() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(dateTime(2026, 6, 14, 0, 0));
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302001139_2026-06-12", 64);
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302001139_2026-06-13", 0);
+
+        Integer latestFinishedQty = ReflectionTestUtils.invokeMethod(strategy,
+                "resolveLatestPreviousFinishedQty", context, "3302001139");
+
+        assertEquals(Integer.valueOf(0), latestFinishedQty,
+                "最近一次非空完成量为0时必须停止回溯，不能继续取更早的大于0记录");
+    }
+
+    @Test
+    void resolveLatestPreviousFinishedQty_shouldNotUsePreviousMonthValue() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(dateTime(2026, 6, 1, 0, 0));
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302001139_2026-05-31", 64);
+
+        Integer latestFinishedQty = ReflectionTestUtils.invokeMethod(strategy,
+                "resolveLatestPreviousFinishedQty", context, "3302001139");
+
+        assertNull(latestFinishedQty, "最近一次完成量只能在当前月月初至T-1范围内查找");
     }
 
     @Test

@@ -240,6 +240,47 @@ public class LhBaseDataServiceImplTest {
     }
 
     /**
+     * 用例说明：本月逐日完成量Map必须排除NULL并保留0，确保最近一次完成量判断能区分空值与零值。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldExcludeNullAndKeepZeroMonthDailyFinishedQty() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(buildDate(2026, 6, 14));
+        context.setScheduleTargetDate(buildDate(2026, 6, 14));
+
+        FactoryMonthPlanProductionFinalResult monthPlan = new FactoryMonthPlanProductionFinalResult();
+        monthPlan.setMaterialCode("3302001139");
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper =
+                mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any()))
+                .thenReturn(Collections.singletonList(monthPlan));
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        LhDayFinishQty nullFinishQty = buildDayFinishQty("3302001139", 2026, 6, 11, null);
+        LhDayFinishQty zeroFinishQty = buildDayFinishQty("3302001139", 2026, 6, 12, BigDecimal.ZERO);
+        LhDayFinishQty positiveFinishQty = buildDayFinishQty(
+                "3302001139", 2026, 6, 13, BigDecimal.valueOf(32));
+        LhDayFinishQtyMapper dayFinishQtyMapper = mockMapper(LhDayFinishQtyMapper.class);
+        Mockito.when(dayFinishQtyMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Arrays.asList(nullFinishQty, zeroFinishQty, positiveFinishQty),
+                Collections.emptyList());
+        injectField(service, "lhDayFinishQtyMapper", dayFinishQtyMapper);
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertFalse(context.getMaterialMonthDailyFinishedQtyMap()
+                .containsKey("3302001139_2026-06-11"), "NULL完成量不能写入本月逐日完成量Map");
+        Assertions.assertEquals(Integer.valueOf(0), context.getMaterialMonthDailyFinishedQtyMap()
+                .get("3302001139_2026-06-12"), "0是有效最近数据，必须保留日期键");
+        Assertions.assertEquals(Integer.valueOf(32), context.getMaterialMonthDailyFinishedQtyMap()
+                .get("3302001139_2026-06-13"), "正数完成量应按日期正常聚合");
+    }
+
+    /**
      * 用例说明：SKU与模具关系应在月计划加载后按本次月计划SKU范围查询，模具台账应在关系加载后按关联模具号范围查询。
      *
      * @throws Exception 反射注入异常
@@ -484,6 +525,15 @@ public class LhBaseDataServiceImplTest {
         calendar.set(Calendar.MONTH, month - 1);
         calendar.set(Calendar.DAY_OF_MONTH, day);
         return calendar.getTime();
+    }
+
+    private LhDayFinishQty buildDayFinishQty(String materialCode, int year, int month,
+                                             int day, BigDecimal finishedQty) {
+        LhDayFinishQty result = new LhDayFinishQty();
+        result.setMaterialCode(materialCode);
+        result.setFinishDate(buildDate(year, month, day));
+        result.setDayFinishQty(finishedQty);
+        return result;
     }
 
     private void injectField(Object target, String fieldName, Object value) throws Exception {

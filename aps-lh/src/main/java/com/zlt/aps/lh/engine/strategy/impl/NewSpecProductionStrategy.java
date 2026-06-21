@@ -114,7 +114,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String AUTO_DATA_SOURCE = "0";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
     private static final String HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON =
-            "仅历史欠产、后续无月计划，且前日已有完成量，本次跳过补排";
+            "仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
@@ -389,20 +389,20 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             boolean currentSkuRemoved = false;
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
-            int previousDayFinishedQty = resolvePreviousDayFinishedQty(context, sku.getMaterialCode());
-            if (shouldSkipHistoryShortageOnlyPreviousProducedSku(context, sku,
-                    previousDayFinishedQty)) {
+            Integer latestPreviousFinishedQty = resolveLatestPreviousFinishedQty(context, sku.getMaterialCode());
+            if (shouldSkipHistoryShortageOnlyRecentlyProducedSku(context, sku,
+                    latestPreviousFinishedQty)) {
                 int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
                 addUnscheduledResult(context, sku, historyShortageQty,
                         HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON,
                         unscheduledReasonCountMap);
                 removeCurrentNewSpecSku(context, iterator, sku);
                 progressed = true;
-                log.info("新增SKU仅历史欠产且前日已有生产记录，本次跳过补排, materialCode: {}, "
-                                + "historyShortageQty: {}, scheduleDate: {}, previousDayFinishedQty: {}, reason: {}",
+                log.info("新增SKU仅历史欠产且最近一次已有完成量，本次跳过不排, materialCode: {}, "
+                                + "historyShortageQty: {}, scheduleDate: {}, latestPreviousFinishedQty: {}, reason: {}",
                         sku.getMaterialCode(), historyShortageQty,
                         LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
-                        previousDayFinishedQty,
+                        latestPreviousFinishedQty,
                         HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON);
                 continue;
             }
@@ -927,16 +927,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     /**
      * 判断仅历史欠产且后续无计划的SKU是否需要跳过本轮新增补排。
      * <p>该规则只限制非续作补偿的新增SKU；窗口 dayN 与月底后续计划均为0，
-     * 且前日日完成量大于0时，避免本轮重复补排历史欠产。</p>
+     * 且当前月最近一次非空日完成量大于0时，避免本轮重复补排历史欠产。</p>
      *
      * @param context 排程上下文
      * @param sku 新增排产SKU
-     * @param previousDayFinishedQty 前日日完成量
+     * @param latestPreviousFinishedQty 当前月最近一次非空日完成量
      * @return true-跳过本轮新增补排；false-继续原新增排产逻辑
      */
-    private boolean shouldSkipHistoryShortageOnlyPreviousProducedSku(LhScheduleContext context,
+    private boolean shouldSkipHistoryShortageOnlyRecentlyProducedSku(LhScheduleContext context,
                                                                      SkuScheduleDTO sku,
-                                                                     int previousDayFinishedQty) {
+                                                                     Integer latestPreviousFinishedQty) {
         if (Objects.isNull(context) || Objects.isNull(sku)
                 || sku.isContinuousCompensationSku()) {
             return false;
@@ -947,8 +947,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (!isWindowDayPlanEmpty(sku) || Math.max(0, sku.getFutureMonthPlanQtyAfterWindow()) > 0) {
             return false;
         }
-        // 仅以T日前日完成量判断是否已生产过
-        return previousDayFinishedQty > 0;
+        // 仅以当前月最近一次非空日完成量判断是否已生产过，0是有效最近数据但不触发跳过。
+        return Objects.nonNull(latestPreviousFinishedQty) && latestPreviousFinishedQty > 0;
     }
 
     /**
@@ -970,32 +970,30 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 解析当前排程日T前一日的日完成量。
+     * 解析当前月月初至排程日T-1最近一次非空日完成量。
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
-     * @return 前日日完成量，无记录时返回0
+     * @return 最近一次非空日完成量；当前月无有效记录时返回null
      */
-    private int resolvePreviousDayFinishedQty(LhScheduleContext context, String materialCode) {
+    private Integer resolveLatestPreviousFinishedQty(LhScheduleContext context, String materialCode) {
         if (Objects.isNull(context) || Objects.isNull(context.getScheduleDate())
-                || StringUtils.isEmpty(materialCode)) {
-            return 0;
+                || StringUtils.isEmpty(materialCode)
+                || CollectionUtils.isEmpty(context.getMaterialMonthDailyFinishedQtyMap())) {
+            return null;
         }
-        Date previousDay = LhScheduleTimeUtil.clearTime(LhScheduleTimeUtil.addDays(context.getScheduleDate(), -1));
-        Integer finishedQty = context.getMaterialDayFinishedQtyMap()
-                .get(buildMaterialDayKey(materialCode, previousDay));
-        return Objects.nonNull(finishedQty) ? Math.max(finishedQty, 0) : 0;
-    }
-
-    /**
-     * 构建物料日完成量聚合Key。
-     *
-     * @param materialCode 物料编码
-     * @param finishDate 完成日期
-     * @return 聚合Key
-     */
-    private String buildMaterialDayKey(String materialCode, Date finishDate) {
-        return materialCode + "_" + LhScheduleTimeUtil.formatDate(LhScheduleTimeUtil.clearTime(finishDate));
+        LocalDate scheduleDate = context.getScheduleDate().toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        LocalDate monthStart = scheduleDate.withDayOfMonth(1);
+        for (LocalDate finishDate = scheduleDate.minusDays(1);
+             !finishDate.isBefore(monthStart); finishDate = finishDate.minusDays(1)) {
+            Integer finishedQty = context.getMaterialMonthDailyFinishedQtyMap()
+                    .get(materialCode + "_" + finishDate);
+            if (Objects.nonNull(finishedQty)) {
+                return Math.max(finishedQty, 0);
+            }
+        }
+        return null;
     }
 
     /**

@@ -1324,11 +1324,14 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         finishQty.getMaterialCode(),
                         resolveDayFinishedQty(finishQty),
                         Integer::sum);
-                materialMonthDailyFinishedQtyMap.merge(
-                        buildMaterialDayKey(finishQty.getMaterialCode(),
-                                LhScheduleTimeUtil.clearTime(finishQty.getFinishDate())),
-                        resolveDayFinishedQty(finishQty),
-                        Integer::sum);
+                // 逐日Map仅保留完成量非空的日期；0是有效数据，供“最近一次完成量”判断停止回溯。
+                if (Objects.nonNull(finishQty.getDayFinishQty())) {
+                    materialMonthDailyFinishedQtyMap.merge(
+                            buildMaterialDayKey(finishQty.getMaterialCode(),
+                                    LhScheduleTimeUtil.clearTime(finishQty.getFinishDate())),
+                            resolveDayFinishedQty(finishQty),
+                            Integer::sum);
+                }
             }
         }
 
