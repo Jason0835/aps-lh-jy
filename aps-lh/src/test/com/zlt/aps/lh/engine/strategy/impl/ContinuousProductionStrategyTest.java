@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
@@ -18,6 +19,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -1672,6 +1674,47 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
+    public void scheduleReduceMould_shouldKeepDynamicEndingQtyWhenWindowAndFuturePlanEmpty()
+            throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildWindowNoPlanContinuousContext();
+        SkuScheduleDTO sku = context.getContinuousSkuList().get(0);
+        sku.setMaterialCode("3302002182");
+        sku.setTargetScheduleQty(144);
+        sku.setPendingQty(144);
+        sku.setSurplusQty(83);
+        sku.setEmbryoStock(33);
+        sku.setShiftCapacity(18);
+        sku.setMouldQty(2);
+        sku.setMonthlyHistoryShortageQty(17);
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get("K1712");
+        machine.setMaxMoldNum(2);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002182");
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(52);
+        context.getSkuLhCapacityMap().put("3302002182", capacity);
+
+        strategy.scheduleContinuousEnding(context);
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag(),
+                "窗口及月底均无计划的动态收尾必须同步统一收尾标签");
+        assertEquals(1, sku.getEndingDaysRemaining(),
+                "动态收尾应按当前窗口可完成口径标记剩余一天");
+        assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(84, ShiftFieldUtil.resolveScheduledQty(result),
+                "余量83在双模机台应按既有模数规则排成84，不能回裁为历史欠产17");
+        assertEquals("1", result.getIsEnd(), "完整排完动态收尾目标后结果必须标记收尾");
+        assertTrue(result.getClass2PlanQty() > 0,
+                "动态收尾必须跨多个班次排产，不能只保留C1");
+    }
+
+    @Test
     public void scheduleReduceMould_shouldAppendCompensationAfterFirstDayNoPlanRelease()
             throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
@@ -1723,6 +1766,8 @@ public class ContinuousProductionStrategyTest {
         assertEquals("0", result.getIsEnd(), "月底仍有后续计划时不能把SKU判定为整体收尾");
         assertTrue(sku.isStrictNewSpecShortageOnly(), "仅补历史欠产场景必须启用严格目标量");
         assertTrue(result.getDailyPlanQty() <= 40, "仅补本月欠产时不允许提前消耗T+3以后计划");
+        assertTrue(!StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag()),
+                "月底仍有计划的仅补欠产场景不能误标为收尾");
     }
 
     @Test
