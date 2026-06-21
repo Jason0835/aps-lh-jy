@@ -574,9 +574,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 int switchDurationHours = maintenanceOverlapSwitch
                         ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                         : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
-                switchReadyTime = alignAddedMachineSwitchReadyTime(
-                        sku, switchReadyTime, shifts, totalScheduledQty,
-                        currentAddMachineProductionDate, switchDurationHours);
+                if (totalScheduledQty > 0) {
+                    switchReadyTime = alignAddedMachineSwitchReadyTime(
+                            sku, switchReadyTime, shifts, totalScheduledQty,
+                            currentAddMachineProductionDate);
+                } else {
+                    switchReadyTime = alignFirstMachineSwitchReadyTimeByDailyPlan(
+                            context, sku, switchReadyTime, shifts, isEnding);
+                }
                 mouldChangeStartTime = allocateNewSpecMouldChangeStartTime(
                         context, sku, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
                 if (mouldChangeStartTime == null) {
@@ -2953,6 +2958,59 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 首台机台首日无可用日计划额度时，将换模就绪时间推进到首个可承接生产日内的允许换模班次。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param switchReadyTime 当前换模就绪时间
+     * @param shifts 排程窗口班次
+     * @param isEnding 是否收尾
+     * @return 调整后的换模就绪时间
+     */
+    private Date alignFirstMachineSwitchReadyTimeByDailyPlan(LhScheduleContext context,
+                                                             SkuScheduleDTO sku,
+                                                             Date switchReadyTime,
+                                                             List<LhShiftConfigVO> shifts,
+                                                             boolean isEnding) {
+        if (Objects.isNull(sku) || Objects.isNull(switchReadyTime)
+                || isEnding || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return switchReadyTime;
+        }
+        LocalDate productionDate = resolveProductionWorkDate(shifts, switchReadyTime);
+        if (Objects.isNull(productionDate)) {
+            return switchReadyTime;
+        }
+        SkuDailyPlanQuotaDTO currentQuota = sku.getDailyPlanQuotaMap().get(productionDate);
+        if (hasSchedulableDailyPlanQuota(sku, currentQuota)) {
+            return switchReadyTime;
+        }
+        LocalDate nextPlanDate = resolveNextPositiveDailyPlanDate(
+                sku, sku.getDailyPlanQuotaMap(), productionDate, resolveScheduleTargetLocalDate(context));
+        if (Objects.isNull(nextPlanDate)) {
+            return switchReadyTime;
+        }
+        if (!sku.isContinuousCompensationSku()) {
+            EarlyProductionDecision earlyProductionDecision = resolveEarlyProductionDecision(
+                    context, sku, switchReadyTime, isEnding);
+            if (Objects.nonNull(earlyProductionDecision) && earlyProductionDecision.isAllowed()) {
+                return switchReadyTime;
+            }
+        } else if (!shouldDelayFirstProductionForNoPlanDate(sku, switchReadyTime, isEnding)) {
+            return switchReadyTime;
+        }
+        Date nextSwitchReadyTime = resolveFirstAllowMouldChangeShiftStartTime(shifts, nextPlanDate);
+        if (Objects.isNull(nextSwitchReadyTime) || !nextSwitchReadyTime.after(switchReadyTime)) {
+            return switchReadyTime;
+        }
+        log.info("新增SKU首台换模日期按上机日顺延, materialCode: {}, fromProductionDate: {}, "
+                        + "toProductionDate: {}, fromSwitchReadyTime: {}, toSwitchReadyTime: {}",
+                sku.getMaterialCode(), productionDate, nextPlanDate,
+                LhScheduleTimeUtil.formatDateTime(switchReadyTime),
+                LhScheduleTimeUtil.formatDateTime(nextSwitchReadyTime));
+        return nextSwitchReadyTime;
+    }
+
+    /**
      * 将后续新增机台的首个可排时间推进到dayN模拟确定的增机业务日。
      *
      * @param sku SKU
@@ -2984,36 +3042,32 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 将后续新增机台的换模就绪时间推进到增机业务日前一个完整换模周期。
+     * 将后续新增机台的换模就绪时间推进到增机业务日内首个允许换模班次。
      *
      * @param sku SKU
      * @param switchReadyTime 当前换模就绪时间
      * @param shifts 排程窗口班次
      * @param totalScheduledQty 当前SKU累计已排量
      * @param addMachineProductionDate 首次需要增机的业务日期
-     * @param switchDurationHours 换模总时长
      * @return 调整后的换模就绪时间
      */
     private Date alignAddedMachineSwitchReadyTime(SkuScheduleDTO sku,
                                                   Date switchReadyTime,
                                                   List<LhShiftConfigVO> shifts,
                                                   int totalScheduledQty,
-                                                  LocalDate addMachineProductionDate,
-                                                  int switchDurationHours) {
+                                                  LocalDate addMachineProductionDate) {
         if (Objects.isNull(switchReadyTime) || totalScheduledQty <= 0
-                || Objects.isNull(addMachineProductionDate) || switchDurationHours <= 0) {
+                || Objects.isNull(addMachineProductionDate)) {
             return switchReadyTime;
         }
-        Date addMachineStartTime = resolveFirstShiftStartTime(shifts, addMachineProductionDate);
-        if (Objects.isNull(addMachineStartTime)) {
+        Date addMachineSwitchReadyTime = resolveFirstAllowMouldChangeShiftStartTime(shifts, addMachineProductionDate);
+        if (Objects.isNull(addMachineSwitchReadyTime)) {
             return switchReadyTime;
         }
-        Date addMachineSwitchReadyTime = LhScheduleTimeUtil.addHours(
-                addMachineStartTime, -switchDurationHours);
         if (!addMachineSwitchReadyTime.after(switchReadyTime)) {
             return switchReadyTime;
         }
-        log.info("新增SKU增机换模日期顺延, materialCode: {}, addMachineProductionDate: {}, "
+        log.info("新增SKU增机换模日期按增机日顺延, materialCode: {}, addMachineProductionDate: {}, "
                         + "fromSwitchReadyTime: {}, toSwitchReadyTime: {}",
                 Objects.isNull(sku) ? null : sku.getMaterialCode(), addMachineProductionDate,
                 LhScheduleTimeUtil.formatDateTime(switchReadyTime),
@@ -3135,6 +3189,31 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         for (LhShiftConfigVO shift : shifts) {
             if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
                     || Objects.isNull(shift.getWorkDate())) {
+                continue;
+            }
+            LocalDate shiftWorkDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            if (productionDate.equals(shiftWorkDate)) {
+                return shift.getShiftStartDateTime();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 解析指定业务日内首个允许换模的班次开始时间。
+     *
+     * @param shifts 排程窗口班次
+     * @param productionDate 业务日期
+     * @return 首个允许换模班次开始时间
+     */
+    private Date resolveFirstAllowMouldChangeShiftStartTime(List<LhShiftConfigVO> shifts,
+                                                            LocalDate productionDate) {
+        if (CollectionUtils.isEmpty(shifts) || Objects.isNull(productionDate)) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
+                    || Objects.isNull(shift.getWorkDate()) || !shift.isAllowMouldChange()) {
                 continue;
             }
             LocalDate shiftWorkDate = shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();

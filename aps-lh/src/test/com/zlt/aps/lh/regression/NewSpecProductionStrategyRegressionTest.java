@@ -3448,7 +3448,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldApplyDailyStandardQtyAndStartAddedMachineOnExpansionDate() throws Exception {
+    void scheduleNewSpecs_shouldApplyDailyStandardQtyAndSwitchAddedMachineOnExpansionDate() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
 
@@ -3504,9 +3504,12 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(14, resolveShiftQty(primaryResult, 5), "T+1中班应承担日标准产量余量14");
         assertEquals(14, resolveShiftQty(primaryResult, 8), "T+2中班应承担日标准产量余量14");
         assertEquals(0, resolveShiftQty(addedResult, 1), "第二台应在T+1增机，T日早班不得生产");
-        assertEquals(4, resolveShiftQty(addedResult, 2), "换模完成落在C2结束临界点，首检4应归属C2");
-        assertEquals(16, resolveShiftQty(addedResult, 3), "第二台正常生产仍应从T+1的C3开始");
-        assertEquals(14, resolveShiftQty(addedResult, 5), "第二台T+1中班也应承担日标准产量余量14");
+        assertEquals(0, resolveShiftQty(addedResult, 2), "第二台应在T+1增机，T日中班不得提前换模首检");
+        assertEquals(0, resolveShiftQty(addedResult, 3), "T+1晚班不可换模，第二台不得在C3换模或生产");
+        assertEquals(dateTime(2026, 6, 2, 6, 0), addedResult.getMouldChangeStartTime(),
+                "哪一天增机台，就应在那一天允许换模的首个班次开始换模");
+        assertEquals(4, resolveShiftQty(addedResult, 4), "换模完成落在C4结束临界点，首检4应归属C4");
+        assertEquals(16, resolveShiftQty(addedResult, 5), "第二台正常生产应从C5开始");
     }
 
     @Test
@@ -3547,7 +3550,11 @@ class NewSpecProductionStrategyRegressionTest {
         LhScheduleResult result = context.getScheduleResultList().get(0);
         assertEquals(0, resolveShiftQty(result, 1), "首日日计划为0时，不应落早班");
         assertEquals(0, resolveShiftQty(result, 2), "首日日计划为0时，不应落中班");
-        assertTrue(resolveShiftQty(result, 3) > 0, "应从第二个生产日首个班次开始排产");
+        assertEquals(0, resolveShiftQty(result, 3), "第二个生产日首个班次为晚班时，不应提前换模或生产");
+        assertEquals(dateTime(2026, 4, 2, 6, 0), result.getMouldChangeStartTime(),
+                "哪一天上机，就应在那一天允许换模的首个班次开始换模");
+        assertEquals(4, resolveShiftQty(result, 4), "换模完成落在C4结束临界点，首检4应归属C4");
+        assertTrue(resolveShiftQty(result, 5) > 0, "首台正常生产应从C5开始");
     }
 
     @Test
