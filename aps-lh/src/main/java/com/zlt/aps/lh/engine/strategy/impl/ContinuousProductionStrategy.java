@@ -2497,7 +2497,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             capResultShiftQtyToTarget(context, result, shifts, nextQty);
             overQty -= currentQty - ShiftFieldUtil.resolveScheduledQty(result);
         }
-        log.info("续作多机台严格收尾最终收口, materialCode: {}, 目标量: {}, 原总量: {}, "
+        log.info("续作严格收尾最终收口, materialCode: {}, 目标量: {}, 原总量: {}, "
                         + "收口后总量: {}, 机台列表: {}",
                 sourceSku.getMaterialCode(), targetQty, totalPlanQty,
                 skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum(),
