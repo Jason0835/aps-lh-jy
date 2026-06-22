@@ -12,6 +12,7 @@
 /.kiro/
 /.claude/
 /.trae/
+/.worktrees/
 # 日志目录
 log/
 # 启动日志
