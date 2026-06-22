@@ -691,6 +691,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int inheritedPlanQty = Math.max(0, context.getInheritedPlanQtyMap().getOrDefault(plan.getMaterialCode(), 0));
         dto.setWindowPlanQty(windowPlanQty);
         dto.setMonthlyHistoryShortageQty(Math.max(0, rawCarryForwardQty));
+        dto.setEffectiveLastMonthOverdueQty(surplus.getLastMonthOverdueQty());
         dto.setEffectiveCarryForwardQty(Math.max(0, carryForwardQty));
         dto.setScheduleDayFinishQty(Math.max(0, scheDayFinishQty));
         dto.setFutureMonthPlanQtyAfterWindow(resolveFutureMonthPlanQtyAfterWindow(context, plan));
@@ -1821,6 +1822,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         copy.setWindowRemainingPlanQty(source.getWindowRemainingPlanQty());
         copy.setShiftFillOverQty(source.getShiftFillOverQty());
         copy.setMonthlyHistoryShortageQty(source.getMonthlyHistoryShortageQty());
+        copy.setEffectiveLastMonthOverdueQty(source.getEffectiveLastMonthOverdueQty());
         copy.setEffectiveCarryForwardQty(source.getEffectiveCarryForwardQty());
         copy.setScheduleDayFinishQty(source.getScheduleDayFinishQty());
         copy.setFutureMonthPlanQtyAfterWindow(source.getFutureMonthPlanQtyAfterWindow());

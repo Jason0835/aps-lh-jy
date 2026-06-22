@@ -107,6 +107,17 @@ class ContinuousSkuAssignmentRegressionTest {
         assertEquals(0, context.getNewSpecSkuList().size());
     }
 
+    @Test
+    void copySkuForContinuousMachine_shouldKeepEffectiveLastMonthOverdueQty() {
+        SkuScheduleDTO source = buildSku("3302002637", "285/70R19.5");
+        source.setEffectiveLastMonthOverdueQty(18);
+
+        SkuScheduleDTO copy = ReflectionTestUtils.invokeMethod(
+                handler, "copySkuForContinuousMachine", source, "K2010");
+
+        assertEquals(18, copy.getEffectiveLastMonthOverdueQty());
+    }
+
     private LhMachineOnlineInfo buildOnlineInfo(String machineCode, String materialCode) {
         LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
         onlineInfo.setLhCode(machineCode);

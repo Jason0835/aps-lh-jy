@@ -146,6 +146,9 @@ public class SkuScheduleDTO {
     /** 当前排程月份内、早于T日的历史欠产量，仅正向欠产进入新增排产判断 */
     private int monthlyHistoryShortageQty;
 
+    /** 有效上月超欠产量；正数为欠产，负数为超产，仅用于本轮排产准入判断 */
+    private int effectiveLastMonthOverdueQty;
+
     /** 已在初始化阶段实际追加到账本的本月历史欠产量 */
     private int effectiveCarryForwardQty;
 
