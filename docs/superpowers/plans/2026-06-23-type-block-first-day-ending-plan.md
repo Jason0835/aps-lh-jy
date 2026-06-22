@@ -121,9 +121,6 @@ void scheduleTypeBlockChange_shouldSkipReleasedAndFallbackMachinesEndingAfterFir
     putMouldRel(context, "MAT-T1", "MOULD-1");
     putMouldRel(context, "MAT-T2", "MOULD-2");
 
-    when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-    when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
-
     typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
     assertEquals(0, context.getScheduleResultList().size());

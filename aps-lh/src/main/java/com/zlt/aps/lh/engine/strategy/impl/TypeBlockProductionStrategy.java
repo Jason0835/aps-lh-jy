@@ -155,8 +155,6 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             candidateMachines.add(releasedMachine);
             String triggerSource = resolveReleasedTypeBlockTriggerSource(context, machineCode);
             machineTriggerSourceMap.put(machineCode, triggerSource);
-            log.info("续作释放机台进入换活字块匹配, machineCode: {}, currentMaterialCode: {}, triggerSource: {}",
-                    machineCode, releasedMachine.getCurrentMaterialCode(), triggerSource);
         }
 
         List<MachineScheduleDTO> fallbackMachines = resolveTypeBlockFallbackMachines(context);
@@ -168,6 +166,16 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             }
             candidateMachines.add(fallbackMachine);
             machineTriggerSourceMap.put(machineCode, TYPE_BLOCK_TRIGGER_FALLBACK);
+        }
+        // 换活字块仅处理最新收尾时间落在第一天 T 日的机台，其他机台保留给 S4.5 新增排产。
+        candidateMachines = filterFirstDayEndingMachines(context, candidateMachines);
+        for (MachineScheduleDTO candidateMachine : candidateMachines) {
+            String triggerSource = machineTriggerSourceMap.get(candidateMachine.getMachineCode());
+            if (StringUtils.equals(TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE, triggerSource)
+                    || StringUtils.equals(TYPE_BLOCK_TRIGGER_SMALL_ENDING_SURPLUS_RELEASE, triggerSource)) {
+                log.info("续作释放机台进入换活字块匹配, machineCode: {}, currentMaterialCode: {}, triggerSource: {}",
+                        candidateMachine.getMachineCode(), candidateMachine.getCurrentMaterialCode(), triggerSource);
+            }
         }
         traceEndingMachineOrder(context, candidateMachines, machineTriggerSourceMap);
         log.info("换活字块候选机台准备完成, 收尾机台: {}, 续作释放机台: {}, 兜底机台: {}, 候选机台: {}, 待排新增SKU: {}",
@@ -181,7 +189,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         int typeBlockScheduledCount = 0;
         while (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
             List<MachineScheduleDTO> activeMachines = buildActiveMachineList(
-                    candidateMachines, machineTriggerSourceMap, completedMachineMap);
+                    context, candidateMachines, machineTriggerSourceMap, completedMachineMap);
             if (CollectionUtils.isEmpty(activeMachines)) {
                 log.warn("换活字块无可继续尝试机台, 待排新增SKU: {}, 已完成机台: {}",
                         context.getNewSpecSkuList().size(), completedMachineMap.size());
@@ -301,14 +309,68 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
+     * 过滤只允许在排程窗口第一天 T 日收尾的换活字块机台。
+     *
+     * @param context 排程上下文
+     * @param candidateMachines 原候选机台
+     * @return T 日收尾候选机台
+     */
+    private List<MachineScheduleDTO> filterFirstDayEndingMachines(
+            LhScheduleContext context, List<MachineScheduleDTO> candidateMachines) {
+        if (CollectionUtils.isEmpty(candidateMachines)) {
+            return new ArrayList<MachineScheduleDTO>(0);
+        }
+        List<MachineScheduleDTO> firstDayMachines = new ArrayList<>(candidateMachines.size());
+        List<String> skippedMachineSummaries = new ArrayList<>(candidateMachines.size());
+        for (MachineScheduleDTO machine : candidateMachines) {
+            if (isFirstDayEndingMachine(context, machine)) {
+                firstDayMachines.add(machine);
+                continue;
+            }
+            skippedMachineSummaries.add(String.format("%s@%s",
+                    machine == null ? "-" : machine.getMachineCode(),
+                    machine == null ? "-" : LhScheduleTimeUtil.formatDateTime(machine.getEstimatedEndTime())));
+        }
+        if (!CollectionUtils.isEmpty(skippedMachineSummaries)) {
+            log.info("非T日收尾机台跳过换活字块, T日: {}, 过滤前候选: {}, 跳过机台数: {}, 跳过明细: {}",
+                    LhScheduleTimeUtil.formatDate(context.getScheduleDate()), candidateMachines.size(),
+                    skippedMachineSummaries.size(), String.join(",", skippedMachineSummaries));
+        }
+        return firstDayMachines;
+    }
+
+    /**
+     * 判断机台最新预计收尾时间是否落在排程窗口第一天 T 日。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @return true-T 日收尾，false-非 T 日收尾
+     */
+    private boolean isFirstDayEndingMachine(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (Objects.isNull(context)
+                || Objects.isNull(context.getScheduleDate())
+                || Objects.isNull(machine)
+                || Objects.isNull(machine.getEstimatedEndTime())) {
+            return false;
+        }
+        LocalDate firstDay = context.getScheduleDate().toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        LocalDate endingDay = machine.getEstimatedEndTime().toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        return firstDay.equals(endingDay);
+    }
+
+    /**
      * 构建本轮可尝试的机台列表。
      *
+     * @param context 排程上下文
      * @param candidateMachines 候选机台
      * @param machineTriggerSourceMap 机台触发来源
      * @param completedMachineMap 已完成机台
      * @return 可尝试机台
      */
-    private List<MachineScheduleDTO> buildActiveMachineList(List<MachineScheduleDTO> candidateMachines,
+    private List<MachineScheduleDTO> buildActiveMachineList(LhScheduleContext context,
+                                                            List<MachineScheduleDTO> candidateMachines,
                                                             Map<String, String> machineTriggerSourceMap,
                                                             Map<String, Boolean> completedMachineMap) {
         List<MachineScheduleDTO> activeMachines = new ArrayList<>(candidateMachines.size());
@@ -318,6 +380,13 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             }
             String machineCode = machine.getMachineCode();
             if (Boolean.TRUE.equals(completedMachineMap.get(machineCode))) {
+                continue;
+            }
+            if (!isFirstDayEndingMachine(context, machine)) {
+                completedMachineMap.put(machineCode, true);
+                log.info("机台最新收尾时间已不在T日，停止换活字块并交由新增排产, machineCode: {}, estimatedEndTime: {}, T日: {}",
+                        machineCode, LhScheduleTimeUtil.formatDateTime(machine.getEstimatedEndTime()),
+                        LhScheduleTimeUtil.formatDate(context.getScheduleDate()));
                 continue;
             }
             String triggerSource = machineTriggerSourceMap.get(machineCode);
