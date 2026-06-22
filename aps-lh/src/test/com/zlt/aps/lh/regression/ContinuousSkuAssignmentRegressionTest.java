@@ -121,14 +121,14 @@ class ContinuousSkuAssignmentRegressionTest {
     }
 
     @Test
-    void classifyContinuousAndNewSkus_shouldWriteUnscheduledWhenOnlyFuturePlanExists() {
+    void classifyContinuousAndNewSkus_shouldWriteUnscheduledWhenOnlyFuturePlanExistsEvenWithLastMonthShortage() {
         LhScheduleContext context = buildClassificationContext();
         SkuScheduleDTO sku = buildSku("3302002637", "285/70R19.5");
         sku.setEmbryoCode("EMBRYO-2637");
         sku.setWindowPlanQty(0);
         sku.setFutureMonthPlanQtyAfterWindow(62);
         sku.setMonthlyHistoryShortageQty(0);
-        sku.setEffectiveLastMonthOverdueQty(0);
+        sku.setEffectiveLastMonthOverdueQty(1);
         sku.setSurplusQty(276);
         sku.setTargetScheduleQty(144);
         context.getStructureSkuMap().put(sku.getStructureName(),
@@ -141,7 +141,7 @@ class ContinuousSkuAssignmentRegressionTest {
         assertEquals(0, context.getNewSpecSkuList().size());
         assertEquals(1, context.getUnscheduledResultList().size());
         assertEquals(0, context.getUnscheduledResultList().get(0).getUnscheduledQty().intValue());
-        assertEquals("T～T+2窗口无日计划且无欠产，窗口后仍有月计划，本次不排产",
+        assertEquals("当前排程窗口无日计划，后续远期有计划，禁止提前消耗未来计划",
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
         assertTrue(context.getStructureSkuMap().isEmpty());
         assertTrue(context.getActiveEmbryoSkuMap().isEmpty());
@@ -151,11 +151,6 @@ class ContinuousSkuAssignmentRegressionTest {
     @Test
     void classifyContinuousAndNewSkus_shouldKeepNewSkuWhenCurrentMonthShortageExists() {
         assertWindowNoPlanSkuKeptAsNew(10, 0, 62, 0);
-    }
-
-    @Test
-    void classifyContinuousAndNewSkus_shouldKeepNewSkuWhenLastMonthShortageExists() {
-        assertWindowNoPlanSkuKeptAsNew(0, 10, 62, 0);
     }
 
     @Test

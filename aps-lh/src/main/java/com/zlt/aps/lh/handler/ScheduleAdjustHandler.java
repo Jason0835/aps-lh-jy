@@ -82,9 +82,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /** 共用胎胚余量为0未排提示 */
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
-    /** 窗口无日计划且无欠产来源的新增SKU未排提示 */
+    /** 窗口无日计划且无本月历史欠产的新增SKU未排提示 */
     private static final String WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON =
-            "T～T+2窗口无日计划且无欠产，窗口后仍有月计划，本次不排产";
+            "当前排程窗口无日计划，后续远期有计划，禁止提前消耗未来计划";
     /** 上月超欠产有效标识 */
     private static final String LAST_MONTH_OVERDUE_VALID_FLAG = "1";
     /** 自动排程数据来源 */
@@ -1667,7 +1667,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                 if (StringUtils.equals(ScheduleTypeEnum.CONTINUOUS.getCode(), sku.getScheduleType())) {
                     continue;
                 }
-                // 续作匹配完成后，只拦截没有窗口计划和欠产来源、仅存在窗口后计划的新增SKU。
+                // 续作匹配完成后，拦截窗口无计划、无本月历史欠产且仅存在窗口后计划的新增SKU。
                 if (shouldSkipWindowNoPlanNewSku(sku)) {
                     appendWindowNoPlanNewSkuUnscheduledResult(context, sku);
                     blockedNewSkuList.add(sku);
@@ -1695,7 +1695,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 判断新增SKU是否仅存在排程窗口后的月计划，且当前没有任何欠产来源。
+     * 判断新增SKU是否仅存在排程窗口后的月计划，且当前没有本月历史欠产。
+     * <p>有效上月超欠产已计入硫化余量，但不能作为提前消耗本月远期计划的依据。</p>
      *
      * @param sku SKU排程DTO
      * @return true-本轮不排产，false-继续按新增SKU处理
@@ -1704,12 +1705,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         return Objects.nonNull(sku)
                 && sku.getWindowPlanQty() <= 0
                 && sku.getFutureMonthPlanQtyAfterWindow() > 0
-                && sku.getMonthlyHistoryShortageQty() <= 0
-                && sku.getEffectiveLastMonthOverdueQty() <= 0;
+                && sku.getMonthlyHistoryShortageQty() <= 0;
     }
 
     /**
-     * 追加窗口无计划且无欠产来源的新增SKU未排结果和排程过程日志。
+     * 追加窗口无计划且无本月历史欠产的新增SKU未排结果和排程过程日志。
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
