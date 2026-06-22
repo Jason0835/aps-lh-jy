@@ -165,7 +165,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             sku.setMouldQty(machineMouldQty);
             DailyMachineShortageQuotaPlan shortageQuotaPlan =
                     DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "续作排产");
-            if (shouldReleaseWindowNoPlanContinuousSku(shortageQuotaPlan)) {
+            if (shouldReleaseWindowNoPlanContinuousSku(sku, shortageQuotaPlan)) {
                 // 当前窗口没有日计划时不强行续作占机，释放机台给换活字块/新增；后续有计划的情况会登记为占位/补偿。
                 appendWindowNoPlanContinuousUnscheduledResult(context, sku);
                 registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(), "窗口内无日计划");
@@ -183,8 +183,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
 
+            // 窗口无计划但仍有续作余量时必须先排完，再沿用既有收尾机台释放链。
+            boolean finishWindowNoPlanSurplus =
+                    shouldFinishWindowNoPlanContinuousSurplus(sku, shortageQuotaPlan);
+            if (finishWindowNoPlanSurplus) {
+                applyContinuousWindowNoPlanSurplusStrictTarget(context, sku, shortageQuotaPlan);
+            }
             // SKU收尾判定决定是否严格控量：收尾必须按目标量停，非收尾才允许后续补满可用班次。
-            boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
+            boolean isEnding = finishWindowNoPlanSurplus || endingJudgmentStrategy.isEnding(context, sku);
             if (shortageQuotaPlan.isForceEndingByNoFuturePlan()) {
                 isEnding = true;
                 applyContinuousNoFutureEndingStrictTarget(sku, shortageQuotaPlan);
@@ -1362,13 +1368,56 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     /**
      * 判断窗口无计划续作SKU是否应直接释放机台。
      *
+     * @param sku 续作SKU
      * @param shortageQuotaPlan 欠产账本准备结果
-     * @return true-无本月历史欠产，按原窗口无计划逻辑释放；false-继续排历史欠产或收尾量
+     * @return true-无本月历史欠产且无续作余量，释放机台；false-继续排历史欠产或续作余量
      */
-    private boolean shouldReleaseWindowNoPlanContinuousSku(DailyMachineShortageQuotaPlan shortageQuotaPlan) {
-        return shortageQuotaPlan != null
+    private boolean shouldReleaseWindowNoPlanContinuousSku(
+            SkuScheduleDTO sku, DailyMachineShortageQuotaPlan shortageQuotaPlan) {
+        return Objects.nonNull(sku)
+                && Objects.nonNull(shortageQuotaPlan)
                 && shortageQuotaPlan.isNoWindowPlan()
-                && Math.max(0, shortageQuotaPlan.getHistoryShortageQty()) <= 0;
+                && Math.max(0, shortageQuotaPlan.getHistoryShortageQty()) <= 0
+                && Math.max(0, sku.getSurplusQty()) <= 0;
+    }
+
+    /**
+     * 判断窗口无计划续作SKU是否仍需按硫化余量继续排产。
+     *
+     * @param sku 续作SKU
+     * @param shortageQuotaPlan 欠产账本准备结果
+     * @return true-仍有硫化余量，继续续作并按收尾释放机台；false-沿用原规则
+     */
+    private boolean shouldFinishWindowNoPlanContinuousSurplus(
+            SkuScheduleDTO sku, DailyMachineShortageQuotaPlan shortageQuotaPlan) {
+        return Objects.nonNull(sku)
+                && Objects.nonNull(shortageQuotaPlan)
+                && shortageQuotaPlan.isNoWindowPlan()
+                && Math.max(0, shortageQuotaPlan.getHistoryShortageQty()) <= 0
+                && Math.max(0, sku.getSurplusQty()) > 0;
+    }
+
+    /**
+     * 将窗口无计划但仍有余量的续作SKU同步为严格收尾目标。
+     *
+     * @param context 排程上下文
+     * @param sku 续作SKU
+     * @param shortageQuotaPlan 欠产账本准备结果
+     */
+    private void applyContinuousWindowNoPlanSurplusStrictTarget(
+            LhScheduleContext context, SkuScheduleDTO sku,
+            DailyMachineShortageQuotaPlan shortageQuotaPlan) {
+        sku.setSkuTag(SkuTagEnum.ENDING.getCode());
+        if (sku.getEndingDaysRemaining() <= 0) {
+            sku.setEndingDaysRemaining(1);
+        }
+        // 复用统一收尾目标量和账本同步，避免窗口dayN为0时结果被回裁。
+        int strictTargetQty = getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
+        log.info("续作窗口无日计划但仍有硫化余量，继续按余量严格排产, materialCode: {}, "
+                        + "machineCode: {}, surplusQty: {}, futureMonthPlanQtyAfterWindow: {}, "
+                        + "historyShortageQty: {}, strictTargetQty: {}, result: 继续续作并在排完后释放机台",
+                sku.getMaterialCode(), sku.getContinuousMachineCode(), sku.getSurplusQty(),
+                sku.getFutureMonthPlanQtyAfterWindow(), shortageQuotaPlan.getHistoryShortageQty(), strictTargetQty);
     }
 
     /**

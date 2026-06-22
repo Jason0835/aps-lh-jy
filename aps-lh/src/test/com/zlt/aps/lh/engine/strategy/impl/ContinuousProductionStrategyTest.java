@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -1634,6 +1635,11 @@ public class ContinuousProductionStrategyTest {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
         LhScheduleContext context = buildWindowNoPlanContinuousContext();
+        SkuScheduleDTO sku = context.getContinuousSkuList().get(0);
+        sku.setSurplusQty(0);
+        sku.setPendingQty(0);
+        sku.setTargetScheduleQty(0);
+        sku.setFutureMonthPlanQtyAfterWindow(62);
 
         strategy.scheduleContinuousEnding(context);
 
@@ -1643,6 +1649,53 @@ public class ContinuousProductionStrategyTest {
                 .contains("当前排程窗口内无日计划量"));
         assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1712"),
                 "窗口全无日计划时，应释放续作机台给新增排产，但只作为降优先级标识");
+    }
+
+    @Test
+    public void scheduleContinuousEnding_shouldContinueWhenWindowNoPlanButSurplusExists() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildWindowNoPlanContinuousContext();
+        SkuScheduleDTO sku = context.getContinuousSkuList().get(0);
+        sku.setSurplusQty(80);
+        sku.setPendingQty(80);
+        sku.setTargetScheduleQty(80);
+        sku.setFutureMonthPlanQtyAfterWindow(62);
+
+        strategy.scheduleContinuousEnding(context);
+        strategy.scheduleReduceMould(context);
+
+        assertFalse(context.getScheduleResultList().isEmpty());
+        assertTrue(context.getScheduleResultList().stream()
+                .anyMatch(result -> "3302001077".equals(result.getMaterialCode())
+                        && ShiftFieldUtil.resolveScheduledQty(result) > 0));
+        assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    @Test
+    public void scheduleContinuousEnding_shouldExposeMachineAfterSurplusFinished() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildWindowNoPlanContinuousContext();
+        SkuScheduleDTO sku = context.getContinuousSkuList().get(0);
+        sku.setSurplusQty(20);
+        sku.setPendingQty(20);
+        sku.setTargetScheduleQty(20);
+        sku.setFutureMonthPlanQtyAfterWindow(62);
+
+        strategy.scheduleContinuousEnding(context);
+        strategy.scheduleReduceMould(context);
+
+        assertFalse(context.getScheduleResultList().isEmpty(), "有余量的续作必须生成排产结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get("K1712");
+        assertEquals("1", result.getIsEnd());
+        assertTrue(machine.isEnding());
+        assertEquals(result.getSpecEndTime(), machine.getEstimatedEndTime());
     }
 
     @Test
