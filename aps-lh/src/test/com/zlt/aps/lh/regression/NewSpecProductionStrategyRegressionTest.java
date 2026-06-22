@@ -1044,56 +1044,6 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldSkipTrialConstructionStageWithoutTrialFlagWhenNoSchedulableDay() throws Exception {
-        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
-        injectDependencies(strategy, false);
-        injectTrialProductionStrategy(strategy, new ITrialProductionStrategy() {
-            @Override
-            public List<SkuScheduleDTO> filterTrialSkus(LhScheduleContext context, List<SkuScheduleDTO> allSkus) {
-                return allSkus;
-            }
-
-            @Override
-            public boolean canScheduleTrialOnDate(LhScheduleContext context, Date targetDate) {
-                return true;
-            }
-
-            @Override
-            public boolean canScheduleTrialSkuOnDate(LhScheduleContext context, SkuScheduleDTO trialSku, Date targetDate) {
-                return !StringUtils.equals("3302002216", trialSku.getMaterialCode());
-            }
-
-            @Override
-            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate) {
-                return false;
-            }
-
-            @Override
-            public boolean isDailyTrialLimitReached(LhScheduleContext context, Date targetDate, String materialCode) {
-                return false;
-            }
-
-            @Override
-            public String matchTrialMachine(LhScheduleContext context, SkuScheduleDTO trialSku) {
-                return "K1501R";
-            }
-        });
-
-        LhScheduleContext context = buildContext();
-        SkuScheduleDTO sku = buildSku();
-        sku.setMaterialCode("3302002216");
-        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
-        context.getNewSpecSkuList().add(sku);
-
-        strategy.scheduleNewSpecs(context, singletonMachineMatch(buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0))),
-                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
-
-        assertEquals(0, context.getScheduleResultList().size(), "试制施工阶段即使未显式打 isTrial，也应走试制禁排判断");
-        assertEquals(1, context.getUnscheduledResultList().size());
-        assertEquals("试制量试当日不可排产", context.getUnscheduledResultList().get(0).getUnscheduledReason());
-    }
-
-    @Test
     void scheduleNewSpecs_shouldNotSkipTrialSkuWhenTargetSundayButWindowStartsOnWorkday() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

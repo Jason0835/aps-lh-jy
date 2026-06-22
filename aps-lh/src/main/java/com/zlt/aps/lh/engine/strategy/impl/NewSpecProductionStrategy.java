@@ -7472,41 +7472,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return true-跳过排产
      */
     private boolean shouldSkipTrialSku(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (sku == null || !isTrialOrMassTrialSku(sku)) {
-            return false;
-        }
-        ITrialProductionStrategy strategy = getTrialProductionStrategy();
-        Date firstBlockedDate = null;
-        boolean hasSchedulableBusinessDay = false;
-        Set<String> checkedDateSet = new HashSet<>(8);
-        for (LhShiftConfigVO shift : LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate())) {
-            if (shift == null || shift.getWorkDate() == null) {
-                continue;
-            }
-            String workDateKey = LhScheduleTimeUtil.formatDate(shift.getWorkDate());
-            if (!checkedDateSet.add(workDateKey)) {
-                continue;
-            }
-            Date workDate = shift.getWorkDate();
-            if (!strategy.canScheduleTrialSkuOnDate(context, sku, workDate)) {
-                if (firstBlockedDate == null) {
-                    firstBlockedDate = workDate;
-                }
-                continue;
-            }
-            if (strategy.isDailyTrialLimitReached(context, workDate, sku.getMaterialCode())) {
-                continue;
-            }
-            hasSchedulableBusinessDay = true;
-            break;
-        }
-        if (!hasSchedulableBusinessDay) {
-            Date logDate = firstBlockedDate != null ? firstBlockedDate
-                    : (context.getScheduleDate() != null ? context.getScheduleDate() : context.getScheduleTargetDate());
-            log.info("试制量试SKU排程窗口内无可排业务日, materialCode: {}, 日期: {}",
-                    sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(logDate));
-            return true;
-        }
         return false;
     }
 
