@@ -1,5 +1,8 @@
 package com.zlt.aps.lh.regression;
 
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
@@ -11,7 +14,9 @@ import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.handler.ResultValidationHandler;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Method;
@@ -22,6 +27,7 @@ import java.util.LinkedHashMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -286,6 +292,10 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
     void generateMouldChangePlan_shouldKeepClassIndexEmptyWhenTimeOutsideShiftWindow() {
         ResultValidationHandler handler = new ResultValidationHandler();
         LhScheduleContext context = newContext();
+        context.setScheduleDate(date(2026, 4, 17));
+        context.setWindowEndDate(date(2026, 4, 19));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                context, context.getScheduleDate()));
         context.setMachineScheduleMap(new LinkedHashMap<>());
         context.setInitialMachineScheduleMap(new LinkedHashMap<>());
 
@@ -295,10 +305,20 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
         ReflectionTestUtils.setField(result, "mouldChangeStartTime", mouldChangeStartTime);
         context.getScheduleResultList().add(result);
 
-        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+        Logger logger = (Logger) LoggerFactory.getLogger(ResultValidationHandler.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+        } finally {
+            logger.detachAppender(appender);
+        }
 
         assertEquals(1, context.getMouldChangePlanList().size());
         assertEquals(null, context.getMouldChangePlanList().get(0).getClassIndex());
+        assertTrue(appender.list.stream().anyMatch(event -> event.getFormattedMessage()
+                .contains("模具交替计划时间超出排程窗口")));
     }
 
     @Test

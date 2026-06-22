@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.handler;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
@@ -377,9 +378,11 @@ public class DataInitHandler extends AbsScheduleStepHandler {
             }
         }
         if (latestSpecEndTime != null) {
+            Date alignedEndTime = alignForceRescheduleEndTimeToWindowStart(
+                    context, machineCode, latestSpecEndTime);
             log.debug("机台初始结束时间取前批次规格结束时间, 机台: {}, 结束时间: {}",
-                    machineCode, LhScheduleTimeUtil.formatDateTime(latestSpecEndTime));
-            return latestSpecEndTime;
+                    machineCode, LhScheduleTimeUtil.formatDateTime(alignedEndTime));
+            return alignedEndTime;
         }
         if (Objects.nonNull(onlineInfo)) {
             List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
@@ -398,6 +401,38 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         log.warn("机台初始结束时间未匹配班次窗口, 机台: {}, 使用T日: {}",
                 machineCode, LhScheduleTimeUtil.formatDate(context.getScheduleDate()));
         return context.getScheduleDate();
+    }
+
+    /**
+     * 强制重排时将窗口外的前批次结束时间对齐到本次排程窗口首班。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param previousEndTime 前批次规格结束时间
+     * @return 对齐后的机台初始结束时间
+     */
+    private Date alignForceRescheduleEndTimeToWindowStart(LhScheduleContext context,
+                                                          String machineCode,
+                                                          Date previousEndTime) {
+        if (context.getParamIntValue(LhScheduleParamConstant.FORCE_RESCHEDULE,
+                LhScheduleConstant.FORCE_RESCHEDULE) != LhScheduleConstant.FORCE_RESCHEDULE_ENABLED
+                || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return previousEndTime;
+        }
+        Date windowStartTime = context.getScheduleWindowShifts().stream()
+                .map(LhShiftConfigVO::getShiftStartDateTime)
+                .filter(Objects::nonNull)
+                .min(Date::compareTo)
+                .orElse(null);
+        if (Objects.isNull(windowStartTime) || !previousEndTime.before(windowStartTime)) {
+            return previousEndTime;
+        }
+        log.info("强制重排机台结束时间早于窗口起点，按首班开始时间归一化, 工厂: {}, 机台: {}, "
+                        + "原结束时间: {}, 窗口起点: {}",
+                context.getFactoryCode(), machineCode,
+                LhScheduleTimeUtil.formatDateTime(previousEndTime),
+                LhScheduleTimeUtil.formatDateTime(windowStartTime));
+        return windowStartTime;
     }
 
     /**

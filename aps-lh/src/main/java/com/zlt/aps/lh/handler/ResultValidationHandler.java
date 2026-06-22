@@ -684,7 +684,52 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         }
 
         planOrder = appendCleaningMouldChangePlans(context, plans, planOrder, changeResults);
+        logOutOfWindowMouldChangePlans(context, plans);
         log.info("生成模具交替计划完成, 共 {} 条", plans.size());
+    }
+
+    /**
+     * 记录计划时间超出本次排程窗口的模具交替计划，不修改计划数据，也不中断排程。
+     *
+     * @param context 排程上下文
+     * @param plans 模具交替计划列表
+     * @return 无返回值
+     */
+    private void logOutOfWindowMouldChangePlans(LhScheduleContext context,
+                                                List<LhMouldChangePlan> plans) {
+        if (CollectionUtils.isEmpty(plans) || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return;
+        }
+        Date windowStartTime = context.getScheduleWindowShifts().stream()
+                .map(LhShiftConfigVO::getShiftStartDateTime)
+                .filter(Objects::nonNull)
+                .min(Date::compareTo)
+                .orElse(null);
+        Date windowEndTime = context.getScheduleWindowShifts().stream()
+                .map(LhShiftConfigVO::getShiftEndDateTime)
+                .filter(Objects::nonNull)
+                .max(Date::compareTo)
+                .orElse(null);
+        if (Objects.isNull(windowStartTime) || Objects.isNull(windowEndTime)) {
+            return;
+        }
+        for (LhMouldChangePlan plan : plans) {
+            Date planDate = plan.getPlanDate();
+            if (Objects.isNull(planDate)
+                    || (!planDate.before(windowStartTime) && planDate.before(windowEndTime))) {
+                continue;
+            }
+            log.warn("模具交替计划时间超出排程窗口，仅记录日志并继续排程, 工厂: {}, 批次: {}, "
+                            + "排程目标日: {}, 机台: {}, 前物料: {}, 后物料: {}, 交替类型: {}, "
+                            + "计划时间: {}, 变更时间: {}, 窗口起点: {}, 窗口终点: {}",
+                    context.getFactoryCode(), context.getBatchNo(),
+                    LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
+                    plan.getLhMachineCode(), plan.getBeforeMaterialCode(), plan.getAfterMaterialCode(),
+                    plan.getChangeMouldType(), LhScheduleTimeUtil.formatDateTime(planDate),
+                    LhScheduleTimeUtil.formatDateTime(plan.getChangeTime()),
+                    LhScheduleTimeUtil.formatDateTime(windowStartTime),
+                    LhScheduleTimeUtil.formatDateTime(windowEndTime));
+        }
     }
 
     /**

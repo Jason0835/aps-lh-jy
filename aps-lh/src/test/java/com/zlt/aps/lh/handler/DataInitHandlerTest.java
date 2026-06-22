@@ -86,6 +86,33 @@ public class DataInitHandlerTest {
     }
 
     /**
+     * 用例说明：强制重排时，前批次结束时间早于排程窗口首班，不允许把窗口外时间带入本次排程。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldUseWindowStartWhenForceReschedulePreviousEndBeforeWindow() throws Exception {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "1");
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1401");
+        onlineInfo.setMaterialCode("3302002187");
+        context.getMachineOnlineInfoMap().put("K1401", onlineInfo);
+        context.setScheduleWindowShifts(Collections.singletonList(buildShift(1, 0,
+                "06:00:00", "14:00:00")));
+
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setLhMachineCode("K1401");
+        previousResult.setMaterialCode("3302002187");
+        previousResult.setSpecEndTime(toDate(2026, 6, 10, 12, 13, 20));
+        context.setPreviousScheduleResultList(Collections.singletonList(previousResult));
+
+        Date estimatedEndTime = invokeResolveInitialEstimatedEndTime(context, "K1401");
+
+        Assertions.assertEquals(toDate(2026, 6, 11, 6, 0, 0), estimatedEndTime);
+    }
+
+    /**
      * 用例说明：干冰清洗时间早于允许窗口时，清洗窗口应调整到当天 07:30。
      *
      * @throws Exception 反射调用异常
