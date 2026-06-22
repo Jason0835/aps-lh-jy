@@ -16,6 +16,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
+import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
@@ -81,6 +82,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     /** 共用胎胚余量为0未排提示 */
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
+    /** 窗口无日计划且无欠产来源的新增SKU未排提示 */
+    private static final String WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON =
+            "T～T+2窗口无日计划且无欠产，窗口后仍有月计划，本次不排产";
     /** 上月超欠产有效标识 */
     private static final String LAST_MONTH_OVERDUE_VALID_FLAG = "1";
     /** 自动排程数据来源 */
@@ -1633,6 +1637,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private void classifyContinuousAndNewSkus(LhScheduleContext context) {
         List<SkuScheduleDTO> continuousSkuList = new ArrayList<>();
         List<SkuScheduleDTO> newSpecSkuList = new ArrayList<>();
+        List<SkuScheduleDTO> blockedNewSkuList = new ArrayList<SkuScheduleDTO>(8);
         Map<String, List<SkuScheduleDTO>> skuByMaterialMap = buildSkuByMaterialMap(context);
         Map<String, Integer> materialSkuCountMap = buildMaterialSkuCountMap(skuByMaterialMap);
 
@@ -1662,6 +1667,12 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                 if (StringUtils.equals(ScheduleTypeEnum.CONTINUOUS.getCode(), sku.getScheduleType())) {
                     continue;
                 }
+                // 续作匹配完成后，只拦截没有窗口计划和欠产来源、仅存在窗口后计划的新增SKU。
+                if (shouldSkipWindowNoPlanNewSku(sku)) {
+                    appendWindowNoPlanNewSkuUnscheduledResult(context, sku);
+                    blockedNewSkuList.add(sku);
+                    continue;
+                }
                 // 未命中MES在机记录的SKU按新增规格处理。
                 sku.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
                 sku.setContinuousMachineCode(null);
@@ -1669,9 +1680,58 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             }
         }
 
+        // 遍历完成后统一清理，避免修改正在遍历的结构SKU集合。
+        for (SkuScheduleDTO blockedSku : blockedNewSkuList) {
+            blockedSku.setTargetScheduleQty(0);
+            blockedSku.setRemainingScheduleQty(0);
+            context.removePendingSkuFromStructureMap(blockedSku);
+            getTargetScheduleQtyResolver().removeActiveEmbryoSku(
+                    context, blockedSku, WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON);
+        }
+
         context.setContinuousSkuList(continuousSkuList);
         context.setNewSpecSkuList(newSpecSkuList);
         log.info("续作/新增SKU区分完成, 续作: {}个, 新增: {}个", continuousSkuList.size(), newSpecSkuList.size());
+    }
+
+    /**
+     * 判断新增SKU是否仅存在排程窗口后的月计划，且当前没有任何欠产来源。
+     *
+     * @param sku SKU排程DTO
+     * @return true-本轮不排产，false-继续按新增SKU处理
+     */
+    private boolean shouldSkipWindowNoPlanNewSku(SkuScheduleDTO sku) {
+        return Objects.nonNull(sku)
+                && sku.getWindowPlanQty() <= 0
+                && sku.getFutureMonthPlanQtyAfterWindow() > 0
+                && sku.getMonthlyHistoryShortageQty() <= 0
+                && sku.getEffectiveLastMonthOverdueQty() <= 0;
+    }
+
+    /**
+     * 追加窗口无计划且无欠产来源的新增SKU未排结果和排程过程日志。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     */
+    private void appendWindowNoPlanNewSkuUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku) {
+        LhUnscheduledResult unscheduled = buildBaseUnscheduledResult(context, sku);
+        unscheduled.setUnscheduledQty(0);
+        unscheduled.setUnscheduledReason(WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON);
+        context.getUnscheduledResultList().add(unscheduled);
+
+        String window = String.format("%s～%s",
+                LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                LhScheduleTimeUtil.formatDate(context.getWindowEndDate()));
+        String detail = String.format(
+                "工厂: %s, 排程窗口: %s, 物料: %s, 窗口计划量: %d, 窗口后计划量: %d, "
+                        + "本月历史欠产量: %d, 有效上月超欠产量: %d, 硫化余量: %d, 原因: %s",
+                context.getFactoryCode(), window, sku.getMaterialCode(), sku.getWindowPlanQty(),
+                sku.getFutureMonthPlanQtyAfterWindow(), sku.getMonthlyHistoryShortageQty(),
+                sku.getEffectiveLastMonthOverdueQty(), sku.getSurplusQty(),
+                WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON);
+        log.info("新增SKU排产准入拦截, {}", detail);
+        PriorityTraceLogHelper.appendProcessLog(context, "窗口无计划新增SKU不排产", detail);
     }
 
     /**

@@ -10,14 +10,16 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 续作归类回归：停用或不可排机台的 MES 在机记录不能抢占续作 SKU。
+ * 续作与新增SKU归类回归：校验续作匹配顺序及窗口无计划新增SKU准入。
  */
 class ContinuousSkuAssignmentRegressionTest {
 
@@ -116,6 +118,89 @@ class ContinuousSkuAssignmentRegressionTest {
                 handler, "copySkuForContinuousMachine", source, "K2010");
 
         assertEquals(18, copy.getEffectiveLastMonthOverdueQty());
+    }
+
+    @Test
+    void classifyContinuousAndNewSkus_shouldWriteUnscheduledWhenOnlyFuturePlanExists() {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO sku = buildSku("3302002637", "285/70R19.5");
+        sku.setEmbryoCode("EMBRYO-2637");
+        sku.setWindowPlanQty(0);
+        sku.setFutureMonthPlanQtyAfterWindow(62);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setEffectiveLastMonthOverdueQty(0);
+        sku.setSurplusQty(276);
+        sku.setTargetScheduleQty(144);
+        context.getStructureSkuMap().put(sku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Arrays.asList(sku)));
+        context.getActiveEmbryoSkuMap().put(sku.getEmbryoCode(),
+                new ArrayList<String>(Arrays.asList(sku.getMaterialCode())));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(0, context.getNewSpecSkuList().size());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals(0, context.getUnscheduledResultList().get(0).getUnscheduledQty().intValue());
+        assertEquals("T～T+2窗口无日计划且无欠产，窗口后仍有月计划，本次不排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+        assertTrue(context.getStructureSkuMap().isEmpty());
+        assertTrue(context.getActiveEmbryoSkuMap().isEmpty());
+        assertEquals(1, context.getScheduleLogList().size());
+    }
+
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepNewSkuWhenCurrentMonthShortageExists() {
+        assertWindowNoPlanSkuKeptAsNew(10, 0, 62, 0);
+    }
+
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepNewSkuWhenLastMonthShortageExists() {
+        assertWindowNoPlanSkuKeptAsNew(0, 10, 62, 0);
+    }
+
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepNewSkuWhenWindowPlanExists() {
+        assertWindowNoPlanSkuKeptAsNew(0, 0, 62, 18);
+    }
+
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepOverallEndingSkuWhenNoFuturePlanExists() {
+        assertWindowNoPlanSkuKeptAsNew(0, 0, 0, 0);
+    }
+
+    private void assertWindowNoPlanSkuKeptAsNew(int historyShortageQty,
+                                                 int lastMonthOverdueQty,
+                                                 int futurePlanQty,
+                                                 int windowPlanQty) {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO sku = buildSku("MAT-BOUNDARY", "STRUCT-BOUNDARY");
+        sku.setWindowPlanQty(windowPlanQty);
+        sku.setFutureMonthPlanQtyAfterWindow(futurePlanQty);
+        sku.setMonthlyHistoryShortageQty(historyShortageQty);
+        sku.setEffectiveLastMonthOverdueQty(lastMonthOverdueQty);
+        sku.setSurplusQty(100);
+        sku.setTargetScheduleQty(100);
+        context.getStructureSkuMap().put(sku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Arrays.asList(sku)));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    private LhScheduleContext buildClassificationContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        Date scheduleDate = new Date();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-CLASSIFY-TEST");
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleDate(scheduleDate);
+        context.setWindowEndDate(scheduleDate);
+        context.setStructureSkuMap(new LinkedHashMap<String, java.util.List<SkuScheduleDTO>>());
+        context.setMachineOnlineInfoMap(new LinkedHashMap<String, LhMachineOnlineInfo>());
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        return context;
     }
 
     private LhMachineOnlineInfo buildOnlineInfo(String machineCode, String materialCode) {
