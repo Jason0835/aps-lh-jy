@@ -487,6 +487,26 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作已按硫化余量建立严格收尾目标后，再次准备欠产账本不能用历史欠产抬高目标量。
+     */
+    @Test
+    public void shouldKeepStrictEndingTargetWhenPreparingShortageQuotaAgain() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002546", 18, 32,
+                buildQuotaMapByShifts(shifts, 50, 50, 50));
+        sku.setMonthlyHistoryShortageQty(887);
+        sku.setScheduleDayFinishQty(18);
+        sku.setSkuTag(SkuTagEnum.ENDING.getCode());
+        sku.setStrictTargetQty(true);
+
+        DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "续作排产补偿");
+
+        Assertions.assertEquals(32, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(32, sku.getRemainingScheduleQty());
+    }
+
+    /**
      * 续作小欠产逐日判断首日应扣减T日晚班已完成量，避免首日计划实际已满足时提前转新增加机台。
      */
     @Test

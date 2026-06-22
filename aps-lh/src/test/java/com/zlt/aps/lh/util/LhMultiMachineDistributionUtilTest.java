@@ -15,27 +15,24 @@ import java.util.List;
 public class LhMultiMachineDistributionUtilTest {
 
     /**
-     * 用例说明：多机台仅胎胚库存按机台数均分（最后一台补尾差），硫化余量保持不分摊。
+     * 用例说明：同一SKU在多台机台排产时，不再按机台分摊SKU已分配的胎胚库存。
      */
     @Test
-    public void shouldDistributeEmbryoStockOnlyWithoutSurplus() {
+    public void shouldKeepFullEmbryoStockForEveryMachineOfSameMaterial() {
         LhScheduleResult first = buildResult("K1105", 22);
         LhScheduleResult second = buildResult("K1111", 30);
         LhScheduleResult third = buildResult("K1501R", 7);
         List<LhScheduleResult> materialResults = Arrays.asList(first, second, third);
 
-        // 余量 30 不再分摊，各机台余量保持原始值（null）
-        // 胎胚库存 14 按机台数均分
-        LhMultiMachineDistributionUtil.distributeForSingleMaterial(materialResults, 30, 14);
+        // 不改变硫化余量，每条同SKU机台结果都保留已按SKU分配的25条胎胚库存。
+        LhMultiMachineDistributionUtil.retainFullEmbryoStockForSingleMaterial(materialResults, 25);
 
-        // 余量不分摊，保持原始 null
         Assertions.assertNull(first.getMouldSurplusQty());
         Assertions.assertNull(second.getMouldSurplusQty());
         Assertions.assertNull(third.getMouldSurplusQty());
-        // 胎胚库存仍然分摊
-        Assertions.assertEquals(4, first.getEmbryoStock());
-        Assertions.assertEquals(4, second.getEmbryoStock());
-        Assertions.assertEquals(6, third.getEmbryoStock());
+        Assertions.assertEquals(25, first.getEmbryoStock());
+        Assertions.assertEquals(25, second.getEmbryoStock());
+        Assertions.assertEquals(25, third.getEmbryoStock());
     }
 
     private LhScheduleResult buildResult(String machineCode, int dailyPlanQty) {

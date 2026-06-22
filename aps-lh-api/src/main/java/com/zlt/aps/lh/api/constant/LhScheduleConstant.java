@@ -325,7 +325,7 @@ public final class LhScheduleConstant {
     public static final int LOCAL_SEARCH_TIME_BUDGET_MS = 50;
 
     /** 优先级跟踪日志开关默认值（0-关闭，1-开启） */
-    public static final int ENABLE_PRIORITY_TRACE_LOG = 0;
+    public static final int ENABLE_PRIORITY_TRACE_LOG = 1;
 
     /** 新增排产欠产追补判断天数默认值（当前天发生欠产后，额外向后观察2天） */
     public static final int NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS = 2;

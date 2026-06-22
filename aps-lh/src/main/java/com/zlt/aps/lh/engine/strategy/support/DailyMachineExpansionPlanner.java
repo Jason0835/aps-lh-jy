@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -114,10 +115,22 @@ public final class DailyMachineExpansionPlanner {
                     sceneName, sku.getMaterialCode(), historyShortageQty, sku.resolveTargetScheduleQty());
             return plan;
         }
+        boolean strictEnding = sku.isStrictTargetQty()
+                && SkuTagEnum.ENDING.getCode().equals(sku.getSkuTag());
+        int strictTargetQty = strictEnding ? Math.max(0, sku.resolveTargetScheduleQty()) : 0;
         int syntheticWindowPlanQty = Math.max(0, windowDayPlanQty) + historyShortageQty;
         sku.setWindowPlanQty(syntheticWindowPlanQty);
         sku.setWindowRemainingPlanQty(quotaRemainingQty > 0 ? quotaRemainingQty : syntheticWindowPlanQty);
-        sku.setTargetScheduleQty(Math.max(sku.resolveTargetScheduleQty(), sku.getWindowRemainingPlanQty()));
+        if (!strictEnding) {
+            sku.setTargetScheduleQty(Math.max(sku.resolveTargetScheduleQty(), sku.getWindowRemainingPlanQty()));
+        } else {
+            // 收尾目标已经按硫化余量/胎胚库存收口，欠产账本只用于追溯，不能再次抬高严格排产上限。
+            sku.setTargetScheduleQty(strictTargetQty);
+            log.info("{}严格目标保护命中，欠产账本不抬高收尾目标, materialCode: {}, "
+                            + "strictTargetQty: {}, historyShortageQty: {}, windowRemainingQty: {}",
+                    sceneName, sku.getMaterialCode(), strictTargetQty, historyShortageQty,
+                    sku.getWindowRemainingPlanQty());
+        }
         log.info("{}欠产增机台判断准备完成, materialCode: {}, scheduleDate: {}, "
                         + "historyShortageQty: {}, threshold: {}, scheduleDayFinishQty: {}, "
                         + "windowPlanQty: {}, windowRemainingQty: {}, futurePlanQtyAfterWindow: {}",

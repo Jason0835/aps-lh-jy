@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -1428,7 +1429,7 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void scheduleReduceMould_shouldKeepEmbryoStockSumConsistentForSharedQuotaMultiMachineGroup() {
+    public void scheduleReduceMould_shouldKeepFullEmbryoStockForEachSharedQuotaMachineResult() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiMachineContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), false, 96, 96, 10, 5, "K1101", "K1102");
@@ -1438,13 +1439,13 @@ public class ContinuousProductionStrategyTest {
 
         strategy.scheduleReduceMould(context);
 
-        int totalEmbryoStock = context.getScheduleResultList().stream()
+        List<Integer> embryoStockList = context.getScheduleResultList().stream()
                 .map(LhScheduleResult::getEmbryoStock)
                 .filter(Objects::nonNull)
-                .mapToInt(Integer::intValue)
-                .sum();
-        assertEquals(120, totalEmbryoStock,
-                "共享账本多机台组保留两台时，最终结果上的胎胚库存总和应与来源SKU一致");
+                .collect(Collectors.toList());
+        assertFalse(embryoStockList.isEmpty(), "共享账本多机台组应保留有效结果");
+        assertTrue(embryoStockList.stream().allMatch(stock -> stock == 120),
+                "共享账本多机台组的每条结果都应保留来源SKU的完整胎胚库存");
     }
 
     @Test

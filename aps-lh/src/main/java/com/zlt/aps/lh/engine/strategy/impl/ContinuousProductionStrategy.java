@@ -831,8 +831,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         finalizeZeroPlanContinuousResults(context);
         // 降模或额度回裁会再次改变最终计划量，收口后再统一复核一次收尾标记，确保落库口径一致。
         refreshContinuousEndingFlagByResult(context);
-        // 续作最终结果稳定后，再按保留结果分摊多机台胎胚库存，避免零计划结果残留旧口径。
-        distributeMultiMachineSurplusAndStock(context);
+        // 续作最终结果稳定后，统一回写SKU完整胎胚库存，避免同SKU多机台结果残留二次分摊口径。
+        retainMultiMachineEmbryoStock(context);
         syncMachineStateAfterContinuousAdjust(context);
         // 续作阶段全部处理完成后，再按剩余新增待排SKU统一收口结构视图，供S4.5排序使用。
         context.rebuildStructureSkuMapFromPending(context.getNewSpecSkuList());
@@ -4415,13 +4415,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 多机台余量和胎胚库存按机台条数均分。
-     * <p>对续作阶段结果按来源SKU分组，委托 {@link LhMultiMachineDistributionUtil#distributeForSingleMaterial}
-     * 按机台结果条数均分，最后一条补尾差。</p>
+     * 回写多机台续作结果的SKU完整胎胚库存。
+     * <p>同SKU多机台仅拆分排产量，不进入共用胎胚库存分摊。</p>
      *
      * @param context 排程上下文
      */
-    private void distributeMultiMachineSurplusAndStock(LhScheduleContext context) {
+    private void retainMultiMachineEmbryoStock(LhScheduleContext context) {
         if (context == null || CollectionUtils.isEmpty(context.getScheduleResultList())) {
             return;
         }
@@ -4448,20 +4447,19 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             groupResultsMap.get(groupKey).add(result);
         }
-        // 委托工具类按机台条数均分
+        // 同一业务SKU的每条机台结果统一保留SKU级胎胚库存。
         for (String groupKey : groupOrder) {
             SkuScheduleDTO sourceSku = groupSourceSkuMap.get(groupKey);
             List<LhScheduleResult> materialResults = groupResultsMap.get(groupKey);
             if (materialResults.size() <= 1) {
                 continue;
             }
-            int totalSurplus = Math.max(0, sourceSku.getSurplusQty());
             int totalEmbryoStock = Math.max(0, sourceSku.getEmbryoStock());
-            // 仅分摊胎胚库存，余量不按机台均分（各机台结果保留原始全量值）
-            LhMultiMachineDistributionUtil.distributeForSingleMaterial(
-                    materialResults, totalSurplus, totalEmbryoStock);
-            log.debug("多机台续作胎胚库存分摊完成, materialCode: {}, 机台数: {}, 总余量: {}, 总胎胚库存: {}",
-                    sourceSku.getMaterialCode(), materialResults.size(), totalSurplus, totalEmbryoStock);
+            // 同SKU多机台只拆分排产量，每条结果都保留SKU已分配的完整胎胚库存。
+            LhMultiMachineDistributionUtil.retainFullEmbryoStockForSingleMaterial(
+                    materialResults, totalEmbryoStock);
+            log.debug("多机台续作胎胚库存完整回写完成, materialCode: {}, 机台数: {}, SKU胎胚库存: {}",
+                    sourceSku.getMaterialCode(), materialResults.size(), totalEmbryoStock);
         }
     }
 
