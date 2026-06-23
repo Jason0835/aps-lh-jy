@@ -102,6 +102,8 @@ public class SkuScheduleDTO {
     private Integer delayDays;
     /** 供应链优先级 */
     private String supplyChainPriority;
+    /** 排产分类，来自月计划 PRODUCTION_TYPE；01-主销产品，其他-普通产品 */
+    private String productionType;
     /** 高优先级待排量 */
     private int highPriorityPendingQty;
     /** 周期排产待排量 */

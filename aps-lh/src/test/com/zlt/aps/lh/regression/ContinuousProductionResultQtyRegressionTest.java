@@ -26,6 +26,8 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.time.LocalDate;
+import java.time.ZoneId;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -285,6 +287,77 @@ class ContinuousProductionResultQtyRegressionTest {
     }
 
     @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldFillMainSaleEndingAfterTwentyWhenStructureNotFull() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200MAIN", "PCR-01", "01");
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1901", "330200MAIN", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(18, result.getClass5PlanQty().intValue(), "主销收尾20点后应补满当天中班");
+        assertEquals(18, result.getClass6PlanQty().intValue(), "主销收尾20点后应补满下一个晚班");
+        assertEquals(1, context.getStructureScheduledMachineCount(businessDate, "PCR-01"),
+                "补满后必须回写结构已排机台统计");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldKeepNormalEndingStrictTarget() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200NORMAL", "PCR-01", "02");
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1902", "330200NORMAL", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(8, result.getClass5PlanQty().intValue(), "普通收尾SKU不得补满中班");
+        assertNull(result.getClass6PlanQty(), "普通收尾SKU不得补满下一个晚班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldNotFillAtExactTwenty() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200MAIN", "PCR-01", "01");
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1903", "330200MAIN", 0);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(8, result.getClass5PlanQty().intValue(), "正好20:00不属于20:00之后");
+        assertNull(result.getClass6PlanQty(), "正好20:00不得补满下一个晚班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldNotFillWhenStructureMachineCountReached() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 1);
+        context.recordScheduledMachine(businessDate, "PCR-01", "330200OTHER", "K1801");
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200MAIN", "PCR-01", "01");
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1904", "330200MAIN", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(8, result.getClass5PlanQty().intValue(), "结构机台数已达标时不得补满中班");
+        assertNull(result.getClass6PlanQty(), "结构机台数已达标时不得补满下一个晚班");
+    }
+
+    @Test
     void buildScheduleResult_shouldWriteSpecialMaterialFlagByMaterialCode() {
         LhScheduleContext context = newContext();
         context.getSpecialMaterialCategoryByMaterialCode().put("MAT-SPECIAL", java.util.Collections.singleton("01"));
@@ -507,6 +580,47 @@ class ContinuousProductionResultQtyRegressionTest {
         result.setSpecEndTime(shift.getShiftEndDateTime());
         result.setTdaySpecEndTime(shift.getShiftEndDateTime());
         return result;
+    }
+
+    private SkuScheduleDTO buildMainSaleEndingSku(String materialCode, String structureName, String productionType) {
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode(materialCode);
+        sku.setStructureName(structureName);
+        sku.setSkuTag("02");
+        sku.setProductionType(productionType);
+        sku.setStrictTargetQty(true);
+        sku.setSurplusQty(8);
+        sku.setEmbryoStock(8);
+        sku.setMouldQty(2);
+        return sku;
+    }
+
+    private LhScheduleResult buildMainSaleEndingResult(LhScheduleContext context,
+                                                       LhShiftConfigVO afternoonShift,
+                                                       String machineCode,
+                                                       String materialCode,
+                                                       int minutesAfterTwenty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(materialCode);
+        result.setStructureName("PCR-01");
+        result.setLhMachineCode(machineCode);
+        result.setScheduleType("01");
+        result.setSingleMouldShiftQty(18);
+        result.setMouldQty(2);
+        result.setLhTime(1800);
+        result.setIsEnd("1");
+        Date endingTime = dateTime(2026, 4, 12, 20, minutesAfterTwenty, 0);
+        ShiftFieldUtil.setShiftPlanQty(result, afternoonShift.getShiftIndex(), 8,
+                afternoonShift.getShiftStartDateTime(), endingTime);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setSpecEndTime(endingTime);
+        result.setTdaySpecEndTime(endingTime);
+        context.getScheduleResultList().add(result);
+        return result;
+    }
+
+    private LocalDate resolveShiftBusinessDate(LhShiftConfigVO shift) {
+        return shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     private static Date date(int year, int month, int day) {

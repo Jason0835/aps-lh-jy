@@ -61,6 +61,7 @@ import org.springframework.util.CollectionUtils;
 import javax.annotation.Resource;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -108,6 +109,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
             SmallEndingSurplusSkipRule.UNSCHEDULED_REASON;
     private static final int TYPE_BLOCK_SWITCH_MAX_ATTEMPTS = 16;
+    private static final String MAIN_SALE_PRODUCTION_TYPE = "01";
+    private static final LocalTime MAIN_SALE_ENDING_FILL_THRESHOLD_TIME = LocalTime.of(20, 0);
 
     @Resource
     private OrderNoGenerator orderNoGenerator;
@@ -4006,17 +4009,172 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             Map<Integer, Integer> adjustedPlanQtyMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
                     shifts, rawPlanQtyMap, dailyStandardQty, shiftCapacity, remainShiftType,
                     singleControlMachine, ScheduleTypeEnum.CONTINUOUS.getCode());
+            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
             if (Objects.equals(rawPlanQtyMap, adjustedPlanQtyMap)) {
+                applyMainSaleEndingFillIfNecessary(context, result, sourceSku, shifts);
                 continue;
             }
             applyDailyStandardShiftPlanQty(context, result, shifts, rawPlanQtyMap, adjustedPlanQtyMap);
             refreshResultSummary(context, result, shifts);
+            applyMainSaleEndingFillIfNecessary(context, result, sourceSku, shifts);
             log.info("日标准产量结果计划量收敛, 当前流程: 续作排产, materialCode: {}, machineCode: {}, "
                             + "SKU日标准产量: {}, 班产: {}, 日标准产量剩余班次参数值: {}, "
                             + "修正前班次计划量: {}, 修正后班次计划量: {}",
                     result.getMaterialCode(), result.getLhMachineCode(), dailyStandardQty, shiftCapacity,
                     remainShiftType, rawPlanQtyMap, adjustedPlanQtyMap);
         }
+    }
+
+    /**
+     * 主销产品收尾特殊补满。
+     * <p>仅当主销收尾机台真实收尾时间晚于业务日20:00，且结构已排机台数未达到月计划结构机台数时，
+     * 才允许补满当天中班和下一个晚班。</p>
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param sku 来源SKU
+     * @param shifts 排程窗口班次
+     */
+    private void applyMainSaleEndingFillIfNecessary(LhScheduleContext context,
+                                                    LhScheduleResult result,
+                                                    SkuScheduleDTO sku,
+                                                    List<LhShiftConfigVO> shifts) {
+        if (!isMainSaleEndingFillCandidate(context, result, sku, shifts)) {
+            return;
+        }
+        int lastShiftIndex = resolveLastPlannedShiftIndex(result);
+        LhShiftConfigVO currentShift = findShiftByIndex(shifts, lastShiftIndex);
+        LhShiftConfigVO nextShift = findShiftByIndex(shifts, lastShiftIndex + 1);
+        if (!isAfternoonToNightShift(currentShift, nextShift)) {
+            return;
+        }
+        Date endingTime = result.getSpecEndTime();
+        if (Objects.isNull(endingTime)) {
+            endingTime = ShiftFieldUtil.getShiftEndTime(result, currentShift.getShiftIndex());
+        }
+        if (!isAfterMainSaleEndingFillThreshold(endingTime)) {
+            return;
+        }
+        LocalDate businessDate = resolveShiftWorkDate(currentShift);
+        int planMachineCount = context.getStructurePlanMachineCount(businessDate, sku.getStructureName());
+        int scheduledMachineCount = context.getStructureScheduledMachineCount(businessDate, sku.getStructureName());
+        if (planMachineCount <= 0 || scheduledMachineCount >= planMachineCount) {
+            log.info("主销收尾补满跳过, materialCode: {}, machineCode: {}, businessDate: {}, structureName: {}, "
+                            + "planMachineCount: {}, scheduledMachineCount: {}, endingTime: {}",
+                    result.getMaterialCode(), result.getLhMachineCode(), businessDate, sku.getStructureName(),
+                    planMachineCount, scheduledMachineCount, LhScheduleTimeUtil.formatDateTime(endingTime));
+            return;
+        }
+        if (isMachineShiftOccupiedByOtherSku(context, sku, result, nextShift)) {
+            log.info("主销收尾补满跳过, materialCode: {}, machineCode: {}, businessDate: {}, nextShift: {}, "
+                            + "原因: 下一晚班已被其他SKU占用",
+                    result.getMaterialCode(), result.getLhMachineCode(), businessDate, nextShift.getShiftIndex());
+            return;
+        }
+        if (!fillMainSaleEndingShifts(context, result, currentShift, nextShift)) {
+            return;
+        }
+        context.recordScheduledMachine(businessDate, sku.getStructureName(), sku.getMaterialCode(),
+                result.getLhMachineCode());
+        refreshResultSummary(context, result, shifts);
+        log.info("主销收尾补满完成, materialCode: {}, machineCode: {}, businessDate: {}, structureName: {}, "
+                        + "planMachineCount: {}, scheduledMachineCountBefore: {}, scheduledMachineCountAfter: {}, "
+                        + "endingTime: {}",
+                result.getMaterialCode(), result.getLhMachineCode(), businessDate, sku.getStructureName(),
+                planMachineCount, scheduledMachineCount,
+                context.getStructureScheduledMachineCount(businessDate, sku.getStructureName()),
+                LhScheduleTimeUtil.formatDateTime(endingTime));
+    }
+
+    /**
+     * 判断续作结果是否进入主销收尾补满候选。
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param sku 来源SKU
+     * @param shifts 排程窗口班次
+     * @return true-候选；false-不处理
+     */
+    private boolean isMainSaleEndingFillCandidate(LhScheduleContext context,
+                                                  LhScheduleResult result,
+                                                  SkuScheduleDTO sku,
+                                                  List<LhShiftConfigVO> shifts) {
+        return Objects.nonNull(context)
+                && Objects.nonNull(result)
+                && Objects.nonNull(sku)
+                && !CollectionUtils.isEmpty(shifts)
+                && StringUtils.equals(MAIN_SALE_PRODUCTION_TYPE, sku.getProductionType())
+                && StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag())
+                && StringUtils.equals(ScheduleTypeEnum.CONTINUOUS.getCode(), result.getScheduleType())
+                && StringUtils.isNotEmpty(sku.getStructureName())
+                && StringUtils.isNotEmpty(result.getLhMachineCode());
+    }
+
+    /**
+     * 判断主销收尾时间是否严格晚于20:00。
+     *
+     * @param endingTime 收尾时间
+     * @return true-晚于20:00；false-不满足
+     */
+    private boolean isAfterMainSaleEndingFillThreshold(Date endingTime) {
+        if (Objects.isNull(endingTime)) {
+            return false;
+        }
+        LocalTime endingLocalTime = endingTime.toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalTime();
+        return endingLocalTime.isAfter(MAIN_SALE_ENDING_FILL_THRESHOLD_TIME);
+    }
+
+    /**
+     * 判断是否为中班后紧接晚班。
+     *
+     * @param currentShift 当前最后有量班次
+     * @param nextShift 下一班次
+     * @return true-中班后接晚班；false-不满足
+     */
+    private boolean isAfternoonToNightShift(LhShiftConfigVO currentShift, LhShiftConfigVO nextShift) {
+        return Objects.nonNull(currentShift)
+                && Objects.nonNull(nextShift)
+                && StringUtils.equals(ShiftEnum.AFTERNOON_SHIFT.getCode(), currentShift.getShiftType())
+                && nextShift.isNightShift();
+    }
+
+    /**
+     * 补满主销收尾当前中班和下一晚班。
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param currentShift 当前中班
+     * @param nextShift 下一晚班
+     * @return true-发生补满；false-无可补产能
+     */
+    private boolean fillMainSaleEndingShifts(LhScheduleContext context,
+                                             LhScheduleResult result,
+                                             LhShiftConfigVO currentShift,
+                                             LhShiftConfigVO nextShift) {
+        int currentBeforeQty = resolveShiftPlanQty(result, currentShift.getShiftIndex());
+        int currentShiftCapacity = calculateResultShiftCapacity(context, result, currentShift);
+        int nextBeforeQty = resolveShiftPlanQty(result, nextShift.getShiftIndex());
+        int nextShiftCapacity = calculateResultShiftCapacity(context, result, nextShift);
+        boolean filled = false;
+        if (currentShiftCapacity > currentBeforeQty) {
+            Date currentStartTime = ShiftFieldUtil.getShiftStartTime(result, currentShift.getShiftIndex());
+            setShiftPlanQty(result, currentShift.getShiftIndex(), currentShiftCapacity,
+                    Objects.isNull(currentStartTime) ? currentShift.getShiftStartDateTime() : currentStartTime,
+                    currentShift.getShiftEndDateTime());
+            filled = true;
+        }
+        if (nextShiftCapacity > nextBeforeQty) {
+            setShiftPlanQty(result, nextShift.getShiftIndex(), nextShiftCapacity,
+                    nextShift.getShiftStartDateTime(), nextShift.getShiftEndDateTime());
+            filled = true;
+        }
+        log.info("主销收尾补满判断, materialCode: {}, machineCode: {}, currentShift: {}, nextShift: {}, "
+                        + "currentBeforeQty: {}, currentCapacity: {}, nextBeforeQty: {}, nextCapacity: {}, filled: {}",
+                result.getMaterialCode(), result.getLhMachineCode(), currentShift.getShiftIndex(),
+                nextShift.getShiftIndex(), currentBeforeQty, currentShiftCapacity, nextBeforeQty,
+                nextShiftCapacity, filled);
+        return filled;
     }
 
     /**

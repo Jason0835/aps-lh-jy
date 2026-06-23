@@ -760,6 +760,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // 优先级信息
         dto.setSupplyChainPriority(plan.getProductionType());
+        dto.setProductionType(plan.getProductionType());
         dto.setDeliveryLocked(isDeliveryLocked(context, plan.getMaterialCode()));
         dto.setDelayDays(resolveDelayDays(context, plan));
         dto.setHighPriorityPendingQty(safeInt(plan.getHeightProductionQty()));
@@ -1867,6 +1868,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         copy.setDeliveryLocked(source.isDeliveryLocked());
         copy.setDelayDays(source.getDelayDays());
         copy.setSupplyChainPriority(source.getSupplyChainPriority());
+        copy.setProductionType(source.getProductionType());
         copy.setHighPriorityPendingQty(source.getHighPriorityPendingQty());
         copy.setCycleProductionPendingQty(source.getCycleProductionPendingQty());
         copy.setMidPriorityPendingQty(source.getMidPriorityPendingQty());
