@@ -17,3 +17,4 @@
 log/
 # 启动日志
 aps-lh-start.log
+/.comet/
