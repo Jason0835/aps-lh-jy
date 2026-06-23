@@ -687,7 +687,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 segment.setRole(role);
                 boolean singleMachineWindowFill = shouldFillSingleMachineToWindowEnd(
                         context, sku, candidateMachine, isEnding, totalScheduledQty,
-                        candidateTargetQty, maxQtyToWindowEnd);
+                        candidateTargetQty, maxQtyToWindowEnd, earlyProductionDecision);
                 int machinePlanQty = singleMachineWindowFill
                         ? maxQtyToWindowEnd
                         : resolveMachinePlanQty(context, sku, quantityPolicy, role, segment,
@@ -2853,7 +2853,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                        boolean isEnding,
                                                        int totalScheduledQty,
                                                        int candidateTargetQty,
-                                                       int maxQtyToWindowEnd) {
+                                                       int maxQtyToWindowEnd,
+                                                       EarlyProductionDecision earlyProductionDecision) {
         if (sku == null || isEnding || totalScheduledQty > 0) {
             return false;
         }
@@ -2871,6 +2872,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // 小批量 SKU 优先占用单控运行态机台，命中后应补满该单控侧窗口，避免被后续普通 SKU 截断。
             return true;
         }
+        if (isAllowedFuturePlanEarlyProduction(earlyProductionDecision)) {
+            /*
+             * 后续日计划 SKU 已通过提前生产准入并完成新增换模上机后，
+             * 当前机台应保留到窗口结束，避免只按被提前借用的 dayN 小计划截断 C6~C8。
+             */
+            log.info("提前生产新增换模保留机台到窗口结束, materialCode: {}, machineCode: {}, "
+                            + "futurePlanDate: {}, targetQty: {}, maxQtyToWindowEnd: {}",
+                    sku.getMaterialCode(), candidateMachine == null ? null : candidateMachine.getMachineCode(),
+                    earlyProductionDecision.getFuturePlanDate(), candidateTargetQty, maxQtyToWindowEnd);
+            return true;
+        }
         if (!CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return hasMultiDayQuotaWindow(sku) && isOnlyPendingNewSpecSku(context);
         }
@@ -2878,6 +2890,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return false;
         }
         return candidateTargetQty > Math.max(0, sku.getPendingQty());
+    }
+
+    private boolean isAllowedFuturePlanEarlyProduction(EarlyProductionDecision earlyProductionDecision) {
+        return earlyProductionDecision != null
+                && earlyProductionDecision.isEarlyProduction()
+                && earlyProductionDecision.isAllowed()
+                && earlyProductionDecision.getFuturePlanDate() != null;
     }
 
     /**
@@ -2991,6 +3010,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             EarlyProductionDecision earlyProductionDecision = resolveEarlyProductionDecision(
                     context, sku, switchReadyTime, isEnding);
             if (Objects.nonNull(earlyProductionDecision) && earlyProductionDecision.isAllowed()) {
+                Date targetDaySwitchReadyTime = resolveTargetDaySwitchReadyTime(
+                        context, shifts, productionDate, switchReadyTime);
+                if (Objects.nonNull(targetDaySwitchReadyTime)) {
+                    log.info("新增SKU提前生产换模日期按目标业务日顺延, materialCode: {}, "
+                                    + "fromProductionDate: {}, targetProductionDate: {}, "
+                                    + "fromSwitchReadyTime: {}, toSwitchReadyTime: {}",
+                            sku.getMaterialCode(), productionDate, resolveScheduleBusinessLocalDate(context),
+                            LhScheduleTimeUtil.formatDateTime(switchReadyTime),
+                            LhScheduleTimeUtil.formatDateTime(targetDaySwitchReadyTime));
+                    return targetDaySwitchReadyTime;
+                }
                 return switchReadyTime;
             }
         } else if (!shouldDelayFirstProductionForNoPlanDate(sku, switchReadyTime, isEnding)) {
@@ -3006,6 +3036,32 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 LhScheduleTimeUtil.formatDateTime(switchReadyTime),
                 LhScheduleTimeUtil.formatDateTime(nextSwitchReadyTime));
         return nextSwitchReadyTime;
+    }
+
+    /**
+     * 提前生产首台上机时，换模最早只能落在排程目标业务日的首个允许换模班次。
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     * @param productionDate 当前换模就绪所在业务日
+     * @param switchReadyTime 当前换模就绪时间
+     * @return 目标业务日换模就绪时间；无需顺延时返回 null
+     */
+    private Date resolveTargetDaySwitchReadyTime(LhScheduleContext context,
+                                                 List<LhShiftConfigVO> shifts,
+                                                 LocalDate productionDate,
+                                                 Date switchReadyTime) {
+        LocalDate targetBusinessDate = resolveScheduleBusinessLocalDate(context);
+        if (Objects.isNull(targetBusinessDate) || Objects.isNull(productionDate)
+                || !productionDate.isBefore(targetBusinessDate)) {
+            return null;
+        }
+        Date targetDaySwitchReadyTime = resolveFirstAllowMouldChangeShiftStartTime(
+                shifts, targetBusinessDate);
+        if (Objects.isNull(targetDaySwitchReadyTime) || !targetDaySwitchReadyTime.after(switchReadyTime)) {
+            return null;
+        }
+        return targetDaySwitchReadyTime;
     }
 
     /**
@@ -7679,11 +7735,44 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                      int switchDurationHours,
                                                      IMouldChangeBalanceStrategy mouldChangeBalance) {
         if (isChangeoverBalanceEnabled(context)) {
+            String actionType = isEarlyProductionTargetDayMouldChange(context, sku, switchReadyTime)
+                    ? IMouldChangeBalanceStrategy.ACTION_EARLY_PRODUCTION_NEW_SPEC_MOULD_CHANGE
+                    : IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE;
             return mouldChangeBalance.allocateMouldChange(
                     context, machineCode, switchReadyTime, switchDurationHours,
-                    sku, IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
+                    sku, actionType);
         }
         return allocateBasicMouldChangeStartTime(context, machineCode, switchReadyTime, switchDurationHours);
+    }
+
+    /**
+     * 判断当前换模是否为后续日计划提前到目标业务日的首台新增换模。
+     *
+     * @param context 排程上下文
+     * @param sku 当前 SKU
+     * @param switchReadyTime 换模就绪时间
+     * @return true-提前生产目标日首台换模；false-普通新增换模
+     */
+    private boolean isEarlyProductionTargetDayMouldChange(LhScheduleContext context,
+                                                          SkuScheduleDTO sku,
+                                                          Date switchReadyTime) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(switchReadyTime)
+                || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        LocalDate productionDate = resolveProductionWorkDate(context.getScheduleWindowShifts(), switchReadyTime);
+        LocalDate targetBusinessDate = resolveScheduleBusinessLocalDate(context);
+        if (Objects.isNull(productionDate) || Objects.isNull(targetBusinessDate)
+                || !targetBusinessDate.equals(productionDate)) {
+            return false;
+        }
+        SkuDailyPlanQuotaDTO currentQuota = sku.getDailyPlanQuotaMap().get(productionDate);
+        if (hasSchedulableDailyPlanQuota(sku, currentQuota)) {
+            return false;
+        }
+        EarlyProductionDecision earlyProductionDecision = resolveEarlyProductionDecision(
+                context, sku, switchReadyTime, false);
+        return Objects.nonNull(earlyProductionDecision) && earlyProductionDecision.isAllowed();
     }
 
     /**
@@ -8224,6 +8313,19 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return null;
         }
         return context.getScheduleDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+    }
+
+    /**
+     * 解析排程请求对应的目标业务日。
+     *
+     * @param context 排程上下文
+     * @return 目标业务日
+     */
+    private LocalDate resolveScheduleBusinessLocalDate(LhScheduleContext context) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleTargetDate())) {
+            return null;
+        }
+        return context.getScheduleTargetDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     /**

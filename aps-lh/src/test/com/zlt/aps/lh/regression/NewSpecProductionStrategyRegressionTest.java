@@ -3558,6 +3558,71 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldKeepFuturePlanStartedMachineToWindowEndWhenOtherSkuPending() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 14, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 15, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 16, 0, 0));
+        context.setScheduleConfig(buildChangeoverBalanceScheduleConfig("1"));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001797");
+        sku.setStructureName("235/75R17.5");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(20);
+        sku.setMouldQty(1);
+        sku.setPendingQty(2502);
+        sku.setDailyPlanQty(30);
+        sku.setTargetScheduleQty(2502);
+        sku.setWindowPlanQty(24);
+        sku.setWindowRemainingPlanQty(24);
+        sku.setSurplusQty(2502);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 24));
+        context.getNewSpecSkuList().add(sku);
+        context.getMaterialSharedEmbryoMap().put(sku.getMaterialCode(), true);
+        LocalDate firstDay = toLocalDate(context.getScheduleWindowShifts().get(0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(3));
+        LocalDate thirdDay = toLocalDate(context.getScheduleWindowShifts().get(6));
+        context.addStructurePlanMachineCount(firstDay, sku.getStructureName(), 0);
+        context.addStructurePlanMachineCount(secondDay, sku.getStructureName(), 0);
+        context.addStructurePlanMachineCount(thirdDay, sku.getStructureName(), 5);
+        String targetDayKey = LhScheduleTimeUtil.formatDate(context.getScheduleWindowShifts().get(3).getWorkDate());
+        context.getDailyMouldChangeCountMap().put(targetDayKey, new int[]{8, 0});
+
+        SkuScheduleDTO pendingSku = buildSku();
+        pendingSku.setMaterialCode("3302001798");
+        pendingSku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), pendingSku.getMaterialCode(), 20, 20, 20));
+        context.getNewSpecSkuList().add(pendingSku);
+
+        MachineScheduleDTO k1302 = buildMachine("K1302", dateTime(2026, 6, 14, 13, 0));
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001797");
+
+        strategy.scheduleNewSpecs(context, materialMatch(sku.getMaterialCode(), k1302),
+                new DefaultMouldChangeBalanceStrategy(), defaultInspectionBalance(), twentyCapacityCalculate());
+
+        LhScheduleResult result = findResultByMaterialCode(context.getScheduleResultList(), sku.getMaterialCode());
+        assertEquals(84, result.getDailyPlanQty().intValue(), "后续日有计划且已新增换模上机时，应保留机台到窗口结束的有效产能");
+        assertEquals(dateTime(2026, 6, 15, 6, 0), result.getMouldChangeStartTime(),
+                "第三天计划只能提前到目标业务日，首台新增换模应落在第二天C4");
+        assertEquals(0, resolveShiftQty(result, 2), "第三天计划提前到第二天排产时，不应在第一天C2首检");
+        assertEquals(0, resolveShiftQty(result, 3), "第三天计划提前到第二天排产时，不应在第一天C3生产");
+        assertEquals(4, resolveShiftQty(result, 4), "第二天C4换模完成后只应落首检4");
+        assertEquals(20, resolveShiftQty(result, 5), "第二天C5应开始按班产排产");
+        assertEquals(20, resolveShiftQty(result, 6), "T+2夜班应继续按班产排计划量");
+        assertEquals(20, resolveShiftQty(result, 7), "T+2早班应继续按班产排计划量");
+        assertEquals(20, resolveShiftQty(result, 8), "T+2中班应继续按班产排计划量");
+    }
+
+    @Test
     void appendEarlyProductionRemark_shouldPreserveExistingRemarkAndAvoidDuplicate() {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         LhScheduleContext context = buildContext();
@@ -5390,6 +5455,30 @@ class NewSpecProductionStrategyRegressionTest {
         };
     }
 
+    private IMachineMatchStrategy materialMatch(String materialCode, MachineScheduleDTO machine) {
+        return new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                if (scheduleSku != null && StringUtils.equals(materialCode, scheduleSku.getMaterialCode())) {
+                    return Collections.singletonList(machine);
+                }
+                return Collections.emptyList();
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (candidate != null && !excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+        };
+    }
+
     private IMachineMatchStrategy orderedMachineMatch(MachineScheduleDTO firstMachine,
                                                        MachineScheduleDTO secondMachine) {
         return new IMachineMatchStrategy() {
@@ -5555,6 +5644,30 @@ class NewSpecProductionStrategyRegressionTest {
             @Override
             public int calculateDailyCapacity(int lhTimeSeconds, int mouldQty) {
                 return 16;
+            }
+        };
+    }
+
+    private ICapacityCalculateStrategy twentyCapacityCalculate() {
+        return new ICapacityCalculateStrategy() {
+            @Override
+            public int calculateShiftCapacity(LhScheduleContext ctx, int lhTimeSeconds, int mouldQty) {
+                return 20;
+            }
+
+            @Override
+            public Date calculateStartTime(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                return endingTime;
+            }
+
+            @Override
+            public int calculateFirstShiftQty(Date startTime, Date shiftEndTime, int lhTimeSeconds, int mouldQty) {
+                return startTime.before(shiftEndTime) ? 20 : 0;
+            }
+
+            @Override
+            public int calculateDailyCapacity(int lhTimeSeconds, int mouldQty) {
+                return 20;
             }
         };
     }

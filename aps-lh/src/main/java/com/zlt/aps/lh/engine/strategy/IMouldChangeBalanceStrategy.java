@@ -18,6 +18,9 @@ public interface IMouldChangeBalanceStrategy {
     /** 正规新增换模动作 */
     String ACTION_NEW_SPEC_MOULD_CHANGE = "新增换模";
 
+    /** 提前生产首台新增换模动作 */
+    String ACTION_EARLY_PRODUCTION_NEW_SPEC_MOULD_CHANGE = "提前生产新增换模";
+
     /** 换活字块动作 */
     String ACTION_TYPE_BLOCK_CHANGE = "换活字块";
 

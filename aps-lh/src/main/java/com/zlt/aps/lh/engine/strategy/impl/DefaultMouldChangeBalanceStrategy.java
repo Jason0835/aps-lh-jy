@@ -119,7 +119,8 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
                 continue;
             }
 
-            boolean sharedEmbryo = isSharedEmbryo(context, sku);
+            boolean sharedEmbryo = isSharedEmbryo(context, sku)
+                    && !StringUtils.equals(actionType, ACTION_EARLY_PRODUCTION_NEW_SPEC_MOULD_CHANGE);
             Date balancedTime = sharedEmbryo
                     ? resolveSharedEmbryoBalancedTime(context, adjustedTime, counts) : adjustedTime;
             if (balancedTime != null && balancedTime.after(adjustedTime)) {
