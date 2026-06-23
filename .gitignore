@@ -22,3 +22,5 @@ aps-lh-start.log
 node_modules/
 .codegraph/
 .codex/
+package.json
+package-lock.json
