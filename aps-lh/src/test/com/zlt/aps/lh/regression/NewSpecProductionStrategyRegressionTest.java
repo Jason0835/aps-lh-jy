@@ -3428,6 +3428,52 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldNotSplitSingleMachineWhenStructureEndingCoversWindowPlan() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 2, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 4, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002661");
+        sku.setMaterialDesc("结构收尾单机覆盖窗口计划");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(128);
+        sku.setTargetScheduleQty(128);
+        sku.setWindowPlanQty(128);
+        sku.setWindowRemainingPlanQty(128);
+        sku.setSurplusQty(128);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setScheduleDayFinishQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 8, 60, 60));
+        context.getNewSpecSkuList().add(sku);
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302002661");
+
+        MachineScheduleDTO k1111 = buildMachine("K1111", dateTime(2026, 6, 2, 6, 0));
+        MachineScheduleDTO k1113 = buildMachine("K1113", dateTime(2026, 6, 2, 6, 0));
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(k1111, k1113),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "结构收尾误入严格策略时，1台*16班产*8班已覆盖窗口计划128，不应拆到第二台机台");
+        LhScheduleResult result = findResult(context.getScheduleResultList(), "K1111");
+        assertEquals(116, result.getDailyPlanQty().intValue(), "首台应按真实可排窗口排满，而不是被均分成64");
+        assertEquals(16, resolveShiftQty(result, 7), "K1111 C7 应继续排满班产");
+        assertEquals(16, resolveShiftQty(result, 8), "K1111 C8 应继续排满班产");
+        assertEquals(0, context.getUnscheduledResultList().size(), "单机真实窗口已排满时不应生成剩余未排");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldApplyDailyStandardQtyAndSwitchAddedMachineOnExpansionDate() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

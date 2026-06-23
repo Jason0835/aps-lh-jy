@@ -718,6 +718,20 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 logNewSpecMachinePlanDecision(sku, quantityPolicy, isEnding, singleMachineWindowFill,
                         candidateTargetQty, maxQtyToWindowEnd, machinePlanQty, null);
                 if (machinePlanQty <= 0) {
+                    if (segment.isExistingSameMaterialSatisfied()) {
+                        log.info("新增SKU已有同物料机台满足dayN规则，跳过当前新增候选, materialCode: {}, "
+                                        + "candidateMachine: {}, existingResultCount: {}",
+                                sku.getMaterialCode(), machineCode,
+                                countExistingSameMaterialResults(context, sku, machineCode));
+                        inspectionBalance.rollbackInspection(context, inspectionTime);
+                        rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                        rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
+                        removeCurrentNewSpecSku(context, iterator, sku);
+                        currentSkuRemoved = true;
+                        progressed = true;
+                        scheduled = true;
+                        break;
+                    }
                     log.debug("新增SKU动态分配后本机台计划量为0, materialCode: {}, 机台: {}, 目标量: {}, 换模开始: {}, 开产时间: {}",
                             sku.getMaterialCode(), machineCode, candidateTargetQty,
                             LhScheduleTimeUtil.formatDateTime(mouldChangeStartTime),
@@ -3505,6 +3519,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         int requiredMachineCountByDailyCapacity = resolveRequiredMachineCountByDailyCapacity(
                 context, sku, candidates, excludedMachineCodes, policy, segment, candidateMachine,
                 shifts, capacityCalculate, remainingTargetQty, availableMachineCount);
+        if (requiredMachineCountByDailyCapacity == 0 && segment.isExistingSameMaterialSatisfied()) {
+            log.info("新增SKU dayN模拟判定已有同物料机台已满足, materialCode: {}, machineCode: {}, "
+                            + "remainingTargetQty: {}, existingSameMaterialSatisfied: true",
+                    sku.getMaterialCode(), segment.getMachineCode(), remainingTargetQty);
+            return 0;
+        }
         if (shouldFillMachineToWindowEndForFutureDayDemand(
                 context, sku, policy, segment, requiredMachineCountByDailyCapacity)) {
             segment.setFutureDayDemandMachineCount(requiredMachineCountByDailyCapacity);
@@ -3790,12 +3810,67 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         DailyMachineCapacitySimulationResult simulationResult =
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
         logDailyMachineCapacitySimulation(sku, segment, simulationResult);
+        if (isExistingSameMaterialSimulationSatisfied(request, existingMachineCapacityMaps)) {
+            segment.setExistingSameMaterialSatisfied(true);
+            log.info("新增SKU已有同物料机台满足dayN增机台规则, materialCode: {}, machineCode: {}, "
+                            + "existingMachineCount: {}, remainingTargetQty: {}",
+                    sku.getMaterialCode(), segment.getMachineCode(), existingMachineCapacityMaps.size(),
+                    remainingTargetQty);
+            return 0;
+        }
         segment.setAddMachineProductionDateList(resolveAddMachineProductionDateList(simulationResult));
         int requiredMachineCountByDailyCapacity = resolveRequiredNewSpecMachineCount(
                 simulationResult.getFinalActiveMachines(), existingMachineCapacityMaps.size());
         int requiredMachineCountByMouldInfo = resolveRequiredShortageOnlyMachineCountByMouldInfo(
                 sku, candidateMachine, existingMachineCapacityMaps.size(), availableMachineCount);
         return Math.max(requiredMachineCountByDailyCapacity, requiredMachineCountByMouldInfo);
+    }
+
+    /**
+     * 判断已有同物料机台是否已经满足 dayN 增机台规则。
+     *
+     * @param request 原模拟请求
+     * @param existingMachineCapacityMaps 已有同物料机台产能图
+     * @return true-已有机台已满足，无需当前新增候选
+     */
+    private boolean isExistingSameMaterialSimulationSatisfied(
+            DailyMachineCapacitySimulationRequest request,
+            List<Map<LocalDate, Integer>> existingMachineCapacityMaps) {
+        if (Objects.isNull(request) || CollectionUtils.isEmpty(existingMachineCapacityMaps)) {
+            return false;
+        }
+        DailyMachineCapacitySimulationRequest existingOnlyRequest = new DailyMachineCapacitySimulationRequest();
+        BeanUtil.copyProperties(request, existingOnlyRequest);
+        existingOnlyRequest.setMachineDailyCapacityList(existingMachineCapacityMaps);
+        existingOnlyRequest.setInitialActiveMachines(existingMachineCapacityMaps.size());
+        DailyMachineCapacitySimulationResult existingOnlyResult =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(existingOnlyRequest);
+        return existingOnlyResult.getFinalActiveMachines() <= existingMachineCapacityMaps.size()
+                && existingOnlyResult.getTotalAddedMachineCount() == 0;
+    }
+
+    /**
+     * 统计当前 SKU 已落地的同物料结果数。
+     *
+     * @param context 排程上下文
+     * @param sku 当前 SKU
+     * @param currentMachineCode 当前候选机台
+     * @return 已落地同物料结果数
+     */
+    private int countExistingSameMaterialResults(LhScheduleContext context,
+                                                 SkuScheduleDTO sku,
+                                                 String currentMachineCode) {
+        if (Objects.isNull(context) || Objects.isNull(sku)
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return 0;
+        }
+        int count = 0;
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (isExistingSameMaterialActiveResult(context, result, sku, currentMachineCode)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
@@ -7030,7 +7105,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         // 试制非收尾SKU在本轮分配内按日期追踪已消费日计划额度，防止同一天多个班次重复消费。
         // 新增排产仅补欠产场景复用该账本做滚动额度预演，避免窗口日计划为0时跨天班次被误裁。
         Map<LocalDate, Integer> trialDailyConsumedMap = null;
-        if (sku != null && sku.isStrictTargetQty() && !isEnding) {
+        if (shouldApplyStrictNonEndingQuotaLimit(sku, isEnding)) {
             Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
             if (quotaMap != null && !quotaMap.isEmpty()) {
                 trialDailyConsumedMap = new LinkedHashMap<>(4);
@@ -8329,7 +8404,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 boolean endingResult = "1".equals(result.getIsEnd());
                 // 收尾结果必须严格截断，且不再记录满班补齐超排；
                 // 试制等严格目标量场景仍需回裁，但保留超排账本用于追踪被截掉的补满量。
-                if (endingResult || (sku != null && sku.isStrictTargetQty())
+                if (endingResult || shouldApplyStrictNonEndingQuotaLimit(sku, endingResult)
                         || shouldTrimUnavailableQuota(sku)) {
                     trimShiftPlanQty(result, shift.getShiftIndex(), consumed);
                     if (endingResult) {
@@ -8350,6 +8425,23 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         refreshResultSummary(context, result);
         return result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+    }
+
+    /**
+     * 判断非收尾结果是否需要按严格日计划额度回裁。
+     * <p>正式 SKU 可能因结构收尾判断带上 strict 标记，但最终结果仍是非收尾；
+     * 这类场景应保留满班补齐量，避免单机可满足时被日计划账本裁空后续班次。</p>
+     *
+     * @param sku SKU排程DTO
+     * @param endingResult 当前结果是否收尾
+     * @return true-非收尾也需要严格回裁；false-允许保留满班补齐量
+     */
+    private boolean shouldApplyStrictNonEndingQuotaLimit(SkuScheduleDTO sku, boolean endingResult) {
+        if (Objects.isNull(sku) || endingResult || !sku.isStrictTargetQty()) {
+            return false;
+        }
+        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isStrictNewSpecShortageOnly();
     }
 
     /**

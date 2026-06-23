@@ -43,6 +43,8 @@ public class MachineProductionSegment implements Serializable {
     private MachineScheduleRole role;
     /** 小额欠产允许滚动时，本机台完成后不再继续追加机台 */
     private boolean stopAfterCurrentForSmallShortage;
+    /** 已有同物料机台已满足dayN增机台规则，当前新增候选无需再上机 */
+    private boolean existingSameMaterialSatisfied;
     /** 因窗口后第一天日计划推导出的保留机台数 */
     private int futureDayDemandMachineCount;
     /** dayN逐日判断中各新增机台对应的生效业务日期，按新增顺序排列 */

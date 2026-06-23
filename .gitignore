@@ -19,3 +19,6 @@ log/
 aps-lh-start.log
 /.comet/
 /.node_modules/
+node_modules/
+.codegraph/
+.codex/
