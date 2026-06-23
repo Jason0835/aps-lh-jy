@@ -111,7 +111,7 @@ class EarlyProductionCheckerTest {
     }
 
     @Test
-    void canEnterEarlyProductionCheck_shouldAllowThirdDayPlanWithinScheduleWindow() {
+    void canEnterEarlyProductionCheck_shouldRejectThirdDayPlanWithinScheduleWindow() {
         LocalDate day1 = LocalDate.of(2026, 6, 12);
         LocalDate day2 = LocalDate.of(2026, 6, 13);
         LocalDate day3 = LocalDate.of(2026, 6, 14);
@@ -123,7 +123,7 @@ class EarlyProductionCheckerTest {
         boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
                 context, sku, day1, day3, 200);
 
-        assertTrue(allowed, "T日应允许判断T+2有日计划量的SKU是否提前进入新增机台判断");
+        assertFalse(allowed, "提前生产只允许提前一天，T日不能判断T+2日计划量");
     }
 
     @Test
@@ -157,6 +157,23 @@ class EarlyProductionCheckerTest {
                 context, sku, day1, day3, 200);
 
         assertTrue(allowed, "当前日结构计划为0时，应改用后续第一个计划日的结构计划机台数判断");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldNotUseThirdDayStructurePlanWhenNextDayStructurePlanIsZero() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 0);
+        context.addStructurePlanMachineCount(day3, "L1", 2);
+        SkuScheduleDTO sku = sku("3302001001", "L1", 0, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+
+        boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, sku, day1, day3, 200);
+
+        assertFalse(allowed, "结构切换只允许取下一天结构计划，不能继续取T+2结构计划机台数");
     }
 
     @Test

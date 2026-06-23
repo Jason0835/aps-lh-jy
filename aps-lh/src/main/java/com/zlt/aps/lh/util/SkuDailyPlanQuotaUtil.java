@@ -6,6 +6,7 @@ import org.springframework.util.CollectionUtils;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -117,6 +118,37 @@ public final class SkuDailyPlanQuotaUtil {
         }
         refreshRollingFields(quotaMap);
         return consumedQty;
+    }
+
+    /**
+     * 构造提前生产临时日计划额度视图。
+     * <p>提前生产只允许提前一天，因此当前业务日到窗口结束日逐日读取下一天额度；
+     * 该方法只克隆运行态账本，不修改原始月计划日计划量和原始额度对象。</p>
+     *
+     * @param quotaMap 原始日计划额度账本
+     * @param currentDate 当前业务日期
+     * @param windowEndDate 排程窗口结束日期
+     * @return 前移一天后的临时额度账本
+     */
+    public static Map<LocalDate, SkuDailyPlanQuotaDTO> buildShiftedEarlyProductionQuotaMap(
+            Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+            LocalDate currentDate,
+            LocalDate windowEndDate) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> shiftedQuotaMap =
+                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(currentDate) || Objects.isNull(windowEndDate)
+                || currentDate.isAfter(windowEndDate)) {
+            return shiftedQuotaMap;
+        }
+        String materialCode = resolveMaterialCode(quotaMap);
+        LocalDate date = currentDate;
+        while (!date.isAfter(windowEndDate)) {
+            SkuDailyPlanQuotaDTO sourceQuota = quotaMap.get(date.plusDays(1));
+            shiftedQuotaMap.put(date, cloneQuotaForProductionDate(sourceQuota, date, materialCode));
+            date = date.plusDays(1);
+        }
+        refreshRollingFields(shiftedQuotaMap);
+        return shiftedQuotaMap;
     }
 
     /**
@@ -234,6 +266,40 @@ public final class SkuDailyPlanQuotaUtil {
             }
         }
         return lastQuotaDate;
+    }
+
+    private static String resolveMaterialCode(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
+        if (CollectionUtils.isEmpty(quotaMap)) {
+            return null;
+        }
+        for (SkuDailyPlanQuotaDTO quota : quotaMap.values()) {
+            if (Objects.nonNull(quota)) {
+                return quota.getMaterialCode();
+            }
+        }
+        return null;
+    }
+
+    private static SkuDailyPlanQuotaDTO cloneQuotaForProductionDate(SkuDailyPlanQuotaDTO sourceQuota,
+                                                                    LocalDate productionDate,
+                                                                    String materialCode) {
+        SkuDailyPlanQuotaDTO targetQuota = new SkuDailyPlanQuotaDTO();
+        targetQuota.setProductionDate(productionDate);
+        targetQuota.setMaterialCode(Objects.nonNull(sourceQuota) ? sourceQuota.getMaterialCode() : materialCode);
+        if (Objects.isNull(sourceQuota)) {
+            return targetQuota;
+        }
+        targetQuota.setDayPlanQty(Math.max(0, sourceQuota.getDayPlanQty()));
+        targetQuota.setScheduledQty(Math.max(0, sourceQuota.getScheduledQty()));
+        targetQuota.setRemainingQty(Math.max(0, sourceQuota.getRemainingQty()));
+        targetQuota.setShiftFillOverQty(Math.max(0, sourceQuota.getShiftFillOverQty()));
+        targetQuota.setCarryLossQty(Math.max(0, sourceQuota.getCarryLossQty()));
+        targetQuota.setFutureBorrowQty(Math.max(0, sourceQuota.getFutureBorrowQty()));
+        targetQuota.setActualQty(Math.max(0, sourceQuota.getActualQty()));
+        targetQuota.setCumulativeQty(Math.max(0, sourceQuota.getCumulativeQty()));
+        targetQuota.setFinalLossQty(Math.max(0, sourceQuota.getFinalLossQty()));
+        targetQuota.setCompleted(sourceQuota.isCompleted());
+        return targetQuota;
     }
 
     private static int consumeSingleQuota(SkuDailyPlanQuotaDTO quota, int planQty) {

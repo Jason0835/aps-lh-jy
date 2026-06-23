@@ -71,8 +71,8 @@ public final class EarlyProductionChecker {
             logEarlyProductionDecision(context, sku, currentDate, null, 0,
                     context.getStructureScheduledMachineCount(currentDate, sku.getStructureName()),
                     context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode()),
-                    shortageThreshold, false, "窗口后续日期无日计划量");
-            return EarlyProductionDecision.notEarlyProduction(false, "窗口后续日期无日计划量");
+                    shortageThreshold, false, "下一业务日无日计划量");
+            return EarlyProductionDecision.notEarlyProduction(false, "下一业务日无日计划量");
         }
         List<Integer> structurePlanMachineCounts = resolveWindowStructurePlanMachineCounts(
                 context, sku.getStructureName(), windowStartDate);
@@ -145,7 +145,7 @@ public final class EarlyProductionChecker {
      * @param context 排程上下文
      * @param sku SKU
      * @param currentDate 当前业务日期
-     * @param firstFuturePlanDate 后续首个计划日
+     * @param firstFuturePlanDate 下一业务日计划日
      * @return true-命中结构收尾大余量；false-未命中
      */
     public static boolean isEndingStructureLargeSurplus(LhScheduleContext context,
@@ -170,12 +170,14 @@ public final class EarlyProductionChecker {
     }
 
     /**
-     * 解析当前日之后第一个有 dayN 日计划量的日期。
+     * 解析当前日后一日是否有 dayN 日计划量。
+     * <p>SKU提前生产只允许提前一天，当前业务日只能判断下一业务日的计划量，
+     * 不再向 T+2 或更后日期扫描。</p>
      *
      * @param sku SKU
      * @param currentDate 当前业务日期
      * @param windowEndDate 排程窗口结束日期
-     * @return 第一个后续计划日；无后续计划返回 null
+     * @return 下一业务日；无下一日计划返回 null
      */
     public static LocalDate resolveFirstFuturePlanDate(SkuScheduleDTO sku,
                                                        LocalDate currentDate,
@@ -184,15 +186,12 @@ public final class EarlyProductionChecker {
                 || Objects.isNull(currentDate)) {
             return null;
         }
-        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sku.getDailyPlanQuotaMap().entrySet()) {
-            LocalDate productionDate = entry.getKey();
-            if (Objects.isNull(productionDate) || !productionDate.isAfter(currentDate)
-                    || (Objects.nonNull(windowEndDate) && productionDate.isAfter(windowEndDate))) {
-                continue;
-            }
-            if (hasDayPlan(entry.getValue())) {
-                return productionDate;
-            }
+        LocalDate nextDate = currentDate.plusDays(1);
+        if (Objects.nonNull(windowEndDate) && nextDate.isAfter(windowEndDate)) {
+            return null;
+        }
+        if (hasDayPlan(sku.getDailyPlanQuotaMap().get(nextDate))) {
+            return nextDate;
         }
         return null;
     }
@@ -223,12 +222,12 @@ public final class EarlyProductionChecker {
     }
 
     /**
-     * 获取结构计划机台数；当前日为0时，按结构切换规则改取后续首个计划日。
+     * 获取结构计划机台数；当前日为0时，按结构切换规则只改取下一业务日。
      *
      * @param context 排程上下文
      * @param sku SKU
      * @param currentDate 当前业务日期
-     * @param firstFuturePlanDate 后续首个计划日
+     * @param firstFuturePlanDate 下一业务日计划日
      * @return 用于准入判断的结构计划机台数
      */
     private static int resolveEffectiveStructurePlanMachineCount(LhScheduleContext context,

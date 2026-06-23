@@ -3558,6 +3558,69 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void resolveEarlyProductionDecision_shouldUseShiftWorkDateForCrossDayNightShift() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 5, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 5, 3, 0, 0));
+        context.setScheduleConfig(buildChangeoverBalanceScheduleConfig("1"));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002326");
+        sku.setStructureName("L1");
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 46, 0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(3));
+        context.addStructurePlanMachineCount(secondDay, sku.getStructureName(), 2);
+        Date crossDayNightShiftStartTime = context.getScheduleWindowShifts().get(2).getShiftStartDateTime();
+
+        EarlyProductionDecision decision = ReflectionTestUtils.invokeMethod(strategy,
+                "resolveEarlyProductionDecision", context, sku, crossDayNightShiftStartTime,
+                context.getScheduleWindowShifts(), false);
+
+        assertNotNull(decision);
+        assertFalse(decision.isEarlyProduction(), "跨自然日夜班必须按班次业务日判断，T+1自身有计划时不应判为提前生产");
+    }
+
+    @Test
+    void resolveEarlyProductionSimulationQuotaMap_shouldUseShiftedPlanAfterAdmission() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 14, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 15, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 16, 0, 0));
+        context.setScheduleConfig(buildChangeoverBalanceScheduleConfig("1"));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002326");
+        sku.setStructureName("L1");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 46, 46);
+        LocalDate firstDay = toLocalDate(context.getScheduleWindowShifts().get(0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(3));
+        LocalDate thirdDay = toLocalDate(context.getScheduleWindowShifts().get(6));
+        LocalDate fourthDay = thirdDay.plusDays(1);
+        quotaMap.put(fourthDay, quota(sku.getMaterialCode(), fourthDay, 46));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        context.addStructurePlanMachineCount(firstDay, sku.getStructureName(), 1);
+
+        Map<LocalDate, SkuDailyPlanQuotaDTO> shiftedQuotaMap = ReflectionTestUtils.invokeMethod(strategy,
+                "resolveEarlyProductionSimulationQuotaMap", context, sku, firstDay, thirdDay);
+
+        assertNotNull(shiftedQuotaMap);
+        assertFalse(shiftedQuotaMap == quotaMap, "提前生产模拟必须使用临时前移视图，不能直接使用原始账本对象");
+        assertEquals(46, shiftedQuotaMap.get(firstDay).getDayPlanQty());
+        assertEquals(46, shiftedQuotaMap.get(secondDay).getDayPlanQty());
+        assertEquals(46, shiftedQuotaMap.get(thirdDay).getDayPlanQty());
+        assertEquals(0, quotaMap.get(firstDay).getDayPlanQty(), "临时前移视图不能污染原始日计划账本");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldKeepFuturePlanStartedMachineToWindowEndWhenOtherSkuPending() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
