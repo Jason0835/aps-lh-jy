@@ -1057,6 +1057,60 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String isEarlyProduction;
 
     /**
+     * SKU 排序名次。
+     * <p>来源：{@code DefaultSkuPriorityStrategy.sortByPriority} 完成续作/新增统一排序后，
+     * 回写到 {@code SkuScheduleDTO.scheduleOrder} 的 1~N 名次；
+     * 落库时通过 {@code LhScheduleContext.scheduleResultSourceSkuMap} 按对象身份取来源 SKU。
+     * 滚动继承结果与无来源 SKU 的占位结果不参与回填。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.skuSortRank")
+    @ApiModelProperty(value = "SKU排序名次", name = "skuSortRank")
+    @TableField(value = "SKU_SORT_RANK")
+    private Integer skuSortRank;
+
+    /**
+     * SKU 排序描述。
+     * <p>与日志“SKU排序优先级汇总【新增】/【续作】”中同一 SKU 的整行描述同源，
+     * 由 {@code DefaultSkuPriorityStrategy.buildSkuSortDesc} 统一生成；
+     * 排序中未包含的 SKU、滚动继承结果均落空。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.skuSortDesc")
+    @ApiModelProperty(value = "SKU排序描述", name = "skuSortDesc")
+    @TableField(value = "SKU_SORT_DESC")
+    private String skuSortDesc;
+
+    /**
+     * 结构计划硫化机台数，格式 {@code T=2,T+1=2,T+2=3}。
+     * <p>来源：{@code LhScheduleContext.structurePlanMachineCountMap}，
+     * T 日由 {@code scheduleDate} 解析的 LocalDate 起算，T+1/T+2 顺延，
+     * 与 {@code dayNRange} 同窗口；缺数或缺结构名落 0。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.structurePlanMachineCountRange")
+    @ApiModelProperty(value = "结构计划硫化机台数", name = "structurePlanMachineCountRange")
+    @TableField(value = "STRUCTURE_PLAN_MACHINE_COUNT_RANGE")
+    private String structurePlanMachineCountRange;
+
+    /**
+     * 结构已排硫化机台数，格式 {@code T=2,T+1=2,T+2=3}。
+     * <p>来源：{@code LhScheduleContext.structureScheduledMachineCodeMap} 去重后的机台数；
+     * 与计划机台数同窗口取数。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.structureScheduledMachineCountRange")
+    @ApiModelProperty(value = "结构已排硫化机台数", name = "structureScheduledMachineCountRange")
+    @TableField(value = "STRUCTURE_SCHEDULED_MACHINE_COUNT_RANGE")
+    private String structureScheduledMachineCountRange;
+
+    /**
+     * SKU 已排硫化机台数，格式 {@code T=2,T+1=2,T+2=3}。
+     * <p>来源：{@code LhScheduleContext.skuScheduledMachineCodeMap} 去重后的机台数；
+     * 与计划机台数同窗口取数。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.skuScheduledMachineCountRange")
+    @ApiModelProperty(value = "SKU已排硫化机台数", name = "skuScheduledMachineCountRange")
+    @TableField(value = "SKU_SCHEDULED_MACHINE_COUNT_RANGE")
+    private String skuScheduledMachineCountRange;
+
+    /**
      * 是否为滚动排程继承结果，仅用于本次排程运行期识别，不落库。
      */
     @TableField(exist = false)

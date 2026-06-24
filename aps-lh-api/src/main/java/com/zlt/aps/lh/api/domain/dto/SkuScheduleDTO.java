@@ -96,6 +96,10 @@ public class SkuScheduleDTO {
     private String priorityCode;
     /** 排产顺序；由 SKU 排序策略回写，最终用于排程结果 scheduleOrder */
     private int scheduleOrder;
+    /** SKU 排序名次（续作/新增列表内 1~N，与“SKU排序优先级汇总”日志 rank 字段一致），落库到排程结果 skuSortRank */
+    private int sortRank;
+    /** SKU 排序描述；由 SKU 排序策略统一生成，与“SKU排序优先级汇总”单行日志同源，落库到排程结果 skuSortDesc */
+    private String sortDesc;
     /** 是否有发货要求(锁定交期) */
     private boolean deliveryLocked;
     /** 延误天数，月计划开始日距T日的天数差（beginDate - scheduleDate），负数=延误，null=未知 */

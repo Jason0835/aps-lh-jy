@@ -35,6 +35,11 @@
             TOTAL_FINISH_QTY,
             STANDARD_CAPACITY,
             IS_EARLY_PRODUCTION,
+            SKU_SORT_RANK,
+            SKU_SORT_DESC,
+            STRUCTURE_PLAN_MACHINE_COUNT_RANGE,
+            STRUCTURE_SCHEDULED_MACHINE_COUNT_RANGE,
+            SKU_SCHEDULED_MACHINE_COUNT_RANGE,
             CREATE_BY, CREATE_TIME, UPDATE_BY, UPDATE_TIME, REMARK, IS_DELETE
         ) VALUES
         <foreach collection="list" item="item" separator=",">
@@ -68,6 +73,11 @@
                 #{item.totalFinishQty},
                 #{item.standardCapacity},
                 #{item.isEarlyProduction},
+                #{item.skuSortRank},
+                #{item.skuSortDesc},
+                #{item.structurePlanMachineCountRange},
+                #{item.structureScheduledMachineCountRange},
+                #{item.skuScheduledMachineCountRange},
                 #{item.createBy}, #{item.createTime}, #{item.updateBy}, #{item.updateTime}, #{item.remark}, #{item.isDelete}
             )
         </foreach>

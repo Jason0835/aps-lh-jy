@@ -360,13 +360,13 @@ public final class LhScheduleConstant {
     // ======================== 排序跟踪日志输出控制 ========================
 
     /** SKU排序汇总日志默认输出前N名 */
-    public static final int SKU_SORT_TRACE_TOP_N = 20;
+    public static final int SKU_SORT_TRACE_TOP_N = 50;
 
     /** 机台排序汇总日志默认输出前N名 */
-    public static final int MACHINE_SORT_TRACE_TOP_N = 10;
+    public static final int MACHINE_SORT_TRACE_TOP_N = 50;
 
     /** SKU选机台候选列表默认输出前N名 */
-    public static final int SKU_MACHINE_CANDIDATE_TOP_N = 5;
+    public static final int SKU_MACHINE_CANDIDATE_TOP_N = 10;
 
     /** 换活字块反选SKU候选列表默认输出前N名 */
     public static final int TYPE_BLOCK_SKU_CANDIDATE_TOP_N = 5;

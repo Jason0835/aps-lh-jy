@@ -29,6 +29,8 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Comparator;
@@ -154,6 +156,10 @@ public class SchedulePersistenceService {
             fillClassEndFlags(context, context.getScheduleResultList());
             fillDayNRange(context, context.getScheduleResultList());
             fillShortageQty(context, context.getScheduleResultList());
+            // 回填 SKU 排序名次/描述（来源 sortByPriority 回写到 sourceSku）
+            fillSkuSortInfo(context, context.getScheduleResultList());
+            // 回填 T/T+1/T+2 三天的结构计划机台数、结构已排机台数、SKU 已排机台数串
+            fillMachineCountRange(context, context.getScheduleResultList());
             scheduleResultMapper.insertBatch(context.getScheduleResultList());
         }
         if (!context.getUnscheduledResultList().isEmpty()) {
@@ -557,6 +563,150 @@ public class SchedulePersistenceService {
             if (Objects.nonNull(shortageQty)) {
                 result.setShortageQty(shortageQty);
             }
+        }
+    }
+
+    /**
+     * 回填 SKU 排序名次（{@code skuSortRank}）和单行描述（{@code skuSortDesc}）。
+     * <p>通过 {@code scheduleResultSourceSkuMap} 按对象身份取到来源 SKU 后，
+     * 写入 sortRank/sortDesc；与“SKU排序优先级汇总”日志同源。
+     * 滚动继承结果与无来源 SKU 的占位结果保持原值不覆盖。</p>
+     *
+     * @param context 排程上下文
+     * @param scheduleResults 排程结果列表
+     */
+    private void fillSkuSortInfo(LhScheduleContext context, List<LhScheduleResult> scheduleResults) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(scheduleResults)) {
+            return;
+        }
+        Map<LhScheduleResult, SkuScheduleDTO> sourceSkuMap = context.getScheduleResultSourceSkuMap();
+        if (CollectionUtils.isEmpty(sourceSkuMap)) {
+            return;
+        }
+        for (LhScheduleResult result : scheduleResults) {
+            if (Objects.isNull(result) || result.isRollingInherited()) {
+                continue;
+            }
+            SkuScheduleDTO sourceSku = sourceSkuMap.get(result);
+            if (Objects.isNull(sourceSku)) {
+                continue;
+            }
+            // 排序中存在的 SKU 才有 sortRank/sortDesc；未参与排序的 SKU 保留默认空值。
+            if (sourceSku.getSortRank() > 0) {
+                result.setSkuSortRank(sourceSku.getSortRank());
+            }
+            if (StringUtils.isNotEmpty(sourceSku.getSortDesc())) {
+                result.setSkuSortDesc(sourceSku.getSortDesc());
+            }
+        }
+    }
+
+    /**
+     * 回填结构计划/已排机台数串与 SKU 已排机台数串，格式 {@code T=N,T+1=N,T+2=N}。
+     * <p>T 日为 {@code context.scheduleDate}，与 {@code dayNRange} 同窗口；
+     * 结构名或物料编码为空时对应字段不写；
+     * 滚动继承结果保留原值不覆盖。</p>
+     *
+     * @param context 排程上下文
+     * @param scheduleResults 排程结果列表
+     */
+    private void fillMachineCountRange(LhScheduleContext context, List<LhScheduleResult> scheduleResults) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(scheduleResults)
+                || Objects.isNull(context.getScheduleDate())) {
+            return;
+        }
+        // 排程窗口 T、T+1、T+2 日 LocalDate，使用系统时区与运行态 Map key 对齐
+        LocalDate baseDate = context.getScheduleDate().toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        LocalDate[] dates = new LocalDate[]{baseDate, baseDate.plusDays(1), baseDate.plusDays(2)};
+        for (LhScheduleResult result : scheduleResults) {
+            if (Objects.isNull(result) || result.isRollingInherited()) {
+                continue;
+            }
+            if (StringUtils.isNotEmpty(result.getStructureName())) {
+                result.setStructurePlanMachineCountRange(
+                        buildStructurePlanMachineCountRange(context, dates, result.getStructureName()));
+                result.setStructureScheduledMachineCountRange(
+                        buildStructureScheduledMachineCountRange(context, dates, result.getStructureName()));
+            }
+            if (StringUtils.isNotEmpty(result.getMaterialCode())) {
+                result.setSkuScheduledMachineCountRange(
+                        buildSkuScheduledMachineCountRange(context, dates, result.getMaterialCode()));
+            }
+        }
+    }
+
+    /**
+     * 按结构维度拼接结构计划机台数串。
+     *
+     * @param context 排程上下文
+     * @param dates T/T+1/T+2 三天 LocalDate
+     * @param structureName 产品结构
+     * @return 形如 {@code T=2,T+1=2,T+2=3}
+     */
+    private String buildStructurePlanMachineCountRange(LhScheduleContext context,
+                                                       LocalDate[] dates,
+                                                       String structureName) {
+        StringBuilder sb = new StringBuilder(24);
+        for (int offset = 0; offset < dates.length; offset++) {
+            appendDayKey(sb, offset);
+            sb.append('=').append(context.getStructurePlanMachineCount(dates[offset], structureName));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 按结构维度拼接结构已排机台数串。
+     *
+     * @param context 排程上下文
+     * @param dates T/T+1/T+2 三天 LocalDate
+     * @param structureName 产品结构
+     * @return 形如 {@code T=2,T+1=2,T+2=3}
+     */
+    private String buildStructureScheduledMachineCountRange(LhScheduleContext context,
+                                                            LocalDate[] dates,
+                                                            String structureName) {
+        StringBuilder sb = new StringBuilder(24);
+        for (int offset = 0; offset < dates.length; offset++) {
+            appendDayKey(sb, offset);
+            sb.append('=').append(context.getStructureScheduledMachineCount(dates[offset], structureName));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 按 SKU 维度拼接 SKU 已排机台数串。
+     *
+     * @param context 排程上下文
+     * @param dates T/T+1/T+2 三天 LocalDate
+     * @param materialCode 物料编码
+     * @return 形如 {@code T=2,T+1=2,T+2=3}
+     */
+    private String buildSkuScheduledMachineCountRange(LhScheduleContext context,
+                                                      LocalDate[] dates,
+                                                      String materialCode) {
+        StringBuilder sb = new StringBuilder(24);
+        for (int offset = 0; offset < dates.length; offset++) {
+            appendDayKey(sb, offset);
+            sb.append('=').append(context.getSkuScheduledMachineCount(dates[offset], materialCode));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 拼接 T / T+1 / T+2 等键名（首键无逗号前缀）。
+     *
+     * @param sb 目标 StringBuilder
+     * @param offset 0=T, 1=T+1, 2=T+2
+     */
+    private void appendDayKey(StringBuilder sb, int offset) {
+        if (sb.length() > 0) {
+            sb.append(',');
+        }
+        if (offset == 0) {
+            sb.append('T');
+        } else {
+            sb.append("T+").append(offset);
         }
     }
 }

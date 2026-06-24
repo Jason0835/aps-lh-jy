@@ -91,6 +91,19 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
             sku.setScheduleOrder(order++);
         }
 
+        // 按续作/新增分别回写排序名次（rank）和单行描述，作为排程结果落库 skuSortRank/skuSortDesc 的来源；
+        // 与“SKU排序优先级汇总”日志同源，TOP N 日志仅做截断展示。
+        // 仅在当前步骤对应的列表上回写：S4.4 写续作列表，S4.5 写新增列表，
+        // 避免 S4.4 先对未稳定的新增列表写入了过期快照。
+        if (ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION.getCode().equals(context.getCurrentStep())) {
+            writeSkuSortRankAndDesc(context, context.getContinuousSkuList(), false,
+                    structurePriorityMap, structureEndingDaysMap);
+        }
+        if (ScheduleStepEnum.S4_5_NEW_PRODUCTION.getCode().equals(context.getCurrentStep())) {
+            writeSkuSortRankAndDesc(context, context.getNewSpecSkuList(), true,
+                    structurePriorityMap, structureEndingDaysMap);
+        }
+
         traceOpenProductionLateScore(context, orderedSkuList);
         traceSortedSkuList(context, structurePriorityMap, structureEndingDaysMap);
         log.debug("SKU优先级排序完成, 排序后第一位: {}",
@@ -695,143 +708,10 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         } else {
             for (int i = 0; i < outputCount; i++) {
                 SkuScheduleDTO sku = traceSkuList.get(i);
-                boolean structureAllEndingPriority = isStructureAllEndingPriority(structurePriorityMap, sku);
-                boolean ending = endingJudgmentStrategy.isEnding(context, sku);
-                boolean isSpecifyMachine = LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode());
-                boolean isSpecial = isSpecialMaterial(context, sku);
-                String constructionStageDesc = resolveConstructionStageDesc(sku);
-                int structureEndingDays = resolveStructureEndingDays(structureEndingDaysMap, sku);
-                String skuTypeDesc = resolveNewSpecSkuTypeDesc(sku);
-                String groupDesc = resolveNewSpecGroupDesc(sku);
-                int groupScore = resolveNewSpecGroupScore(sku);
-                int targetScheduleQty = resolveNewSpecSortTargetQty(sku);
-
-                // 提取延误天数，避免三元表达式中Integer/int类型推断问题
-                Integer delayDays = sku.getDelayDays();
-                boolean delayKnown = delayDays != null;
-                List<String> levelNames;
-                List<String> sortKeyLevels;
-                List<Integer> scores;
-                List<Integer> defaultScores;
-                if (isNewSpec) {
-                    if (isTrialGroupSku(sku) || isMassTrialGroupSku(sku)) {
-                        levelNames = Arrays.asList(
-                                "L1_分组优先级", "L2_延误天数", "L3_排产量", "L4_物料编码");
-                        sortKeyLevels = Arrays.asList(
-                                "L1_分组优先级=" + groupDesc,
-                                "L2_延误天数=" + (delayKnown ? delayDays : 0),
-                                "L3_排产量=" + targetScheduleQty,
-                                "L4_物料编码=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode()));
-                        scores = Arrays.asList(
-                                groupScore,
-                                delayKnown ? delayDays : 0,
-                                -targetScheduleQty,
-                                0);
-                        defaultScores = Arrays.asList(2, 0, 0, 0);
-                    } else {
-                        levelNames = Arrays.asList(
-                                "L1_分组优先级", "L2_定点机台", "L3_锁交期", "L4_延误天数",
-                                "L5_结构全收尾", "L6_最晚收尾日", "L7_高优待排", "L8_周期待排",
-                                "L9_中优待排", "L10_常规待排", "L11_开产靠后分",
-                                "L12_排产量", "L13_物料编码");
-                        sortKeyLevels = Arrays.asList(
-                                "L1_分组优先级=" + groupDesc,
-                                "L2_定点机台=" + (isSpecifyMachine ? 1 : 0),
-                                "L3_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
-                                "L4_延误天数=" + (delayKnown ? delayDays : 0),
-                                "L5_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
-                                "L6_最晚收尾日=" + (structureAllEndingPriority && structureEndingDays >= 0 ? structureEndingDays : 0),
-                                "L7_高优待排=" + sku.getHighPriorityPendingQty(),
-                                "L8_周期待排=" + sku.getCycleProductionPendingQty(),
-                                "L9_中优待排=" + sku.getMidPriorityPendingQty(),
-                                "L10_常规待排=" + sku.getConventionProductionPendingQty(),
-                                "L11_开产靠后分=" + resolveOpenProductionLateScore(context, sku),
-                                "L12_排产量=" + targetScheduleQty,
-                                "L13_物料编码=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode()));
-                        scores = Arrays.asList(
-                                groupScore,
-                                isSpecifyMachine ? 0 : 1,
-                                sku.isDeliveryLocked() ? 0 : 1,
-                                delayKnown ? delayDays : 0,
-                                structureAllEndingPriority ? 0 : 1,
-                                structureAllEndingPriority && structureEndingDays >= 0 ? -structureEndingDays : 0,
-                                -sku.getHighPriorityPendingQty(),
-                                -sku.getCycleProductionPendingQty(),
-                                -sku.getMidPriorityPendingQty(),
-                                -sku.getConventionProductionPendingQty(),
-                                resolveOpenProductionLateScore(context, sku),
-                                -targetScheduleQty,
-                                0);
-                        defaultScores = Arrays.asList(2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
-                    }
-                } else {
-                    levelNames = Arrays.asList(
-                            "L1_锁交期", "L2_延误天数", "L3_结构全收尾", "L4_最晚收尾日",
-                            "L5_高优待排", "L6_周期待排", "L7_中优待排", "L8_常规待排",
-                            "L9_开产靠后分");
-                        sortKeyLevels = Arrays.asList(
-                            "L1_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
-                            "L2_延误天数=" + (delayKnown ? delayDays : 0),
-                            "L3_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
-                            "L4_最晚收尾日=" + (structureAllEndingPriority && structureEndingDays >= 0 ? structureEndingDays : 0),
-                            "L5_高优待排=" + sku.getHighPriorityPendingQty(),
-                            "L6_周期待排=" + sku.getCycleProductionPendingQty(),
-                            "L7_中优待排=" + sku.getMidPriorityPendingQty(),
-                            "L8_常规待排=" + sku.getConventionProductionPendingQty(),
-                            "L9_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
-                    scores = Arrays.asList(
-                            sku.isDeliveryLocked() ? 0 : 1,
-                            delayKnown ? 0 : 1,
-                            structureAllEndingPriority ? 0 : 1,
-                            structureAllEndingPriority && structureEndingDays >= 0 ? -structureEndingDays : 0,
-                            -sku.getHighPriorityPendingQty(),
-                            -sku.getCycleProductionPendingQty(),
-                            -sku.getMidPriorityPendingQty(),
-                            -sku.getConventionProductionPendingQty(),
-                            resolveOpenProductionLateScore(context, sku));
-                    defaultScores = Arrays.asList(1, 1, 1, 0, 0, 0, 0, 0, 0);
-                }
-                String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
-                String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
-
-                String tracePrefix = isNewSpec
-                        ? "[新增排产SKU排序] rank=" + (i + 1)
-                        + ", sku=" + sku.getMaterialCode()
-                        + ", " + PriorityTraceLogHelper.kv("交付锁定", PriorityTraceLogHelper.oneZero(sku.isDeliveryLocked()))
-                        + ", " + PriorityTraceLogHelper.kv("延期天数", delayKnown ? delayDays : 0)
-                        + ", " + PriorityTraceLogHelper.kv("结构五天收尾", PriorityTraceLogHelper.oneZero(structureAllEndingPriority))
-                        + ", " + PriorityTraceLogHelper.kv("SKU类型", skuTypeDesc)
-                        + ", " + PriorityTraceLogHelper.kv("高优先级数量", sku.getHighPriorityPendingQty())
-                        + ", " + PriorityTraceLogHelper.kv("周期排产数量", sku.getCycleProductionPendingQty())
-                        + ", " + PriorityTraceLogHelper.kv("中优先级数量", sku.getMidPriorityPendingQty())
-                        + ", " + PriorityTraceLogHelper.kv("常规数量", sku.getConventionProductionPendingQty())
-                        + ", " + PriorityTraceLogHelper.kv("最终排序原因", hitLevel)
-                        : (i + 1) + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode());
-
-                PriorityTraceLogHelper.appendLine(detailBuilder,
-                        tracePrefix
-                                + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
-                                + ", " + PriorityTraceLogHelper.kv("排产类型", sku.getScheduleType())
-                                + ", " + PriorityTraceLogHelper.kv("分组优先级", groupDesc)
-                                + ", " + PriorityTraceLogHelper.kv("SKU类型", skuTypeDesc)
-                                + ", " + PriorityTraceLogHelper.kv("SKU类型优先级", groupScore)
-                                + ", " + PriorityTraceLogHelper.kv("最终排序名次", sku.getScheduleOrder())
-                                + ", " + PriorityTraceLogHelper.kv("续作", oneZeroFromScheduleType(sku.getScheduleType()))
-                                + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.oneZero(ending))
-                                + ", " + PriorityTraceLogHelper.kv("阶段", constructionStageDesc)
-                                + ", " + PriorityTraceLogHelper.kv("试制量试", PriorityTraceLogHelper.oneZero(isTrialOrMassTrialSku(sku)))
-                                + ", " + PriorityTraceLogHelper.kv("特殊材料", PriorityTraceLogHelper.oneZero(isSpecial))
-                                + ", " + PriorityTraceLogHelper.kv("排产量", targetScheduleQty)
-                                + ", " + PriorityTraceLogHelper.kv("定点机台", PriorityTraceLogHelper.oneZero(isSpecifyMachine))
-                                + ", " + PriorityTraceLogHelper.kv("月计划量", sku.getMonthPlanQty())
-                                + ", " + PriorityTraceLogHelper.kv("余量", sku.getSurplusQty())
-                                + ", " + PriorityTraceLogHelper.kv("胎胚库存", sku.getEmbryoStock())
-                                + ", " + PriorityTraceLogHelper.kv("班产", sku.getShiftCapacity())
-                                + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
-                                + ", " + PriorityTraceLogHelper.kv("花纹", sku.getMainPattern())
-                                + ", " + PriorityTraceLogHelper.kv("胎胚描述", sku.getMainMaterialDesc())
-                                + ", " + PriorityTraceLogHelper.kv("SortKey", sortKey)
-                                + ", " + PriorityTraceLogHelper.kv("HitLevel", hitLevel));
+                // 复用 buildSkuSortDesc 生成单行描述，保证日志、运行态、落库三处口径完全一致。
+                String desc = buildSkuSortDesc(context, sku, i + 1, isNewSpec,
+                        structurePriorityMap, structureEndingDaysMap);
+                PriorityTraceLogHelper.appendLine(detailBuilder, desc);
             }
             if (skuCount > topN) {
                 PriorityTraceLogHelper.appendLine(detailBuilder,
@@ -847,6 +727,200 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
         PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 按续作/新增列表回写 SKU 排序名次（rank=1~N）和单行描述（sortDesc）。
+     *
+     * <p>名次与”SKU排序优先级汇总【新增】/【续作】”日志中 rank 字段同源；
+     * 描述与日志单行内容完全一致，便于排程结果落库后按 SKU 还原排序原因。
+     * 调用方通过 {@code currentStep} 保证每个列表仅在所属步骤回写一次。</p>
+     *
+     * @param context 排程上下文
+     * @param skuList 排序后的 SKU 列表
+     * @param isNewSpec 是否为新增 SKU 列表
+     * @param structurePriorityMap 结构收尾优先级快照
+     * @param structureEndingDaysMap 结构收尾天数快照
+     */
+    private void writeSkuSortRankAndDesc(LhScheduleContext context,
+                                         List<SkuScheduleDTO> skuList,
+                                         boolean isNewSpec,
+                                         Map<String, StructurePriorityMeta> structurePriorityMap,
+                                         Map<SkuScheduleDTO, Integer> structureEndingDaysMap) {
+        if (CollectionUtils.isEmpty(skuList)) {
+            return;
+        }
+        for (int i = 0; i < skuList.size(); i++) {
+            SkuScheduleDTO sku = skuList.get(i);
+            if (Objects.isNull(sku)) {
+                continue;
+            }
+            int rank = i + 1;
+            sku.setSortRank(rank);
+            sku.setSortDesc(buildSkuSortDesc(context, sku, rank, isNewSpec,
+                    structurePriorityMap, structureEndingDaysMap));
+        }
+    }
+
+    /**
+     * 生成 SKU 排序单行描述。
+     *
+     * <p>与原 traceSortedSkuList 拼装的“[新增排产SKU排序] rank=… 描述=… SortKey=… HitLevel=…”单行内容完全一致，
+     * 续作场景使用“N. 物料编码=…”形式（与原日志一致）。新增 SKU 走两种 SortKey 维度：试制/量试组与普通组。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param rank 排序名次（1~N）
+     * @param isNewSpec 是否为新增 SKU 列表
+     * @param structurePriorityMap 结构收尾优先级快照
+     * @param structureEndingDaysMap 结构收尾天数快照
+     * @return 单行描述
+     */
+    private String buildSkuSortDesc(LhScheduleContext context,
+                                    SkuScheduleDTO sku,
+                                    int rank,
+                                    boolean isNewSpec,
+                                    Map<String, StructurePriorityMeta> structurePriorityMap,
+                                    Map<SkuScheduleDTO, Integer> structureEndingDaysMap) {
+        if (Objects.isNull(sku)) {
+            return StringUtils.EMPTY;
+        }
+        boolean structureAllEndingPriority = isStructureAllEndingPriority(structurePriorityMap, sku);
+        boolean ending = endingJudgmentStrategy.isEnding(context, sku);
+        boolean isSpecifyMachine = LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode());
+        boolean isSpecial = isSpecialMaterial(context, sku);
+        String constructionStageDesc = resolveConstructionStageDesc(sku);
+        int structureEndingDays = resolveStructureEndingDays(structureEndingDaysMap, sku);
+        String skuTypeDesc = resolveNewSpecSkuTypeDesc(sku);
+        String groupDesc = resolveNewSpecGroupDesc(sku);
+        int groupScore = resolveNewSpecGroupScore(sku);
+        int targetScheduleQty = resolveNewSpecSortTargetQty(sku);
+
+        // 提取延误天数，避免三元表达式中Integer/int类型推断问题
+        Integer delayDays = sku.getDelayDays();
+        boolean delayKnown = delayDays != null;
+        List<String> levelNames;
+        List<String> sortKeyLevels;
+        List<Integer> scores;
+        List<Integer> defaultScores;
+        if (isNewSpec) {
+            if (isTrialGroupSku(sku) || isMassTrialGroupSku(sku)) {
+                levelNames = Arrays.asList(
+                        "L1_分组优先级", "L2_延误天数", "L3_排产量", "L4_物料编码");
+                sortKeyLevels = Arrays.asList(
+                        "L1_分组优先级=" + groupDesc,
+                        "L2_延误天数=" + (delayKnown ? delayDays : 0),
+                        "L3_排产量=" + targetScheduleQty,
+                        "L4_物料编码=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode()));
+                scores = Arrays.asList(
+                        groupScore,
+                        delayKnown ? delayDays : 0,
+                        -targetScheduleQty,
+                        0);
+                defaultScores = Arrays.asList(2, 0, 0, 0);
+            } else {
+                levelNames = Arrays.asList(
+                        "L1_分组优先级", "L2_定点机台", "L3_锁交期", "L4_延误天数",
+                        "L5_结构全收尾", "L6_最晚收尾日", "L7_高优待排", "L8_周期待排",
+                        "L9_中优待排", "L10_常规待排", "L11_开产靠后分",
+                        "L12_排产量", "L13_物料编码");
+                sortKeyLevels = Arrays.asList(
+                        "L1_分组优先级=" + groupDesc,
+                        "L2_定点机台=" + (isSpecifyMachine ? 1 : 0),
+                        "L3_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
+                        "L4_延误天数=" + (delayKnown ? delayDays : 0),
+                        "L5_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
+                        "L6_最晚收尾日=" + (structureAllEndingPriority && structureEndingDays >= 0 ? structureEndingDays : 0),
+                        "L7_高优待排=" + sku.getHighPriorityPendingQty(),
+                        "L8_周期待排=" + sku.getCycleProductionPendingQty(),
+                        "L9_中优待排=" + sku.getMidPriorityPendingQty(),
+                        "L10_常规待排=" + sku.getConventionProductionPendingQty(),
+                        "L11_开产靠后分=" + resolveOpenProductionLateScore(context, sku),
+                        "L12_排产量=" + targetScheduleQty,
+                        "L13_物料编码=" + PriorityTraceLogHelper.safeText(sku.getMaterialCode()));
+                scores = Arrays.asList(
+                        groupScore,
+                        isSpecifyMachine ? 0 : 1,
+                        sku.isDeliveryLocked() ? 0 : 1,
+                        delayKnown ? delayDays : 0,
+                        structureAllEndingPriority ? 0 : 1,
+                        structureAllEndingPriority && structureEndingDays >= 0 ? -structureEndingDays : 0,
+                        -sku.getHighPriorityPendingQty(),
+                        -sku.getCycleProductionPendingQty(),
+                        -sku.getMidPriorityPendingQty(),
+                        -sku.getConventionProductionPendingQty(),
+                        resolveOpenProductionLateScore(context, sku),
+                        -targetScheduleQty,
+                        0);
+                defaultScores = Arrays.asList(2, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+            }
+        } else {
+            levelNames = Arrays.asList(
+                    "L1_锁交期", "L2_延误天数", "L3_结构全收尾", "L4_最晚收尾日",
+                    "L5_高优待排", "L6_周期待排", "L7_中优待排", "L8_常规待排",
+                    "L9_开产靠后分");
+            sortKeyLevels = Arrays.asList(
+                    "L1_锁交期=" + (sku.isDeliveryLocked() ? 1 : 0),
+                    "L2_延误天数=" + (delayKnown ? delayDays : 0),
+                    "L3_结构全收尾=" + (structureAllEndingPriority ? 1 : 0),
+                    "L4_最晚收尾日=" + (structureAllEndingPriority && structureEndingDays >= 0 ? structureEndingDays : 0),
+                    "L5_高优待排=" + sku.getHighPriorityPendingQty(),
+                    "L6_周期待排=" + sku.getCycleProductionPendingQty(),
+                    "L7_中优待排=" + sku.getMidPriorityPendingQty(),
+                    "L8_常规待排=" + sku.getConventionProductionPendingQty(),
+                    "L9_开产靠后分=" + resolveOpenProductionLateScore(context, sku));
+            scores = Arrays.asList(
+                    sku.isDeliveryLocked() ? 0 : 1,
+                    delayKnown ? 0 : 1,
+                    structureAllEndingPriority ? 0 : 1,
+                    structureAllEndingPriority && structureEndingDays >= 0 ? -structureEndingDays : 0,
+                    -sku.getHighPriorityPendingQty(),
+                    -sku.getCycleProductionPendingQty(),
+                    -sku.getMidPriorityPendingQty(),
+                    -sku.getConventionProductionPendingQty(),
+                    resolveOpenProductionLateScore(context, sku));
+            defaultScores = Arrays.asList(1, 1, 1, 0, 0, 0, 0, 0, 0);
+        }
+        String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
+        String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
+
+        String tracePrefix = isNewSpec
+                ? "[新增排产SKU排序] rank=" + rank
+                + ", sku=" + sku.getMaterialCode()
+                + ", " + PriorityTraceLogHelper.kv("交付锁定", PriorityTraceLogHelper.oneZero(sku.isDeliveryLocked()))
+                + ", " + PriorityTraceLogHelper.kv("延期天数", delayKnown ? delayDays : 0)
+                + ", " + PriorityTraceLogHelper.kv("结构五天收尾", PriorityTraceLogHelper.oneZero(structureAllEndingPriority))
+                + ", " + PriorityTraceLogHelper.kv("SKU类型", skuTypeDesc)
+                + ", " + PriorityTraceLogHelper.kv("高优先级数量", sku.getHighPriorityPendingQty())
+                + ", " + PriorityTraceLogHelper.kv("周期排产数量", sku.getCycleProductionPendingQty())
+                + ", " + PriorityTraceLogHelper.kv("中优先级数量", sku.getMidPriorityPendingQty())
+                + ", " + PriorityTraceLogHelper.kv("常规数量", sku.getConventionProductionPendingQty())
+                + ", " + PriorityTraceLogHelper.kv("最终排序原因", hitLevel)
+                : rank + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode());
+
+        return tracePrefix
+                + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
+                + ", " + PriorityTraceLogHelper.kv("排产类型", sku.getScheduleType())
+                + ", " + PriorityTraceLogHelper.kv("分组优先级", groupDesc)
+                + ", " + PriorityTraceLogHelper.kv("SKU类型", skuTypeDesc)
+                + ", " + PriorityTraceLogHelper.kv("SKU类型优先级", groupScore)
+                + ", " + PriorityTraceLogHelper.kv("最终排序名次", sku.getScheduleOrder())
+                + ", " + PriorityTraceLogHelper.kv("续作", oneZeroFromScheduleType(sku.getScheduleType()))
+                + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.oneZero(ending))
+                + ", " + PriorityTraceLogHelper.kv("阶段", constructionStageDesc)
+                + ", " + PriorityTraceLogHelper.kv("试制量试", PriorityTraceLogHelper.oneZero(isTrialOrMassTrialSku(sku)))
+                + ", " + PriorityTraceLogHelper.kv("特殊材料", PriorityTraceLogHelper.oneZero(isSpecial))
+                + ", " + PriorityTraceLogHelper.kv("排产量", targetScheduleQty)
+                + ", " + PriorityTraceLogHelper.kv("定点机台", PriorityTraceLogHelper.oneZero(isSpecifyMachine))
+                + ", " + PriorityTraceLogHelper.kv("月计划量", sku.getMonthPlanQty())
+                + ", " + PriorityTraceLogHelper.kv("余量", sku.getSurplusQty())
+                + ", " + PriorityTraceLogHelper.kv("胎胚库存", sku.getEmbryoStock())
+                + ", " + PriorityTraceLogHelper.kv("班产", sku.getShiftCapacity())
+                + ", " + PriorityTraceLogHelper.kv("规格", sku.getSpecCode())
+                + ", " + PriorityTraceLogHelper.kv("花纹", sku.getMainPattern())
+                + ", " + PriorityTraceLogHelper.kv("胎胚描述", sku.getMainMaterialDesc())
+                + ", " + PriorityTraceLogHelper.kv("SortKey", sortKey)
+                + ", " + PriorityTraceLogHelper.kv("HitLevel", hitLevel);
     }
 
     /**
