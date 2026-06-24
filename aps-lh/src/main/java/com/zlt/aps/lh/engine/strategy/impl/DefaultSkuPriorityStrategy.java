@@ -181,13 +181,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                                   SkuScheduleDTO left,
                                   SkuScheduleDTO right) {
         // 新增SKU先按施工阶段分组：试制、量试、小批量/正规分层；分组内再走各自规则。
+        // 续作欠产转入新增的补偿SKU不再享有同组内置顶优先权，统一按现有新增排序规则参与排序。
         int compareResult = Integer.compare(resolveNewSpecGroupScore(left), resolveNewSpecGroupScore(right));
-        if (compareResult != 0) {
-            return compareResult;
-        }
-
-        // 续作欠产转入新增的补偿SKU，只在同施工阶段组内提前，不跨试制/量试/正规分组。
-        compareResult = Integer.compare(resolveContinuousCompensationScore(left), resolveContinuousCompensationScore(right));
         if (compareResult != 0) {
             return compareResult;
         }
@@ -206,16 +201,6 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         return Comparator.nullsLast(String::compareTo).compare(
                 left == null ? null : left.getMaterialCode(),
                 right == null ? null : right.getMaterialCode());
-    }
-
-    /**
-     * 解析续作补偿SKU排序得分。
-     *
-     * @param sku SKU
-     * @return 0-续作补偿SKU优先，1-普通新增SKU
-     */
-    private int resolveContinuousCompensationScore(SkuScheduleDTO sku) {
-        return sku != null && sku.isContinuousCompensationSku() ? 0 : 1;
     }
 
     /**

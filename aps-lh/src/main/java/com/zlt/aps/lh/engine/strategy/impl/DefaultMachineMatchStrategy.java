@@ -974,30 +974,30 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 return compareResult;
             }
 
-            compareResult = compareOtherSkuOccupancy(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareEarliestProductionShift(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareContinuousSchedulableShifts(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareTotalSchedulableShifts(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareTailFragmentPriority(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
+//            compareResult = compareOtherSkuOccupancy(leftProfile, rightProfile);
+//            if (compareResult != 0) {
+//                return compareResult;
+//            }
+//
+//            compareResult = compareEarliestProductionShift(leftProfile, rightProfile);
+//            if (compareResult != 0) {
+//                return compareResult;
+//            }
+//
+//            compareResult = compareContinuousSchedulableShifts(leftProfile, rightProfile);
+//            if (compareResult != 0) {
+//                return compareResult;
+//            }
+//
+//            compareResult = compareTotalSchedulableShifts(leftProfile, rightProfile);
+//            if (compareResult != 0) {
+//                return compareResult;
+//            }
+//
+//            compareResult = compareTailFragmentPriority(leftProfile, rightProfile);
+//            if (compareResult != 0) {
+//                return compareResult;
+//            }
 
             compareResult = compareNormalMachinePriority(matchResult, left, right);
             if (compareResult != 0) {
