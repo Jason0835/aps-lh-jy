@@ -11,7 +11,7 @@ verify_mode: null
 auto_transition: true
 base_ref: cbc62a368f14230329c3b888df3a62054451a823
 design_doc: docs/superpowers/specs/2026-06-24-unify-dayn-schedule-quota-design.md
-plan: null
+plan: docs/superpowers/plans/2026-06-24-unify-dayn-schedule-quota.md
 verify_result: pending
 verification_report: null
 branch_status: pending
