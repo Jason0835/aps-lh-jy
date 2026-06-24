@@ -1,0 +1,18 @@
+{
+  "change": "unify-dayn-schedule-quota",
+  "phase": "design",
+  "mode": "compact",
+  "canonical_spec": "openspec",
+  "generated_by": "comet-handoff.sh",
+  "context_hash": "217dd15d5211b6b360d18d3f5a7d6c2a6e2fe1e42206662acda9499181557a06",
+  "files": [
+    { "path": "openspec/changes/unify-dayn-schedule-quota/proposal.md", "sha256": "d91c3969f0d27470e4b1b20d57766c73114ef2c9801480c358b992a453bb12ee" },
+    { "path": "openspec/changes/unify-dayn-schedule-quota/design.md", "sha256": "cf7efc2b8e86f9c06e1bc74dd66763cc7881809faffad6f39fabaecd5f7b1324" },
+    { "path": "openspec/changes/unify-dayn-schedule-quota/tasks.md", "sha256": "b2667d5016d5a43d0e689db892681db17dc27b0f737d489e1385d3c6583f7494" },
+    { "path": "openspec/changes/unify-dayn-schedule-quota/specs/add-machine-rule/spec.md", "sha256": "6c8d881958c494f5b0d89a9953702d17ee0aabf2c7797ae1f65eaf45ab5dd103" },
+    { "path": "openspec/changes/unify-dayn-schedule-quota/specs/continue-reduce-machine-rule/spec.md", "sha256": "5e068d37f297d14639a34e3affdd35ef0193cdbe51dd469a419ff7d87c67338c" },
+    { "path": "openspec/changes/unify-dayn-schedule-quota/specs/daily-standard-shift-plan/spec.md", "sha256": "86828943328aef79c4c8a599520b902f7c34fe6855eb6dc0d6e20ab4c98b85f8" },
+    { "path": "openspec/changes/unify-dayn-schedule-quota/specs/mould-surplus-calculate/spec.md", "sha256": "089334cb29dc102891e224051e0aec1c3187b15ecfa70892a23f027223839c4b" },
+    { "path": "openspec/changes/unify-dayn-schedule-quota/specs/sku-early-production/spec.md", "sha256": "48c73b05b93d12596bfc247c439544fbb8fb38274d7bd14e906b7ff046237f10" }
+  ]
+}
