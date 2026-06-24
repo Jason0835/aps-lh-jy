@@ -79,9 +79,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private static final int SINGLE_CONTROL_NORMAL_MACHINE_SCORE = 3;
     /** 正规SKU单控机台靠后得分 */
     private static final int SINGLE_CONTROL_FORMAL_SCORE = 4;
-    /** 释放机台早班尾量默认占用小时数 */
-    private static final int RELEASED_MACHINE_MORNING_TAIL_HOURS = 6;
-
     @Override
     public List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku) {
         log.debug("匹配可用硫化机台, SKU: {}", sku.getMaterialCode());
@@ -829,8 +826,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private Date resolveAlignedCandidateReferenceTime(LhScheduleContext context,
                                                       SkuScheduleDTO sku,
                                                       MachineScheduleDTO machine) {
-        Date referenceTime = resolveAlignedCandidateReferenceTime(context, machine);
-        return adjustReleasedMachineReferenceTime(context, sku, machine, referenceTime);
+        return resolveAlignedCandidateReferenceTime(context, machine);
     }
 
     /**
@@ -1473,35 +1469,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // T日释放机台优先承接该业务日有正日计划且单段模数明确的SKU，避免其它SKU提前抢占释放窗口。
         return hasPositivePlanOnReferenceDate(sku, referenceTime)
                 && StringUtils.isNotEmpty(resolveSingleMouldChangeSegment(sku.getMouldChangeInfo())) ? 0 : 1;
-    }
-
-    /**
-     * 调整释放机台参考时间。
-     * <p>收尾释放机台若承接T日单段模数SKU，需保留早班尾量生产时间，避免换模从窗口首班开始。</p>
-     *
-     * @param context 排程上下文
-     * @param sku 待排SKU
-     * @param machine 候选机台
-     * @param referenceTime 原参考时间
-     * @return 调整后的参考时间
-     */
-    private Date adjustReleasedMachineReferenceTime(LhScheduleContext context,
-                                                    SkuScheduleDTO sku,
-                                                    MachineScheduleDTO machine,
-                                                    Date referenceTime) {
-        if (context == null || sku == null || machine == null || referenceTime == null
-                || CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())
-                || !context.getReleasedContinuousMachineCodeSet().contains(machine.getMachineCode())
-                || !hasPositivePlanOnReferenceDate(sku, referenceTime)
-                || StringUtils.isEmpty(resolveSingleMouldChangeSegment(sku.getMouldChangeInfo()))
-                || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
-            return referenceTime;
-        }
-        Date windowStartTime = context.getScheduleWindowShifts().get(0).getShiftStartDateTime();
-        if (windowStartTime == null || !referenceTime.equals(windowStartTime)) {
-            return referenceTime;
-        }
-        return LhScheduleTimeUtil.addHours(referenceTime, RELEASED_MACHINE_MORNING_TAIL_HOURS);
     }
 
     /**

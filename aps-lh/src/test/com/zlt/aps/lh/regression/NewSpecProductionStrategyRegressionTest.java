@@ -1217,6 +1217,44 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldStartReleasedMachineMouldChangeAtFirstShift() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO secondShift = shifts.get(1);
+
+        MachineScheduleDTO releasedMachine = buildMachine("K1406", firstShift.getShiftStartDateTime());
+        context.getReleasedContinuousMachineCodeSet().add(releasedMachine.getMachineCode());
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002319");
+        sku.setMaterialDesc("3302002319");
+        sku.setMouldChangeInfo("6-2");
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(8);
+        sku.setPendingQty(28);
+        sku.setTargetScheduleQty(28);
+        sku.setSurplusQty(28);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(shifts, sku.getMaterialCode(), 28, 48, 48));
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302002319");
+        context.getNewSpecSkuList().add(sku);
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(releasedMachine),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "应生成新增排产结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(firstShift.getShiftStartDateTime(), result.getMouldChangeStartTime(),
+                "释放机台承接当天有日计划的新增SKU时，换模应从首个允许换模班次开始");
+        assertEquals(secondShift.getShiftStartDateTime(), result.getClass2StartTime(),
+                "8小时普通换模完成后，首个有量班次应从中班开始");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldKeepOriginalBalanceQuotaWhenChangeoverBalanceEnabled() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);

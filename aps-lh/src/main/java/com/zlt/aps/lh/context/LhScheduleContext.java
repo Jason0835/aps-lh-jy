@@ -219,6 +219,8 @@ public class LhScheduleContext {
     private boolean continuousDailyQuotaSynced;
     /** 续作首日/窗口无计划释放的机台集合，仅用于S4.5选机降优先级，不代表禁止生产 */
     private Set<String> releasedContinuousMachineCodeSet = new LinkedHashSet<>();
+    /** 已按降模规则只保留单台续作机台的分组集合，避免后续补偿链路把已释放机台重新补回 */
+    private Set<String> singleMachineReducedContinuationGroupKeySet = new LinkedHashSet<>();
     /** 续作收尾小余量释放后可优先进入换活字块匹配的机台集合 */
     private Set<String> typeBlockReleasedContinuousMachineCodeSet = new LinkedHashSet<>();
     /** 首日无计划但后续有计划的续作释放机台集合，供S4.4/S4.5稳定识别占位结果，不受后续账本扣减影响 */
