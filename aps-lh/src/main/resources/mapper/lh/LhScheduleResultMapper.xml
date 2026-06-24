@@ -33,6 +33,8 @@
             DAY_N_RANGE,
             SHORTAGE_QTY,
             TOTAL_FINISH_QTY,
+            STANDARD_CAPACITY,
+            IS_EARLY_PRODUCTION,
             CREATE_BY, CREATE_TIME, UPDATE_BY, UPDATE_TIME, REMARK, IS_DELETE
         ) VALUES
         <foreach collection="list" item="item" separator=",">
@@ -64,6 +66,8 @@
                 #{item.dayNRange},
                 #{item.shortageQty},
                 #{item.totalFinishQty},
+                #{item.standardCapacity},
+                #{item.isEarlyProduction},
                 #{item.createBy}, #{item.createTime}, #{item.updateBy}, #{item.updateTime}, #{item.remark}, #{item.isDelete}
             )
         </foreach>

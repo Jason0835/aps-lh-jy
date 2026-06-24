@@ -2344,6 +2344,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         result.setTotalDailyPlanQty(sku.getMonthPlanQty());
         result.setMouldSurplusQty(sku.getSurplusQty());
         result.setTotalFinishQty(sku.getFinishedQty());
+        // 日标准产量：复用上下文 SKU 日硫化产能主数据，无主数据则为 0
+        result.setStandardCapacity(ShiftCapacityResolverUtil.resolveDailyStandardQty(
+                context, sku.getMaterialCode()));
+        // 换活字块结果不参与提前生产判定，标识固定为 0
+        result.setIsEarlyProduction(NO_FLAG);
         result.setIsEnd(isEnding ? YES_FLAG : NO_FLAG);
         result.setIsDelivery(sku.isDeliveryLocked() ? YES_FLAG : NO_FLAG);
         result.setIsRelease(NO_FLAG);

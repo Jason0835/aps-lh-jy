@@ -3186,6 +3186,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (Objects.isNull(result) || Objects.isNull(decision)) {
             return;
         }
+        // 与提前生产备注同源回写标识：命中场景且准入通过的结果统一标记为 1
+        if (decision.isEarlyProduction() && decision.isAllowed()) {
+            result.setIsEarlyProduction("1");
+        }
         String remarkFragment = decision.buildRemark();
         if (StringUtils.isEmpty(remarkFragment) || StringUtils.contains(result.getRemark(), remarkFragment)) {
             return;
@@ -5656,6 +5660,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         result.setTotalDailyPlanQty(sku.getMonthPlanQty());
         result.setMouldSurplusQty(sku.getSurplusQty());
         result.setTotalFinishQty(sku.getFinishedQty());
+        // 日标准产量：复用上下文 SKU 日硫化产能主数据，无主数据则为 0
+        result.setStandardCapacity(ShiftCapacityResolverUtil.resolveDailyStandardQty(
+                context, sku.getMaterialCode()));
+        // 默认非提前生产，命中后由 appendEarlyProductionRemark 与备注同源置 1
+        result.setIsEarlyProduction("0");
         result.setIsEnd(isEnding ? "1" : "0");
         result.setIsDelivery(sku.isDeliveryLocked() ? "1" : "0");
         result.setIsRelease("0");

@@ -235,3 +235,53 @@
 
 - **WHEN** 同一提前生产 SKU 实际生成多条新增机台结果
 - **THEN** 系统 SHALL 在每条结果中写入相同场景和三日结构计划机台数
+
+### Requirement: 硫化排程结果回写提前生产标识
+
+系统 SHALL 在 `T_LH_SCHEDULE_RESULT.IS_EARLY_PRODUCTION` 字段回写本次结果是否属于 SKU 提前生产，与提前生产备注同源；该字段 SHALL 与备注片段在同一判定结果（`EarlyProductionDecision`）下产生，避免出现“有标识无备注”或“有备注无标识”的不一致。
+
+#### Scenario: 新增结果命中提前生产并准入通过
+
+- **WHEN** `NewSpecProductionStrategy` 产生新增结果且对应 `EarlyProductionDecision.earlyProduction` 为真、`allowed` 为真
+- **THEN** 系统 SHALL 将 `IS_EARLY_PRODUCTION` 写为 `1`
+- **AND** 系统 SHALL 同时按既有规则写入提前生产备注片段
+
+#### Scenario: 非提前生产或未准入的新增结果
+
+- **WHEN** 新增结果未命中提前生产场景，或命中但 `allowed` 为假
+- **THEN** 系统 SHALL 将 `IS_EARLY_PRODUCTION` 写为 `0`
+- **AND** 系统 SHALL NOT 写入提前生产备注片段
+
+#### Scenario: 续作/换活字块结果
+
+- **WHEN** 结果由 `ContinuousProductionStrategy` 或 `TypeBlockProductionStrategy` 生成
+- **THEN** 系统 SHALL 将 `IS_EARLY_PRODUCTION` 固定写为 `0`
+- **AND** 系统 SHALL NOT 调用提前生产判定
+
+#### Scenario: 滚动继承结果
+
+- **WHEN** 滚动排程通过 `RollingScheduleHandoffService` 从上一批次继承生成结果
+- **THEN** 系统 SHALL 直接沿用上一批次结果的 `IS_EARLY_PRODUCTION` 取值
+- **AND** 系统 SHALL NOT 重新执行提前生产判定
+
+### Requirement: 硫化排程结果回写日标准产量
+
+系统 SHALL 在 `T_LH_SCHEDULE_RESULT.STANDARD_CAPACITY` 字段写入当前 SKU 的日标准产量，取值口径与运行期日标准产量修正逻辑保持一致，避免结果展示与排程计算口径分裂。
+
+#### Scenario: SKU 存在标准产能主数据
+
+- **WHEN** 当前 SKU 在 `T_MDM_SKU_LH_CAPACITY` 中存在记录且 `STANDARD_CAPACITY` 非空
+- **THEN** 系统 SHALL 通过 `ShiftCapacityResolverUtil#resolveDailyStandardQty` 读取 `LhScheduleContext.skuLhCapacityMap` 中该 SKU 的 `STANDARD_CAPACITY`
+- **AND** 系统 SHALL 将该值写入结果 `STANDARD_CAPACITY` 字段
+
+#### Scenario: SKU 缺失标准产能主数据
+
+- **WHEN** 当前 SKU 在 `LhScheduleContext.skuLhCapacityMap` 不存在，或对应 `STANDARD_CAPACITY` 为空或负数
+- **THEN** 系统 SHALL 将结果 `STANDARD_CAPACITY` 写为 `0`
+- **AND** 系统 SHALL NOT 引入额外兜底默认值
+
+#### Scenario: 滚动继承结果
+
+- **WHEN** 滚动排程通过 `RollingScheduleHandoffService` 从上一批次继承生成结果
+- **THEN** 系统 SHALL 直接沿用上一批次结果的 `STANDARD_CAPACITY` 取值
+- **AND** 系统 SHALL NOT 重新读取主数据

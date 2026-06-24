@@ -1033,6 +1033,30 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Integer totalFinishQty;
 
     /**
+     * 日标准产量。
+     * <p>来源：{@code T_MDM_SKU_LH_CAPACITY.STANDARD_CAPACITY}。
+     * 由排程上下文 {@code skuLhCapacityMap} 通过
+     * {@code ShiftCapacityResolverUtil#resolveDailyStandardQty(LhScheduleContext, String)} 解析，
+     * 无主数据时落 0，保持与运行期口径一致。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.standardCapacity")
+    @ApiModelProperty(value = "日标准产量", name = "standardCapacity")
+    @TableField(value = "STANDARD_CAPACITY")
+    private Integer standardCapacity;
+
+    /**
+     * SKU 提前生产标识 0-否 1-是（默认 0）。
+     * <p>仅 {@code NewSpecProductionStrategy} 新增（02）结果在命中
+     * {@code EarlyProductionDecision.earlyProduction && allowed} 时回写为 1，
+     * 与提前生产备注 [结构切换]/[结构收尾] 同源；
+     * 续作（01）、换活字块（03）、滚动继承结果一律为 0。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.isEarlyProduction", dictType = "biz_yes_no")
+    @ApiModelProperty(value = "SKU 提前生产标识 0-否 1-是", name = "isEarlyProduction")
+    @TableField(value = "IS_EARLY_PRODUCTION")
+    private String isEarlyProduction;
+
+    /**
      * 是否为滚动排程继承结果，仅用于本次排程运行期识别，不落库。
      */
     @TableField(exist = false)

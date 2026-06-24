@@ -3922,6 +3922,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         result.setTotalDailyPlanQty(sku.getMonthPlanQty());
         result.setMouldSurplusQty(sku.getSurplusQty());
         result.setTotalFinishQty(sku.getFinishedQty());
+        // 日标准产量：复用上下文 SKU 日硫化产能主数据，无主数据则为 0
+        result.setStandardCapacity(ShiftCapacityResolverUtil.resolveDailyStandardQty(
+                context, sku.getMaterialCode()));
+        // 续作结果不参与提前生产判定，标识固定为 0
+        result.setIsEarlyProduction("0");
         result.setIsEnd(isEnding ? "1" : "0");
         result.setIsDelivery(sku.isDeliveryLocked() ? "1" : "0");
         result.setIsRelease("0");
