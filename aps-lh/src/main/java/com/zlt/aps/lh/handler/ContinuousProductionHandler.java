@@ -74,6 +74,9 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
         strategy.scheduleReduceMould(context);
         log.info("续作降模排产完成, 排程结果数: {}, 未排产数: {}",
                 context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
+
+        // S4.4.6 续作后全量启用机台排序日志：排除续作排满机台、保留续作收尾机台，不依赖具体SKU。
+        strategyFactory.getMachineMatchStrategy().traceEnabledMachineSort(context);
     }
 
     @Override

@@ -1190,6 +1190,18 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                                   CandidateWindowProfile rightProfile) {
         Date leftEndTime = leftProfile == null ? null : leftProfile.getReferenceTime();
         Date rightEndTime = rightProfile == null ? null : rightProfile.getReferenceTime();
+        return compareEndingTimeValue(context, leftEndTime, rightEndTime);
+    }
+
+    /**
+     * 比较两个收尾时间：升序，null 排最后，带容差。
+     *
+     * @param context 排程上下文
+     * @param leftEndTime 左收尾时间
+     * @param rightEndTime 右收尾时间
+     * @return 比较结果
+     */
+    private int compareEndingTimeValue(LhScheduleContext context, Date leftEndTime, Date rightEndTime) {
         if (leftEndTime == null && rightEndTime == null) {
             return 0;
         }
@@ -2046,6 +2058,206 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
         String detail = detailBuilder.toString().trim();
         PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 输出续作排产后全量启用机台排序日志（不依赖具体SKU）。
+     * <p>排除续作排满机台（续作机台且非收尾且未释放），保留续作收尾机台、续作释放机台和非续作机台；
+     * 排序规则：L1单控优先 -> L2收尾时间(升序,null末位) -> L3普通机台优先 -> L4特殊支持能力数(升序)。</p>
+     *
+     * @param context 排程上下文
+     */
+    @Override
+    public void traceEnabledMachineSort(LhScheduleContext context) {
+        if (!PriorityTraceLogHelper.isEnabled(context)) {
+            return;
+        }
+        Map<String, MachineScheduleDTO> machineScheduleMap = context.getMachineScheduleMap();
+        if (CollectionUtils.isEmpty(machineScheduleMap)) {
+            return;
+        }
+        // 续作机台集合：按续作SKU的续作机台编码构建，用于识别续作排满/收尾机台。
+        Set<String> continuousMachineCodeSet = resolveContinuousMachineCodeSet(context);
+        // 已释放续作机台集合：窗口无计划/收尾小余量释放后视为可用机台，不计入续作排满。
+        Set<String> releasedMachineCodeSet = resolveReleasedContinuousMachineCodeSet(context);
+
+        int enabledCount = 0;
+        int excludedFullContinuousCount = 0;
+        List<MachineScheduleDTO> sortMachines = new ArrayList<>(machineScheduleMap.size());
+        for (MachineScheduleDTO machine : machineScheduleMap.values()) {
+            if (machine == null || !MachineStatusUtil.isEnabled(machine.getStatus())) {
+                continue;
+            }
+            enabledCount++;
+            // 续作排满：续作机台且非收尾且未释放，窗口已被续作占满，排除出排序。
+            if (continuousMachineCodeSet.contains(machine.getMachineCode())
+                    && !machine.isEnding()
+                    && !releasedMachineCodeSet.contains(machine.getMachineCode())) {
+                excludedFullContinuousCount++;
+                continue;
+            }
+            sortMachines.add(machine);
+        }
+        sortMachines.sort(buildStandaloneMachineComparator(context));
+
+        String title = "机台排序优先级汇总【续作后全量启用机台】";
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
+        PriorityTraceLogHelper.appendLine(detailBuilder,
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("工厂", context.getFactoryCode())
+                        + ", " + PriorityTraceLogHelper.kv("启用机台总数", enabledCount)
+                        + ", " + PriorityTraceLogHelper.kv("排除续作排满数", excludedFullContinuousCount)
+                        + ", " + PriorityTraceLogHelper.kv("参与排序数", sortMachines.size()));
+        PriorityTraceLogHelper.appendLine(detailBuilder,
+                "排序规则: L1单控优先 -> L2收尾时间(升序,null末位) -> L3普通机台优先 -> L4特殊支持能力数(升序)");
+        List<String> levelNames = java.util.Arrays.asList(
+                "L1_单控优先", "L2_收尾时间", "L3_普通机台优先", "L4_特殊支持能力数量");
+        for (int i = 0; i < sortMachines.size(); i++) {
+            MachineScheduleDTO machine = sortMachines.get(i);
+            boolean isSingleCtrl = isSingleControlMachine(context, machine.getMachineCode());
+            int normalMachinePriority = LhMachineHardMatchUtil.resolveNormalMachinePriority(machine);
+            int specialSupportCapabilityCount = resolveSpecialSupportCapabilityCount(machine);
+            List<String> sortKeyLevels = java.util.Arrays.asList(
+                    "L1_单控优先=" + (isSingleCtrl ? 1 : 0),
+                    "L2_收尾时间=" + PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()),
+                    "L3_普通机台优先=" + (normalMachinePriority == 0 ? 1 : 0),
+                    "L4_特殊支持能力数量=" + specialSupportCapabilityCount);
+            List<Integer> scores = java.util.Arrays.asList(
+                    isSingleCtrl ? 0 : 1,
+                    resolveEndingTimeScore(machine),
+                    normalMachinePriority,
+                    specialSupportCapabilityCount);
+            List<Integer> defaultScores = java.util.Arrays.asList(1, 0, 0, 0);
+            String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
+            String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    (i + 1)
+                            + ". " + PriorityTraceLogHelper.kv("机台", machine.getMachineCode())
+                            + ", " + PriorityTraceLogHelper.kv("名称", machine.getMachineName())
+                            + ", " + PriorityTraceLogHelper.kv("单控", PriorityTraceLogHelper.oneZero(isSingleCtrl))
+                            + ", " + PriorityTraceLogHelper.kv("普通机台", PriorityTraceLogHelper.oneZero(normalMachinePriority == 0))
+                            + ", " + PriorityTraceLogHelper.kv("特殊支持能力数量", specialSupportCapabilityCount)
+                            + ", " + PriorityTraceLogHelper.kv("收尾时间", PriorityTraceLogHelper.formatDateTime(machine.getEstimatedEndTime()))
+                            + ", " + PriorityTraceLogHelper.kv("续作状态", resolveContinuousStateDesc(machine, continuousMachineCodeSet, releasedMachineCodeSet))
+                            + ", " + PriorityTraceLogHelper.kv("机台顺序", machine.getMachineOrder())
+                            + ", " + PriorityTraceLogHelper.kv("SortKey", sortKey)
+                            + ", " + PriorityTraceLogHelper.kv("HitLevel", hitLevel));
+        }
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
+        String detail = detailBuilder.toString().trim();
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 构建全量启用机台排序比较器（不依赖SKU）。
+     *
+     * @param context 排程上下文
+     * @return 机台比较器
+     */
+    private Comparator<MachineScheduleDTO> buildStandaloneMachineComparator(LhScheduleContext context) {
+        return (left, right) -> {
+            // L1 单控优先：单控机台排前
+            int compareResult = Integer.compare(resolveStandaloneSingleControlScore(context, left),
+                    resolveStandaloneSingleControlScore(context, right));
+            if (compareResult != 0) {
+                return compareResult;
+            }
+            // L2 收尾时间升序，null排最后
+            compareResult = compareEndingTimeValue(context, left.getEstimatedEndTime(), right.getEstimatedEndTime());
+            if (compareResult != 0) {
+                return compareResult;
+            }
+            // L3 普通机台优先：普通=0，特殊支持=1
+            compareResult = Integer.compare(LhMachineHardMatchUtil.resolveNormalMachinePriority(left),
+                    LhMachineHardMatchUtil.resolveNormalMachinePriority(right));
+            if (compareResult != 0) {
+                return compareResult;
+            }
+            // L4 特殊支持能力数升序（越少越优先）
+            compareResult = Integer.compare(resolveSpecialSupportCapabilityCount(left),
+                    resolveSpecialSupportCapabilityCount(right));
+            if (compareResult != 0) {
+                return compareResult;
+            }
+            // 兜底：机台顺序 -> 机台编码
+            compareResult = Integer.compare(left.getMachineOrder(), right.getMachineOrder());
+            if (compareResult != 0) {
+                return compareResult;
+            }
+            return Comparator.nullsLast(String::compareTo).compare(left.getMachineCode(), right.getMachineCode());
+        };
+    }
+
+    /**
+     * 解析全量排序场景下单控机台得分：单控=0，普通=1。
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @return 单控得分
+     */
+    private int resolveStandaloneSingleControlScore(LhScheduleContext context, MachineScheduleDTO machine) {
+        return isSingleControlMachine(context, machine.getMachineCode()) ? 0 : 1;
+    }
+
+    /**
+     * 构建续作机台编码集合。
+     *
+     * @param context 排程上下文
+     * @return 续作机台编码集合
+     */
+    private Set<String> resolveContinuousMachineCodeSet(LhScheduleContext context) {
+        List<SkuScheduleDTO> continuousSkuList = context.getContinuousSkuList();
+        if (CollectionUtils.isEmpty(continuousSkuList)) {
+            return java.util.Collections.emptySet();
+        }
+        Set<String> machineCodeSet = new HashSet<>(continuousSkuList.size());
+        for (SkuScheduleDTO sku : continuousSkuList) {
+            if (sku != null && StringUtils.isNotEmpty(sku.getContinuousMachineCode())) {
+                machineCodeSet.add(sku.getContinuousMachineCode());
+            }
+        }
+        return machineCodeSet;
+    }
+
+    /**
+     * 构建已释放续作机台编码集合（窗口无计划/首日无计划/换活字块释放）。
+     *
+     * @param context 排程上下文
+     * @return 已释放续作机台编码集合
+     */
+    private Set<String> resolveReleasedContinuousMachineCodeSet(LhScheduleContext context) {
+        Set<String> releasedSet = new HashSet<>(16);
+        if (!CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())) {
+            releasedSet.addAll(context.getReleasedContinuousMachineCodeSet());
+        }
+        if (!CollectionUtils.isEmpty(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet())) {
+            releasedSet.addAll(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet());
+        }
+        if (!CollectionUtils.isEmpty(context.getTypeBlockReleasedContinuousMachineCodeSet())) {
+            releasedSet.addAll(context.getTypeBlockReleasedContinuousMachineCodeSet());
+        }
+        return releasedSet;
+    }
+
+    /**
+     * 解析机台续作状态描述，供日志展示。
+     *
+     * @param machine 机台
+     * @param continuousMachineCodeSet 续作机台编码集合
+     * @param releasedMachineCodeSet 已释放续作机台编码集合
+     * @return 续作状态描述
+     */
+    private String resolveContinuousStateDesc(MachineScheduleDTO machine, Set<String> continuousMachineCodeSet,
+                                              Set<String> releasedMachineCodeSet) {
+        if (!continuousMachineCodeSet.contains(machine.getMachineCode())) {
+            return "非续作";
+        }
+        if (releasedMachineCodeSet.contains(machine.getMachineCode())) {
+            return "续作释放";
+        }
+        // 续作排满机台已在筛选阶段剔除，此处保留的续作机台即续作收尾。
+        return machine.isEnding() ? "续作收尾" : "续作在产";
     }
 
     /**

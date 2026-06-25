@@ -44,4 +44,12 @@ public interface IMachineMatchStrategy {
                                          SkuScheduleDTO sku,
                                          List<MachineScheduleDTO> candidates,
                                          Set<String> excludedMachineCodes);
+
+    /**
+     * 输出续作排产后全量启用机台排序日志（不依赖具体SKU）。
+     * <p>排除续作排满机台、保留续作收尾机台，按"单控优先->收尾时间->普通机台优先->特殊支持能力数"排序。</p>
+     *
+     * @param context 排程上下文
+     */
+    void traceEnabledMachineSort(LhScheduleContext context);
 }
