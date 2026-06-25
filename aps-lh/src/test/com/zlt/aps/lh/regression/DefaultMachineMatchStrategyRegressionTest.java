@@ -218,6 +218,30 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void isSkuNeedScheduleOnFirstDay_shouldUseCompensationEarlyProductionAdmission() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO nextDayShift = context.getScheduleWindowShifts().get(2);
+
+        SkuScheduleDTO sku = sku("3302002546", "SPEC-A", "22.5");
+        sku.setContinuousCompensationSku(true);
+        sku.setDailyPlanQty(0);
+        sku.setRemainingScheduleQty(82);
+        Map<LocalDate, com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>();
+        quotaMap.put(toLocalDate(firstShift), quota("3302002546", toLocalDate(firstShift), 0));
+        quotaMap.put(toLocalDate(nextDayShift), quota("3302002546", toLocalDate(nextDayShift), 32));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        context.getNewSpecEarlyProductionAllowedMap().put(sku, Boolean.TRUE);
+
+        Boolean needScheduleOnFirstDay = ReflectionTestUtils.invokeMethod(
+                strategy, "isSkuNeedScheduleOnFirstDay", context, sku);
+
+        assertTrue(Boolean.TRUE.equals(needScheduleOnFirstDay),
+                "补偿SKU提前生产准入通过时，选机画像应按窗口首日排产识别");
+    }
+
+    @Test
     void resolveCandidateReferenceTime_shouldIgnoreTentativeContinuousEndTimeForReleasedMachine() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
@@ -621,7 +645,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldExcludeSingleControlMachineForNormalSku() {
+    void matchMachines_shouldKeepSingleControlMachineForNormalSkuBehindNormalCandidate() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -636,9 +660,11 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001418", "SPEC-A", "22.5"));
 
-        assertEquals(1, candidates.size());
+        assertEquals(2, candidates.size(), "待排小批量SKU未完成时，正规SKU仍应保留单控候选作为回落");
         assertEquals("K1401", candidates.get(0).getMachineCode(),
-                "待排小批量SKU未完成时，正规新增 SKU 不允许保留单控候选");
+                "正规SKU应优先选择非单控机台");
+        assertEquals("K1501L", candidates.get(1).getMachineCode(),
+                "单控机台应排在正规SKU普通候选之后");
     }
 
     @Test
@@ -664,7 +690,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldBlockFormalSkuFromSingleControlWhenSmallBatchStillPending() {
+    void matchMachines_shouldFallbackToSingleControlForFormalSkuWhenOnlySingleControlCandidate() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -676,7 +702,8 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
-        assertTrue(candidates.isEmpty(), "待排小批量SKU未完成时，正规SKU即使只剩单控机台，也不能抢占单控资源");
+        assertEquals(1, candidates.size(), "正规SKU没有非单控候选时，应允许回落单控机台");
+        assertEquals("K1501R", candidates.get(0).getMachineCode());
     }
 
     @Test

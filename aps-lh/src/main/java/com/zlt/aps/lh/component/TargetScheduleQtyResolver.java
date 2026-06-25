@@ -434,6 +434,29 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 判断 SKU 硫化余量是否可在当前排程窗口内完成。
+     * <p>该口径复用候选机台真实窗口产能，产能计算已按班次控制、换模时间和设备停机时段扣减。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-窗口真实产能可覆盖硫化余量；false-无法覆盖或无有效余量
+     */
+    public boolean canFinishSurplusInActualWindow(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)) {
+            return false;
+        }
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        if (surplusQty <= 0) {
+            return false;
+        }
+        int totalAvailableCapacity = calcSkuTotalAvailableCapacityInWindow(context, sku);
+        boolean canFinish = totalAvailableCapacity >= surplusQty;
+        log.info("SKU硫化余量窗口完成能力判断, materialCode: {}, surplusQty: {}, actualWindowCapacity: {}, canFinish: {}",
+                sku.getMaterialCode(), surplusQty, totalAvailableCapacity, canFinish);
+        return canFinish;
+    }
+
+    /**
      * 按候选机台真实窗口产能计算结构排序使用的收尾天数。
      * <p>逐日汇总所有候选机台的实际可排量，目标量首次被覆盖的当天即为最晚收尾日。</p>
      *
@@ -722,7 +745,8 @@ public class TargetScheduleQtyResolver {
             Date effectiveEndTime = control.getEffectiveEndTime();
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
-                    new ArrayList<>(0),
+                    machine.getCleaningWindowList(),
+                    machine.getMaintenanceWindowList(),
                     machine.getMachineCode(),
                     effectiveStartTime,
                     effectiveEndTime,

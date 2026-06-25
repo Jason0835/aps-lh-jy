@@ -27,6 +27,7 @@ import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.LocalSearchMachineAllocatorStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -3667,6 +3668,235 @@ class NewSpecProductionStrategyRegressionTest {
 
         assertNotNull(decision);
         assertFalse(decision.isEarlyProduction(), "跨自然日夜班必须按班次业务日判断，T+1自身有计划时不应判为提前生产");
+    }
+
+    @Test
+    void resolveEarlyProductionDecision_shouldMarkEndingNewSpecResultWhenNextDayHasPlan() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002481");
+        sku.setStructureName("11R22.5-JD571四层");
+        sku.setDailyCapacity(40);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 40, 0));
+        LocalDate firstDay = toLocalDate(context.getScheduleWindowShifts().get(0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(3));
+        context.addStructurePlanMachineCount(firstDay, sku.getStructureName(), 1);
+        context.addStructurePlanMachineCount(secondDay, sku.getStructureName(), 1);
+        Date firstProductionStartTime = context.getScheduleWindowShifts().get(1).getShiftStartDateTime();
+
+        EarlyProductionDecision decision = ReflectionTestUtils.invokeMethod(strategy,
+                "resolveEarlyProductionDecision", context, sku, firstProductionStartTime,
+                context.getScheduleWindowShifts(), true);
+        LhScheduleResult result = buildNewSpecResult(sku.getMaterialCode(), "K1501L");
+        ReflectionTestUtils.invokeMethod(strategy, "appendEarlyProductionRemark",
+                context, result, decision, firstDay);
+
+        assertNotNull(decision);
+        assertTrue(decision.isEarlyProduction(), "新增收尾SKU下一业务日有计划时，也应参与提前生产判定");
+        assertEquals("1", result.getIsEarlyProduction(), "收尾新增结果提前一天生产时应回写提前生产标识");
+        assertEquals("结构计划硫化机台数：1,1,0", result.getRemark());
+    }
+
+    @Test
+    void alignFirstTimeByDailyPlan_shouldKeepCurrentDayForCompensationEarlyProduction() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002546");
+        sku.setStructureName("11R22.5-JD571四层");
+        sku.setContinuousCompensationSku(true);
+        sku.setDailyPlanQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 32, 50));
+        LocalDate firstDay = toLocalDate(context.getScheduleWindowShifts().get(0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(3));
+        context.addStructurePlanMachineCount(firstDay, sku.getStructureName(), 1);
+        context.addStructurePlanMachineCount(secondDay, sku.getStructureName(), 1);
+        Date switchReadyTime = context.getScheduleWindowShifts().get(0).getShiftStartDateTime();
+        Date firstProductionStartTime = context.getScheduleWindowShifts().get(1).getShiftStartDateTime();
+
+        EarlyProductionDecision decision = ReflectionTestUtils.invokeMethod(strategy,
+                "resolveEarlyProductionDecision", context, sku, firstProductionStartTime,
+                context.getScheduleWindowShifts(), false);
+        Date alignedSwitchReadyTime = ReflectionTestUtils.invokeMethod(strategy,
+                "alignFirstMachineSwitchReadyTimeByDailyPlan", context, sku, switchReadyTime,
+                context.getScheduleWindowShifts(), false);
+        Date alignedProductionStartTime = ReflectionTestUtils.invokeMethod(strategy,
+                "alignFirstProductionStartTimeByDailyPlan", context, sku, firstProductionStartTime,
+                context.getScheduleWindowShifts(), false, decision);
+
+        assertNotNull(decision);
+        assertTrue(decision.isEarlyProduction(), "续作补偿SKU转入新增后应复用提前生产准入");
+        assertEquals(switchReadyTime, alignedSwitchReadyTime, "提前生产准入通过时，补偿SKU首台换模不应顺延到T+1");
+        assertEquals(firstProductionStartTime, alignedProductionStartTime, "提前生产准入通过时，补偿SKU开产不应顺延到T+1");
+    }
+
+    @Test
+    void isSkuNeedScheduleOnFirstDay_shouldUseCompensationEarlyProductionAdmission() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002546");
+        sku.setStructureName("11R22.5-JD571四层");
+        sku.setContinuousCompensationSku(true);
+        sku.setDailyPlanQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 32, 50));
+        context.getNewSpecEarlyProductionAllowedMap().put(sku, Boolean.TRUE);
+
+        Boolean needScheduleOnFirstDay = ReflectionTestUtils.invokeMethod(strategy,
+                "isSkuNeedScheduleOnFirstDay", context, sku);
+
+        assertTrue(Boolean.TRUE.equals(needScheduleOnFirstDay),
+                "补偿SKU提前生产准入通过时，首日空闲机台优先规则应可生效");
+    }
+
+    @Test
+    void selectCandidateMachine_shouldKeepNormalBeforeSingleControlForCompensationEarlyProduction() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002546");
+        sku.setStructureName("11R22.5-JD571四层");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setContinuousCompensationSku(true);
+        sku.setDailyPlanQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 32, 50));
+        context.getNewSpecEarlyProductionAllowedMap().put(sku, Boolean.TRUE);
+
+        MachineScheduleDTO normalMachine = buildMachine("K1105", context.getScheduleWindowShifts().get(0).getShiftStartDateTime());
+        MachineScheduleDTO occupiedSingleControlMachine = buildMachine("K1501L", context.getScheduleWindowShifts().get(5).getShiftEndDateTime());
+        MachineScheduleDTO singleControlMachine = buildMachine("K1501R", context.getScheduleWindowShifts().get(0).getShiftStartDateTime());
+        List<MachineScheduleDTO> candidates = Arrays.asList(normalMachine, occupiedSingleControlMachine, singleControlMachine);
+        NewSpecCandidateCache candidateCache = NewSpecCandidateCache.from(candidates,
+                machine -> StringUtils.startsWith(machine.getMachineCode(), "K1501"));
+
+        MachineScheduleDTO selectedMachine = ReflectionTestUtils.invokeMethod(strategy,
+                "selectCandidateMachine", context, sku, candidateCache, Collections.emptySet(),
+                orderedMachineMatch(normalMachine, occupiedSingleControlMachine, singleControlMachine), null,
+                ProductionQuantityPolicy.from(sku, false));
+
+        assertNotNull(selectedMachine);
+        assertEquals("K1105", selectedMachine.getMachineCode(),
+                "补偿SKU提前生产准入通过时仍应保持正规SKU选机顺序，非单控机台优先于单控机台");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldSkipSingleControlWhenCompensationCannotStartOnFirstWorkDate() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleConfig(buildSingleControlScheduleConfig());
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002546");
+        sku.setMaterialDesc("3302002546");
+        sku.setStructureName("11R22.5-JD571四层");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setContinuousCompensationSku(true);
+        sku.setShiftCapacity(18);
+        sku.setPendingQty(82);
+        sku.setDailyPlanQty(0);
+        sku.setTargetScheduleQty(82);
+        sku.setWindowPlanQty(82);
+        sku.setSurplusQty(1732);
+        sku.setEmbryoStock(82);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 32, 50));
+        context.getNewSpecSkuList().add(sku);
+        attachAvailableMould(context, sku.getMaterialCode(), "M-3302002546");
+
+        LocalDate firstDay = toLocalDate(context.getScheduleWindowShifts().get(0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(3));
+        context.addStructurePlanMachineCount(firstDay, sku.getStructureName(), 1);
+        context.addStructurePlanMachineCount(secondDay, sku.getStructureName(), 1);
+
+        MachineScheduleDTO lateSingleControlMachine = buildMachine(
+                "K1501L", context.getScheduleWindowShifts().get(1).getShiftStartDateTime());
+        MachineScheduleDTO earlySingleControlMachine = buildMachine(
+                "K1501R", context.getScheduleWindowShifts().get(0).getShiftStartDateTime());
+
+        strategy.scheduleNewSpecs(context, orderedMachineMatch(lateSingleControlMachine, earlySingleControlMachine),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "补偿SKU应跳过无法在当前业务日开产的单控候选后继续排产");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals("K1501R", result.getLhMachineCode(),
+                "补偿SKU提前生产应落到真实可在当前业务日开产的单控侧别");
+        assertEquals("1", result.getIsEarlyProduction(),
+                "真实开产业务日满足提前生产时应写入提前生产标识");
+    }
+
+    @Test
+    void allocateNewSpecMouldChangeStartTime_shouldKeepEarlyProductionChangeInMorningShift() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 6, 3, 0, 0));
+        context.setScheduleConfig(buildSingleControlChangeoverBalanceScheduleConfig());
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002546");
+        sku.setEmbryoCode("215104553");
+        sku.setStructureName("11R22.5-JD571四层");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setContinuousCompensationSku(true);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 32, 50));
+        context.getMaterialSharedEmbryoMap().put(sku.getMaterialCode(), Boolean.TRUE);
+
+        LocalDate firstDay = toLocalDate(context.getScheduleWindowShifts().get(0));
+        LocalDate secondDay = toLocalDate(context.getScheduleWindowShifts().get(2));
+        context.addStructurePlanMachineCount(firstDay, sku.getStructureName(), 14);
+        context.addStructurePlanMachineCount(secondDay, sku.getStructureName(), 16);
+        // 早班已有共用胎胚换模达到均衡阈值时，普通新增换模会被挪到中班；
+        // 提前生产新增换模必须绕过该均衡挪动，保留 06:00 首台换模。
+        context.getDailyMouldChangeCountMap().put("2026-06-01", new int[]{8, 0});
+
+        Date allocatedTime = ReflectionTestUtils.invokeMethod(strategy,
+                "allocateNewSpecMouldChangeStartTime", context, sku, "K1501R",
+                dateTime(2026, 6, 1, 6, 0), 8, new DefaultMouldChangeBalanceStrategy());
+
+        assertEquals(dateTime(2026, 6, 1, 6, 0), allocatedTime,
+                "提前生产首台新增换模应使用提前生产动作类型，避免被共用胎胚均衡挪到中班");
     }
 
     @Test

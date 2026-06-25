@@ -101,8 +101,8 @@ class EndingDaysRegressionTest {
     }
 
     @Test
-    void isEnding_fullCapacityMode_shouldNotTreatLargeSurplusAsEndingWhenWindowRemainingPlanIsSmaller() {
-        DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(1500);
+    void isEnding_fullCapacityMode_shouldNotTreatLargeSurplusAsEndingWhenActualWindowCapacityIsInsufficient() {
+        DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(800);
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(new java.util.Date());
         context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
@@ -117,7 +117,27 @@ class EndingDaysRegressionTest {
         dto.setWindowPlanQty(150);
         dto.setWindowRemainingPlanQty(150);
 
-        assertFalse(strategy.isEnding(context, dto), "窗口剩余额度明显小于余量时，不应仅因候选机台总产能充足而提前判收尾");
+        assertFalse(strategy.isEnding(context, dto), "真实窗口产能无法覆盖硫化余量时，不应提前判收尾");
+    }
+
+    @Test
+    void isEnding_fullCapacityMode_shouldUseActualWindowCapacityWhenWindowRemainingPlanIsSmallerThanSurplus() {
+        DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(112);
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(new java.util.Date());
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.ENABLE_FULL_CAPACITY_SCHEDULING, "1")));
+        SkuScheduleDTO dto = new SkuScheduleDTO();
+        dto.setMaterialCode("3302002169");
+        dto.setTargetScheduleQty(128);
+        dto.setPendingQty(102);
+        dto.setSurplusQty(102);
+        dto.setShiftCapacity(16);
+        dto.setDailyCapacity(46);
+        dto.setWindowPlanQty(100);
+        dto.setWindowRemainingPlanQty(100);
+
+        assertTrue(strategy.isEnding(context, dto), "满排按余量判收尾时，应按真实窗口产能覆盖硫化余量判收尾");
     }
 
     @Test

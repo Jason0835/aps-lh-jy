@@ -1,8 +1,10 @@
 package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -168,6 +170,26 @@ class TargetScheduleQtyResolverRegressionTest {
         assertTrue(snapshot.isHitStructureEnding(), "有效产能覆盖余量时应命中结构五天内收尾");
     }
 
+    @Test
+    void canFinishSurplusInActualWindow_shouldDeductMachineCleaningWindow() {
+        TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver();
+        MachineScheduleDTO machine = machine("K1002", "3302002169");
+        machine.getCleaningWindowList().add(cleaningWindow("K1002",
+                dateTime(2026, 5, 1, 6), dateTime(2026, 5, 1, 14)));
+        ReflectionTestUtils.setField(resolver, "machineMatchStrategy", fixedMachineMatch(machine));
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(date(2026, 5, 1));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        context.setScheduleConfig(createConfig("1"));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002169");
+        sku.setSurplusQty(120);
+        sku.setShiftCapacity(16);
+
+        assertFalse(resolver.canFinishSurplusInActualWindow(context, sku),
+                "真实窗口产能判断应扣除候选机台清洗窗口");
+    }
+
     private static LhScheduleConfig createConfig(String fullCapacityMode) {
         return createConfig(fullCapacityMode, "5");
     }
@@ -203,12 +225,33 @@ class TargetScheduleQtyResolverRegressionTest {
         return machine;
     }
 
+    private static MachineCleaningWindowDTO cleaningWindow(String machineCode, java.util.Date startTime,
+                                                           java.util.Date endTime) {
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setLhCode(machineCode);
+        cleaningWindow.setCleanType(CleaningTypeEnum.SAND_BLAST.getCode());
+        cleaningWindow.setCleanStartTime(startTime);
+        cleaningWindow.setCleanEndTime(endTime);
+        cleaningWindow.setReadyTime(endTime);
+        return cleaningWindow;
+    }
+
     private static java.util.Date date(int y, int month, int day) {
         Calendar c = Calendar.getInstance();
         c.clear();
         c.set(Calendar.YEAR, y);
         c.set(Calendar.MONTH, month - 1);
         c.set(Calendar.DAY_OF_MONTH, day);
+        return c.getTime();
+    }
+
+    private static java.util.Date dateTime(int y, int month, int day, int hour) {
+        Calendar c = Calendar.getInstance();
+        c.clear();
+        c.set(Calendar.YEAR, y);
+        c.set(Calendar.MONTH, month - 1);
+        c.set(Calendar.DAY_OF_MONTH, day);
+        c.set(Calendar.HOUR_OF_DAY, hour);
         return c.getTime();
     }
 

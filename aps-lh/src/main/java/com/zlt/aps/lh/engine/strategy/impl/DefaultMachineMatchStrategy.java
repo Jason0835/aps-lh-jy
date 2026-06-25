@@ -176,7 +176,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     /**
      * 对单控拆分机台执行SKU类型约束。
      * <p>试制只保留单控候选；量试/小批量优先单控、无单控时回落普通；
-     * 正规优先普通，且仅在待排小批量SKU已全部排完后，才允许保留单控候选作为回落机台。</p>
+     * 正规优先普通，单控候选保留为普通机台后的回落机台。</p>
      *
      * <p>业务边界：这里不做新增排序重排，不让后续试制/量试反向抢占当前 SKU 的全局顺序；
      * 只在当前 SKU 已轮到选机时，按类型决定单控和普通候选是否保留。</p>
@@ -274,20 +274,32 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return retainedCandidates;
         }
         if (context != null && context.getPendingSmallBatchNewSpecSkuCount() > 0) {
-            // 待排小批量SKU未完成前，正规SKU不得占用单控机台。
-            return normalCandidates;
+            // 待排小批量SKU未完成前，正规SKU仍保留单控候选，但单控只能作为普通机台后的回落。
+            return retainNormalThenSingleCandidates(singleControlCandidates, normalCandidates);
         }
         if (!CollectionUtils.isEmpty(normalCandidates)) {
             // 小批量已全部排完后，正规SKU优先普通机台，但仍可保留单控候选作为回落机台。
             // 单控放在普通机台之后，避免正规 SKU 抢占后续特殊 SKU 可能需要的单控资源。
-            List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
-                    singleControlCandidates.size() + normalCandidates.size());
-            retainedCandidates.addAll(normalCandidates);
-            retainedCandidates.addAll(singleControlCandidates);
-            return retainedCandidates;
+            return retainNormalThenSingleCandidates(singleControlCandidates, normalCandidates);
         }
         // 正规SKU仅剩单控候选时，允许直接使用单控机台。
         return singleControlCandidates;
+    }
+
+    /**
+     * 正规SKU候选顺序：普通机台优先，单控机台作为回落。
+     *
+     * @param singleControlCandidates 单控候选
+     * @param normalCandidates 普通候选
+     * @return 普通在前、单控在后的候选列表
+     */
+    private List<MachineScheduleDTO> retainNormalThenSingleCandidates(List<MachineScheduleDTO> singleControlCandidates,
+                                                                      List<MachineScheduleDTO> normalCandidates) {
+        List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
+                singleControlCandidates.size() + normalCandidates.size());
+        retainedCandidates.addAll(normalCandidates);
+        retainedCandidates.addAll(singleControlCandidates);
+        return retainedCandidates;
     }
 
     /**
@@ -342,7 +354,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         if (isFormalSku(sku) && singleControlMachine) {
             if (context != null && context.getPendingSmallBatchNewSpecSkuCount() > 0) {
-                return "待排小批量SKU未完成，正规SKU禁止抢占单控机台";
+                return "待排小批量SKU未完成，正规SKU单控候选降为普通机台后的回落候选";
             }
             return "正规SKU优先使用普通机台";
         }
@@ -1694,6 +1706,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
         if (sku.getDailyPlanQty() > 0) {
+            return true;
+        }
+        if (sku.isContinuousCompensationSku()
+                && Boolean.TRUE.equals(context.getNewSpecEarlyProductionAllowedMap().get(sku))) {
+            // 续作补偿提前生产准入通过时，选机画像按窗口首日排产处理，但不改变SKU队列顺序。
             return true;
         }
         if (sku.getEffectiveCarryForwardQty() > 0 || sku.getMonthlyHistoryShortageQty() > 0) {

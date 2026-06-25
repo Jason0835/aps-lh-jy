@@ -40,9 +40,10 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
         // 满排模式下可选"按余量判定"开关，避免目标量封顶导致误判。
         int rule2CandidateQty = resolveRule2CandidateQty(context, sku, targetScheduleQty, fullCapacityMode,
                 endingBySurplusInFullModeEnabled);
-        if (rule2CandidateQty > 0
-                && !shouldSkipRule2ByWindowRemainingPlanQty(sku, fullCapacityMode,
-                endingBySurplusInFullModeEnabled, rule2CandidateQty)) {
+        boolean skipRule2ByWindowRemainingPlanQty = rule2CandidateQty > 0
+                && shouldSkipRule2ByWindowRemainingPlanQty(sku, fullCapacityMode,
+                endingBySurplusInFullModeEnabled, rule2CandidateQty);
+        if (rule2CandidateQty > 0 && !skipRule2ByWindowRemainingPlanQty) {
             int totalAvailableCapacity = getTargetScheduleQtyResolver()
                     .calcSkuTotalAvailableCapacityInWindow(context, sku);
             if (totalAvailableCapacity > 0 && rule2CandidateQty <= totalAvailableCapacity) {
@@ -51,6 +52,12 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
                         endingBySurplusInFullModeEnabled);
                 return true;
             }
+        }
+        if (skipRule2ByWindowRemainingPlanQty
+                && getTargetScheduleQtyResolver().canFinishSurplusInActualWindow(context, sku)) {
+            log.debug("SKU[{}]判定为收尾(满排余量窗口产能): 硫化余量可在当前排程窗口内完成",
+                    sku.getMaterialCode());
+            return true;
         }
 
         // 规则3：待排量 < 日产能。
