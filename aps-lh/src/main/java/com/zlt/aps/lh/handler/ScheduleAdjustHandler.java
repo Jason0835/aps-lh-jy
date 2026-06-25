@@ -1610,7 +1610,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int endingCount = 0;
         for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
             for (SkuScheduleDTO sku : skuList) {
-                if (endingJudgmentStrategy.isEnding(context, sku)) {
+                if (endingJudgmentStrategy.isExpectedEnding(context, sku)) {
                     sku.setSkuTag(SkuTagEnum.ENDING.getCode());
                     int endingDays = endingJudgmentStrategy.calculateEndingDays(context, sku);
                     if (endingDays < 0) {

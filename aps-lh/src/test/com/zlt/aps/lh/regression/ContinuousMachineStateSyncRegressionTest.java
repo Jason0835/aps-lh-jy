@@ -93,7 +93,7 @@ class ContinuousMachineStateSyncRegressionTest {
         context.getSkuMouldRelMap().put("MAT-NEW", Collections.singletonList(mould("MOULD-NEW")));
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD-NEW-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
         when(machineMatchStrategy.matchMachines(any(), any())).thenReturn(Collections.singletonList(machine));
         when(machineMatchStrategy.selectBestMachine(any(), any(), any(), any()))
                 .thenAnswer(invocation -> {

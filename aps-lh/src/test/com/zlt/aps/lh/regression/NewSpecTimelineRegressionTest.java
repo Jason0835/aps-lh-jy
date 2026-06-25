@@ -85,7 +85,7 @@ class NewSpecTimelineRegressionTest {
                 .thenReturn(dateTime(2026, 4, 11, 8, 0));
         when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
                 .thenReturn(dateTime(2026, 4, 11, 16, 0));
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
         strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
                 inspectionBalanceStrategy, capacityCalculateStrategy);
 
@@ -135,7 +135,7 @@ class NewSpecTimelineRegressionTest {
                 .thenReturn(dateTime(2026, 4, 10, 22, 0));
         when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
                 .thenReturn(dateTime(2026, 4, 11, 6, 0));
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
                 inspectionBalanceStrategy, capacityCalculateStrategy);
@@ -177,7 +177,7 @@ class NewSpecTimelineRegressionTest {
                 .thenReturn(dateTime(2026, 4, 11, 15, 0));
         when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
                 .thenReturn(dateTime(2026, 4, 11, 23, 30));
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
                 inspectionBalanceStrategy, capacityCalculateStrategy);
@@ -211,7 +211,7 @@ class NewSpecTimelineRegressionTest {
                 .thenAnswer(invocation -> invocation.getArgument(2));
         when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(2));
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
                 inspectionBalanceStrategy, capacityCalculateStrategy);

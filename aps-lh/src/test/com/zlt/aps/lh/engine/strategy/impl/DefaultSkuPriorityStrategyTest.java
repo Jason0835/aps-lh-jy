@@ -81,9 +81,9 @@ class DefaultSkuPriorityStrategyTest {
         endingEarly.setStructureName("S1");
         endingEarly.setEndingDaysRemaining(2);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(endingLate))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(endingEarly))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(normal))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(endingLate))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(endingEarly))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(normal))).thenReturn(false);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(endingLate)))
                 .thenReturn(4);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(endingEarly)))
@@ -121,8 +121,8 @@ class DefaultSkuPriorityStrategyTest {
         formalSku.setHighPriorityPendingQty(158);
         formalSku.setDelayDays(0);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(trialSku))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(formalSku))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(trialSku))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(formalSku))).thenReturn(true);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(trialSku)))
                 .thenReturn(1);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(formalSku)))
@@ -153,8 +153,8 @@ class DefaultSkuPriorityStrategyTest {
         sku1585.setEndingDaysRemaining(0);
         sku1585.setHighPriorityPendingQty(6480);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(sku2022))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(sku1585))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(sku2022))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(sku1585))).thenReturn(false);
 
         LhScheduleContext context = contextWithNewSpec(sku2022, sku1585);
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
@@ -167,6 +167,38 @@ class DefaultSkuPriorityStrategyTest {
 
         assertEquals("3302001585", context.getNewSpecSkuList().get(0).getMaterialCode());
         assertEquals("3302002022", context.getNewSpecSkuList().get(1).getMaterialCode());
+    }
+
+    @Test
+    void sortByPriority_shouldUseStructureEndingFlagInsteadOfCurrentWindowEnding() {
+        SkuScheduleDTO structureEnding = sku("MAT-STRUCTURE");
+        structureEnding.setStructureName("S1");
+        structureEnding.setHighPriorityPendingQty(1);
+        SkuScheduleDTO supplyChainHigh = sku("MAT-SUPPLY");
+        supplyChainHigh.setStructureName("S2");
+        supplyChainHigh.setHighPriorityPendingQty(999);
+
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(structureEnding)))
+                .thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(supplyChainHigh)))
+                .thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(LhScheduleContext.class), same(structureEnding)))
+                .thenReturn(false);
+        when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class),
+                same(structureEnding))).thenReturn(3);
+
+        LhScheduleContext context = contextWithNewSpec(supplyChainHigh, structureEnding);
+        Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("S1", Collections.singletonList(structureEnding));
+        structureSkuMap.put("S2", Collections.singletonList(supplyChainHigh));
+        context.setStructureSkuMap(structureSkuMap);
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.STRUCTURE_ENDING_DAYS, "5")));
+
+        strategy.sortByPriority(context);
+
+        assertEquals("MAT-STRUCTURE", context.getNewSpecSkuList().get(0).getMaterialCode());
+        assertEquals("MAT-SUPPLY", context.getNewSpecSkuList().get(1).getMaterialCode());
     }
 
     @Test
@@ -184,9 +216,9 @@ class DefaultSkuPriorityStrategyTest {
         supplyChainFirst.setStructureName("S2");
         supplyChainFirst.setHighPriorityPendingQty(500);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(consumedNonEnding))).thenReturn(false);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(endingSku))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(supplyChainFirst))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(consumedNonEnding))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(endingSku))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(supplyChainFirst))).thenReturn(false);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(endingSku)))
                 .thenReturn(4);
 
@@ -215,8 +247,8 @@ class DefaultSkuPriorityStrategyTest {
         ending.setStructureName("S1");
         ending.setEndingDaysRemaining(4);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(ending))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(normal))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(ending))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(normal))).thenReturn(false);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(ending)))
                 .thenReturn(4);
 
@@ -244,8 +276,8 @@ class DefaultSkuPriorityStrategyTest {
         highSmall.setEndingDaysRemaining(2);
         highSmall.setHighPriorityPendingQty(50);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(highLarge))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(highSmall))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(highLarge))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(highSmall))).thenReturn(true);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(highLarge)))
                 .thenReturn(2);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(highSmall)))
@@ -305,8 +337,8 @@ class DefaultSkuPriorityStrategyTest {
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
         structureSkuMap.put("结构A", Arrays.asList(massTrialSku, formalSku));
         context.setStructureSkuMap(structureSkuMap);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(massTrialSku))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(formalSku))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(massTrialSku))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(formalSku))).thenReturn(true);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(massTrialSku)))
                 .thenReturn(3);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(formalSku)))
@@ -365,9 +397,9 @@ class DefaultSkuPriorityStrategyTest {
         structurePriority.setEndingDaysRemaining(4);
         structurePriority.setHighPriorityPendingQty(9999);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(locked))).thenReturn(false);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(delayHigh))).thenReturn(false);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(structurePriority))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(locked))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(delayHigh))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(structurePriority))).thenReturn(true);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(structurePriority)))
                 .thenReturn(4);
 
@@ -504,8 +536,8 @@ class DefaultSkuPriorityStrategyTest {
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
         structureSkuMap.put("结构A", Arrays.asList(massTrial, trial));
         context.setStructureSkuMap(structureSkuMap);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(massTrial))).thenReturn(true);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(trial))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(massTrial))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(trial))).thenReturn(true);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(massTrial)))
                 .thenReturn(3);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(trial)))
@@ -591,8 +623,8 @@ class DefaultSkuPriorityStrategyTest {
         endingSku.setStructureName("结构B");
         endingSku.setEndingDaysRemaining(3);
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(trialSku))).thenReturn(false);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(endingSku))).thenReturn(true);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(trialSku))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(endingSku))).thenReturn(true);
         when(endingJudgmentStrategy.calculateEndingDaysForStructurePriority(any(LhScheduleContext.class), same(endingSku)))
                 .thenReturn(3);
 
@@ -720,8 +752,8 @@ class DefaultSkuPriorityStrategyTest {
         SkuScheduleDTO specialSku = sku("Z-SPECIAL");
         specialSku.setStructureName("结构特殊");
 
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(normalSku))).thenReturn(false);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(specialSku))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(normalSku))).thenReturn(false);
+        when(endingJudgmentStrategy.isStructureEndingForPriority(any(LhScheduleContext.class), same(specialSku))).thenReturn(false);
 
         LhScheduleContext context = contextWithNewSpec(normalSku, specialSku);
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();

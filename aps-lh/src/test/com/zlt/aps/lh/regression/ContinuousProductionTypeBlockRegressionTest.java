@@ -115,7 +115,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T3", "MOULD-3");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
@@ -177,7 +177,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T2", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-T1".equals(sku.getMaterialCode());
         });
@@ -205,7 +205,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-P1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "MAT-C1".equals(sku.getMaterialCode()) || "MAT-P1".equals(sku.getMaterialCode());
         });
@@ -249,7 +249,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO currentSku = invocation.getArgument(1);
             return "MAT-C1".equals(currentSku.getMaterialCode()) || "MAT-T1".equals(currentSku.getMaterialCode());
         });
@@ -281,7 +281,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO currentSku = invocation.getArgument(1);
             return "MAT-C1".equals(currentSku.getMaterialCode());
         });
@@ -319,7 +319,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
@@ -366,7 +366,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
@@ -407,7 +407,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "3302001648", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "3302002174".equals(sku.getMaterialCode());
         });
@@ -442,7 +442,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-SPECIFY", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -470,7 +470,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-SPECIFY", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
 
@@ -503,7 +503,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-SPECIFY", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
 
@@ -534,7 +534,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-SPECIFY", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
 
@@ -565,7 +565,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-SPECIFY", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -594,7 +594,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "3302002654", "MOULD-NEW");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "3302001585".equals(sku.getMaterialCode());
         });
@@ -622,7 +622,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRels(context, "MAT-T1", "MOULD-X", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -649,7 +649,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRels(context, "MAT-T1", "MOULD-X", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -672,7 +672,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRels(context, "MAT-C1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -694,7 +694,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-S1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -725,7 +725,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -755,7 +755,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -779,7 +779,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -801,7 +801,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -836,7 +836,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -859,7 +859,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -884,7 +884,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -925,7 +925,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(baselineContext, "MAT-C1", "MOULD-1");
         putMouldRel(baselineContext, "MAT-T1", "MOULD-1");
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("BASE-1", "BASE-2", "ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -945,7 +945,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -986,7 +986,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(baselineContext, "MAT-C1", "MOULD-1");
         putMouldRel(baselineContext, "MAT-T1", "MOULD-1");
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("BASE-1", "BASE-2", "ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1003,7 +1003,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1045,7 +1045,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1094,7 +1094,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T2", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "MAT-C1".equals(sku.getMaterialCode()) || "MAT-T2".equals(sku.getMaterialCode());
         });
@@ -1123,7 +1123,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1149,7 +1149,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1177,7 +1177,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO targetSku = invocation.getArgument(1);
             return "MAT-C1".equals(targetSku.getMaterialCode());
         });
@@ -1200,7 +1200,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
@@ -1261,7 +1261,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "3302002601", "MOULD-K1105");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
@@ -1316,7 +1316,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "3302001513", "MOULD-K1105");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO currentSku = invocation.getArgument(1);
             return currentSku != null && "3302002546".equals(currentSku.getMaterialCode());
         });
@@ -1421,7 +1421,7 @@ class ContinuousProductionTypeBlockRegressionTest {
                         dateTime(2026, 4, 17, 8, 0, 0), dateTime(2026, 4, 17, 8, 5, 0)));
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1454,7 +1454,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T2", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3", "ORD-4");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku.getMaterialCode().startsWith("MAT-C");
         });
@@ -1487,7 +1487,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1513,7 +1513,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1541,7 +1541,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1575,7 +1575,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -1617,7 +1617,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "3302002174", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
@@ -1656,7 +1656,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "3302001002", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "3302002174".equals(sku.getMaterialCode());
         });
@@ -1694,7 +1694,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T3", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3", "ORD-4", "ORD-5");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "MAT-C1".equals(sku.getMaterialCode())
                     || "MAT-C2".equals(sku.getMaterialCode())
@@ -1737,7 +1737,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "3302001648", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "3302002174".equals(sku.getMaterialCode());
         });
@@ -1772,7 +1772,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T2", "MOULD-2");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3", "ORD-4");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku.getMaterialCode().startsWith("MAT-C");
         });
@@ -1817,7 +1817,7 @@ class ContinuousProductionTypeBlockRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && ("MAT-C1".equals(sku.getMaterialCode()) || "MAT-C2".equals(sku.getMaterialCode()));
         });

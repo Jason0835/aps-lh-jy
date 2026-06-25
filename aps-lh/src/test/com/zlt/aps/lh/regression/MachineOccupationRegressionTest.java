@@ -97,7 +97,7 @@ class MachineOccupationRegressionTest {
                 .thenAnswer(invocation -> invocation.getArgument(2));
         when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(2));
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
         strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
                 inspectionBalanceStrategy, capacityCalculateStrategy);
 
@@ -140,7 +140,7 @@ class MachineOccupationRegressionTest {
                 .thenAnswer(invocation -> invocation.getArgument(2));
         when(inspectionBalanceStrategy.allocateInspection(any(), anyString(), any()))
                 .thenAnswer(invocation -> invocation.getArgument(2));
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
                 inspectionBalanceStrategy, capacityCalculateStrategy);

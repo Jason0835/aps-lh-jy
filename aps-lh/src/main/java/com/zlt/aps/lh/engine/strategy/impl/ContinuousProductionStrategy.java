@@ -197,7 +197,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 applyContinuousWindowNoPlanSurplusStrictTarget(context, sku, shortageQuotaPlan);
             }
             // SKU收尾判定决定是否严格控量：收尾必须按目标量停，非收尾才允许后续补满可用班次。
-            boolean isEnding = finishWindowNoPlanSurplus || endingJudgmentStrategy.isEnding(context, sku);
+            boolean isEnding = finishWindowNoPlanSurplus || endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
             if (shortageQuotaPlan.isForceEndingByNoFuturePlan()) {
                 isEnding = true;
                 applyContinuousNoFutureEndingStrictTarget(sku, shortageQuotaPlan);
@@ -4689,7 +4689,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         // 按续作业务分组统一复核，避免同物料但不同共享账本组互相串量。
         Map<String, Integer> groupTotalPlanQtyMap = new LinkedHashMap<>(16);
-        Map<String, Integer> groupEndingDemandQtyMap = new LinkedHashMap<>(16);
+        Map<String, SkuScheduleDTO> groupSourceSkuMap = new LinkedHashMap<>(16);
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (!isContinuousPhaseResult(result) || StringUtils.isEmpty(result.getMaterialCode())) {
                 continue;
@@ -4697,8 +4697,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             String groupKey = resolveContinuationGroupKey(context, result);
             int planQty = ShiftFieldUtil.resolveScheduledQty(result);
             groupTotalPlanQtyMap.merge(groupKey, planQty, Integer::sum);
-            if (!groupEndingDemandQtyMap.containsKey(groupKey)) {
-                groupEndingDemandQtyMap.put(groupKey, resolveEndingDemandQty(context, result));
+            if (!groupSourceSkuMap.containsKey(groupKey)) {
+                groupSourceSkuMap.put(groupKey, resolveResultSourceSku(context, result));
             }
         }
         // 基于分组汇总计划量统一设置同组结果的收尾标记。
@@ -4708,8 +4708,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             String groupKey = resolveContinuationGroupKey(context, result);
             int totalPlanQty = groupTotalPlanQtyMap.getOrDefault(groupKey, 0);
-            int endingDemandQty = groupEndingDemandQtyMap.getOrDefault(groupKey, 0);
-            result.setIsEnd(totalPlanQty >= endingDemandQty && endingDemandQty > 0 ? "1" : "0");
+            SkuScheduleDTO sourceSku = groupSourceSkuMap.get(groupKey);
+            result.setIsEnd(endingJudgmentStrategy.isFinalEnding(context, sourceSku, totalPlanQty) ? "1" : "0");
         }
     }
 

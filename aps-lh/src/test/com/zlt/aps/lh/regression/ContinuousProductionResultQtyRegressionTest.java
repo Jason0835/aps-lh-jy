@@ -76,7 +76,7 @@ class ContinuousProductionResultQtyRegressionTest {
         context.getContinuousSkuList().add(sku);
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD20260411011");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
 
@@ -116,7 +116,7 @@ class ContinuousProductionResultQtyRegressionTest {
         context.getContinuousSkuList().add(sku);
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("LHGD20260411012");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
 
         strategy.scheduleContinuousEnding(context);
 

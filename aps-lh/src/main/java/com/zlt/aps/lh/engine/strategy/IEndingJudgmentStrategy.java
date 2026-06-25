@@ -3,6 +3,8 @@ package com.zlt.aps.lh.engine.strategy;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 
+import java.util.Objects;
+
 /**
  * 收尾判定策略接口
  * <p>统一收尾判定逻辑，避免分散在多处导致不一致</p>
@@ -27,6 +29,60 @@ public interface IEndingJudgmentStrategy {
      * @return true表示处于收尾状态
      */
     boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku);
+
+    /**
+     * 判断 SKU 是否为排前预计收尾。
+     * <p>预计收尾仅用于排序日志、分析和排前参考，不直接控制实际排产控量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return true-预计收尾；false-非预计收尾
+     */
+    default boolean isExpectedEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+        return isEnding(context, sku);
+    }
+
+    /**
+     * 判断 SKU 是否为当前排程窗口收尾。
+     * <p>当前窗口收尾用于实际排产控量，调用方应在实际机台集合确定后、生成班次计划量前调用。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return true-当前窗口收尾；false-当前窗口非收尾
+     */
+    default boolean isCurrentWindowEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+        return isEnding(context, sku);
+    }
+
+    /**
+     * 判断 SKU 排后最终是否收尾。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @param actualScheduledQty 本次窗口实际总排产量
+     * @return true-最终收尾；false-最终非收尾
+     */
+    default boolean isFinalEnding(LhScheduleContext context, SkuScheduleDTO sku, int actualScheduledQty) {
+        if (Objects.isNull(sku)) {
+            return false;
+        }
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int embryoStock = Math.max(0, sku.getEmbryoStock());
+        int endingDemandQty = Math.max(surplusQty, embryoStock);
+        return endingDemandQty > 0 && Math.max(0, actualScheduledQty) >= endingDemandQty;
+    }
+
+    /**
+     * 判断 SKU 是否命中结构排序专用收尾。
+     * <p>结构收尾只用于 SKU 排序优先级，不直接决定实际排产控量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return true-结构排序收尾；false-未命中结构排序收尾
+     */
+    default boolean isStructureEndingForPriority(LhScheduleContext context, SkuScheduleDTO sku) {
+        return isExpectedEnding(context, sku) && calculateEndingDaysForStructurePriority(context, sku) >= 0;
+    }
 
     /**
      * 计算预计收尾所需班次数

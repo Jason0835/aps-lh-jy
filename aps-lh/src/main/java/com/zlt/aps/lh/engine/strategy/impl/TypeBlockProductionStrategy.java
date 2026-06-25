@@ -256,7 +256,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                             machineCode, typeBlockSku.getMaterialCode());
                     continue;
                 }
-                if (endingJudgmentStrategy.isEnding(context, typeBlockSku)) {
+                if (endingJudgmentStrategy.isCurrentWindowEnding(context, typeBlockSku)) {
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                             context, machine, machine.getEstimatedEndTime());
                 }
@@ -1178,7 +1178,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
         int originalRemainingScheduleQty = sku.getRemainingScheduleQty();
         boolean originalStrictTargetQty = sku.isStrictTargetQty();
-        boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
+        boolean isEnding = endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
         boolean typeBlockExpansionContinuation = hasScheduledTypeBlockResult(context, sku);
         applySingleMachineTypeBlockTargetRule(context, machine, sku, startTime, switchStartTime, shifts,
                 isEnding, isSingleMachine, typeBlockExpansionContinuation);
@@ -1994,7 +1994,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     (i + 1)
                             + ". " + PriorityTraceLogHelper.kv("物料编码", sku.getMaterialCode())
                             + ", " + PriorityTraceLogHelper.kv("描述", sku.getMaterialDesc())
-                            + ", " + PriorityTraceLogHelper.kv("收尾", PriorityTraceLogHelper.oneZero(endingJudgmentStrategy.isEnding(context, sku)))
+                            + ", " + PriorityTraceLogHelper.kv("预计收尾", PriorityTraceLogHelper.oneZero(endingJudgmentStrategy.isExpectedEnding(context, sku)))
                             + ", " + PriorityTraceLogHelper.kv("待排产量", sku.resolveTargetScheduleQty())
                             + ", " + PriorityTraceLogHelper.kv("月计划余量", sku.getSurplusQty())
                             + ", " + PriorityTraceLogHelper.kv("胎胚库存", sku.getEmbryoStock())

@@ -400,7 +400,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                     continue;
                 }
                 totalSkuCount++;
-                if (!endingJudgmentStrategy.isEnding(context, sku)) {
+                if (!endingJudgmentStrategy.isStructureEndingForPriority(context, sku)) {
                     continue;
                 }
                 endingSkuCount++;
@@ -771,7 +771,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
             return StringUtils.EMPTY;
         }
         boolean structureAllEndingPriority = isStructureAllEndingPriority(structurePriorityMap, sku);
-        boolean ending = endingJudgmentStrategy.isEnding(context, sku);
+        boolean ending = endingJudgmentStrategy.isExpectedEnding(context, sku);
         boolean isSpecifyMachine = LhSpecifyMachineUtil.hasLimitSpecifyMachine(context, sku.getMaterialCode());
         boolean isSpecial = isSpecialMaterial(context, sku);
         String constructionStageDesc = resolveConstructionStageDesc(sku);

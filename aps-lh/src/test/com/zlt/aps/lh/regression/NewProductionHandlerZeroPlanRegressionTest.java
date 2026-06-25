@@ -108,7 +108,7 @@ class NewProductionHandlerZeroPlanRegressionTest {
         when(capacityCalculateStrategy.calculateStartTime(any(LhScheduleContext.class), anyString(), any(Date.class)))
                 .thenAnswer(invocation -> invocation.getArgument(2));
         when(orderNoGenerator.generateOrderNo(any(Date.class))).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), any(SkuScheduleDTO.class))).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(LhScheduleContext.class), any(SkuScheduleDTO.class))).thenReturn(false);
 
         newProductionHandler.handle(context);
 
@@ -163,7 +163,7 @@ class NewProductionHandlerZeroPlanRegressionTest {
         when(capacityCalculateStrategy.calculateStartTime(any(LhScheduleContext.class), anyString(), any(Date.class)))
                 .thenAnswer(invocation -> invocation.getArgument(2));
         when(orderNoGenerator.generateOrderNo(any(Date.class))).thenReturn("ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), any(SkuScheduleDTO.class))).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(LhScheduleContext.class), any(SkuScheduleDTO.class))).thenReturn(false);
 
         newProductionHandler.handle(context);
 

@@ -94,7 +94,7 @@ class ContinuousFollowUpResultValidationRegressionTest {
         putMouldRel(context, "MAT-S1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -138,7 +138,7 @@ class ContinuousFollowUpResultValidationRegressionTest {
         putMouldRel(context, "MAT-C1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(true);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(true);
         when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
         when(strategyFactory.getProductionStrategy("01")).thenReturn(continuousProductionStrategy);
 
@@ -164,7 +164,7 @@ class ContinuousFollowUpResultValidationRegressionTest {
         putMouldRel(context, "MAT-C1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(false);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
         when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
         when(strategyFactory.getProductionStrategy("01")).thenReturn(continuousProductionStrategy);
 
@@ -190,7 +190,7 @@ class ContinuousFollowUpResultValidationRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "MAT-C1".equals(sku.getMaterialCode());
         });
@@ -229,7 +229,7 @@ class ContinuousFollowUpResultValidationRegressionTest {
         putMouldRel(context, "MAT-C1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(true);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(true);
         when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
         when(strategyFactory.getProductionStrategy("01")).thenReturn(continuousProductionStrategy);
 
@@ -259,7 +259,7 @@ class ContinuousFollowUpResultValidationRegressionTest {
         putMouldRel(context, "MAT-C1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenReturn(true);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(true);
         when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
         when(strategyFactory.getProductionStrategy("01")).thenReturn(continuousProductionStrategy);
 
@@ -292,7 +292,7 @@ class ContinuousFollowUpResultValidationRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2", "ORD-3", "ORD-4");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return "MAT-C1".equals(sku.getMaterialCode()) || "MAT-C2".equals(sku.getMaterialCode());
         });

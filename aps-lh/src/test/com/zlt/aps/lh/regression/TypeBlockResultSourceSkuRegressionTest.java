@@ -70,7 +70,7 @@ class TypeBlockResultSourceSkuRegressionTest {
         putMouldRel(context, "MAT-T1", "MOULD-1");
 
         when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
-        when(endingJudgmentStrategy.isEnding(any(), any())).thenAnswer(invocation -> {
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
             SkuScheduleDTO sku = invocation.getArgument(1);
             return sku != null && "MAT-C1".equals(sku.getMaterialCode());
         });

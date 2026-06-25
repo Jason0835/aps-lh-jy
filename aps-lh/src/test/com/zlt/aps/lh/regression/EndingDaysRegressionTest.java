@@ -34,7 +34,7 @@ class EndingDaysRegressionTest {
     }
 
     @Test
-    void isEnding_shouldUseTargetScheduleQtyInsteadOfSurplusQty() {
+    void isExpectedEnding_shouldUseTargetScheduleQtyInsteadOfSurplusQty() {
         DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(90);
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(new java.util.Date());
@@ -45,7 +45,7 @@ class EndingDaysRegressionTest {
         dto.setShiftCapacity(10);
         dto.setDailyCapacity(90);
 
-        assertFalse(strategy.isEnding(context, dto), "目标量已超过窗口总产能时，不应仅因余量较小而误判收尾");
+        assertFalse(strategy.isExpectedEnding(context, dto), "预计收尾仍按目标量口径，不应仅因余量较小而误判收尾");
         assertEquals(12, strategy.calculateEndingShifts(context, dto));
     }
 
@@ -83,7 +83,7 @@ class EndingDaysRegressionTest {
     }
 
     @Test
-    void isEnding_fullCapacityMode_shouldSkipRule2WhenSwitchDisabled() {
+    void isExpectedEnding_fullCapacityMode_shouldSkipRule2WhenSwitchDisabled() {
         DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(160);
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(new java.util.Date());
@@ -97,7 +97,7 @@ class EndingDaysRegressionTest {
         dto.setShiftCapacity(20);
         dto.setDailyCapacity(62);
 
-        assertFalse(strategy.isEnding(context, dto), "满排模式关闭开关后，规则2应继续跳过");
+        assertFalse(strategy.isExpectedEnding(context, dto), "满排模式关闭开关后，预计收尾规则2应继续跳过");
     }
 
     @Test
@@ -160,6 +160,53 @@ class EndingDaysRegressionTest {
         assertTrue(strategy.isEnding(context, dto), "窗口剩余额度已覆盖收尾需求时，仍应保持收尾判定");
     }
 
+    @Test
+    void isCurrentWindowEnding_sharedEmbryo_shouldUseSurplusQtyOnly() {
+        DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(90, true);
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(new java.util.Date());
+        SkuScheduleDTO dto = new SkuScheduleDTO();
+        dto.setMaterialCode("MAT-SHARED");
+        dto.setSurplusQty(80);
+        dto.setEmbryoStock(140);
+        dto.setTargetScheduleQty(140);
+        dto.setShiftCapacity(20);
+        dto.setDailyCapacity(60);
+
+        assertTrue(strategy.isCurrentWindowEnding(context, dto),
+                "共用胎胚当前窗口收尾应只按硫化余量判断，不能被胎胚库存抬高目标量");
+    }
+
+    @Test
+    void isCurrentWindowEnding_singleEmbryo_shouldUseMaxSurplusAndEmbryoStock() {
+        DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(90, false);
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(new java.util.Date());
+        SkuScheduleDTO dto = new SkuScheduleDTO();
+        dto.setMaterialCode("MAT-SINGLE");
+        dto.setSurplusQty(80);
+        dto.setEmbryoStock(140);
+        dto.setTargetScheduleQty(80);
+        dto.setShiftCapacity(20);
+        dto.setDailyCapacity(60);
+
+        assertFalse(strategy.isCurrentWindowEnding(context, dto),
+                "非共用胎胚当前窗口收尾应按max(硫化余量,胎胚库存)判断");
+    }
+
+    @Test
+    void isFinalEnding_shouldUseActualScheduledQtyAndTailDemand() {
+        DefaultEndingJudgmentStrategy strategy = strategyWithCapacity(0, true);
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO dto = new SkuScheduleDTO();
+        dto.setMaterialCode("MAT-FINAL");
+        dto.setSurplusQty(80);
+        dto.setEmbryoStock(140);
+
+        assertFalse(strategy.isFinalEnding(context, dto, 79), "排后实际排产量未达到清尾目标量时不能落最终收尾");
+        assertTrue(strategy.isFinalEnding(context, dto, 80), "排后实际排产量达到清尾目标量时应落最终收尾");
+    }
+
     private SkuScheduleDTO sku(int pendingQty, int shiftCapacity) {
         SkuScheduleDTO dto = new SkuScheduleDTO();
         dto.setPendingQty(pendingQty);
@@ -169,11 +216,20 @@ class EndingDaysRegressionTest {
     }
 
     private static DefaultEndingJudgmentStrategy strategyWithCapacity(int totalAvailableCapacity) {
+        return strategyWithCapacity(totalAvailableCapacity, false);
+    }
+
+    private static DefaultEndingJudgmentStrategy strategyWithCapacity(int totalAvailableCapacity, boolean sharedEmbryo) {
         DefaultEndingJudgmentStrategy strategy = new DefaultEndingJudgmentStrategy();
         TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver() {
             @Override
             public int calcSkuTotalAvailableCapacityInWindow(LhScheduleContext context, SkuScheduleDTO sku) {
                 return totalAvailableCapacity;
+            }
+
+            @Override
+            public boolean isSharedEmbryoInWindow(LhScheduleContext context, SkuScheduleDTO sku) {
+                return sharedEmbryo;
             }
         };
         ReflectionTestUtils.setField(strategy, "targetScheduleQtyResolver", resolver);

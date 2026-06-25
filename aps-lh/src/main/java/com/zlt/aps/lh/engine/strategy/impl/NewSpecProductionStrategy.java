@@ -339,7 +339,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                 + ", 班产=" + PriorityTraceLogHelper.safeText(sku.getShiftCapacity())
                                 + ", 阶段=" + resolveConstructionStageDesc(sku)
                                 + ", 施工组=" + resolveNewSpecDisplayType(sku)
-                                + ", 收尾=" + PriorityTraceLogHelper.oneZero(endingJudgmentStrategy.isEnding(context, sku)));
+                                + ", 预计收尾=" + PriorityTraceLogHelper.oneZero(endingJudgmentStrategy.isExpectedEnding(context, sku)));
             }
         }
         PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
@@ -387,7 +387,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             SkuScheduleDTO sku = iterator.next();
             boolean currentSkuRemoved = false;
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
-            boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
+            boolean isEnding = endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
             Integer latestPreviousFinishedQty = resolveLatestPreviousFinishedQty(context, sku.getMaterialCode());
             if (shouldSkipHistoryShortageOnlyRecentlyProducedSku(context, sku,
                     latestPreviousFinishedQty)) {
@@ -5321,7 +5321,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             totalSkuCount++;
-            if (!endingJudgmentStrategy.isEnding(context, pendingSku)) {
+            if (!endingJudgmentStrategy.isStructureEndingForPriority(context, pendingSku)) {
                 continue;
             }
             endingSkuCount++;
@@ -5471,7 +5471,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
         // SKU基本信息
         String skuType = resolveNewSpecSkuType(sku);
-        boolean isEnding = endingJudgmentStrategy.isEnding(context, sku);
+        boolean isEnding = endingJudgmentStrategy.isExpectedEnding(context, sku);
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
                         + ", " + PriorityTraceLogHelper.kv("SKU", sku.getMaterialCode())
@@ -7112,7 +7112,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         // 按物料编码汇总新增结果的总计划量（支持多机台同SKU排产）
         Map<String, Integer> materialTotalPlanQtyMap = new LinkedHashMap<>(16);
-        Map<String, Integer> materialEndingDemandQtyMap = new LinkedHashMap<>(16);
+        Map<String, SkuScheduleDTO> materialSkuMap = new LinkedHashMap<>(16);
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (result == null || !NEW_SPEC_SCHEDULE_TYPE.equals(result.getScheduleType())) {
                 continue;
@@ -7123,8 +7123,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
             int planQty = resolveResultScheduledQty(result);
             materialTotalPlanQtyMap.merge(materialCode, planQty, Integer::sum);
-            if (!materialEndingDemandQtyMap.containsKey(materialCode)) {
-                materialEndingDemandQtyMap.put(materialCode, resolveEndingDemandQty(context, result));
+            if (!materialSkuMap.containsKey(materialCode)) {
+                materialSkuMap.put(materialCode, findSkuDto(context, materialCode));
             }
         }
         // 基于汇总计划量统一设置同物料所有结果的收尾标记
@@ -7134,8 +7134,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             int totalPlanQty = materialTotalPlanQtyMap.getOrDefault(result.getMaterialCode(), 0);
-            int endingDemandQty = materialEndingDemandQtyMap.getOrDefault(result.getMaterialCode(), 0);
-            result.setIsEnd(totalPlanQty >= endingDemandQty && endingDemandQty > 0 ? "1" : "0");
+            SkuScheduleDTO sku = materialSkuMap.get(result.getMaterialCode());
+            result.setIsEnd(endingJudgmentStrategy.isFinalEnding(context, sku, totalPlanQty) ? "1" : "0");
         }
     }
 

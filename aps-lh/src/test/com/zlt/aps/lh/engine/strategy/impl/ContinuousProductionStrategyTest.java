@@ -71,7 +71,7 @@ public class ContinuousProductionStrategyTest {
         SkuScheduleDTO sku1585 = sku("3302001585");
         SkuScheduleDTO sku2022 = sku("3302002022");
         List<SkuScheduleDTO> priorityOneCandidates = Arrays.asList(sku1585, sku2022);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(sku2022))).thenReturn(true);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(LhScheduleContext.class), same(sku2022))).thenReturn(true);
 
         SkuScheduleDTO selected = ReflectionTestUtils.invokeMethod(
                 strategy, "selectPreferredSkuFromCandidates", new LhScheduleContext(), priorityOneCandidates);
@@ -89,7 +89,7 @@ public class ContinuousProductionStrategyTest {
         SkuScheduleDTO sku1585 = sku("3302001585");
         SkuScheduleDTO sku2022 = sku("3302002022");
         List<SkuScheduleDTO> priorityTwoCandidates = Arrays.asList(sku1585, sku2022);
-        when(endingJudgmentStrategy.isEnding(any(LhScheduleContext.class), same(sku2022))).thenReturn(true);
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(LhScheduleContext.class), same(sku2022))).thenReturn(true);
 
         SkuScheduleDTO selected = ReflectionTestUtils.invokeMethod(
                 strategy, "selectPreferredSkuFromCandidates", new LhScheduleContext(), priorityTwoCandidates);
