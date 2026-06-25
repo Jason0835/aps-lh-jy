@@ -210,4 +210,6 @@ public final class LhScheduleParamConstant {
     public static final String ENABLE_CARRY_FORWARD_QTY = "SYS0304020";
     /** 硫化示方历史保护开关（0-关闭，1-开启） */
     public static final String ENABLE_CURE_FORMULA_HISTORY_PROTECT = "SYS0304018";
+    /** 全量SKU排序日志月计划起产日(beginDay)筛选阈值；仅输出月计划beginDay<=该值的SKU */
+    public static final String FULL_SKU_SORT_LOG_BEGIN_DAY_THRESHOLD = "SYS0304027";
 }

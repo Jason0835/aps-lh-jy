@@ -204,6 +204,9 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.LOCAL_SEARCH_TIME_BUDGET_MS, 1);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG,
                 LhScheduleConstant.ENABLE_PRIORITY_TRACE_LOG);
+        // 全量SKU排序日志月计划起产日筛选阈值，缺失时取默认值（默认不过滤）
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.FULL_SKU_SORT_LOG_BEGIN_DAY_THRESHOLD,
+                LhScheduleConstant.DEFAULT_FULL_SKU_SORT_LOG_BEGIN_DAY);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS,
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS, 1);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD,

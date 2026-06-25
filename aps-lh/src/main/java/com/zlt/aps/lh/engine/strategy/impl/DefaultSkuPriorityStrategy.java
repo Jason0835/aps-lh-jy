@@ -9,6 +9,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
@@ -106,6 +107,10 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
         traceOpenProductionLateScore(context, orderedSkuList);
         traceSortedSkuList(context, structurePriorityMap, structureEndingDaysMap);
+        // S4.4 续作排序、排产消费前，orderedSkuList 为续作+新增全量未消费候选，输出全量统一排序日志。
+        if (ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION.getCode().equals(context.getCurrentStep())) {
+            traceFullSortedSkuList(context, orderedSkuList, structurePriorityMap, structureEndingDaysMap);
+        }
         log.debug("SKU优先级排序完成, 排序后第一位: {}",
                 CollectionUtils.isEmpty(orderedSkuList) ? "空" : orderedSkuList.get(0).getMaterialCode());
     }
@@ -707,6 +712,73 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                 appendNewSpecSupplyChainTieBreakTrace(detailBuilder, traceSkuList);
                 appendNewSpecSkuTypeTieBreakTrace(context, detailBuilder, traceSkuList,
                         structurePriorityMap, structureEndingDaysMap);
+            }
+        }
+        PriorityTraceLogHelper.appendTitleFooter(detailBuilder);
+        String detail = detailBuilder.toString().trim();
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
+     * 输出全量SKU排序优先级跟踪日志（续作+新增统一排序，含换活字块候选）。
+     *
+     * <p>仅在 S4.4 续作排序、排产消费前调用，此时 orderedSkuList 为续作(01)+新增(02)全量未消费候选，
+     * 已按统一比较器排序并回写 scheduleOrder。按月计划起产日(beginDay)阈值筛选：仅输出
+     * beginDay 非空且小于等于阈值的SKU，命中筛选的全部输出（不做 TOP N 截断）。
+     * 单行内容复用 {@link #buildSkuSortDesc}，并额外追加结构名称、起产日、结束日，便于聚焦排查。</p>
+     *
+     * @param context 排程上下文
+     * @param orderedSkuList 续作+新增统一排序后的全量候选列表
+     * @param structurePriorityMap 结构收尾优先级快照
+     * @param structureEndingDaysMap 结构收尾天数快照
+     */
+    private void traceFullSortedSkuList(LhScheduleContext context,
+                                        List<SkuScheduleDTO> orderedSkuList,
+                                        Map<String, StructurePriorityMeta> structurePriorityMap,
+                                        Map<SkuScheduleDTO, Integer> structureEndingDaysMap) {
+        if (!PriorityTraceLogHelper.isEnabled(context)) {
+            return;
+        }
+        String title = "SKU排序优先级汇总【全量】";
+        int beginDayThreshold = context.getScheduleConfig().getFullSkuSortLogBeginDayThreshold();
+        int totalCount = PriorityTraceLogHelper.sizeOf(orderedSkuList);
+
+        // 先筛选出月计划起产日(beginDay)小于等于阈值的SKU，beginDay为空的不输出。
+        List<SkuScheduleDTO> hitSkuList = new ArrayList<>(totalCount);
+        if (!CollectionUtils.isEmpty(orderedSkuList)) {
+            for (SkuScheduleDTO sku : orderedSkuList) {
+                if (Objects.isNull(sku) || Objects.isNull(sku.getBeginDay())) {
+                    continue;
+                }
+                if (sku.getBeginDay() <= beginDayThreshold) {
+                    hitSkuList.add(sku);
+                }
+            }
+        }
+
+        StringBuilder detailBuilder = new StringBuilder(1024);
+        PriorityTraceLogHelper.appendTitleHeader(detailBuilder, title);
+        PriorityTraceLogHelper.appendLine(detailBuilder,
+                PriorityTraceLogHelper.kv("排程日期", PriorityTraceLogHelper.formatDateTime(context.getScheduleDate()))
+                        + ", " + PriorityTraceLogHelper.kv("步骤", context.getCurrentStep())
+                        + ", " + PriorityTraceLogHelper.kv("排序场景", "全量统一排序")
+                        + ", " + PriorityTraceLogHelper.kv("候选总数", totalCount)
+                        + ", " + PriorityTraceLogHelper.kv("命中筛选数", hitSkuList.size())
+                        + ", " + PriorityTraceLogHelper.kv("起产日阈值", beginDayThreshold));
+
+        if (CollectionUtils.isEmpty(hitSkuList)) {
+            PriorityTraceLogHelper.appendLine(detailBuilder, "无可输出的SKU排序结果");
+        } else {
+            for (SkuScheduleDTO sku : hitSkuList) {
+                // 按SKU类型自适应排序维度：02新增走新增SortKey，01续作走续作SortKey。
+                boolean isNewSpec = StringUtils.equals(
+                        ScheduleTypeEnum.NEW_SPEC.getCode(), sku.getScheduleType());
+                String desc = buildSkuSortDesc(context, sku, sku.getScheduleOrder(), isNewSpec,
+                        structurePriorityMap, structureEndingDaysMap)
+                        + ", " + PriorityTraceLogHelper.kv("结构", sku.getStructureName())
+                        + ", " + PriorityTraceLogHelper.kv("起产日", sku.getBeginDay())
+                        + ", " + PriorityTraceLogHelper.kv("结束日", sku.getEndDay());
+                PriorityTraceLogHelper.appendLine(detailBuilder, desc);
             }
         }
         PriorityTraceLogHelper.appendTitleFooter(detailBuilder);

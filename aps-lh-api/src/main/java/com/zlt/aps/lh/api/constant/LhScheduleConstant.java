@@ -371,6 +371,9 @@ public final class LhScheduleConstant {
     /** 换活字块反选SKU候选列表默认输出前N名 */
     public static final int TYPE_BLOCK_SKU_CANDIDATE_TOP_N = 5;
 
+    /** 全量SKU排序日志月计划起产日筛选阈值默认值；默认31表示不过滤，输出全部有起产日的SKU */
+    public static final int DEFAULT_FULL_SKU_SORT_LOG_BEGIN_DAY = 31;
+
     /** 排程结果实体班次槽位上限（class1～class8） */
     public static final int MAX_SHIFT_SLOT_COUNT = 8;
 

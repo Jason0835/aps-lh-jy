@@ -471,6 +471,16 @@ public class LhScheduleConfig {
                 LhScheduleConstant.ENABLE_PRIORITY_TRACE_LOG) == 1;
     }
 
+    /**
+     * 全量SKU排序日志月计划起产日(beginDay)筛选阈值，仅输出月计划beginDay<=该值的SKU。
+     *
+     * @return 起产日阈值（日序号，缺失时取默认值）
+     */
+    public int getFullSkuSortLogBeginDayThreshold() {
+        return getParamIntValue(LhScheduleParamConstant.FULL_SKU_SORT_LOG_BEGIN_DAY_THRESHOLD,
+                LhScheduleConstant.DEFAULT_FULL_SKU_SORT_LOG_BEGIN_DAY);
+    }
+
     public int getNewSpecShortageLookAheadDays() {
         return Math.max(1, getParamIntValue(LhScheduleParamConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS,
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS));

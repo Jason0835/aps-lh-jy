@@ -90,6 +90,8 @@ public class SkuScheduleDTO {
     private boolean smallBatchValidation;
     /** 月计划结构起产日 */
     private Integer beginDay;
+    /** 月计划结构结束日 */
+    private Integer endDay;
 
     // ========== 优先级信息 ==========
     /** 排产优先级代码 */
