@@ -324,6 +324,16 @@ public final class DailyMachineExpansionPlanner {
                 continue;
             }
             LocalDate nextProductionDate = resolveNextProductionDate(sku.getDailyPlanQuotaMap(), productionDate);
+            if (Objects.isNull(nextProductionDate)) {
+                log.info("小欠产加机台逐日后看末日不足，直接判定需要加机台, materialCode: {}, productionDate: {}, "
+                                + "activeMachineCount: {}, currentDayCapacityQty: {}, dayPlanQty: {}, "
+                                + "currentDayPlanQty: {}, scheduleDayFinishQty: {}, currentDayPlanSatisfied: {}, "
+                                + "nextDayLookAheadEntered: {}, addMachine: {}",
+                        sku.getMaterialCode(), productionDate, activeMachineCount, currentDayCapacityQty,
+                        dayPlanQty, currentDayPlanQty, resolveFirstDayFinishQty(sku, productionDate, firstProductionDate),
+                        false, false, true);
+                return productionDate;
+            }
             if (Objects.nonNull(nextProductionDate)) {
                 SkuDailyPlanQuotaDTO nextQuota = sku.getDailyPlanQuotaMap().get(nextProductionDate);
                 int nextDayPlanQty = nextQuota == null ? 0 : Math.max(0, nextQuota.getDayPlanQty());

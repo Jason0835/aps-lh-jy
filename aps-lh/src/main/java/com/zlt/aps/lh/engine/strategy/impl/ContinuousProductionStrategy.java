@@ -771,7 +771,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (reduceEndingContinuationToSingleMachineWhenCovered(context, sourceSku, skuResults, shifts)) {
                 continue;
             }
-            if (shouldUseTargetQtyForContinuationReduction(sourceSku)) {
+            boolean reduceByWorkDate = shouldReduceContinuationByWorkDate(sourceSku, skuResults, shifts);
+            if (shouldUseTargetQtyForContinuationReduction(sourceSku) && !reduceByWorkDate) {
                 log.info("续作多机台跳过dayN降模, materialCode: {}, 目标量: {}, 窗口日计划量: {}, "
                                 + "原因: 日计划仅用于准入和增机台判断，不限制当前窗口清尾排产量",
                         sourceSku.getMaterialCode(), sourceSku.resolveTargetScheduleQty(),
@@ -783,7 +784,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
             }
-            if (shouldReduceContinuationByWorkDate(sourceSku, skuResults, shifts)) {
+            if (reduceByWorkDate) {
                 reduceContinuationMachinesByWorkDate(context, sourceSku, skuResults, shifts);
                 capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
@@ -1970,6 +1971,33 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 判断续作分组是否已经发生降模释放。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @return true-已降模释放
+     */
+    private boolean isReducedContinuationGroup(LhScheduleContext context, SkuScheduleDTO sourceSku) {
+        return context != null
+                && sourceSku != null
+                && context.getReducedContinuationGroupKeySet().contains(buildReducedContinuationKey(sourceSku));
+    }
+
+    /**
+     * 构建续作降模释放运行态标记。
+     * <p>补偿新增按同物料回流，降模释放也按物料级阻断，避免同物料机台被补偿链路重新加回。</p>
+     *
+     * @param sourceSku 来源SKU
+     * @return 降模释放标记
+     */
+    private String buildReducedContinuationKey(SkuScheduleDTO sourceSku) {
+        if (sourceSku == null || StringUtils.isEmpty(sourceSku.getMaterialCode())) {
+            return "";
+        }
+        return sourceSku.getMaterialCode();
+    }
+
+    /**
      * 构建单机降模运行态标记。
      * <p>同物料多台续作在真实数据中可能拆成多个SKU账本副本，单机降模必须按物料级阻断后置补偿。</p>
      *
@@ -2879,6 +2907,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 ? new ArrayList<LhScheduleResult>(0)
                 : selectDaySupplementMachines(context, activeResults, keptResults);
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, activeResults, keptResults);
+        if (!CollectionUtils.isEmpty(removedResults)) {
+            // 已按 dayN 节奏完成续作降模释放，后续补偿链路不能再把同物料释放机台补回。
+            context.getReducedContinuationGroupKeySet().add(buildReducedContinuationKey(sourceSku));
+            log.info("登记续作降模释放分组, materialCode: {}, 日期: {}, 下机机台: {}",
+                    sourceSku.getMaterialCode(), productionDate, joinMachineCodes(removedResults));
+        }
         for (LhScheduleResult result : supplementResults) {
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
             int allocation = Math.min(remainingDemandQty, machineCapacity);
@@ -4961,13 +4995,21 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (remainingQty <= 0 || hasContinuousCompensationSku(context, sourceSku)) {
                 continue;
             }
-            if (isContinuousDailyCapacitySatisfied(context, sourceSku)) {
+            if (isContinuousDailyCapacitySatisfied(context, sourceSku)
+                    && !DailyMachineExpansionPlanner.needMoreMachine(context, sourceSku)) {
                 // 理论 8 班/3 班产能已经满足窗口日计划时，不因真实残班缺口生成额外新增机台补偿。
                 log.info("续作补偿增机台跳过，当前续作机台已满足理论日计划增机台规则, materialCode: {}, "
                         + "continuousMachines: {}, shiftCapacity: {}, windowPlanQty: {}",
                         sourceSku.getMaterialCode(), resolveContinuousMachineCodes(context, sourceSku),
                         sourceSku.getShiftCapacity(), sumDailyPlanQty(sourceSku.getDailyPlanQuotaMap()));
                 continue;
+            }
+            if (isContinuousDailyCapacitySatisfied(context, sourceSku)) {
+                // dayN 理论产能只用于节奏判断；账本仍要求增机台时，必须转 S4.5 补偿新增。
+                log.info("续作理论dayN已满足但仍需补偿新增机台, materialCode: {}, continuousMachines: {}, "
+                                + "remainingQty: {}, dailyPlanRemainingQty: {}",
+                        sourceSku.getMaterialCode(), resolveContinuousMachineCodes(context, sourceSku),
+                        remainingQty, SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
             }
             SkuScheduleDTO compensationSku = copyContinuousCompensationSku(sourceSku, remainingQty);
             // 补偿 SKU 保留同一日计划账本，S4.5 排到后会继续消费剩余额度，避免重复扩大日计划。
@@ -4989,29 +5031,49 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @return 补偿量
      */
     private int resolveContinuousCompensationQty(LhScheduleContext context, SkuScheduleDTO sourceSku) {
-        if (isSingleMachineReducedContinuationGroup(context, sourceSku)) {
+        if (isReducedContinuationGroup(context, sourceSku)) {
+            // 续作降模已经确认当前/后续日计划只需要保留机台，剩余余量留给后续滚动，不转新增链路补回释放机台。
+            log.info("续作已按降模释放机台，跳过补偿新增, materialCode: {}, targetQty: {}, remainingQty: {}, dailyPlanRemainingQty: {}",
+                    sourceSku.getMaterialCode(), sourceSku.resolveTargetScheduleQty(),
+                    sourceSku.getRemainingScheduleQty(),
+                    SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
+            return 0;
+        }
+        if (isSingleMachineReducedContinuationGroup(context, sourceSku)
+                && !DailyMachineExpansionPlanner.needMoreMachine(context, sourceSku)) {
             // 降模已确认当前窗口只保留一台续作机台，剩余余量留给后续滚动，不转新增链路补回释放机台。
             return 0;
         }
+        if (isSingleMachineReducedContinuationGroup(context, sourceSku)) {
+            log.info("续作单机降模后仍需按dayN节奏补偿新增机台, materialCode: {}, targetQty: {}, "
+                            + "remainingQty: {}, dailyPlanRemainingQty: {}",
+                    sourceSku.getMaterialCode(), sourceSku.resolveTargetScheduleQty(),
+                    sourceSku.getRemainingScheduleQty(),
+                    SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
+        }
         int scheduledQty = resolveScheduledQtyBySourceSku(context, sourceSku);
-        // targetRemainingQty 是目标量口径缺口；quotaRemainingQty 是 dayN 账本口径缺口，两者都要满足才可补偿。
+        // targetRemainingQty 是业务目标口径缺口；dayN 只参与是否需要增机台判断，不再作为非收尾硬上限。
         int targetRemainingQty = Math.max(0, sourceSku.resolveTargetScheduleQty() - scheduledQty);
         if (!CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
             int quotaRemainingQty = Math.max(0,
                     SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
-            if (quotaRemainingQty <= 0) {
-                return 0;
-            }
             if (isSmallShortageFuturePlanCoveredByContinuousResults(context, sourceSku)) {
                 return 0;
             }
             if (!DailyMachineExpansionPlanner.needMoreMachine(context, sourceSku)) {
                 return 0;
             }
+            ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty());
             if (targetRemainingQty > 0) {
-                return Math.min(targetRemainingQty, quotaRemainingQty);
+                return targetRemainingQty;
             }
-            // 正式/量试非收尾续作可能已把原续作机台排满，但日计划账本仍有缺口，需要转S4.5新增链路补机台。
+            if (!policy.isStrictUpperLimit()) {
+                return 0;
+            }
+            if (quotaRemainingQty <= 0) {
+                return 0;
+            }
+            // 严格目标场景仍按日计划账本收口，避免收尾或试制补偿量越过业务上限。
             if (shouldCompensateRemainingDailyQuota(sourceSku)) {
                 return quotaRemainingQty;
             }
