@@ -302,10 +302,10 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 已有同物料机台满足 dayN 节奏时，若业务目标仍有剩余，不能直接把当前新增候选计划量压成0。
+     * 已有同物料机台满足 dayN 节奏时，即使业务目标仍有剩余，也不能继续新增候选机台。
      */
     @Test
-    public void shouldKeepAddingMachineWhenExistingSameMaterialSatisfiesDayNButTargetRemains() throws Exception {
+    public void shouldSkipAddingMachineWhenExistingSameMaterialSatisfiesDayNButTargetRemains() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
@@ -361,7 +361,7 @@ public class SchedulingStrategyRegressionTest {
                 ProductionQuantityPolicy.from(compensationSku, false), segment, candidateMachine, shifts,
                 buildFixedCapacityCalculateStrategy(), 240, 0, 120);
 
-        Assertions.assertEquals(120, planQty);
+        Assertions.assertEquals(0, planQty);
     }
 
     /**
@@ -1050,6 +1050,48 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 欠产未超过阈值时，首日小计划已满足不加机台；滚动到次日后，当前日和下一日均超过单机日标准才加机台。
+     */
+    @Test
+    public void shouldAddMachineOnSecondDayWhenCurrentAndNextDayExceedDailyStandardForSixtyPlan() {
+        DailyMachineCapacitySimulationRequest request = buildDailyStandardRhythmRequest("3302002661", 8, 60, 60);
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        Assertions.assertEquals(2, result.getFinalActiveMachines());
+        Assertions.assertEquals(1, result.getTotalAddedMachineCount());
+        DailyMachineCapacityDayDecision firstDayDecision = result.getDayDecisionList().get(0);
+        Assertions.assertEquals(LocalDate.of(2026, 5, 1), firstDayDecision.getProductionDate());
+        Assertions.assertTrue(firstDayDecision.isCurrentDayPlanSatisfied());
+        Assertions.assertEquals(0, firstDayDecision.getAddedMachineCount());
+        DailyMachineCapacityDayDecision secondDayDecision = result.getDayDecisionList().get(1);
+        Assertions.assertEquals(LocalDate.of(2026, 5, 2), secondDayDecision.getProductionDate());
+        Assertions.assertEquals(60, secondDayDecision.getCurrentDayPlanQty());
+        Assertions.assertEquals(60, secondDayDecision.getNextDayPlanQty());
+        Assertions.assertEquals(1, secondDayDecision.getAddedMachineCount());
+    }
+
+    /**
+     * 欠产未超过阈值时，50/50 连续两日均超过单机日标准48，也必须在当前业务日补一台机台。
+     */
+    @Test
+    public void shouldAddMachineOnSecondDayWhenCurrentAndNextDayExceedDailyStandardForFiftyPlan() {
+        DailyMachineCapacitySimulationRequest request = buildDailyStandardRhythmRequest("3302001555", 8, 50, 50);
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        Assertions.assertEquals(2, result.getFinalActiveMachines());
+        Assertions.assertEquals(1, result.getTotalAddedMachineCount());
+        DailyMachineCapacityDayDecision secondDayDecision = result.getDayDecisionList().get(1);
+        Assertions.assertEquals(LocalDate.of(2026, 5, 2), secondDayDecision.getProductionDate());
+        Assertions.assertEquals(50, secondDayDecision.getCurrentDayPlanQty());
+        Assertions.assertEquals(50, secondDayDecision.getNextDayPlanQty());
+        Assertions.assertEquals(1, secondDayDecision.getAddedMachineCount());
+    }
+
+    /**
      * 欠产未超过阈值时，只有当天和后一天计划均无法由当前机台满足，才允许增加机台。
      */
     @Test
@@ -1235,6 +1277,42 @@ public class SchedulingStrategyRegressionTest {
             capacityMap.put(LocalDate.of(2026, 5, 3), 48);
             machineCapacityList.add(capacityMap);
         }
+        return machineCapacityList;
+    }
+
+    private DailyMachineCapacitySimulationRequest buildDailyStandardRhythmRequest(String materialCode,
+                                                                                  int day1Qty,
+                                                                                  int day2Qty,
+                                                                                  int day3Qty) {
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode(materialCode);
+        request.setDailyPlanQuotaMap(buildQuotaMap(day1Qty, day2Qty, day3Qty));
+        request.setMachineDailyCapacityList(buildDailyStandardRhythmCapacityMaps(day1Qty, day2Qty, day3Qty));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setShortageLookAheadDays(1);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setWindowLastDayNextPlanLookAheadEnabled(true);
+        request.setSceneType("newSpec");
+        return request;
+    }
+
+    private List<Map<LocalDate, Integer>> buildDailyStandardRhythmCapacityMaps(int day1Qty,
+                                                                               int day2Qty,
+                                                                               int day3Qty) {
+        List<Map<LocalDate, Integer>> machineCapacityList = new ArrayList<Map<LocalDate, Integer>>(2);
+        Map<LocalDate, Integer> existingMachineCapacityMap = new LinkedHashMap<LocalDate, Integer>(4);
+        existingMachineCapacityMap.put(LocalDate.of(2026, 5, 1), day1Qty);
+        existingMachineCapacityMap.put(LocalDate.of(2026, 5, 2), day2Qty);
+        existingMachineCapacityMap.put(LocalDate.of(2026, 5, 3), day3Qty);
+        machineCapacityList.add(existingMachineCapacityMap);
+        Map<LocalDate, Integer> candidateMachineCapacityMap = new LinkedHashMap<LocalDate, Integer>(4);
+        candidateMachineCapacityMap.put(LocalDate.of(2026, 5, 1), 0);
+        candidateMachineCapacityMap.put(LocalDate.of(2026, 5, 2), 48);
+        candidateMachineCapacityMap.put(LocalDate.of(2026, 5, 3), 48);
+        machineCapacityList.add(candidateMachineCapacityMap);
         return machineCapacityList;
     }
 

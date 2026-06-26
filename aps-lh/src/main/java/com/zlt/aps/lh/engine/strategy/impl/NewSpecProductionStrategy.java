@@ -3628,18 +3628,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, sku, candidates, excludedMachineCodes, policy, segment, candidateMachine,
                 shifts, capacityCalculate, remainingTargetQty, availableMachineCount);
         if (requiredMachineCountByDailyCapacity == 0 && segment.isExistingSameMaterialSatisfied()) {
-            if (!needMoreMachine(context, sku)) {
-                log.info("新增SKU dayN模拟判定已有同物料机台已满足, materialCode: {}, machineCode: {}, "
-                                + "remainingTargetQty: {}, existingSameMaterialSatisfied: true",
-                        sku.getMaterialCode(), segment.getMachineCode(), remainingTargetQty);
-                return 0;
-            }
-            // dayN 只作为节奏和资源判断依据，业务目标仍有剩余时不能直接阻断新增机台。
-            log.info("新增SKU已有同物料机台满足dayN节奏但目标仍需补量，继续尝试新增机台, "
+            // 已有同物料机台满足逐日加机台规则时，当前候选不再因目标剩余继续新增。
+            log.info("新增SKU已有同物料机台满足dayN增机台规则，跳过当前新增候选, "
                             + "materialCode: {}, machineCode: {}, remainingTargetQty: {}, "
-                            + "remainingScheduleQty: {}",
+                            + "remainingScheduleQty: {}, existingSameMaterialSatisfied: true",
                     sku.getMaterialCode(), segment.getMachineCode(), remainingTargetQty,
                     sku.getRemainingScheduleQty());
+            return 0;
         }
         if (shouldFillMachineToWindowEndForFutureDayDemand(
                 context, sku, policy, segment, requiredMachineCountByDailyCapacity)) {
@@ -3740,7 +3735,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 判断 dayN 理论产能模拟是否已经确认当前启用机台满足增机台规则。
-     * <p>小欠产模式下，8班窗口总产能和后一天3班产能均按理论班产判断；
+     * <p>小欠产模式下，当前日和后一天均按单日理论产能判断；
      * 该结果用于阻断后续按真实换模后窗口缺口继续扩机台。</p>
      *
      * @param sku SKU

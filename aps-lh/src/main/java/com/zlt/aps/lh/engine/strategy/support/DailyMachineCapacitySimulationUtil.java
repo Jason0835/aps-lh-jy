@@ -131,13 +131,13 @@ public final class DailyMachineCapacitySimulationUtil {
         int currentDayPlanQty = resolveCurrentDayPlanQty(decision, firstProductionDate, scheduleDayFinishQty);
         // todayRequiredQty 是当前日需要承接的量：当前日判断计划量 + 前序模拟滚动下来的欠产量。
         int todayRequiredQty = decision.getCarryShortageQty() + currentDayPlanQty;
-        boolean currentDayPlanSatisfied = currentDayPlanQty <= todayCapacityQty;
         int windowEffectiveCapacityQty = sumCapacityQty(request, firstProductionDate,
                 request.getWindowEndDate(), activeMachines);
         int windowRemainingShortageQty = 0;
         int nextDayPlanQty = 0;
         int currentDayThreeShiftCapacityQty = resolveDailyTheoryCapacityQty(
                 request, decision.getProductionDate(), activeMachines);
+        boolean currentDayPlanSatisfied = currentDayPlanQty <= currentDayThreeShiftCapacityQty;
         int nextDayThreeShiftCapacityQty = 0;
         LocalDate nextProductionDate = resolveNextProductionDate(
                 request, decision.getProductionDate(), forcedShortageWindowMode);
@@ -178,20 +178,6 @@ public final class DailyMachineCapacitySimulationUtil {
             demandQty = currentDayPlanQty;
             capacityQty = todayCapacityQty;
             decisionMode = MODE_CURRENT_DAY_PLAN_SATISFIED;
-        } else if (isWindowTotalCapacitySatisfied(windowPlanQty, windowTotalCapacityQty)) {
-            /*
-             * 欠产未超过阈值时，如果当前启用机台按 8 班理论产能已覆盖剩余窗口日计划，
-             * 不再因为某一天 3 班理论产能小于当天计划而提前加机台。
-             */
-            demandQty = windowPlanQty;
-            capacityQty = windowTotalCapacityQty;
-            decisionMode = MODE_WINDOW_TOTAL_CAPACITY;
-        } else if (isWindowTotalCapacityInsufficient(windowPlanQty, windowTotalCapacityQty)
-                && currentDayPlanQty > currentDayThreeShiftCapacityQty) {
-            // 当前日计划未满足且 8 班窗口总产能也不足时，保留当前日缺口触发增机台能力。
-            demandQty = todayRequiredQty;
-            capacityQty = todayCapacityQty;
-            decisionMode = MODE_CURRENT_DAY_CAPACITY;
         } else if (Objects.nonNull(nextProductionDate)) {
             /*
              * 欠产未超过阈值时，只有当前机台数同时无法满足当前日和后一天计划，才允许增加机台。
@@ -202,6 +188,20 @@ public final class DailyMachineCapacitySimulationUtil {
             capacityQty = nextDayThreeShiftCapacityQty;
             decisionMode = MODE_NEXT_DAY_CAPACITY;
             nextDayLookAheadEntered = true;
+        } else if (isWindowTotalCapacitySatisfied(windowPlanQty, windowTotalCapacityQty)) {
+            /*
+             * 当前日未满足但没有下一生产日可后看时，才允许用窗口总产能兜底拦截，
+             * 避免有下一日计划的场景绕过“当前日未满足再后看下一日”的增机台规则。
+             */
+            demandQty = windowPlanQty;
+            capacityQty = windowTotalCapacityQty;
+            decisionMode = MODE_WINDOW_TOTAL_CAPACITY;
+        } else if (isWindowTotalCapacityInsufficient(windowPlanQty, windowTotalCapacityQty)
+                && currentDayPlanQty > currentDayThreeShiftCapacityQty) {
+            // 窗口末日无下一日可后看时，保留当前日缺口触发增机台能力。
+            demandQty = todayRequiredQty;
+            capacityQty = todayCapacityQty;
+            decisionMode = MODE_CURRENT_DAY_CAPACITY;
         } else {
             demandQty = 0;
             capacityQty = 0;
