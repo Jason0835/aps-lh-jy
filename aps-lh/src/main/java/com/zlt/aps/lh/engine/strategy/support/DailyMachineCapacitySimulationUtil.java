@@ -174,9 +174,10 @@ public final class DailyMachineCapacitySimulationUtil {
              * 欠产未超过阈值时，每个业务日先判断当前机台数是否已满足当前日月计划量。
              * 窗口首日按日计划账本口径扣除T日晚班已完成量，避免完成量已覆盖的首日计划继续后看。
              * 当前日已满足则不继续后看下一日，避免因为后续高日计划提前在当前日盲目加机台。
+             * dayN 只作节奏判断，容量必须使用当前机台数 * 单日理论产能，不能被真实换模后残班产能放大缺口。
              */
             demandQty = currentDayPlanQty;
-            capacityQty = todayCapacityQty;
+            capacityQty = currentDayThreeShiftCapacityQty;
             decisionMode = MODE_CURRENT_DAY_PLAN_SATISFIED;
         } else if (Objects.nonNull(nextProductionDate)) {
             /*
@@ -200,7 +201,7 @@ public final class DailyMachineCapacitySimulationUtil {
                 && currentDayPlanQty > currentDayThreeShiftCapacityQty) {
             // 窗口末日无下一日可后看时，保留当前日缺口触发增机台能力。
             demandQty = todayRequiredQty;
-            capacityQty = todayCapacityQty;
+            capacityQty = currentDayThreeShiftCapacityQty;
             decisionMode = MODE_CURRENT_DAY_CAPACITY;
         } else {
             demandQty = 0;

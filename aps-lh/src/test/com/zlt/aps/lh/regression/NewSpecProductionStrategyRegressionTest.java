@@ -1296,6 +1296,58 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void scheduleNewSpecs_shouldKeepFirstDayMouldChangeWhenEffectiveProductionDelayedToNextDay() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 5, 3, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+        LhShiftConfigVO secondDayMiddleShift = shifts.get(4);
+
+        MachineScheduleDTO machine = buildMachine("K2025", firstShift.getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001418");
+        sku.setMaterialDesc("3302001418");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(18);
+        sku.setPendingQty(90);
+        sku.setDailyPlanQty(90);
+        sku.setTargetScheduleQty(90);
+        sku.setSurplusQty(90);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(shifts, sku.getMaterialCode(), 90, 90, 90));
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001418");
+        context.getNewSpecSkuList().add(sku);
+
+        IFirstInspectionBalanceStrategy delayedInspectionBalance =
+                (ctx, machineCode, mouldChangeTime) -> secondDayMiddleShift.getShiftStartDateTime();
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine), defaultMouldChangeBalance(),
+                delayedInspectionBalance, defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(), "应生成新增排产结果");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals(firstShift.getShiftStartDateTime(), result.getMouldChangeStartTime(),
+                "dayN命中首日需要增机时，不能因有效开产量后移而把换模推到其他业务日");
+        assertTrue(resolveShiftQty(result, firstShift.getShiftIndex()) > 0,
+                "普通换模首检数量仍应按换模完成落班，避免新增机台前序班次全部为空");
+        assertEquals(firstShift.getShiftIndex(), resolveFirstPlannedShiftIndex(result),
+                "换模完成落在首日早班结束临界点时，首检数量应归属首日早班");
+        assertTrue(resolveShiftQty(result, shifts.get(1).getShiftIndex()) > 0,
+                "普通8小时换模已包含首检，首检均衡后移不得阻断换模完成后的正常生产班次");
+        assertTrue(resolveShiftQty(result, secondDayMiddleShift.getShiftIndex()) > 0,
+                "首检后续班次应继续承接正常生产量");
+    }
+
+    @Test
     void scheduleNewSpecs_shouldKeepOriginalBalanceQuotaWhenChangeoverBalanceEnabled() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
@@ -3614,7 +3666,7 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setMonthlyHistoryShortageQty(0);
         sku.setScheduleDayFinishQty(0);
         sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
-                context.getScheduleWindowShifts(), sku.getMaterialCode(), 8, 92, 46));
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 8, 92, 92));
         context.getNewSpecSkuList().add(sku);
 
         MdmSkuLhCapacity skuCapacity = new MdmSkuLhCapacity();

@@ -430,13 +430,28 @@ public final class DailyMachineExpansionPlanner {
     }
 
     /**
-     * 构建 dayN 模拟账本快照。
+     * 构建 dayN 节奏模拟账本快照。
+     * <p>dayN 只用于判断排产节奏、资源和增机台日期，不得被本轮剩余目标量截断。</p>
      *
      * @param quotaMap 原日计划账本
-     * @param remainingTargetQty 本轮剩余目标量
+     * @param remainingTargetQty 本轮剩余目标量，仅保留兼容签名，不参与 dayN 节奏截断
      * @return 模拟账本
      */
     public static Map<LocalDate, SkuDailyPlanQuotaDTO> buildSimulationQuotaMap(
+            Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+            int remainingTargetQty) {
+        return buildDailyRhythmSimulationQuotaMap(quotaMap);
+    }
+
+    /**
+     * 构建严格扣账试算账本快照。
+     * <p>仅用于实际班次扣账前的额度预演，允许按目标量截断；新增排产 dayN 扩机台模拟不得调用该方法。</p>
+     *
+     * @param quotaMap 原日计划账本
+     * @param remainingTargetQty 本轮剩余目标量
+     * @return 目标截断后的模拟账本
+     */
+    public static Map<LocalDate, SkuDailyPlanQuotaDTO> buildTargetCappedSimulationQuotaMap(
             Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
             int remainingTargetQty) {
         if (CollectionUtils.isEmpty(quotaMap)) {
@@ -463,6 +478,34 @@ public final class DailyMachineExpansionPlanner {
             }
             quota.setDayPlanQty(dayPlanQty);
             quota.setRemainingQty(remainingQty);
+            simulationQuotaMap.put(entry.getKey(), quota);
+        }
+        return simulationQuotaMap;
+    }
+
+    /**
+     * 构建不按业务目标截断的 dayN 节奏账本。
+     *
+     * @param quotaMap 原日计划账本
+     * @return 完整 dayN 节奏账本
+     */
+    private static Map<LocalDate, SkuDailyPlanQuotaDTO> buildDailyRhythmSimulationQuotaMap(
+            Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
+        if (CollectionUtils.isEmpty(quotaMap)) {
+            return new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(0);
+        }
+        Map<LocalDate, SkuDailyPlanQuotaDTO> simulationQuotaMap =
+                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(Math.max(4, quotaMap.size() * 2));
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            SkuDailyPlanQuotaDTO sourceQuota = entry.getValue();
+            if (Objects.isNull(sourceQuota)) {
+                continue;
+            }
+            SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+            quota.setMaterialCode(sourceQuota.getMaterialCode());
+            quota.setProductionDate(sourceQuota.getProductionDate());
+            quota.setDayPlanQty(Math.max(0, sourceQuota.getDayPlanQty()));
+            quota.setRemainingQty(Math.max(0, sourceQuota.getRemainingQty()));
             simulationQuotaMap.put(entry.getKey(), quota);
         }
         return simulationQuotaMap;

@@ -733,6 +733,110 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 新增排产 dayN 扩机台模拟必须保留完整日计划节奏，不能被本轮剩余目标量截断。
+     */
+    @Test
+    public void shouldKeepFullDailyPlanForNewSpecMachineExpansionSimulation() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        SkuScheduleDTO sku = buildContinuousSku("3302001418", 18, 144, buildQuotaMap(162, 162, 162));
+        Map<LocalDate, SkuDailyPlanQuotaDTO> simulationQuotaMap = invokeBuildSimulationQuotaMap(
+                strategy, sku, sku.getDailyPlanQuotaMap(), 144, LocalDate.of(2026, 5, 3));
+
+        Assertions.assertEquals(162, simulationQuotaMap.get(LocalDate.of(2026, 5, 1)).getDayPlanQty());
+        Assertions.assertEquals(162, simulationQuotaMap.get(LocalDate.of(2026, 5, 2)).getDayPlanQty());
+        Assertions.assertEquals(162, simulationQuotaMap.get(LocalDate.of(2026, 5, 3)).getDayPlanQty());
+
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001418");
+        request.setDailyPlanQuotaMap(simulationQuotaMap);
+        request.setMachineDailyCapacityList(buildDailyCapacityMaps(3, 36, 54, 54));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(18);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        Assertions.assertEquals(3, result.getFinalActiveMachines());
+        Assertions.assertEquals(2, result.getTotalAddedMachineCount());
+    }
+
+    /**
+     * 公共 dayN 模拟账本构造也必须保留完整日计划节奏，避免后续调用回退到目标量截断旧口径。
+     */
+    @Test
+    public void shouldKeepFullDailyPlanWhenBuildingPublicExpansionSimulationQuotaMap() {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> simulationQuotaMap =
+                DailyMachineExpansionPlanner.buildSimulationQuotaMap(buildQuotaMap(162, 162, 162), 144);
+
+        Assertions.assertEquals(162, simulationQuotaMap.get(LocalDate.of(2026, 5, 1)).getDayPlanQty());
+        Assertions.assertEquals(162, simulationQuotaMap.get(LocalDate.of(2026, 5, 2)).getDayPlanQty());
+        Assertions.assertEquals(162, simulationQuotaMap.get(LocalDate.of(2026, 5, 3)).getDayPlanQty());
+    }
+
+    /**
+     * 新增排产 dayN 模拟保留完整节奏后，3302002654 类场景仍只需要新增一台机台。
+     */
+    @Test
+    public void shouldOnlyAddOneMachineWhenTwoMachinesCoverNewSpecDailyPlan() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        SkuScheduleDTO sku = buildContinuousSku("3302002654", 25, 144, buildQuotaMap(100, 100, 100));
+        Map<LocalDate, SkuDailyPlanQuotaDTO> simulationQuotaMap = invokeBuildSimulationQuotaMap(
+                strategy, sku, sku.getDailyPlanQuotaMap(), 144, LocalDate.of(2026, 5, 3));
+
+        Assertions.assertEquals(100, simulationQuotaMap.get(LocalDate.of(2026, 5, 1)).getDayPlanQty());
+        Assertions.assertEquals(100, simulationQuotaMap.get(LocalDate.of(2026, 5, 2)).getDayPlanQty());
+        Assertions.assertEquals(100, simulationQuotaMap.get(LocalDate.of(2026, 5, 3)).getDayPlanQty());
+
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302002654");
+        request.setDailyPlanQuotaMap(simulationQuotaMap);
+        request.setMachineDailyCapacityList(buildDailyCapacityMaps(2, 50, 50, 50));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(25);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        Assertions.assertEquals(2, result.getFinalActiveMachines());
+        Assertions.assertEquals(1, result.getTotalAddedMachineCount());
+    }
+
+    /**
+     * 已有同物料机台模拟不能把“无可新增机台”误判成“dayN已经满足”。
+     */
+    @Test
+    public void shouldNotTreatExistingSameMaterialAsSatisfiedWhenDailyPlanStillUnmet() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001418");
+        request.setDailyPlanQuotaMap(buildQuotaMap(162, 162, 162));
+        request.setMachineDailyCapacityList(buildDailyCapacityMaps(3, 36, 54, 54));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(18);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setSceneType("newSpec");
+        List<Map<LocalDate, Integer>> existingMachineCapacityMaps = buildDailyCapacityMaps(1, 36, 54, 54);
+
+        boolean satisfied = invokeIsExistingSameMaterialSimulationSatisfied(
+                strategy, request, existingMachineCapacityMaps, 3);
+
+        Assertions.assertFalse(satisfied);
+    }
+
+    /**
      * 正式非收尾新增 SKU 不得把 day1+day2+day3 当作多机台排产目标量，dayN 只参与节奏和增机判断。
      */
     @Test
@@ -1278,6 +1382,49 @@ public class SchedulingStrategyRegressionTest {
             machineCapacityList.add(capacityMap);
         }
         return machineCapacityList;
+    }
+
+    private List<Map<LocalDate, Integer>> buildDailyCapacityMaps(int machineCount,
+                                                                 int day1Capacity,
+                                                                 int day2Capacity,
+                                                                 int day3Capacity) {
+        List<Map<LocalDate, Integer>> machineCapacityList =
+                new ArrayList<Map<LocalDate, Integer>>(Math.max(1, machineCount));
+        for (int index = 0; index < machineCount; index++) {
+            Map<LocalDate, Integer> capacityMap = new LinkedHashMap<LocalDate, Integer>(4);
+            capacityMap.put(LocalDate.of(2026, 5, 1), day1Capacity);
+            capacityMap.put(LocalDate.of(2026, 5, 2), day2Capacity);
+            capacityMap.put(LocalDate.of(2026, 5, 3), day3Capacity);
+            machineCapacityList.add(capacityMap);
+        }
+        return machineCapacityList;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> invokeBuildSimulationQuotaMap(
+            NewSpecProductionStrategy strategy,
+            SkuScheduleDTO sku,
+            Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+            int remainingTargetQty,
+            LocalDate windowEndDate) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "buildSimulationQuotaMap", SkuScheduleDTO.class, Map.class, int.class, LocalDate.class);
+        method.setAccessible(true);
+        return (Map<LocalDate, SkuDailyPlanQuotaDTO>) method.invoke(
+                strategy, sku, quotaMap, remainingTargetQty, windowEndDate);
+    }
+
+    private boolean invokeIsExistingSameMaterialSimulationSatisfied(
+            NewSpecProductionStrategy strategy,
+            DailyMachineCapacitySimulationRequest request,
+            List<Map<LocalDate, Integer>> existingMachineCapacityMaps,
+            int requiredMachineCountByDailyCapacity) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "isExistingSameMaterialSimulationSatisfied",
+                DailyMachineCapacitySimulationRequest.class, List.class, int.class);
+        method.setAccessible(true);
+        return (Boolean) method.invoke(
+                strategy, request, existingMachineCapacityMaps, requiredMachineCountByDailyCapacity);
     }
 
     private DailyMachineCapacitySimulationRequest buildDailyStandardRhythmRequest(String materialCode,
