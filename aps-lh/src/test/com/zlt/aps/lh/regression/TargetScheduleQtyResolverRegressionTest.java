@@ -215,6 +215,11 @@ class TargetScheduleQtyResolverRegressionTest {
                                                         java.util.Set<String> excludedMachineCodes) {
                 return machine;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
     }
 

@@ -70,6 +70,11 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
                                                         Set<String> excludedMachineCodes) {
                 return machine;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
@@ -163,6 +168,11 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
                                                         List<MachineScheduleDTO> candidateMachines,
                                                         Set<String> excludedMachineCodes) {
                 return machine;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
 
@@ -261,6 +271,11 @@ class LocalSearchMachineAllocatorStrategyRegressionTest {
                                                         List<MachineScheduleDTO> candidateMachines,
                                                         Set<String> excludedMachineCodes) {
                 return machine;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
 

@@ -67,6 +67,11 @@ class NewSpecFailReasonPriorityRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         Date mouldFailReadyTime = dateTime(2026, 4, 19, 8, 0);

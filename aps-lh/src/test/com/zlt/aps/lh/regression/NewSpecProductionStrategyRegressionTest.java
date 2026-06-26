@@ -108,6 +108,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
@@ -249,6 +254,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
@@ -370,6 +380,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
 
@@ -765,6 +780,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
@@ -845,6 +865,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
@@ -886,6 +911,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
         IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
@@ -951,6 +981,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
         IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
             @Override
@@ -1014,6 +1049,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
         IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
@@ -1512,6 +1552,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
@@ -1783,6 +1828,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
@@ -1987,6 +2037,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
         strategy.scheduleNewSpecs(context, machineMatchStrategy,
                 defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
@@ -2080,6 +2135,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
 
@@ -2550,6 +2610,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         }, defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
 
@@ -3204,6 +3269,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         strategy.scheduleNewSpecs(context, machineMatchStrategy,
@@ -3276,6 +3346,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
 
@@ -5348,6 +5423,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
 
         strategy.scheduleNewSpecs(context, multiMachineMatch, defaultMouldChangeBalance(),
@@ -5401,6 +5481,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
 
@@ -5829,6 +5914,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return machine;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
     }
 
@@ -5853,6 +5943,11 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
     }
 
@@ -5875,12 +5970,17 @@ class NewSpecProductionStrategyRegressionTest {
                 }
                 return null;
             }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
         };
     }
 
     private IMachineMatchStrategy orderedMachineMatch(MachineScheduleDTO firstMachine,
-                                                      MachineScheduleDTO secondMachine,
-                                                      MachineScheduleDTO thirdMachine) {
+                                                       MachineScheduleDTO secondMachine,
+                                                       MachineScheduleDTO thirdMachine) {
         return new IMachineMatchStrategy() {
             @Override
             public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
@@ -5897,6 +5997,11 @@ class NewSpecProductionStrategyRegressionTest {
                     }
                 }
                 return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
             }
         };
     }
