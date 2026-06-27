@@ -5031,21 +5031,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (remainingQty <= 0 || hasContinuousCompensationSku(context, sourceSku)) {
                 continue;
             }
-            if (isContinuousDailyCapacitySatisfied(context, sourceSku)
-                    && !DailyMachineExpansionPlanner.needMoreMachine(context, sourceSku)) {
+            if (isContinuousDailyRhythmSatisfiedWithoutForcedShortage(context, sourceSku)) {
                 // 理论 8 班/3 班产能已经满足窗口日计划时，不因真实残班缺口生成额外新增机台补偿。
                 log.info("续作补偿增机台跳过，当前续作机台已满足理论日计划增机台规则, materialCode: {}, "
                         + "continuousMachines: {}, shiftCapacity: {}, windowPlanQty: {}",
                         sourceSku.getMaterialCode(), resolveContinuousMachineCodes(context, sourceSku),
                         sourceSku.getShiftCapacity(), sumDailyPlanQty(sourceSku.getDailyPlanQuotaMap()));
                 continue;
-            }
-            if (isContinuousDailyCapacitySatisfied(context, sourceSku)) {
-                // dayN 理论产能只用于节奏判断；账本仍要求增机台时，必须转 S4.5 补偿新增。
-                log.info("续作理论dayN已满足但仍需补偿新增机台, materialCode: {}, continuousMachines: {}, "
-                                + "remainingQty: {}, dailyPlanRemainingQty: {}",
-                        sourceSku.getMaterialCode(), resolveContinuousMachineCodes(context, sourceSku),
-                        remainingQty, SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()));
             }
             SkuScheduleDTO compensationSku = copyContinuousCompensationSku(sourceSku, remainingQty);
             // 补偿 SKU 保留同一日计划账本，S4.5 排到后会继续消费剩余额度，避免重复扩大日计划。
@@ -5096,6 +5088,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (isSmallShortageFuturePlanCoveredByContinuousResults(context, sourceSku)) {
                 return 0;
             }
+            if (isContinuousDailyRhythmSatisfiedWithoutForcedShortage(context, sourceSku)) {
+                log.info("续作补偿增机台跳过，当前续作机台已满足dayN增机台规则, materialCode: {}, "
+                                + "continuousMachines: {}, targetRemainingQty: {}, dailyPlanRemainingQty: {}",
+                        sourceSku.getMaterialCode(), resolveContinuousMachineCodes(context, sourceSku),
+                        targetRemainingQty, quotaRemainingQty);
+                return 0;
+            }
             if (!DailyMachineExpansionPlanner.needMoreMachine(context, sourceSku)) {
                 return 0;
             }
@@ -5116,6 +5115,34 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return 0;
         }
         return targetRemainingQty;
+    }
+
+    /**
+     * 判断续作机台是否已满足日计划节奏且不存在强制历史欠产补偿要求。
+     * <p>该判断只用于 S4.4 转 S4.5 补偿前的增机台短路：
+     * 历史欠产超过阈值时仍保留原补偿语义；未超过阈值时，若纯续作结果已覆盖窗口末班，
+     * 且逐日后看不再要求新增机台，则不再仅因硫化余量剩余转新增机台。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作SKU
+     * @return true-当前续作机台已满足日计划节奏；false-仍按原补偿规则判断
+     */
+    private boolean isContinuousDailyRhythmSatisfiedWithoutForcedShortage(LhScheduleContext context,
+                                                                          SkuScheduleDTO sourceSku) {
+        if (context == null || sourceSku == null || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        int threshold = Math.max(0, DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context));
+        int historyShortageQty = Math.max(0, sourceSku.getMonthlyHistoryShortageQty());
+        if (threshold > 0 && historyShortageQty > threshold) {
+            return false;
+        }
+        int activeMachineCount = resolveContinuousMachineCount(context, sourceSku);
+        if (activeMachineCount <= 0 || !hasPureContinuousResultReachWindowEnd(context, sourceSku)) {
+            return false;
+        }
+        return DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
+                context, sourceSku, activeMachineCount, ScheduleTypeEnum.CONTINUOUS.getCode());
     }
 
     /**

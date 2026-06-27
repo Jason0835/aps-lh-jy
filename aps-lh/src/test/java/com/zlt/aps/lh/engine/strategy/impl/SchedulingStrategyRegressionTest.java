@@ -365,6 +365,110 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 当前机台窗口有效产能已覆盖收尾目标时，不应再按 T/T+1 dayN 节奏拆第二台机台。
+     */
+    @Test
+    public void shouldKeepSingleMachineWhenCurrentMachineCoversEndingTarget() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001555", 16, 108,
+                buildQuotaMapByShifts(shifts, 8, 50, 50));
+        sku.setSurplusQty(108);
+        sku.setStrictTargetQty(true);
+
+        MachineScheduleDTO candidateMachine = new MachineScheduleDTO();
+        candidateMachine.setMachineCode("K1110");
+        MachineScheduleDTO secondCandidateMachine = new MachineScheduleDTO();
+        secondCandidateMachine.setMachineCode("K1111");
+        List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
+        candidates.add(candidateMachine);
+        candidates.add(secondCandidateMachine);
+
+        MachineProductionSegment segment = new MachineProductionSegment();
+        segment.setMachineCode(candidateMachine.getMachineCode());
+        segment.setRole(MachineScheduleRole.TAIL_MACHINE);
+        segment.setShiftCapacity(16);
+        segment.setMaxQtyToWindowEnd(116);
+        segment.setStartProductionShiftIndex(1);
+        Map<Integer, Integer> shiftCapacityMap = new LinkedHashMap<Integer, Integer>(8);
+        for (LhShiftConfigVO shift : shifts) {
+            shiftCapacityMap.put(shift.getShiftIndex(), 16);
+        }
+        segment.setShiftCapacityMap(shiftCapacityMap);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveDynamicMachinePlanQtyByDailyCapacity",
+                LhScheduleContext.class, SkuScheduleDTO.class, List.class, Set.class,
+                ProductionQuantityPolicy.class, MachineProductionSegment.class, MachineScheduleDTO.class,
+                List.class, ICapacityCalculateStrategy.class, int.class, int.class, int.class);
+        method.setAccessible(true);
+        int planQty = (Integer) method.invoke(strategy, context, sku, candidates, new HashSet<String>(2),
+                ProductionQuantityPolicy.from(sku, true), segment, candidateMachine, shifts,
+                buildFixedCapacityCalculateStrategy(), 108, 0, 108);
+
+        Assertions.assertEquals(108, planQty);
+    }
+
+    /**
+     * 增机台候选失败后，已成功排产机台应继续回填到自身尾部有效产能。
+     */
+    @Test
+    public void shouldRefillScheduledMachineTailWhenAddMachineCandidatesFail() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002661", 16, 128,
+                buildQuotaMapByShifts(shifts, 8, 60, 60));
+        sku.setSurplusQty(128);
+        context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), 64);
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(sku.getMaterialCode());
+        result.setLhMachineCode("K1111");
+        result.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
+        result.setIsEnd("0");
+        result.setMouldQty(1);
+        result.setSingleMouldShiftQty(16);
+        result.setLhTime(3600);
+        ShiftFieldUtil.setShiftPlanQty(result, shifts.get(0).getShiftIndex(), 16,
+                shifts.get(0).getShiftStartDateTime(), shifts.get(0).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, shifts.get(1).getShiftIndex(), 16,
+                shifts.get(1).getShiftStartDateTime(), shifts.get(1).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, shifts.get(2).getShiftIndex(), 16,
+                shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(result, shifts.get(3).getShiftIndex(), 16,
+                shifts.get(3).getShiftStartDateTime(), shifts.get(3).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        MachineProductionSegment segment = new MachineProductionSegment();
+        segment.setMachineCode("K1111");
+        segment.setShiftCapacity(16);
+        segment.setMaxQtyToWindowEnd(96);
+        Map<Integer, Integer> shiftCapacityMap = new LinkedHashMap<Integer, Integer>(8);
+        for (int index = 0; index < shifts.size(); index++) {
+            LhShiftConfigVO shift = shifts.get(index);
+            shiftCapacityMap.put(shift.getShiftIndex(), index < 6 ? 16 : 0);
+        }
+        segment.setShiftCapacityMap(shiftCapacityMap);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "refillScheduledResultAfterAddMachineFailure",
+                LhScheduleContext.class, SkuScheduleDTO.class, LhScheduleResult.class,
+                MachineProductionSegment.class, List.class, ProductionQuantityPolicy.class, int.class);
+        method.setAccessible(true);
+        int refillQty = (Integer) method.invoke(strategy, context, sku, result, segment, shifts,
+                ProductionQuantityPolicy.from(sku, false), 64);
+
+        Assertions.assertEquals(32, refillQty);
+        Assertions.assertEquals(96, ShiftFieldUtil.resolveScheduledQty(result));
+        Assertions.assertEquals(Integer.valueOf(32),
+                context.getSkuProductionRemainingQtyMap().get(sku.getMaterialCode()));
+    }
+
+    /**
      * 续作日计划下降时，非收尾多机台也必须按业务日降模，不能被“非收尾不降模”提前跳过。
      */
     @Test
@@ -900,6 +1004,29 @@ public class SchedulingStrategyRegressionTest {
         int compensationQty = (Integer) method.invoke(strategy, context, sku);
 
         Assertions.assertEquals(64, compensationQty);
+    }
+
+    /**
+     * 续作单机已经覆盖 dayN 节奏时，不能仅因硫化余量仍有剩余再转新增补偿机台。
+     */
+    @Test
+    public void shouldSkipContinuousCompensationWhenSingleMachineSatisfiesDailyRhythm() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002654", 18, 1500,
+                buildQuotaMapByShifts(shifts, 50, 50, 50));
+        sku.setSurplusQty(1500);
+        LhScheduleResult result = buildContinuousResult("3302002654", "K2024", 18, shifts, "0");
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class);
+        method.setAccessible(true);
+        int compensationQty = (Integer) method.invoke(strategy, context, sku);
+
+        Assertions.assertEquals(0, compensationQty);
     }
 
     /**
