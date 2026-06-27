@@ -12,8 +12,9 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * SKU 日计划额度账本工具类。
- * <p>统一处理滚动补欠产、未来计划预占和窗口总量封顶，避免续作、新增排产各自消费日额度。</p>
+ * SKU dayN节奏账本工具类。
+ * <p>统一处理滚动补欠产、未来计划预占和窗口总量封顶，避免续作、新增排产各自消费dayN节奏额度。</p>
+ * <p>该工具返回的是节奏账本消费量，不作为非收尾SKU实际落地排产量的硬上限。</p>
  *
  * @author APS
  */
@@ -23,10 +24,10 @@ public final class SkuDailyPlanQuotaUtil {
     }
 
     /**
-     * 汇总当前窗口剩余日计划额度。
+     * 汇总当前窗口剩余dayN节奏额度。
      *
-     * @param quotaMap 日计划额度账本
-     * @return 剩余额度汇总
+     * @param quotaMap dayN节奏账本
+     * @return 剩余节奏额度汇总
      */
     public static int sumRemainingQty(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap) {
         if (CollectionUtils.isEmpty(quotaMap)) {
@@ -43,10 +44,10 @@ public final class SkuDailyPlanQuotaUtil {
     }
 
     /**
-     * 将日计划账本剩余额度压回窗口可排上限内。
+     * 将dayN节奏账本剩余额度压回窗口可排上限内。
      * <p>欠产补产优先保留靠前日期额度，超过窗口上限的部分从后续日期向前扣减。</p>
      *
-     * @param quotaMap 日计划额度账本
+     * @param quotaMap dayN节奏账本
      * @param windowRemainingLimit 窗口剩余可排上限
      */
     public static void capRemainingQtyByWindowLimit(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
@@ -76,13 +77,13 @@ public final class SkuDailyPlanQuotaUtil {
     }
 
     /**
-     * 按滚动补欠产顺序消费日计划额度。
+     * 按滚动补欠产顺序消费dayN节奏额度。
      * <p>先消费当前日期及之前未完成额度，再允许预占后续 dayN 计划量；整体不超出账本剩余额度。</p>
      *
-     * @param quotaMap 日计划额度账本
+     * @param quotaMap dayN节奏账本
      * @param productionDate 实际生产日期
      * @param planQty 本次计划排产量
-     * @return 实际消费的额度
+     * @return 实际消费的dayN节奏额度
      */
     public static int consumeRollingQuota(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
                                           LocalDate productionDate,
@@ -91,14 +92,14 @@ public final class SkuDailyPlanQuotaUtil {
     }
 
     /**
-     * 按滚动补欠产顺序消费日计划额度，并限制可预占的未来日期。
+     * 按滚动补欠产顺序消费dayN节奏额度，并限制可预占的未来日期。
      * <p>先消费当前日期及之前未完成额度，再允许预占不晚于追补截止日的后续 dayN 计划量。</p>
      *
-     * @param quotaMap 日计划额度账本
+     * @param quotaMap dayN节奏账本
      * @param productionDate 实际生产日期
      * @param planQty 本次计划排产量
      * @param lookAheadEndDate 允许提前借用的最晚生产日期，null 表示沿用原公共语义
-     * @return 实际消费的额度
+     * @return 实际消费的dayN节奏额度
      */
     public static int consumeRollingQuota(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
                                           LocalDate productionDate,

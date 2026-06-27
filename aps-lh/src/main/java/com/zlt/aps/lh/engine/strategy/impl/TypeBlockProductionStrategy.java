@@ -15,6 +15,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -3291,9 +3292,18 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                            SkuScheduleDTO sku,
                                            LhScheduleResult result,
                                            List<LhShiftConfigVO> shifts) {
+        int cappedQty = getTargetScheduleQtyResolver().capResultByProductionRemainingQty(
+                context, sku, result, shifts, "换活字块");
+        if (cappedQty <= 0) {
+            return 0;
+        }
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
         if (quotaMap == null || quotaMap.isEmpty()) {
-            return result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+            refreshResultSummary(context, result, shifts);
+            int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+            getTargetScheduleQtyResolver().deductProductionRemainingQty(
+                    context, sku, actualQty, "换活字块", result.getLhMachineCode());
+            return actualQty;
         }
         int totalShiftFillOverQty = 0;
         for (LhShiftConfigVO shift : shifts) {
@@ -3329,7 +3339,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 boolean endingResult = YES_FLAG.equals(result.getIsEnd());
                 // 收尾结果必须严格截断，不再记录满班补齐超排；
                 // 试制等严格目标量场景仍需回裁，但保留超排账本用于追踪被截掉的补满量。
-                if (endingResult || sku.isStrictTargetQty()) {
+                if (endingResult || shouldApplyStrictTypeBlockQuotaLimit(sku, endingResult)) {
                     // 收尾/严格目标量场景不允许把换活字块后的满班补齐量落成有效计划量。
                     trimTypeBlockShiftPlanQty(result, shift.getShiftIndex(), consumed);
                     if (endingResult) {
@@ -3348,7 +3358,25 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             context.getSkuShiftFillOverQtyMap().merge(sku.getMaterialCode(), totalShiftFillOverQty, Integer::sum);
         }
         refreshResultSummary(context, result, shifts);
-        return result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+        int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+        getTargetScheduleQtyResolver().deductProductionRemainingQty(
+                context, sku, actualQty, "换活字块", result.getLhMachineCode());
+        return actualQty;
+    }
+
+    /**
+     * 判断换活字块非收尾是否需要按 dayN 节奏账本严格回裁。
+     *
+     * @param sku SKU排程DTO
+     * @param endingResult 是否收尾结果
+     * @return true-需要严格回裁；false-非收尾实际排产按SKU实际消费账本控制
+     */
+    private boolean shouldApplyStrictTypeBlockQuotaLimit(SkuScheduleDTO sku, boolean endingResult) {
+        if (endingResult || Objects.isNull(sku)) {
+            return false;
+        }
+        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isStrictNewSpecShortageOnly();
     }
 
     /**

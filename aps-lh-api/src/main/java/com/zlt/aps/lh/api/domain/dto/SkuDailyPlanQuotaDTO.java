@@ -6,10 +6,10 @@ import java.io.Serializable;
 import java.time.LocalDate;
 
 /**
- * SKU日计划额度账本DTO
- * <p>维护某个SKU在某一天的计划额度，用于多机台排产时按日控制计划量消耗。</p>
- * <p>同一SKU在多台机台上排产时，所有机台共享同一个日计划额度账本，
- * 避免重复消费同一天额度。</p>
+ * SKU dayN节奏账本DTO
+ * <p>维护某个SKU在某一天的计划节奏，用于判断能否上机、何时加机台、提前生产和日计划审计。</p>
+ * <p>同一SKU在多台机台上排产时，所有机台共享同一个dayN节奏账本，
+ * 避免重复消费同一天节奏额度；非收尾实际排产量由SKU实际消费账本统一控制。</p>
  * <p>S4.4 续作、换活字块和 S4.5 新增补偿 SKU 可能共享同一账本对象，
  * 因此该对象不是只读日计划快照，而是排产过程中持续扣减、借用和滚动欠产的运行态。</p>
  *
@@ -42,7 +42,7 @@ public class SkuDailyPlanQuotaDTO implements Serializable {
     /** 当前日期提前消耗后续 dayN 的计划量，表示满班或追补时向后借用的额度 */
     private int futureBorrowQty;
 
-    /** 当前日期实际排产量 */
+    /** 当前日期已消费的dayN节奏量，不等同于非收尾实际落地排产量 */
     private int actualQty;
 
     /** 截至当前日期累计排产量 */

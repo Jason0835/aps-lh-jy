@@ -1,9 +1,12 @@
 package com.zlt.aps.lh.component;
 
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +14,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -179,6 +183,113 @@ public class TargetScheduleQtyResolverTest {
         Assertions.assertEquals(0, targetQty);
         Assertions.assertEquals(Collections.singletonList("3302002370"),
                 context.getActiveEmbryoSkuMap().get("EMB-01"));
+    }
+
+    /**
+     * 用例说明：非收尾 SKU 的实际消费账本应以硫化余量为准，不被 dayN 目标量截断。
+     */
+    @Test
+    public void shouldInitializeProductionLedgerBySurplusForNonEndingSku() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = buildSku("3302003001", "EMB-02", 300, 0, 16);
+
+        int remainingQty = resolver.resolveProductionRemainingQty(context, sku);
+
+        Assertions.assertEquals(300, remainingQty);
+        Assertions.assertEquals(Integer.valueOf(300),
+                context.getSkuProductionRemainingQtyMap().get("3302003001"));
+    }
+
+    /**
+     * 用例说明：同一 SKU 多机台排产必须共享同一实际消费账本。
+     */
+    @Test
+    public void shouldShareProductionLedgerAcrossSameMaterialSkuCopies() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO firstSku = buildSku("3302003001", "EMB-02", 300, 0, 16);
+        SkuScheduleDTO secondSku = buildSku("3302003001", "EMB-02", 300, 0, 16);
+        resolver.resolveProductionRemainingQty(context, firstSku);
+
+        int deductedQty = resolver.deductProductionRemainingQty(
+                context, secondSku, 96, "新增排产", "K1105");
+
+        Assertions.assertEquals(96, deductedQty);
+        Assertions.assertEquals(204, resolver.resolveProductionRemainingQty(context, firstSku));
+        Assertions.assertEquals(Integer.valueOf(204),
+                context.getSkuProductionRemainingQtyMap().get("3302003001"));
+    }
+
+    /**
+     * 用例说明：结果行超过SKU实际消费账本剩余量时，应裁剪到剩余额度。
+     */
+    @Test
+    public void shouldCapResultByProductionLedgerRemainingQty() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = buildSku("3302003003", "EMB-02", 100, 0, 16);
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302003003");
+        result.setLhMachineCode("K1106");
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 80, new Date(), null);
+        ShiftFieldUtil.setShiftPlanQty(result, 2, 40, new Date(), null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        LhShiftConfigVO firstShift = new LhShiftConfigVO();
+        firstShift.setShiftIndex(1);
+        LhShiftConfigVO secondShift = new LhShiftConfigVO();
+        secondShift.setShiftIndex(2);
+
+        int cappedQty = resolver.capResultByProductionRemainingQty(
+                context, sku, result, Arrays.asList(firstShift, secondShift), "新增排产");
+
+        Assertions.assertEquals(100, cappedQty);
+        Assertions.assertEquals(Integer.valueOf(80), ShiftFieldUtil.getShiftPlanQty(result, 1));
+        Assertions.assertEquals(Integer.valueOf(20), ShiftFieldUtil.getShiftPlanQty(result, 2));
+        Assertions.assertEquals(Integer.valueOf(100), result.getDailyPlanQty());
+    }
+
+    /**
+     * 用例说明：双模结果按实际消费账本回裁时，班次量不能被裁成奇数或非模数倍。
+     */
+    @Test
+    public void shouldCapDoubleMouldResultByMouldMultiple() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = buildSku("3302003004", "EMB-04", 69, 0, 69);
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302003004");
+        result.setLhMachineCode("K1107");
+        result.setMouldQty(2);
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 48, new Date(), null);
+        ShiftFieldUtil.setShiftPlanQty(result, 2, 48, new Date(), null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        LhShiftConfigVO firstShift = new LhShiftConfigVO();
+        firstShift.setShiftIndex(1);
+        LhShiftConfigVO secondShift = new LhShiftConfigVO();
+        secondShift.setShiftIndex(2);
+
+        int cappedQty = resolver.capResultByProductionRemainingQty(
+                context, sku, result, Arrays.asList(firstShift, secondShift), "新增排产");
+
+        Assertions.assertEquals(68, cappedQty);
+        Assertions.assertEquals(Integer.valueOf(48), ShiftFieldUtil.getShiftPlanQty(result, 1));
+        Assertions.assertEquals(Integer.valueOf(20), ShiftFieldUtil.getShiftPlanQty(result, 2));
+        Assertions.assertEquals(Integer.valueOf(68), result.getDailyPlanQty());
+    }
+
+    /**
+     * 用例说明：收尾目标量上调后，实际消费账本应同步覆盖为收尾目标量。
+     */
+    @Test
+    public void shouldSyncProductionLedgerWhenEndingTargetUpsized() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = buildSku("3302003002", "EMB-03", 20, 80, 20);
+        context.setNewSpecSkuList(Collections.singletonList(sku));
+        resolver.resolveProductionRemainingQty(context, sku);
+
+        int targetQty = resolver.upsizeEndingTargetQty(context, sku);
+
+        Assertions.assertEquals(80, targetQty);
+        Assertions.assertEquals(80, resolver.resolveProductionRemainingQty(context, sku));
+        Assertions.assertEquals(Integer.valueOf(80),
+                context.getSkuProductionRemainingQtyMap().get("3302003002"));
     }
 
     /**

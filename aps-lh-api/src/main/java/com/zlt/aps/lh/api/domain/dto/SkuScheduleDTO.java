@@ -12,7 +12,7 @@ import java.util.Map;
  * SKU排程数据传输对象。
  *
  * <p>该对象在 S4.3 由月计划、产能、胎胚库存和历史完成量组装生成，随后在 S4.4/S4.5
- * 作为排序、选机、收尾、班次分配和日计划账本扣减的核心入参。</p>
+ * 作为排序、选机、收尾、班次分配和dayN节奏账本扣减的核心入参。</p>
  *
  * <p>注意：多数数量字段会在排程过程中动态变化，例如 {@link #pendingQty}、
  * {@link #remainingScheduleQty}、{@link #dailyPlanQuotaMap}。维护时不要把它当成只读月计划快照。</p>
@@ -139,13 +139,13 @@ public class SkuScheduleDTO {
     private double embryoSupplyHours;
 
     // ========== 多机台排产相关 ==========
-    /** 多机台拆量剩余排产量（收尾上调后由TargetScheduleQtyResolver写入，后续每台机台排产后递减） */
+    /** 多机台拆量剩余排产量（运行态由SKU实际消费账本解析后写入，后续每台机台排产后递减） */
     private int remainingScheduleQty;
 
-    /** 窗口内每日计划额度，key = productionDate；由月计划 dayN 映射到排程窗口日期后生成 */
+    /** 窗口内dayN节奏账本，key = productionDate；由月计划 dayN 映射到排程窗口日期后生成 */
     private Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap;
 
-    /** 窗口内日计划剩余量汇总（已扣减继承量、锁定量的每日剩余计划量之和） */
+    /** 窗口内dayN节奏剩余量汇总（已扣减继承量、锁定量的每日剩余计划量之和） */
     private int windowRemainingPlanQty;
 
     /** 满班补齐导致的窗口内超排量（因班次需排满而超出日计划的累计量） */

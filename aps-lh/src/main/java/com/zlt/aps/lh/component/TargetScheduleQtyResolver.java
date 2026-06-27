@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -20,6 +21,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
@@ -100,6 +102,258 @@ public class TargetScheduleQtyResolver {
             upperLimitQty = pendingQty;
         }
         return Math.max(0, Math.min(pendingQty, upperLimitQty));
+    }
+
+    /**
+     * 初始化 SKU 实际排产剩余账本。
+     * <p>dayN 只用于节奏判断，非收尾 SKU 的实际消费账本优先取硫化余量；严格目标量场景取业务目标量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param targetQty 当前业务目标量
+     * @param reason 初始化原因
+     * @return 初始化后的剩余量
+     */
+    public int initializeProductionRemainingQty(LhScheduleContext context,
+                                                SkuScheduleDTO sku,
+                                                int targetQty,
+                                                String reason) {
+        int initialQty = resolveInitialProductionRemainingQty(sku, targetQty);
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return initialQty;
+        }
+        Map<String, Integer> ledgerMap = context.getSkuProductionRemainingQtyMap();
+        Integer oldQty = ledgerMap.get(sku.getMaterialCode());
+        if (Objects.nonNull(oldQty)) {
+            return Math.max(0, oldQty);
+        }
+        ledgerMap.put(sku.getMaterialCode(), initialQty);
+        log.info("SKU实际消费账本初始化, materialCode: {}, reason: {}, surplusQty: {}, targetQty: {}, strictTargetQty: {}, ledgerQty: {}",
+                sku.getMaterialCode(), reason, Math.max(0, sku.getSurplusQty()), Math.max(0, targetQty),
+                sku.isStrictTargetQty(), initialQty);
+        return initialQty;
+    }
+
+    /**
+     * 解析 SKU 实际排产剩余量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 当前 SKU 实际排产剩余量
+     */
+    public int resolveProductionRemainingQty(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        if (Objects.isNull(context) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return resolveInitialProductionRemainingQty(sku, sku.resolveTargetScheduleQty());
+        }
+        Map<String, Integer> ledgerMap = context.getSkuProductionRemainingQtyMap();
+        Integer remainingQty = ledgerMap.get(sku.getMaterialCode());
+        if (Objects.isNull(remainingQty)) {
+            return initializeProductionRemainingQty(context, sku, sku.resolveTargetScheduleQty(), "懒加载初始化");
+        }
+        return Math.max(0, remainingQty);
+    }
+
+    /**
+     * 将 SKU 实际消费账本同步到指定目标量。
+     * <p>收尾目标量上调后必须覆盖实际消费账本，避免后续仍按初始化硫化余量扣减。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param targetQty 目标量
+     * @param reason 同步原因
+     * @return 同步后的剩余量
+     */
+    public int syncProductionRemainingQtyToTarget(LhScheduleContext context,
+                                                  SkuScheduleDTO sku,
+                                                  int targetQty,
+                                                  String reason) {
+        int resolvedTargetQty = Math.max(0, targetQty);
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return resolvedTargetQty;
+        }
+        Integer oldQty = context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), resolvedTargetQty);
+        log.info("SKU实际消费账本同步, materialCode: {}, reason: {}, 原账本剩余: {}, 同步后剩余: {}",
+                sku.getMaterialCode(), reason, oldQty, resolvedTargetQty);
+        return resolvedTargetQty;
+    }
+
+    /**
+     * 扣减 SKU 实际排产剩余账本。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param scheduledQty 本次实际排产量
+     * @param scene 排产场景
+     * @param machineCode 机台编码
+     * @return 实际扣减量
+     */
+    public int deductProductionRemainingQty(LhScheduleContext context,
+                                            SkuScheduleDTO sku,
+                                            int scheduledQty,
+                                            String scene,
+                                            String machineCode) {
+        if (scheduledQty <= 0 || Objects.isNull(sku)) {
+            return 0;
+        }
+        if (!hasProductionLedgerBasis(context, sku)) {
+            return 0;
+        }
+        int currentRemainingQty = resolveProductionRemainingQty(context, sku);
+        int deductedQty = Math.min(currentRemainingQty, scheduledQty);
+        if (Objects.nonNull(context) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
+            context.getSkuProductionRemainingQtyMap().put(
+                    sku.getMaterialCode(), Math.max(0, currentRemainingQty - deductedQty));
+        }
+        log.info("SKU实际消费账本扣减, scene: {}, materialCode: {}, machineCode: {}, 本次排产量: {}, "
+                        + "扣减前剩余: {}, 实际扣减: {}, 扣减后剩余: {}",
+                scene, sku.getMaterialCode(), machineCode, scheduledQty,
+                currentRemainingQty, deductedQty, Math.max(0, currentRemainingQty - deductedQty));
+        return deductedQty;
+    }
+
+    /**
+     * 按 SKU 实际消费账本裁剪结果行计划量。
+     * <p>dayN 只做节奏判断，最终落地数量仍不能突破同 SKU 共享的实际排产剩余量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param result 排程结果
+     * @param shifts 班次列表
+     * @param scene 排产场景
+     * @return 裁剪后的结果计划量
+     */
+    public int capResultByProductionRemainingQty(LhScheduleContext context,
+                                                 SkuScheduleDTO sku,
+                                                 LhScheduleResult result,
+                                                 List<LhShiftConfigVO> shifts,
+                                                 String scene) {
+        int resultQty = ShiftFieldUtil.resolveScheduledQty(result);
+        if (resultQty <= 0 || Objects.isNull(sku)) {
+            return 0;
+        }
+        if (!hasProductionLedgerBasis(context, sku)) {
+            return resultQty;
+        }
+        int remainingQty = resolveProductionRemainingQty(context, sku);
+        if (resultQty <= remainingQty) {
+            return resultQty;
+        }
+        if (CollectionUtils.isEmpty(shifts)) {
+            log.warn("SKU实际消费账本裁剪缺少班次窗口，跳过结果裁剪, scene: {}, materialCode: {}, machineCode: {}, "
+                            + "结果量: {}, 账本剩余: {}",
+                    scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty);
+            return resultQty;
+        }
+        int retainedQty = Math.max(0, remainingQty);
+        int remainingRetainQty = retainedQty;
+        int actualRetainedQty = 0;
+        int mouldQty = Objects.nonNull(result.getMouldQty()) ? result.getMouldQty() : 0;
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
+                continue;
+            }
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+            if (Objects.isNull(planQty) || planQty <= 0) {
+                continue;
+            }
+            int currentShiftQty = normalizeRetainedShiftQty(Math.min(planQty, remainingRetainQty), mouldQty);
+            Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shift.getShiftIndex());
+            if (currentShiftQty <= 0) {
+                ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
+            } else {
+                ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), currentShiftQty, shiftStartTime, null);
+            }
+            remainingRetainQty -= currentShiftQty;
+            actualRetainedQty += currentShiftQty;
+        }
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        log.info("SKU实际消费账本裁剪结果, scene: {}, materialCode: {}, machineCode: {}, 原结果量: {}, "
+                        + "账本剩余: {}, 裁剪后结果量: {}",
+                scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty, actualRetainedQty);
+        return actualRetainedQty;
+    }
+
+    /**
+     * 恢复 SKU 实际排产剩余账本。
+     * <p>用于已生成结果被回滚或占位结果被抢占后，把对应排产量加回 SKU 实际消费账本。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param restoredQty 恢复量
+     * @param reason 恢复原因
+     * @param machineCode 机台编码
+     * @return 恢复后的剩余量
+     */
+    public int restoreProductionRemainingQty(LhScheduleContext context,
+                                             SkuScheduleDTO sku,
+                                             int restoredQty,
+                                             String reason,
+                                             String machineCode) {
+        if (restoredQty <= 0 || Objects.isNull(sku)) {
+            return resolveProductionRemainingQty(context, sku);
+        }
+        int currentRemainingQty = resolveProductionRemainingQty(context, sku);
+        int restoredRemainingQty = currentRemainingQty + restoredQty;
+        if (Objects.nonNull(context) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
+            context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), restoredRemainingQty);
+        }
+        log.info("SKU实际消费账本恢复, materialCode: {}, machineCode: {}, reason: {}, 恢复量: {}, "
+                        + "恢复前剩余: {}, 恢复后剩余: {}",
+                sku.getMaterialCode(), machineCode, reason, restoredQty, currentRemainingQty, restoredRemainingQty);
+        return restoredRemainingQty;
+    }
+
+    private int resolveInitialProductionRemainingQty(SkuScheduleDTO sku, int targetQty) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        if (shouldUseTargetQtyAsProductionLedger(sku)) {
+            return Math.max(0, targetQty);
+        }
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        return surplusQty > 0 ? surplusQty : Math.max(0, targetQty);
+    }
+
+    private boolean hasProductionLedgerBasis(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return false;
+        }
+        if (Objects.nonNull(context)
+                && context.getSkuProductionRemainingQtyMap().containsKey(sku.getMaterialCode())) {
+            return true;
+        }
+        return sku.getSurplusQty() > 0 || sku.resolveTargetScheduleQty() > 0 || sku.getPendingQty() > 0;
+    }
+
+    private boolean shouldUseTargetQtyAsProductionLedger(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return false;
+        }
+        return StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag())
+                || StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || sku.isStrictNewSpecShortageOnly();
+    }
+
+    /**
+     * 按模台数向下规整实际保留量。
+     * <p>结果行被账本回裁时，双模/多模班次不能保留奇数或非模数倍计划量。</p>
+     *
+     * @param retainedQty 当前保留量
+     * @param mouldQty 模台数
+     * @return 规整后的保留量
+     */
+    private int normalizeRetainedShiftQty(int retainedQty, int mouldQty) {
+        if (retainedQty <= 0) {
+            return 0;
+        }
+        int resolvedMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(mouldQty);
+        if (resolvedMouldQty <= 1) {
+            return retainedQty;
+        }
+        return retainedQty / resolvedMouldQty * resolvedMouldQty;
     }
 
     /**
@@ -824,6 +1078,7 @@ public class TargetScheduleQtyResolver {
         sku.setTargetScheduleQty(endingTargetQty);
         sku.setRemainingScheduleQty(endingTargetQty);
         syncEndingDailyQuotaToTargetQty(sku, endingTargetQty, windowRemainingPlanQty);
+        syncProductionRemainingQtyToTarget(context, sku, endingTargetQty, "收尾目标量同步");
         if (endingTargetQty <= 0) {
             removeActiveEmbryoSku(context, sku, unscheduledReason);
         }

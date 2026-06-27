@@ -203,6 +203,8 @@ public class LhScheduleContext {
     private Map<String, Integer> carryForwardQtyMap = new HashMap<>();
     /** 满班补齐超排量累加器，key=materialCode，供最终汇总日志使用（不受SKU从待排列表中移除影响） */
     private Map<String, Integer> skuShiftFillOverQtyMap = new LinkedHashMap<>();
+    /** SKU实际排产剩余账本，key=materialCode；dayN只做节奏判断，实际排产按该账本扣减 */
+    private Map<String, Integer> skuProductionRemainingQtyMap = new LinkedHashMap<>();
     /** S4.5当前待排正规新增SKU数量，供选机阶段判断普通机台让位规则 */
     private int pendingFormalNewSpecSkuCount;
     /** S4.5当前待排试制新增SKU数量，供单控机台内部资源竞争判断 */

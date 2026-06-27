@@ -659,8 +659,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     && !"1".equals(result.getIsTypeBlock())) {
                 continue;
             }
+            int beforeRedistributeQty = ShiftFieldUtil.resolveScheduledQty(result);
             // 重新按班次分配（夜->早->中顺序按可用量分配）
             redistributeShiftQty(context, result, shifts);
+            syncTypeBlockProductionLedgerAfterRedistribute(context, result, beforeRedistributeQty);
         }
     }
 
@@ -4690,6 +4692,40 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 换活字块结果经过续作班次重分配后，同步SKU实际消费账本差额。
+     * <p>换活字块在自身策略内已按初始结果扣减实际账本，后置班次重分配可能因日标准产量、
+     * 清洗或维护窗口重新收敛最终量；这里仅把账本调整到最终有效结果量，避免影响dayN节奏账本。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param beforeRedistributeQty 重分配前结果量
+     */
+    private void syncTypeBlockProductionLedgerAfterRedistribute(LhScheduleContext context,
+                                                                LhScheduleResult result,
+                                                                int beforeRedistributeQty) {
+        if (context == null || result == null || !"1".equals(result.getIsTypeBlock())) {
+            return;
+        }
+        int afterRedistributeQty = ShiftFieldUtil.resolveScheduledQty(result);
+        int diffQty = afterRedistributeQty - beforeRedistributeQty;
+        if (diffQty == 0) {
+            return;
+        }
+        SkuScheduleDTO sourceSku = requireContinuousPhaseSourceSku(context, result);
+        if (diffQty > 0) {
+            getTargetScheduleQtyResolver().deductProductionRemainingQty(
+                    context, sourceSku, diffQty, "换活字块后置班次重分配", result.getLhMachineCode());
+        } else {
+            getTargetScheduleQtyResolver().restoreProductionRemainingQty(
+                    context, sourceSku, Math.abs(diffQty), "换活字块后置班次重分配", result.getLhMachineCode());
+        }
+        log.info("换活字块后置班次重分配同步实际账本, materialCode: {}, machineCode: {}, 重分配前量: {}, "
+                        + "重分配后量: {}, 差额: {}",
+                result.getMaterialCode(), result.getLhMachineCode(), beforeRedistributeQty,
+                afterRedistributeQty, diffQty);
+    }
+
+    /**
      * 获取结果当前的首个开产时间，供续作班次重分配时保留残班起点。
      *
      * @param result 排程结果
@@ -4959,7 +4995,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
             SkuScheduleDTO sku = resolveResultSourceSku(context, result);
-            if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            if (sku == null) {
                 continue;
             }
             applyContinuousBlockToDailyQuota(context, sku, result, shifts, rollingAppendStartTime);
@@ -5673,7 +5709,20 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                   LhScheduleResult result,
                                                   List<LhShiftConfigVO> shifts,
                                                   Date rollingAppendStartTime) {
+        int cappedQty = getTargetScheduleQtyResolver().capResultByProductionRemainingQty(
+                context, sku, result, shifts, "续作排产");
+        if (cappedQty <= 0) {
+            refreshResultSummary(context, result, shifts);
+            return;
+        }
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
+        if (CollectionUtils.isEmpty(quotaMap)) {
+            refreshResultSummary(context, result, shifts);
+            int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+            getTargetScheduleQtyResolver().deductProductionRemainingQty(
+                    context, sku, actualQty, "续作排产", result.getLhMachineCode());
+            return;
+        }
         int totalShiftFillOverQty = 0;
         for (LhShiftConfigVO shift : shifts) {
             if (shouldSkipRollingInheritedShift(result, shift, rollingAppendStartTime)) {
@@ -5718,6 +5767,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             context.getSkuShiftFillOverQtyMap().merge(sku.getMaterialCode(), totalShiftFillOverQty, Integer::sum);
         }
         refreshResultSummary(context, result, shifts);
+        int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+        getTargetScheduleQtyResolver().deductProductionRemainingQty(
+                context, sku, actualQty, "续作排产", result.getLhMachineCode());
     }
 
     /**

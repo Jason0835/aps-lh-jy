@@ -258,6 +258,42 @@ public class ContinuousProductionStrategyTest {
                 "同胎胚不同SKU不应被前一个SKU按胎胚编号扣减库存");
     }
 
+    /**
+     * 用例说明：换活字块已扣减SKU实际账本后，续作班次重分配若下调最终结果量，
+     * 应把差额恢复到账本，保证实际消费账本与最终有效排程量一致。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void syncTypeBlockProductionLedgerAfterRedistribute_shouldRestoreReducedQty() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sourceSku = sku("3302001513");
+        LhScheduleResult result = new LhScheduleResult();
+        result.setScheduleType("03");
+        result.setIsTypeBlock("1");
+        result.setMaterialCode("3302001513");
+        result.setLhMachineCode("K1105");
+        ShiftFieldUtil.setShiftPlanQty(result, 2, 14, null, null);
+        ShiftFieldUtil.setShiftPlanQty(result, 3, 18, null, null);
+        ShiftFieldUtil.setShiftPlanQty(result, 4, 18, null, null);
+        ShiftFieldUtil.setShiftPlanQty(result, 5, 14, null, null);
+        ShiftFieldUtil.setShiftPlanQty(result, 6, 18, null, null);
+        ShiftFieldUtil.setShiftPlanQty(result, 7, 18, null, null);
+        ShiftFieldUtil.setShiftPlanQty(result, 8, 14, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultSourceSkuMap().put(result, sourceSku);
+        context.getSkuProductionRemainingQtyMap().put("3302001513", 1232);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "syncTypeBlockProductionLedgerAfterRedistribute", context, result, 118);
+
+        assertEquals(Integer.valueOf(1236), context.getSkuProductionRemainingQtyMap().get("3302001513"),
+                "后置重分配少排4条时，应恢复4条实际账本");
+    }
+
     @Test
     public void adjustEmbryoStock_shouldKeepFormalContinuousFullCapacityResult() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
@@ -826,6 +862,7 @@ public class ContinuousProductionStrategyTest {
         firstSku.setTrial(true);
         firstSku.setStrictTargetQty(true);
         firstSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        firstSku.setTargetScheduleQty(10);
         Map<LocalDate, SkuDailyPlanQuotaDTO> firstQuotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
         firstQuotaMap.put(toLocalDate(firstShift), quota("MAT-DUP", toLocalDate(firstShift), 6));
         firstQuotaMap.put(toLocalDate(nextDayShift), quota("MAT-DUP", toLocalDate(nextDayShift), 0));
@@ -836,16 +873,15 @@ public class ContinuousProductionStrategyTest {
         secondSku.setTrial(true);
         secondSku.setStrictTargetQty(true);
         secondSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
-        Map<LocalDate, SkuDailyPlanQuotaDTO> secondQuotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
-        secondQuotaMap.put(toLocalDate(firstShift), quota("MAT-DUP", toLocalDate(firstShift), 0));
-        secondQuotaMap.put(toLocalDate(nextDayShift), quota("MAT-DUP", toLocalDate(nextDayShift), 4));
-        secondSku.setDailyPlanQuotaMap(secondQuotaMap);
+        secondSku.setTargetScheduleQty(10);
+        secondSku.setDailyPlanQuotaMap(new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4));
         context.setContinuousSkuList(Arrays.asList(firstSku, secondSku));
 
         LhScheduleResult firstResult = new LhScheduleResult();
         firstResult.setScheduleType("01");
         firstResult.setIsTypeBlock("0");
         firstResult.setMaterialCode("MAT-DUP");
+        firstResult.setLhMachineCode("K1901");
         ShiftFieldUtil.setShiftPlanQty(firstResult, firstShift.getShiftIndex(), 8,
                 firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
         ShiftFieldUtil.syncDailyPlanQty(firstResult);
@@ -854,6 +890,7 @@ public class ContinuousProductionStrategyTest {
         secondResult.setScheduleType("01");
         secondResult.setIsTypeBlock("0");
         secondResult.setMaterialCode("MAT-DUP");
+        secondResult.setLhMachineCode("K1902");
         ShiftFieldUtil.setShiftPlanQty(secondResult, nextDayShift.getShiftIndex(), 8,
                 nextDayShift.getShiftStartDateTime(), nextDayShift.getShiftEndDateTime());
         ShiftFieldUtil.syncDailyPlanQty(secondResult);
@@ -866,9 +903,11 @@ public class ContinuousProductionStrategyTest {
         ReflectionTestUtils.invokeMethod(strategy, "syncContinuousDailyPlanQuota", context, shifts);
 
         assertEquals(6, firstResult.getDailyPlanQty().intValue(), "首条重复物料结果应只消费自己的首日额度");
-        assertEquals(4, secondResult.getDailyPlanQty().intValue(), "第二条重复物料结果应消费自己的次日额度");
+        assertEquals(4, secondResult.getDailyPlanQty().intValue(), "第二条重复物料结果即使无dayN账本也应消费共享实际账本");
         assertEquals(2, firstSku.getShiftFillOverQty(), "首条结果的超排量应记录在首个来源SKU账本");
-        assertEquals(4, secondSku.getShiftFillOverQty(), "第二条结果的超排量应记录在第二个来源SKU账本");
+        assertEquals(0, secondSku.getShiftFillOverQty(), "无dayN账本的来源SKU不应再追加超排量");
+        assertEquals(Integer.valueOf(0), context.getSkuProductionRemainingQtyMap().get("MAT-DUP"),
+                "同物料续作结果应共享并扣尽实际消费账本");
     }
 
     @Test

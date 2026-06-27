@@ -488,8 +488,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // baseTargetScheduleQty 是本轮多机台拆量的业务基准，单台失败或继续下一台时按它恢复。
             Integer baseTargetScheduleQty = sku.getTargetScheduleQty();
             Integer finalTargetScheduleQty = baseTargetScheduleQty;
-            // 初始化多机台拆量剩余量：需求目标保留月计划口径，实际拆机按日计划账本剩余额度收敛。
-            int remainingQty = resolveSchedulableRemainingQty(sku);
+            // 初始化多机台拆量剩余量：dayN只做节奏判断，实际拆机按SKU实际消费账本剩余额度收敛。
+            int remainingQty = resolveSchedulableRemainingQty(context, sku);
             // 非收尾可溢出场景下，dynamicTargetQty 至少为一个满班产能，
             // 确保 shouldFillSingleMachineToWindowEnd 能按满班产能补足已开班次。
             if (quantityPolicy != null && quantityPolicy.isAllowFillStartedShift() && !quantityPolicy.isEnding()) {
@@ -805,7 +805,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 sku.setMouldQty(machineMouldQty);
                 applyNightNoMouldChangeContinuationFill(context, sku, result, shifts, quantityPolicy);
                 applyDailyStandardPlanQtyToResult(context, sku, result, shifts, runtimeShiftCapacity);
-                // 7. 先按账本硬约束回裁结果，再落地结果与刷新机台状态，避免窗口总量被结果行放大。
+                // 7. 先消费dayN节奏账本，再落地结果与刷新机台状态；非收尾实际排产由SKU实际消费账本控制。
                 // 收尾/试制等严格目标量会被截断；正规/量试非收尾允许记录满班补齐超排。
                 int machineScheduledQty = applyBlockToDailyQuota(context, sku, result, shifts);
                 if (machineScheduledQty <= 0) {
@@ -813,7 +813,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     sku.setTargetScheduleQty(baseTargetScheduleQty);
-                    remainingQty = resolveSchedulableRemainingQty(sku);
+                    remainingQty = resolveSchedulableRemainingQty(context, sku);
                     sku.setRemainingScheduleQty(remainingQty);
                     if (!needMoreMachine(context, sku)) {
                         break;
@@ -1095,6 +1095,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             restoreContinuousPlaceholderQuota(context, sourceSku);
+            getTargetScheduleQtyResolver().restoreProductionRemainingQty(
+                    context, sourceSku, resolveResultScheduledQty(placeholderResult),
+                    "首日无计划续作占位撤销", placeholderResult.getLhMachineCode());
             appendDeferredContinuousCompensationSku(
                     context, sourceSku, placeholderResult, deferredCompensationSkuList);
             context.getScheduleResultSourceSkuMap().remove(placeholderResult);
@@ -8594,10 +8597,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 将排产块的班次数量按生产日期回写到SKU日计划额度账本。
-     * <p>遍历排产结果中每个有排产量的班次，按班次归属日期扣减对应日期的剩余额度。
-     * 如果班次产能大于当日剩余额度，排满班次并记录满班补齐超排量，
-     * 超出部分优先冲抵窗口内后续日期的同SKU计划。</p>
+     * 将排产块的班次数量同步到SKU实际消费账本和dayN节奏账本。
+     * <p>先按SKU实际消费账本裁剪结果，避免同物料多入口重复消费；再按班次归属日期消费dayN节奏额度。
+     * 如果班次产能大于dayN节奏剩余额度，非收尾结果保留实际排产量并记录满班补齐超排量。</p>
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
@@ -8608,9 +8610,18 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                        SkuScheduleDTO sku,
                                        LhScheduleResult result,
                                        List<LhShiftConfigVO> shifts) {
+        int cappedQty = getTargetScheduleQtyResolver().capResultByProductionRemainingQty(
+                context, sku, result, shifts, "新增排产");
+        if (cappedQty <= 0) {
+            return 0;
+        }
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
         if (quotaMap == null || quotaMap.isEmpty()) {
-            return result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+            refreshResultSummary(context, result);
+            int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+            getTargetScheduleQtyResolver().deductProductionRemainingQty(
+                    context, sku, actualQty, "新增排产", result.getLhMachineCode());
+            return actualQty;
         }
         int totalShiftFillOverQty = 0;
         for (LhShiftConfigVO shift : shifts) {
@@ -8628,7 +8639,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (quota == null) {
                 continue;
             }
-            // 按历史欠产、当日计划、受限追补窗口消费同一SKU的日计划账本
+            // 按 dayN 节奏账本消费当日与允许追补窗口，仅用于节奏判断和满班补齐超排记录
             int consumed = SkuDailyPlanQuotaUtil.consumeRollingQuota(
                     quotaMap, productionDate, planQty, resolveLookAheadEndDate(context, quotaMap, productionDate));
             int overQty = planQty - consumed;
@@ -8636,8 +8647,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 boolean endingResult = "1".equals(result.getIsEnd());
                 // 收尾结果必须严格截断，且不再记录满班补齐超排；
                 // 试制等严格目标量场景仍需回裁，但保留超排账本用于追踪被截掉的补满量。
-                if (endingResult || shouldApplyStrictNonEndingQuotaLimit(sku, endingResult)
-                        || shouldTrimUnavailableQuota(sku)) {
+                if (endingResult || shouldApplyStrictNonEndingQuotaLimit(sku, endingResult)) {
                     trimShiftPlanQty(result, shift.getShiftIndex(), consumed);
                     if (endingResult) {
                         continue;
@@ -8656,7 +8666,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             context.getSkuShiftFillOverQtyMap().merge(sku.getMaterialCode(), totalShiftFillOverQty, Integer::sum);
         }
         refreshResultSummary(context, result);
-        return result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+        int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+        getTargetScheduleQtyResolver().deductProductionRemainingQty(
+                context, sku, actualQty, "新增排产", result.getLhMachineCode());
+        return actualQty;
     }
 
     /**
@@ -8674,20 +8687,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
                 || sku.isStrictNewSpecShortageOnly();
-    }
-
-    /**
-     * 判断日计划额度耗尽后是否需要回裁结果行。
-     * <p>没有窗口目标量依据时，不允许把无法扣账的班次量继续留在结果行。</p>
-     *
-     * @param sku SKU排程DTO
-     * @return true-需要回裁；false-允许保留满班补齐量
-     */
-    private boolean shouldTrimUnavailableQuota(SkuScheduleDTO sku) {
-        if (sku == null) {
-            return true;
-        }
-        return sku.getWindowPlanQty() <= 0 && sku.getWindowRemainingPlanQty() <= 0;
     }
 
     /**
@@ -8833,14 +8832,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @param sku SKU排程DTO
      * @return 本轮可继续排产量
      */
-    private int resolveSchedulableRemainingQty(SkuScheduleDTO sku) {
+    private int resolveSchedulableRemainingQty(LhScheduleContext context, SkuScheduleDTO sku) {
         if (sku == null) {
             return 0;
         }
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sku, sku.isStrictTargetQty());
         if (!policy.isStrictUpperLimit()) {
-            // 正规/量试非收尾的 dayN 只作为节奏与资源判断依据，不作为实际排产硬上限。
-            return sku.resolveTargetScheduleQty();
+            // 正规/量试非收尾的 dayN 只作为节奏与资源判断依据，实际排产量按SKU运行态账本共享扣减。
+            return getTargetScheduleQtyResolver().resolveProductionRemainingQty(context, sku);
         }
         if (!StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
                 && !sku.isStrictNewSpecShortageOnly()) {

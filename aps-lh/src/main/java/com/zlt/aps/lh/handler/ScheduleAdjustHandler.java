@@ -745,6 +745,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 填充日硫化产能
         fillDailyCapacity(dto, capacity);
         dto.setTargetScheduleQty(getTargetScheduleQtyResolver().resolveInitialTargetQty(context, dto));
+        getTargetScheduleQtyResolver().initializeProductionRemainingQty(
+                context, dto, dto.resolveTargetScheduleQty(), "SKU初始化");
         appendOpenProductionShortageIfNecessary(context, dto);
         log.debug("SKU待排量计算完成, materialCode: {}, 结构: {}, 月计划: {}, 窗口计划: {}, 窗口剩余: {}, "
                         + "已完成: {}, 有效上月超欠产: {}, 忽略超产: {}, 余量: {}, 待排: {}, 目标量: {}, 班产: {}",
