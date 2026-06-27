@@ -139,6 +139,29 @@ public class MouldResourceContextTest {
         Assertions.assertEquals(Collections.singletonList("M103"), result.getAllocatedMouldCodeList());
     }
 
+    /**
+     * 用例说明：在机模具号缺失时，不能用当前物料的SKU模具关系猜测占用模具。
+     */
+    @Test
+    public void shouldNotGuessOccupiedMouldFromCurrentMaterialWhenOnlineMouldMissing() {
+        LhScheduleContext context = buildContext(
+                Arrays.asList(
+                        buildRel("SKU-CURRENT", "M001"),
+                        buildRel("SKU-NEW", "M001"),
+                        buildRel("SKU-NEW", "M003"),
+                        buildRel("SKU-OTHER-1", "M003"),
+                        buildRel("SKU-OTHER-2", "M003")),
+                Arrays.asList(buildModel("M001", 1), buildModel("M003", 1)),
+                Arrays.asList(buildMachineWithCurrentMaterial("K1105", 1, "SKU-CURRENT"),
+                        buildMachine("K1110", 1)));
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+
+        MouldResourceAllocationResult result = resourceContext.tryAllocate("SKU-NEW", "K1110");
+
+        Assertions.assertTrue(result.isAllowed());
+        Assertions.assertEquals(Collections.singletonList("M001"), result.getAllocatedMouldCodeList());
+    }
+
     private LhScheduleContext buildContext(List<MdmSkuMouldRel> relList,
                                            List<MdmModelInfo> modelList,
                                            List<MachineScheduleDTO> machineList) {

@@ -74,8 +74,7 @@ public class MouldResourceContext {
         Map<String, List<String>> skuUnavailableMouldCodeMap = buildSkuUnavailableMouldCodeMap(context);
         Map<String, Boolean> skuUnavailableModelInfoMap = buildSkuUnavailableModelInfoMap(context);
         Map<String, Integer> machineMouldQtyMap = buildMachineMouldQtyMap(context);
-        Map<String, LinkedHashSet<String>> machineBoundMouldCodeMap =
-                buildMachineBoundMouldCodeMap(context, skuAvailableMouldCodeMap, machineMouldQtyMap);
+        Map<String, LinkedHashSet<String>> machineBoundMouldCodeMap = buildMachineBoundMouldCodeMap(context);
         LinkedHashSet<String> occupiedMouldCodeSet = buildOccupiedMouldCodeSet(machineBoundMouldCodeMap);
         return new MouldResourceContext(skuAvailableMouldCodeMap, skuUnavailableMouldCodeMap,
                 skuUnavailableModelInfoMap, machineMouldQtyMap, machineBoundMouldCodeMap, occupiedMouldCodeSet);
@@ -326,15 +325,12 @@ public class MouldResourceContext {
                 .thenComparing(Comparator.naturalOrder()));
     }
 
-    private static Map<String, LinkedHashSet<String>> buildMachineBoundMouldCodeMap(
-            LhScheduleContext context,
-            Map<String, List<String>> skuAvailableMouldCodeMap,
-            Map<String, Integer> machineMouldQtyMap) {
+    private static Map<String, LinkedHashSet<String>> buildMachineBoundMouldCodeMap(LhScheduleContext context) {
         Map<String, LinkedHashSet<String>> resultMap = new HashMap<String, LinkedHashSet<String>>(16);
         if (Objects.isNull(context)) {
             return resultMap;
         }
-        appendMachineBoundMouldCodeFromCurrentMaterial(resultMap, context, skuAvailableMouldCodeMap, machineMouldQtyMap);
+        appendMachineBoundMouldCodeFromCurrentMaterial(resultMap, context);
         appendMachineBoundMouldCodeFromResults(resultMap, context.getScheduleResultList());
         if (!CollectionUtils.isEmpty(context.getMachineAssignmentMap())) {
             for (List<LhScheduleResult> resultList : context.getMachineAssignmentMap().values()) {
@@ -346,9 +342,7 @@ public class MouldResourceContext {
 
     private static void appendMachineBoundMouldCodeFromCurrentMaterial(
             Map<String, LinkedHashSet<String>> resultMap,
-            LhScheduleContext context,
-            Map<String, List<String>> skuAvailableMouldCodeMap,
-            Map<String, Integer> machineMouldQtyMap) {
+            LhScheduleContext context) {
         if (CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
             return;
         }
@@ -369,21 +363,11 @@ public class MouldResourceContext {
             if (StringUtils.isEmpty(machine.getCurrentMaterialCode())) {
                 continue;
             }
-            List<String> mouldCodeList = skuAvailableMouldCodeMap.get(machine.getCurrentMaterialCode());
-            if (CollectionUtils.isEmpty(mouldCodeList)) {
-                continue;
-            }
-            Integer machineMouldQty = machineMouldQtyMap.get(machine.getMachineCode());
-            int requiredMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(
-                    machineMouldQty == null ? 0 : machineMouldQty);
-            LinkedHashSet<String> machineMouldCodeSet = new LinkedHashSet<String>(requiredMouldQty);
-            for (String mouldCode : mouldCodeList) {
-                machineMouldCodeSet.add(mouldCode);
-                if (machineMouldCodeSet.size() >= requiredMouldQty) {
-                    break;
-                }
-            }
-            resultMap.put(machine.getMachineCode(), machineMouldCodeSet);
+            // 在机模具缺失时只能暴露基础数据问题，不能用SKU模具关系猜测实际占用模具。
+            log.info("模具资源初始化未找到在机实际模具号，跳过猜测占用, batchNo: {}, machineCode: {}, "
+                            + "currentMaterialCode: {}, requiredMouldQty: {}",
+                    context.getBatchNo(), machine.getMachineCode(), machine.getCurrentMaterialCode(),
+                    ShiftCapacityResolverUtil.resolveMachineMouldQty(machine));
         }
     }
 
