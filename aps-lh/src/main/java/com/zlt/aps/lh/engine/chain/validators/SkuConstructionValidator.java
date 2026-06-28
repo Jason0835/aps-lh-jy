@@ -4,6 +4,9 @@ import com.zlt.aps.lh.api.constant.LhDataValidationGroupConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.ValidationPolicyEnum;
 import com.zlt.aps.lh.engine.chain.IDataValidator;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.SkuConstructionRefResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
@@ -12,6 +15,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import java.util.Calendar;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +54,10 @@ public class SkuConstructionValidator implements IDataValidator {
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
             // 月计划排产量为空或为0的物料跳过校验
             if (plan.getTotalQty() == null || plan.getTotalQty() == 0) {
+                continue;
+            }
+            // 排程窗口内所有日计划量均为0或空的物料跳过校验
+            if (!hasWindowPlanQty(context, plan)) {
                 continue;
             }
             String materialCode = plan.getMaterialCode();
@@ -117,5 +126,45 @@ public class SkuConstructionValidator implements IDataValidator {
     @Override
     public int getOrder() {
         return 25;
+    }
+
+    /**
+     * 判断月计划在排程窗口内是否存在有效日计划量。
+     * 跨月时自动查找对应月份的月计划记录。
+     *
+     * @param context 排程上下文
+     * @param plan 当前月计划
+     * @return true-窗口内存在有效计划量(&gt;0)，false-窗口内全部为0或null
+     */
+    private boolean hasWindowPlanQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
+        Date scheduleDate = context.getScheduleDate();
+        Date windowEndDate = context.getWindowEndDate();
+        if (Objects.isNull(scheduleDate) || Objects.isNull(windowEndDate)) {
+            return true;
+        }
+        Calendar cursor = Calendar.getInstance();
+        cursor.setTime(LhScheduleTimeUtil.clearTime(scheduleDate));
+        Calendar endCal = Calendar.getInstance();
+        endCal.setTime(LhScheduleTimeUtil.clearTime(windowEndDate));
+        while (!cursor.after(endCal)) {
+            int year = cursor.get(Calendar.YEAR);
+            int month = cursor.get(Calendar.MONTH) + 1;
+            int dayOfMonth = cursor.get(Calendar.DAY_OF_MONTH);
+            // 如果遍历到不同月份，从跨月索引中查找对应月份的计划
+            FactoryMonthPlanProductionFinalResult targetPlan = plan;
+            if (Objects.nonNull(plan.getYear()) && Objects.nonNull(plan.getMonth())
+                    && (plan.getYear().intValue() != year || plan.getMonth().intValue() != month)) {
+                String key = MonthPlanDateResolver.buildMaterialMonthKey(plan.getMaterialCode(), year, month);
+                targetPlan = context.getMonthPlanByMaterialMonthMap().get(key);
+            }
+            if (Objects.nonNull(targetPlan)) {
+                int dayQty = MonthPlanDayQtyUtil.resolveDayQty(targetPlan, dayOfMonth);
+                if (dayQty > 0) {
+                    return true;
+                }
+            }
+            cursor.add(Calendar.DAY_OF_MONTH, 1);
+        }
+        return false;
     }
 }
