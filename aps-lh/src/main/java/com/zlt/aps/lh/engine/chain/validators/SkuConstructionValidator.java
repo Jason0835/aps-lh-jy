@@ -47,6 +47,10 @@ public class SkuConstructionValidator implements IDataValidator {
         // 遍历月计划物料，按物料编码+产品状态降级查找并校验 lhNo/lhType
         Map<String, String> missingFieldMap = new LinkedHashMap<>();
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
+            // 月计划排产量为空或为0的物料跳过校验
+            if (plan.getTotalQty() == null || plan.getTotalQty() == 0) {
+                continue;
+            }
             String materialCode = plan.getMaterialCode();
             if (StringUtils.isEmpty(materialCode)) {
                 continue;
