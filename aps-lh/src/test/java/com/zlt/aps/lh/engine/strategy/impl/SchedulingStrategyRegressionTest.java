@@ -22,6 +22,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationRequ
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationResult;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineCapacitySimulationUtil;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineShortageQuotaPlan;
 import com.zlt.aps.lh.engine.strategy.support.MachineProductionSegment;
 import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
@@ -30,6 +31,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -474,6 +476,7 @@ public class SchedulingStrategyRegressionTest {
     @Test
     public void shouldReduceContinuousMachinesWhenFutureDayPlanDrops() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
         SkuScheduleDTO sku = buildContinuousSku("3302001075", 16, 256, buildQuotaMapByShifts(shifts, 92, 92, 46));
@@ -495,8 +498,9 @@ public class SchedulingStrategyRegressionTest {
      * 续作日计划恒定且单机日产能可满足时，应立即减少一台续作机台。
      */
     @Test
-    public void shouldReduceContinuousMachinesWhenConstantDailyPlanFitsOneMachine() {
+    public void shouldReduceContinuousMachinesWhenConstantDailyPlanFitsOneMachine() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 46, 46, 46);
@@ -529,11 +533,51 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作日计划恒定且 dayN 需要两台机台时，不得因首日完成量扣减或后续追补需求为0误降到一台。
+     */
+    @Test
+    public void shouldKeepRequiredContinuousMachinesWhenConstantDailyPlanNeedsTwoMachines() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 96, 96, 96);
+        quotaMap.get(resolveShiftWorkDate(shifts, 1)).setRemainingQty(48);
+        appendMonthPlan(context, "3302001033", resolveShiftWorkDate(shifts, 1), 96, 96, 96);
+        SkuScheduleDTO sku = buildContinuousSku("3302001033", 16, 820, quotaMap);
+        sku.setScheduleDayFinishQty(48);
+        sku.setStrictTargetQty(true);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001033");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(48);
+        context.getSkuLhCapacityMap().put("3302001033", capacity);
+        LhScheduleResult firstResult = buildContinuousResult("3302001033", "K1509", 16, shifts, "0");
+        LhScheduleResult secondResult = buildContinuousResult("3302001033", "K1614", 16, shifts, "0");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        for (int dayIndex = 1; dayIndex <= 3; dayIndex++) {
+            LocalDate workDate = resolveShiftWorkDate(shifts, dayIndex);
+            Assertions.assertEquals(2,
+                    countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, workDate),
+                    "业务日不得低于 dayN 最小续作机台数: " + workDate);
+        }
+        Assertions.assertEquals(2, context.getScheduleResultList().size());
+        Assertions.assertTrue(context.getReducedContinuationGroupKeySet().isEmpty());
+    }
+
+    /**
      * 多机台续作窗口内日计划仍有需求且后续下降时，即使前置收尾标记命中，也必须按天降模。
      */
     @Test
     public void shouldReduceEndingMarkedContinuousByWorkDateWhenFutureDayPlanDrops() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
         SkuScheduleDTO sku = buildContinuousSku("3302002326", 16, 425, buildQuotaMapByShifts(shifts, 192, 192, 30));
@@ -616,6 +660,7 @@ public class SchedulingStrategyRegressionTest {
     @Test
     public void shouldCapEndingSingleControlContinuousByStrictTargetAcrossRuntimeMachines() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousEndingDependencies(strategy);
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
         SkuScheduleDTO leftSku = buildContinuousSku("3302002481", 9, 144, buildQuotaMapByShifts(shifts, 0, 0, 0));
@@ -657,8 +702,9 @@ public class SchedulingStrategyRegressionTest {
      * 多机台续作已判定收尾时，应统一按收尾目标量收口，不能继续按窗口日计划保留两台单控机台。
      */
     @Test
-    public void shouldCapMultiMachineEndingContinuousByMaxSurplusAndEmbryoStock() {
+    public void shouldCapMultiMachineEndingContinuousByMaxSurplusAndEmbryoStock() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousEndingDependencies(strategy);
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
         SkuScheduleDTO sku = buildContinuousSku("3302002706", 8, 108, buildQuotaMapByShifts(shifts, 48, 48, 12));
@@ -982,10 +1028,10 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 续作转新增补偿时，dayN 只决定是否需要增机台，不能把非收尾补偿目标量压成日计划小缺口。
+     * 已有续作机台满足 dayN 节奏时，不得因历史欠产或业务目标剩余继续新增补偿机台。
      */
     @Test
-    public void shouldNotLimitContinuousCompensationQtyByDailyPlanQuota() throws Exception {
+    public void shouldSkipContinuousCompensationWhenDailyPlanAlreadySatisfiedEvenWithShortage() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
@@ -1003,7 +1049,7 @@ public class SchedulingStrategyRegressionTest {
         method.setAccessible(true);
         int compensationQty = (Integer) method.invoke(strategy, context, sku);
 
-        Assertions.assertEquals(64, compensationQty);
+        Assertions.assertEquals(0, compensationQty);
     }
 
     /**
@@ -1027,6 +1073,75 @@ public class SchedulingStrategyRegressionTest {
         int compensationQty = (Integer) method.invoke(strategy, context, sku);
 
         Assertions.assertEquals(0, compensationQty);
+    }
+
+    /**
+     * 已有四台续作机台满足 dayN 节奏时，不能仅因硫化余量或目标剩余再回流新增补机台。
+     */
+    @Test
+    public void shouldSkipContinuousCompensationWhenExistingMachinesSatisfyDailyRhythm() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001316", 16, 5184,
+                buildQuotaMapByShifts(shifts, 184, 184, 184));
+        sku.setSurplusQty(5184);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001316");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001316", capacity);
+        String[] machineCodes = new String[]{"K1113", "K1506", "K1916", "K2017"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult("3302001316", machineCode, 16, shifts, "0");
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class);
+        method.setAccessible(true);
+        int compensationQty = (Integer) method.invoke(strategy, context, sku);
+
+        Assertions.assertEquals(0, compensationQty);
+    }
+
+    /**
+     * S4.5 原始新增列表里同物料已由纯续作机台满足 dayN 时，不得再走新增换模上机。
+     */
+    @Test
+    public void shouldSkipNewSpecWhenPureContinuousMachinesSatisfyOriginalDayMinimum() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstDate = resolveShiftWorkDate(shifts, 1);
+        appendMonthPlan(context, "3302001316", firstDate, 184, 184, 184);
+        SkuScheduleDTO sku = buildContinuousSku("3302001316", 16, 5184,
+                buildQuotaMapByShifts(shifts, 184, 184, 184));
+        sku.setSurplusQty(5184);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001316");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001316", capacity);
+        String[] machineCodes = new String[]{"K1113", "K1506", "K1916", "K2017"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult("3302001316", machineCode, 16, shifts, "0");
+            context.getScheduleResultList().add(result);
+        }
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "shouldSkipNewSpecBecauseContinuousSatisfiesOriginalDayMinimum",
+                LhScheduleContext.class, SkuScheduleDTO.class, ProductionQuantityPolicy.class);
+        method.setAccessible(true);
+        boolean skip = (Boolean) method.invoke(
+                strategy, context, sku, ProductionQuantityPolicy.from(sku, false));
+
+        Assertions.assertTrue(skip);
+        sku.setStrictNewSpecShortageOnly(true);
+        boolean strictShortageSkip = (Boolean) method.invoke(
+                strategy, context, sku, ProductionQuantityPolicy.from(sku, false));
+        Assertions.assertTrue(strictShortageSkip);
     }
 
     /**
@@ -1101,6 +1216,99 @@ public class SchedulingStrategyRegressionTest {
 
         Assertions.assertEquals(shifts.get(0).getShiftStartDateTime(), nonEndingStartTime);
         Assertions.assertEquals(shifts.get(2).getShiftStartDateTime(), endingStartTime);
+    }
+
+    /**
+     * 首日无计划但后续窗口有正日计划的 MES 在机同物料，必须保留续作身份，不能释放后转新增换模。
+     */
+    @Test
+    public void shouldKeepContinuousIdentityWhenFirstDayNoPlanButFuturePlanExists() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002759", 18, 300,
+                buildQuotaMapByShifts(shifts, 0, 54, 54));
+        sku.setContinuousMachineCode("K2009");
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "shouldReleaseFirstDayNoPlanContinuousSku",
+                SkuScheduleDTO.class, List.class, DailyMachineShortageQuotaPlan.class);
+        method.setAccessible(true);
+        boolean release = (Boolean) method.invoke(strategy, sku, shifts, null);
+
+        Assertions.assertFalse(release);
+    }
+
+    /**
+     * 续作收尾后，新增选机和新增排产都必须从收尾完成时间承接，不能按整窗占用到窗口末尾。
+     */
+    @Test
+    public void shouldReuseMachineAfterContinuousEndingSpecEndTime() throws Exception {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Date endingTime = shifts.get(4).getShiftEndDateTime();
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1807");
+        machine.setEstimatedEndTime(endingTime);
+        machine.setEnding(true);
+        LhScheduleResult endingResult = buildContinuousResult("3302002686", "K1807", 16, shifts, "1");
+        endingResult.setDailyPlanQty(64);
+        endingResult.setSpecEndTime(endingTime);
+        List<LhScheduleResult> assignedResults = new ArrayList<LhScheduleResult>(1);
+        assignedResults.add(endingResult);
+        context.getMachineAssignmentMap().put("K1807", assignedResults);
+
+        DefaultMachineMatchStrategy matchStrategy = new DefaultMachineMatchStrategy();
+        Method matchMethod = DefaultMachineMatchStrategy.class.getDeclaredMethod(
+                "resolveCandidateReferenceTime", LhScheduleContext.class, MachineScheduleDTO.class);
+        matchMethod.setAccessible(true);
+        Date candidateReferenceTime = (Date) matchMethod.invoke(matchStrategy, context, machine);
+
+        NewSpecProductionStrategy newSpecStrategy = new NewSpecProductionStrategy();
+        Method newSpecMethod = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveMachineOccupationEndTime", LhScheduleContext.class, MachineScheduleDTO.class, List.class);
+        newSpecMethod.setAccessible(true);
+        Date occupationEndTime = (Date) newSpecMethod.invoke(newSpecStrategy, context, machine, shifts);
+
+        Assertions.assertEquals(endingTime, candidateReferenceTime);
+        Assertions.assertEquals(endingTime, occupationEndTime);
+    }
+
+    /**
+     * 收尾释放机台进入新增候选后若被日计划回裁为0，必须留下短日志说明未复用原因。
+     */
+    @Test
+    public void shouldLogReasonWhenReleasedTailMachineCandidateIsTrimmedToZero() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        SkuScheduleDTO sku = buildContinuousSku("3302001317", 16, 244,
+                buildQuotaMapByShifts(context.getScheduleWindowShifts(), 122, 122, 122));
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001317");
+        capacity.setStandardCapacity(122);
+        context.getSkuLhCapacityMap().put("3302001317", capacity);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "appendNewSpecCandidateRejectedProcessLog",
+                LhScheduleContext.class, SkuScheduleDTO.class, String.class, String.class,
+                Date.class, Date.class, Date.class, Date.class, Date.class,
+                Integer.class, Integer.class, Integer.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, sku, "K1807", "日计划额度回裁后为0",
+                dateTime(2026, 6, 27, 17, 0),
+                dateTime(2026, 6, 27, 17, 0),
+                dateTime(2026, 6, 27, 17, 0),
+                dateTime(2026, 6, 28, 1, 0),
+                dateTime(2026, 6, 28, 1, 0),
+                0, 0, 0);
+
+        Assertions.assertEquals(1, context.getScheduleLogList().size());
+        Assertions.assertEquals("新增候选机台回裁跳过", context.getScheduleLogList().get(0).getTitle());
+        String detail = context.getScheduleLogList().get(0).getLogDetail();
+        Assertions.assertTrue(detail.contains("materialCode=3302001317"));
+        Assertions.assertTrue(detail.contains("machineCode=K1807"));
+        Assertions.assertTrue(detail.contains("dailyStandardQty=122"));
+        Assertions.assertTrue(detail.contains("reason=日计划额度回裁后为0"));
     }
 
     /**
@@ -1693,6 +1901,52 @@ public class SchedulingStrategyRegressionTest {
             quotaMap.put(workDate, buildQuota(qtyArray[index]));
         }
         return quotaMap;
+    }
+
+    /**
+     * 注入测试用原始月计划，用于区分运行态dayN账本剩余额度和月计划原始日计划量。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param firstDate 首个业务日
+     * @param day1Qty 首日原始日计划量
+     * @param day2Qty 第二日原始日计划量
+     * @param day3Qty 第三日原始日计划量
+     */
+    private void appendMonthPlan(LhScheduleContext context,
+                                 String materialCode,
+                                 LocalDate firstDate,
+                                 int day1Qty,
+                                 int day2Qty,
+                                 int day3Qty) {
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode(materialCode);
+        plan.setYear(firstDate.getYear());
+        plan.setMonth(firstDate.getMonthValue());
+        setMonthPlanDayQty(plan, firstDate, day1Qty);
+        setMonthPlanDayQty(plan, firstDate.plusDays(1), day2Qty);
+        setMonthPlanDayQty(plan, firstDate.plusDays(2), day3Qty);
+        context.getMonthPlanList().add(plan);
+        context.getMonthPlanByMaterialMonthMap().put(
+                materialCode + "_" + firstDate.getYear() + "_" + firstDate.getMonthValue(), plan);
+    }
+
+    private void setMonthPlanDayQty(FactoryMonthPlanProductionFinalResult plan,
+                                    LocalDate date,
+                                    int qty) {
+        switch (date.getDayOfMonth()) {
+            case 11:
+                plan.setDay11(qty);
+                break;
+            case 12:
+                plan.setDay12(qty);
+                break;
+            case 13:
+                plan.setDay13(qty);
+                break;
+            default:
+                throw new IllegalArgumentException("测试月计划日期未支持: " + date);
+        }
     }
 
     private int countPositiveMachineByWorkDate(List<LhScheduleResult> results,
