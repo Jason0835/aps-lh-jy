@@ -113,6 +113,16 @@ public class LhScheduleContext {
 
     /** 月生产计划列表，来源于月计划最终结果表，是 SKU 归集和 day1/day2/day3 窗口计划量的主数据来源 */
     private List<FactoryMonthPlanProductionFinalResult> monthPlanList = new ArrayList<>();
+    /** 本次排程加载的全部月计划列表，跨月时包含多个自然月；供按业务日期解析 dayN 使用 */
+    private List<FactoryMonthPlanProductionFinalResult> loadedMonthPlanList = new ArrayList<>();
+    /** 物料+年月 -> 月计划记录索引，跨月时避免按物料编码误取其他月份计划 */
+    private Map<String, FactoryMonthPlanProductionFinalResult> monthPlanByMaterialMonthMap = new LinkedHashMap<>();
+    /** 年月 -> 定稿需求版本，跨月加载月计划和周程调整时按自然月取版本 */
+    private Map<String, String> monthPlanVersionByYearMonthMap = new LinkedHashMap<>();
+    /** 年月 -> 定稿排产版本，跨月加载月计划和结构机台统计时按自然月取版本 */
+    private Map<String, String> productionVersionByYearMonthMap = new LinkedHashMap<>();
+    /** 物料+年月 -> 月累计完成量，避免同一物料跨月时完成量串月 */
+    private Map<String, Integer> materialMonthFinishedQtyByMonthMap = new HashMap<>();
     /** 周程滚动调整结果Map, key=materialCode */
     private Map<String, List<MpAdjustResult>> mpAdjustResultMap = new HashMap<>();
     /** 工作日历列表 */

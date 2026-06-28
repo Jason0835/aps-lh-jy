@@ -19,7 +19,6 @@ import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.component.IncrSerialGenerator;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEvent;
-import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
@@ -27,7 +26,7 @@ import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
-import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -1065,16 +1064,6 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             return;
         }
 
-        // 构建月计划物料->记录映射，用于快速查找日计划量
-        Map<String, FactoryMonthPlanProductionFinalResult> monthPlanMap = new LinkedHashMap<>();
-        if (!CollectionUtils.isEmpty(context.getMonthPlanList())) {
-            for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
-                if (StringUtils.isNotEmpty(plan.getMaterialCode())) {
-                    monthPlanMap.put(plan.getMaterialCode(), plan);
-                }
-            }
-        }
-
         // 按 materialCode + productionDate 汇总实际排产量
         Map<String, Map<LocalDate, Integer>> materialDayScheduledMap = new LinkedHashMap<>();
         for (LhScheduleResult result : context.getScheduleResultList()) {
@@ -1108,12 +1097,10 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         int totalShiftFillOverQty = 0;
         for (Map.Entry<String, Map<LocalDate, Integer>> materialEntry : materialDayScheduledMap.entrySet()) {
             String materialCode = materialEntry.getKey();
-            FactoryMonthPlanProductionFinalResult plan = monthPlanMap.get(materialCode);
             for (Map.Entry<LocalDate, Integer> dayEntry : materialEntry.getValue().entrySet()) {
                 LocalDate productionDate = dayEntry.getKey();
                 int actualQty = dayEntry.getValue();
-                int dayOfMonth = productionDate.getDayOfMonth();
-                int dayPlanQty = plan != null ? MonthPlanDayQtyUtil.resolveDayQty(plan, dayOfMonth) : 0;
+                int dayPlanQty = MonthPlanDateResolver.resolveDayQty(context, materialCode, productionDate);
                 int diffQty = actualQty - dayPlanQty;
                 if (diffQty > 0) {
                     totalOverPlanCount++;

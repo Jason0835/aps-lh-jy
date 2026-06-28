@@ -31,7 +31,7 @@ public class PreValidationHandler extends AbsScheduleStepHandler {
         // S4.1.1 校验MES下发状态
         checkMesReleaseStatus(context);
 
-        // S4.1.2 校验排程窗口是否跨月
+        // S4.1.2 记录排程窗口跨月状态
         checkCrossMonthWindow(context);
 
         // S4.1.3 生成批次号
@@ -59,7 +59,7 @@ public class PreValidationHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 校验排程窗口是否跨月。
+     * 记录排程窗口是否跨月。
      *
      * @param context 排程上下文
      */
@@ -67,15 +67,10 @@ public class PreValidationHandler extends AbsScheduleStepHandler {
         if (!MonthPlanDayQtyUtil.isCrossMonthWindow(context.getScheduleDate(), context.getWindowEndDate())) {
             return;
         }
-        log.warn("排程被拒绝: 工厂[{}] 排程窗口跨月, T日: {}, 目标日: {}",
+        log.info("排程窗口跨月，启用跨月月计划解析, 工厂[{}], T日: {}, 窗口结束日: {}",
                 context.getFactoryCode(),
                 LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
                 LhScheduleTimeUtil.formatDate(context.getWindowEndDate()));
-        throw new ScheduleException(ScheduleStepEnum.S4_1_PRE_VALIDATION,
-                ScheduleErrorCode.CROSS_MONTH_SCHEDULE_UNSUPPORTED,
-                context.getFactoryCode(),
-                context.getBatchNo(),
-                MonthPlanDayQtyUtil.CROSS_MONTH_UNSUPPORTED_MESSAGE);
     }
 
     /**

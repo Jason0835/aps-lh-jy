@@ -597,3 +597,73 @@ T=2026-06-29
 
 建议这次 **先做“月计划日期解析层 + 日账本 key 改造”**，再动具体策略。跨月问题最怕在各个策略里打补丁，短期看能跑，后面加机台、提前生产、收尾、主销、结构机台数一叠加就会继续串月。
 ```
+
+## 十二、已落地实现口径（方案 1）
+
+本次按推荐方案落地：新增统一月计划日期解析层，并将基础数据加载、日计划账本、续作降模、结果汇总和保存链路统一改为按业务日期解析月计划。
+
+### 1. 统一解析层
+
+已新增 `com.zlt.aps.lh.component.MonthPlanDateResolver`，统一提供以下能力：
+
+* 按 `materialCode + bizDate.year + bizDate.month` 解析月计划；
+* 按 `LocalDate bizDate` 读取对应月份 `dayN`；
+* 汇总跨月窗口内的日计划量；
+* 查找月计划断点日；
+* 构建 `materialCode_year_month` 月计划索引。
+
+所有跨月日计划读取必须优先通过该解析层，不再在策略类中自行按偏移拼接 dayN。
+
+### 2. 基础数据加载
+
+基础数据初始化按排程窗口计算 `requiredMonths`，覆盖 T～T+2 以及 T+3 后看日期。跨月、跨年时会分别加载对应年月的：
+
+* 定稿排产版本；
+* 月计划；
+* 月计划结构机台统计；
+* 周程滚动调整；
+* 月累计完成量。
+
+上下文中保留：
+
+* `loadedMonthPlanList`：本次涉及月份的完整月计划；
+* `monthPlanByMaterialMonthMap`：按物料+年月索引的月计划；
+* `monthPlanVersionByYearMonthMap`：按年月索引的需求版本；
+* `productionVersionByYearMonthMap`：按年月索引的排产版本；
+* `materialMonthFinishedQtyByMonthMap`：按物料+年月索引的月累计完成量。
+
+### 3. 日计划账本与消费链路
+
+S4.3 构建 `SkuDailyPlanQuotaDTO` 时，账本 key 使用 `LocalDate`，跨月窗口内每一天都按该日期所属年月读取日计划量。
+
+示例：
+
+```text
+2026-06-29 -> 2026 年 6 月 day29
+2026-06-30 -> 2026 年 6 月 day30
+2026-07-01 -> 2026 年 7 月 day1
+```
+
+结果保存阶段的 dayN 范围也改为按排程窗口内的实际业务日期解析，不再假设三天都属于同一个月份。
+
+当前 `SkuScheduleDTO` / 结果行上的 `monthPlanVersion`、`productionVersion`、`productionType`、`productStatus`
+按 `scheduleTargetDate` 所属年月解析，保证结果表 row-level 字段与保存业务日一致。
+
+受当前 schema 限制，班次级 recipe / 多日混合属性仍没有拆成“每个结果行每个班次各自携带版本/状态”的模型；
+因此这里不声称“无表结构改造即可完全表达所有跨月班次级属性”。
+
+### 4. 规则链路
+
+以下链路已复用 `com.zlt.aps.lh.component.MonthPlanDateResolver`：
+
+* 新增排产 / 余量初始化中的窗口日计划量；
+* 窗口无计划、后续计划扫描、仅欠产排产判断；
+* 续作降模减机台日计划量判断；
+* 结果校验中的日计划汇总日志；
+* 排程结果保存的 T～T+2 dayN 落点。
+
+预校验不再因为 T～T+2 跨月直接拦截；跨月窗口只记录日志，后续由多月月计划加载和解析链路处理。
+
+### 5. 性能与内存边界
+
+本次不按 SKU/日期展开全量笛卡尔缓存，只按本次排程会访问的自然月加载月计划，并建立物料+年月索引。T～T+2 及 T+3 的月份数量通常为 1～2 个，跨年场景也是按自然月去重加载，避免全年度扫描和大对象膨胀。

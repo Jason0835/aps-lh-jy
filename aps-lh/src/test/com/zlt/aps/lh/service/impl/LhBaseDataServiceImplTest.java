@@ -37,6 +37,7 @@ import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
+import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import org.junit.jupiter.api.Assertions;
@@ -281,6 +282,92 @@ public class LhBaseDataServiceImplTest {
     }
 
     /**
+     * 用例说明：跨月加载必须按各自然月定稿记录中的需求版本和排产版本查询月计划、结构统计与周程调整。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldUseYearMonthSpecificMonthPlanVersionAcrossQueries() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+        context.setMonthPlanVersion("REQUEST-MP");
+        context.setScheduleDate(buildDate(2026, 6, 29));
+        context.setScheduleTargetDate(buildDate(2026, 7, 1));
+
+        MpFactoryProductionVersionMapper versionMapper = mockMapper(MpFactoryProductionVersionMapper.class);
+        Mockito.when(versionMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(buildProductionVersion("PV-06", "MP-06")),
+                Collections.singletonList(buildProductionVersion("PV-07", "MP-07")));
+        injectField(service, "mpFactoryProductionVersionMapper", versionMapper);
+
+        FactoryMonthPlanProductionFinalResult junePlan = new FactoryMonthPlanProductionFinalResult();
+        junePlan.setFactoryCode("116");
+        junePlan.setMaterialCode("3302001606");
+        junePlan.setYear(2026);
+        junePlan.setMonth(6);
+        junePlan.setMonthPlanVersion("MP-06");
+        junePlan.setProductionVersion("PV-06");
+        junePlan.setEmbryoCode("EMB-06");
+        junePlan.setStructureName("STRUCT-06");
+        junePlan.setDay29(12);
+        junePlan.setDay30(18);
+        FactoryMonthPlanProductionFinalResult julyPlan = new FactoryMonthPlanProductionFinalResult();
+        julyPlan.setFactoryCode("116");
+        julyPlan.setMaterialCode("3302001606");
+        julyPlan.setYear(2026);
+        julyPlan.setMonth(7);
+        julyPlan.setMonthPlanVersion("MP-07");
+        julyPlan.setProductionVersion("PV-07");
+        julyPlan.setEmbryoCode("EMB-07");
+        julyPlan.setStructureName("STRUCT-07");
+        julyPlan.setDay1(20);
+        julyPlan.setDay2(16);
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper =
+                mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(junePlan),
+                Collections.singletonList(julyPlan));
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        MpMonthPlanStatisticsMapper statisticsMapper = mockMapper(MpMonthPlanStatisticsMapper.class);
+        MpMonthPlanStatistics juneStatistics = new MpMonthPlanStatistics();
+        juneStatistics.setStructureName("STRUCT-06");
+        juneStatistics.setDay29("{\"lhMachines\":1}");
+        juneStatistics.setDay30("{\"lhMachines\":2}");
+        MpMonthPlanStatistics julyStatistics = new MpMonthPlanStatistics();
+        julyStatistics.setStructureName("STRUCT-07");
+        julyStatistics.setDay1("{\"lhMachines\":3}");
+        julyStatistics.setDay2("{\"lhMachines\":4}");
+        Mockito.when(statisticsMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(juneStatistics),
+                Collections.singletonList(julyStatistics));
+        injectField(service, "monthPlanStatisticsMapper", statisticsMapper);
+
+        MpAdjustResultMapper adjustResultMapper = mockMapper(MpAdjustResultMapper.class);
+        MpAdjustResult juneAdjustResult = new MpAdjustResult();
+        juneAdjustResult.setMaterialCode("3302001606");
+        MpAdjustResult julyAdjustResult = new MpAdjustResult();
+        julyAdjustResult.setMaterialCode("3302001607");
+        Mockito.when(adjustResultMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(juneAdjustResult),
+                Collections.singletonList(julyAdjustResult));
+        injectField(service, "mpAdjustResultMapper", adjustResultMapper);
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertEquals("MP-07", context.getMonthPlanVersion(), "主上下文需求版本应优先使用目标业务日所在年月");
+        Assertions.assertEquals("PV-07", context.getProductionVersion(), "主上下文排产版本应优先使用目标业务日所在年月");
+        Assertions.assertEquals("MP-06", context.getMonthPlanVersionByYearMonthMap().get("2026_6"));
+        Assertions.assertEquals("MP-07", context.getMonthPlanVersionByYearMonthMap().get("2026_7"));
+        Assertions.assertEquals("PV-06", context.getProductionVersionByYearMonthMap().get("2026_6"));
+        Assertions.assertEquals("PV-07", context.getProductionVersionByYearMonthMap().get("2026_7"));
+        Assertions.assertEquals(2, context.getLoadedMonthPlanList().size(), "跨月应加载两个自然月的月计划");
+        Assertions.assertTrue(context.getMpAdjustResultMap().containsKey("3302001606"), "6月周程调整结果应进入上下文");
+        Assertions.assertTrue(context.getMpAdjustResultMap().containsKey("3302001607"), "7月周程调整结果应进入上下文");
+    }
+
+    /**
      * 用例说明：SKU与模具关系应在月计划加载后按本次月计划SKU范围查询，模具台账应在关系加载后按关联模具号范围查询。
      *
      * @throws Exception 反射注入异常
@@ -484,11 +571,17 @@ public class LhBaseDataServiceImplTest {
     }
 
     private MpFactoryProductionVersionMapper buildProductionVersionMapper() {
-        MpFactoryProductionVersion version = new MpFactoryProductionVersion();
-        version.setProductionVersion("PV-001");
         MpFactoryProductionVersionMapper mapper = mockMapper(MpFactoryProductionVersionMapper.class);
-        Mockito.when(mapper.selectList(ArgumentMatchers.any())).thenReturn(Collections.singletonList(version));
+        Mockito.when(mapper.selectList(ArgumentMatchers.any()))
+                .thenReturn(Collections.singletonList(buildProductionVersion("PV-001", "MP-001")));
         return mapper;
+    }
+
+    private MpFactoryProductionVersion buildProductionVersion(String productionVersion, String monthPlanVersion) {
+        MpFactoryProductionVersion version = new MpFactoryProductionVersion();
+        version.setProductionVersion(productionVersion);
+        version.setMonthPlanVersion(monthPlanVersion);
+        return version;
     }
 
     private MpMonthPlanStatisticsMapper buildMonthPlanStatisticsMapper() {
@@ -561,4 +654,5 @@ public class LhBaseDataServiceImplTest {
         Mockito.when(mapper.selectList(ArgumentMatchers.any())).thenReturn(new ArrayList<>());
         return mapper;
     }
+
 }

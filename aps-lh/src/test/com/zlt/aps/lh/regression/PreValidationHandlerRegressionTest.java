@@ -1,11 +1,8 @@
 package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.context.LhScheduleContext;
-import com.zlt.aps.lh.exception.ScheduleErrorCode;
-import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.handler.PreValidationHandler;
 import com.zlt.aps.lh.service.ILhScheduleResultService;
-import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -17,12 +14,11 @@ import java.util.Calendar;
 import java.util.Date;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 前置校验回归：跨月排程需在 S4.1 直接拦截。
+ * 前置校验回归：跨月排程不再在 S4.1 直接拦截。
  */
 @ExtendWith(MockitoExtension.class)
 class PreValidationHandlerRegressionTest {
@@ -34,18 +30,20 @@ class PreValidationHandlerRegressionTest {
     private PreValidationHandler handler;
 
     @Test
-    void doHandle_shouldRejectCrossMonthScheduleWindow() {
+    void doHandle_shouldAllowCrossMonthScheduleWindow() {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");
         context.setScheduleDate(date(2026, 4, 30));
         context.setScheduleTargetDate(date(2026, 5, 2));
+        context.setWindowEndDate(date(2026, 5, 2));
         when(scheduleResultService.countReleasedByDate(context.getScheduleTargetDate(), "116")).thenReturn(0);
+        when(scheduleResultService.generateNextBatchNo(context.getScheduleTargetDate(), "116"))
+                .thenReturn("LHPC20260502001");
 
-        ScheduleException exception = assertThrows(ScheduleException.class,
-                () -> ReflectionTestUtils.invokeMethod(handler, "doHandle", context));
+        ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
 
-        assertEquals(ScheduleErrorCode.CROSS_MONTH_SCHEDULE_UNSUPPORTED, exception.getErrorCode());
-        assertTrue(exception.getMessage().contains(MonthPlanDayQtyUtil.CROSS_MONTH_UNSUPPORTED_MESSAGE));
+        assertEquals("LHPC20260502001", context.getBatchNo());
+        verify(scheduleResultService).generateNextBatchNo(context.getScheduleTargetDate(), "116");
     }
 
     private static Date date(int year, int month, int day) {

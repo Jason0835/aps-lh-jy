@@ -727,6 +727,8 @@ class ScheduleAdjustCarryForwardRegressionTest {
 
         MpAdjustResult adjustResult = new MpAdjustResult();
         adjustResult.setMaterialCode("MAT-LOCK");
+        adjustResult.setYear(2026);
+        adjustResult.setMonth(4);
         adjustResult.setIsLockSchedule("1");
         context.getMpAdjustResultMap().put("MAT-LOCK", Collections.singletonList(adjustResult));
 

@@ -44,6 +44,8 @@ import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.service.ILhBaseDataService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
+import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.MonthPlanStatisticsDayUtil;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.mp.api.domain.entity.MdmCapsuleChuck;
@@ -199,6 +201,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         Date startDate = LhScheduleTimeUtil.clearTime(scheduleDate);
         int scheduleDays = LhScheduleTimeUtil.getScheduleDays(context);
         Date endDate = LhScheduleTimeUtil.addDays(startDate, scheduleDays);
+        Map<String, LocalDate> requiredMonthMap = resolveRequiredMonthMap(
+                startDate, LhScheduleTimeUtil.addDays(endDate, 1));
         // 喷砂时间允许前移一天，工作日历与设备停机需覆盖 T-1；清洗计划仍按当前排程窗口加载。
         Date calendarControlStartDate = LhScheduleTimeUtil.addDays(startDate, -1);
 
@@ -211,7 +215,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         // 1. 定稿排产版本是月计划、周程滚动调整等任务的前置条件，先单独同步完成。
         //    （若不先同步获取 productionVersion，后续月计划查询会因缺少版本号导致加载不准确。）
         waitForDataInitTasks(runDataInitTaskAsync("月生产计划版本",
-                () -> loadFinalProductionVersion(context, factoryCode, year, month),
+                () -> loadFinalProductionVersions(context, factoryCode, requiredMonthMap, year, month),
                 () -> StringUtils.isNotEmpty(context.getProductionVersion()) ? 1 : 0));
         if (context.isInterrupted()) {
             log.warn("[DataInit] 基础数据初始化中断：totalCost={}ms, reason={}",
@@ -229,10 +233,11 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         //    - 硫化机台信息（machineInfoFuture）是模具清洗计划的前置依赖，清洗计划需要根据已加载的机台列表过滤查询条件。
         //    - 机台信息与月计划无依赖关系，两者可并发加载。
         CompletableFuture<Void> monthPlanFuture = runDataInitTaskAsync("月生产计划",
-                () -> loadMonthPlan(context, factoryCode, year, month),
+                () -> loadMonthPlan(context, factoryCode, requiredMonthMap),
                 () -> sizeOf(context.getMonthPlanList()));
         CompletableFuture<Void> monthPlanStatisticsFuture = runDataInitTaskAsync("月计划结构机台统计",
-                () -> loadMonthPlanStatistics(context, factoryCode, year, month, startDate, endDate),
+                () -> loadMonthPlanStatistics(context, factoryCode, requiredMonthMap, startDate,
+                        LhScheduleTimeUtil.addDays(endDate, 1)),
                 () -> sizeOf(context.getStructurePlanMachineCountMap()));
         CompletableFuture<Void> specialMaterialBomFuture = runAfterDataInitTask(monthPlanFuture, "特殊物料清单",
                 () -> loadSpecialMaterialBom(context, factoryCode),
@@ -242,7 +247,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 () -> sizeOf(context.getEmbryoRealtimeStockMap()));
         CompletableFuture<Void> monthFinishedQtyFuture = runAfterDataInitTask(monthPlanFuture, "月累计完成量",
                 () -> loadMaterialMonthFinishedQty(context, factoryCode,
-                        year, month, LhScheduleTimeUtil.addDays(scheduleDate, -1)),
+                        requiredMonthMap, LhScheduleTimeUtil.addDays(scheduleDate, -1), year, month),
                 () -> sizeOf(context.getMaterialMonthFinishedQtyMap()));
         CompletableFuture<Void> skuMouldRelFuture = runAfterDataInitTask(monthPlanFuture, "SKU与模具关系",
                 () -> loadSkuMouldRel(context, factoryCode),
@@ -268,7 +273,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 specialMaterialBomFuture,
                 embryoStockFuture,
                 runDataInitTaskAsync("周程滚动调整结果",
-                        () -> loadAdjustResult(context, factoryCode, year, month),
+                        () -> loadAdjustResult(context, factoryCode, requiredMonthMap),
                         () -> sizeOf(context.getMpAdjustResultMap())),
                 runDataInitTaskAsync("工作日历",
                         () -> loadWorkCalendar(context, factoryCode, calendarControlStartDate, endDate),
@@ -481,6 +486,32 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
+     * 解析本次排程需要访问的月计划月份集合。
+     * <p>范围覆盖 T～T+2 以及 T+3 后看日期，按自然月去重后用于批量加载月计划，避免策略层循环查库。</p>
+     *
+     * @param startDate 开始日期，包含当天
+     * @param endDateExclusive 结束日期，不含当天
+     * @return key=year_month，value=该月月初
+     */
+    private Map<String, LocalDate> resolveRequiredMonthMap(Date startDate, Date endDateExclusive) {
+        Map<String, LocalDate> requiredMonthMap = new LinkedHashMap<String, LocalDate>(2);
+        LocalDate startLocalDate = toLocalDate(startDate);
+        LocalDate endExclusiveLocalDate = toLocalDate(endDateExclusive);
+        if (Objects.isNull(startLocalDate) || Objects.isNull(endExclusiveLocalDate)
+                || !startLocalDate.isBefore(endExclusiveLocalDate)) {
+            return requiredMonthMap;
+        }
+        LocalDate cursor = startLocalDate;
+        while (cursor.isBefore(endExclusiveLocalDate)) {
+            LocalDate monthStartDate = cursor.withDayOfMonth(1);
+            requiredMonthMap.putIfAbsent(MonthPlanDateResolver.buildYearMonthKey(
+                    monthStartDate.getYear(), monthStartDate.getMonthValue()), monthStartDate);
+            cursor = cursor.plusDays(1);
+        }
+        return requiredMonthMap;
+    }
+
+    /**
      * 加载月计划结构维度计划硫化机台数。
      * <p>提前生产规则只需要 T～T+2 窗口内 dayN.lhMachines，按 structureName 聚合 SUM 后缓存到上下文。</p>
      *
@@ -493,14 +524,31 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      */
     private void loadMonthPlanStatistics(LhScheduleContext context,
                                          String factoryCode,
+                                         Map<String, LocalDate> requiredMonthMap,
+                                         Date startDate,
+                                         Date endDateExclusive) {
+        context.setStructurePlanMachineCountMap(new LinkedHashMap<LocalDate, Map<String, Integer>>(4));
+        if (CollectionUtils.isEmpty(requiredMonthMap)) {
+            return;
+        }
+        for (LocalDate monthStartDate : requiredMonthMap.values()) {
+            loadMonthPlanStatistics(context, factoryCode, monthStartDate.getYear(), monthStartDate.getMonthValue(),
+                    startDate, endDateExclusive);
+        }
+    }
+
+    private void loadMonthPlanStatistics(LhScheduleContext context,
+                                         String factoryCode,
                                          int year,
                                          int month,
                                          Date startDate,
                                          Date endDateExclusive) {
-        context.setStructurePlanMachineCountMap(new LinkedHashMap<LocalDate, Map<String, Integer>>(4));
-        if (StringUtils.isEmpty(context.getProductionVersion())) {
-            log.warn("月计划结构机台统计跳过加载，排产版本为空, factoryCode: {}, year: {}, month: {}",
-                    factoryCode, year, month);
+        String monthPlanVersion = resolveMonthPlanVersion(context, year, month);
+        String productionVersion = resolveProductionVersion(context, year, month);
+        if (StringUtils.isEmpty(monthPlanVersion) || StringUtils.isEmpty(productionVersion)) {
+            log.warn("月计划结构机台统计跳过加载，需求版本或排产版本为空, factoryCode: {}, year: {}, month: {}, "
+                            + "monthPlanVersion: {}, productionVersion: {}",
+                    factoryCode, year, month, monthPlanVersion, productionVersion);
             return;
         }
         List<MpMonthPlanStatistics> statisticsList = monthPlanStatisticsMapper.selectList(
@@ -508,15 +556,16 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .eq(MpMonthPlanStatistics::getFactoryCode, factoryCode)
                         .eq(MpMonthPlanStatistics::getYear, year)
                         .eq(MpMonthPlanStatistics::getMonth, month)
-                        .eq(MpMonthPlanStatistics::getProductionVersion, context.getProductionVersion())
+                        .eq(MpMonthPlanStatistics::getMonthPlanVersion, monthPlanVersion)
+                        .eq(MpMonthPlanStatistics::getProductionVersion, productionVersion)
                         .eq(MpMonthPlanStatistics::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
                         .and(wrapper -> wrapper.eq(MpMonthPlanStatistics::getTempFlag, "0")
                                 .or().isNull(MpMonthPlanStatistics::getTempFlag)
                                 .or().eq(MpMonthPlanStatistics::getTempFlag, "")));
         if (CollectionUtils.isEmpty(statisticsList)) {
             log.warn("月计划结构机台统计无数据，按空缓存继续排程, factoryCode: {}, year: {}, month: {}, "
-                            + "productionVersion: {}",
-                    factoryCode, year, month, context.getProductionVersion());
+                            + "monthPlanVersion: {}, productionVersion: {}",
+                    factoryCode, year, month, monthPlanVersion, productionVersion);
             return;
         }
         LocalDate startLocalDate = toLocalDate(startDate);
@@ -537,8 +586,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                     // 月计划结构统计只用于提前生产机台数判断，非法JSON按0处理，不阻断排程主流程。
                     lhMachines = 0;
                     log.warn("月计划结构机台统计dayN解析失败，按0继续排程, factoryCode: {}, "
-                                    + "productionVersion: {}, structureName: {}, productionDate: {}, reason: {}",
-                            factoryCode, context.getProductionVersion(), row.getStructureName(), productionDate,
+                                    + "monthPlanVersion: {}, productionVersion: {}, structureName: {}, "
+                                    + "productionDate: {}, reason: {}",
+                            factoryCode, monthPlanVersion, productionVersion, row.getStructureName(), productionDate,
                             e.getMessage());
                 }
                 context.addStructurePlanMachineCount(productionDate, row.getStructureName(), lhMachines);
@@ -546,13 +596,13 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
         if (CollectionUtils.isEmpty(context.getStructurePlanMachineCountMap())) {
             log.warn("月计划结构机台统计无有效结构数据，按空缓存继续排程, factoryCode: {}, year: {}, month: {}, "
-                            + "productionVersion: {}, rowCount: {}",
-                    factoryCode, year, month, context.getProductionVersion(), statisticsList.size());
+                            + "monthPlanVersion: {}, productionVersion: {}, rowCount: {}",
+                    factoryCode, year, month, monthPlanVersion, productionVersion, statisticsList.size());
             return;
         }
-        log.info("月计划结构机台统计加载完成, factoryCode: {}, year: {}, month: {}, productionVersion: {}, "
-                        + "rowCount: {}, dateCount: {}",
-                factoryCode, year, month, context.getProductionVersion(), statisticsList.size(),
+        log.info("月计划结构机台统计加载完成, factoryCode: {}, year: {}, month: {}, monthPlanVersion: {}, "
+                        + "productionVersion: {}, rowCount: {}, dateCount: {}",
+                factoryCode, year, month, monthPlanVersion, productionVersion, statisticsList.size(),
                 context.getStructurePlanMachineCountMap().size());
     }
 
@@ -678,7 +728,72 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param year        年份
      * @param month       月份（1-12）
      */
+    private void loadFinalProductionVersions(LhScheduleContext context,
+                                             String factoryCode,
+                                             Map<String, LocalDate> requiredMonthMap,
+                                             int primaryYear,
+                                             int primaryMonth) {
+        Map<String, String> productionVersionMap = new LinkedHashMap<String, String>(4);
+        Map<String, String> monthPlanVersionMap = new LinkedHashMap<String, String>(4);
+        if (CollectionUtils.isEmpty(requiredMonthMap)) {
+            loadFinalProductionVersion(context, factoryCode, primaryYear, primaryMonth);
+            productionVersionMap.put(MonthPlanDateResolver.buildYearMonthKey(primaryYear, primaryMonth),
+                    context.getProductionVersion());
+            monthPlanVersionMap.put(MonthPlanDateResolver.buildYearMonthKey(primaryYear, primaryMonth),
+                    context.getMonthPlanVersion());
+            context.setProductionVersionByYearMonthMap(productionVersionMap);
+            context.setMonthPlanVersionByYearMonthMap(monthPlanVersionMap);
+            return;
+        }
+        for (LocalDate monthStartDate : requiredMonthMap.values()) {
+            MpFactoryProductionVersion versionRow = resolveFinalProductionVersionRow(context, factoryCode,
+                    monthStartDate.getYear(), monthStartDate.getMonthValue());
+            if (context.isInterrupted()) {
+                return;
+            }
+            String yearMonthKey = MonthPlanDateResolver.buildYearMonthKey(
+                    monthStartDate.getYear(), monthStartDate.getMonthValue());
+            productionVersionMap.put(yearMonthKey, versionRow.getProductionVersion());
+            monthPlanVersionMap.put(yearMonthKey, versionRow.getMonthPlanVersion());
+        }
+        context.setProductionVersionByYearMonthMap(productionVersionMap);
+        context.setMonthPlanVersionByYearMonthMap(monthPlanVersionMap);
+        String primaryYearMonthKey = MonthPlanDateResolver.buildYearMonthKey(primaryYear, primaryMonth);
+        String primaryProductionVersion = productionVersionMap.get(
+                primaryYearMonthKey);
+        if (StringUtils.isEmpty(primaryProductionVersion) && !productionVersionMap.isEmpty()) {
+            primaryProductionVersion = productionVersionMap.values().iterator().next();
+        }
+        String primaryMonthPlanVersion = monthPlanVersionMap.get(primaryYearMonthKey);
+        context.setProductionVersion(primaryProductionVersion);
+        context.setMonthPlanVersion(primaryMonthPlanVersion);
+        log.info("定稿排产版本加载完成, factoryCode: {}, requiredMonths: {}, primaryMonthPlanVersion: {}, "
+                        + "primaryProductionVersion: {}",
+                factoryCode, productionVersionMap.keySet(), primaryMonthPlanVersion, primaryProductionVersion);
+    }
+
     private void loadFinalProductionVersion(LhScheduleContext context, String factoryCode, int year, int month) {
+        MpFactoryProductionVersion versionRow = resolveFinalProductionVersionRow(context, factoryCode, year, month);
+        if (context.isInterrupted() || Objects.isNull(versionRow)) {
+            return;
+        }
+        context.setProductionVersion(versionRow.getProductionVersion());
+        context.setMonthPlanVersion(versionRow.getMonthPlanVersion());
+    }
+
+    /**
+     * 解析指定年月定稿版本记录。
+     *
+     * @param context 排程上下文
+     * @param factoryCode 工厂编码
+     * @param year 年份
+     * @param month 月份
+     * @return 定稿版本记录
+     */
+    private MpFactoryProductionVersion resolveFinalProductionVersionRow(LhScheduleContext context,
+                                                                        String factoryCode,
+                                                                        int year,
+                                                                        int month) {
         // 仅查询前两条：第一条用于取值，第二条用于判断是否存在多条记录
         List<MpFactoryProductionVersion> list = mpFactoryProductionVersionMapper.selectList(
                 wrapFinalProductionVersion(factoryCode, year, month)
@@ -689,7 +804,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         if (CollectionUtils.isEmpty(list)) {
             log.error("定稿排产版本无数据, 工厂: {}, 年: {}, 月: {}", factoryCode, year, month);
             interruptByDataIncomplete(context, String.format("%s 未找到定稿排产版本数据", locationText));
-            return;
+            return null;
         }
         if (list.size() > 1) {
             log.warn("定稿排产版本存在多条，已按更新时间最新取值, 工厂: {}, 年: {}, 月: {}",
@@ -701,10 +816,55 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             log.error("定稿排产版本号为空, 工厂: {}, 年: {}, 月: {}, id: {}",
                     factoryCode, year, month, row.getId());
             interruptByDataIncomplete(context, String.format("%s 的定稿排产版本号为空", locationText));
-            return;
+            return null;
         }
-        context.setProductionVersion(pv);
-        log.debug("定稿排产版本加载完成, productionVersion: {}", pv);
+        String monthPlanVersion = row.getMonthPlanVersion();
+        if (StringUtils.isEmpty(monthPlanVersion)) {
+            log.error("定稿需求版本号为空, 工厂: {}, 年: {}, 月: {}, id: {}",
+                    factoryCode, year, month, row.getId());
+            interruptByDataIncomplete(context, String.format("%s 的定稿需求版本号为空", locationText));
+            return null;
+        }
+        log.debug("定稿版本加载完成, monthPlanVersion: {}, productionVersion: {}", monthPlanVersion, pv);
+        return row;
+    }
+
+    /**
+     * 获取指定年月的定稿排产版本。
+     *
+     * @param context 排程上下文
+     * @param year 年份
+     * @param month 月份
+     * @return 排产版本
+     */
+    private String resolveProductionVersion(LhScheduleContext context, int year, int month) {
+        String yearMonthKey = MonthPlanDateResolver.buildYearMonthKey(year, month);
+        if (!CollectionUtils.isEmpty(context.getProductionVersionByYearMonthMap())) {
+            if (context.getProductionVersionByYearMonthMap().containsKey(yearMonthKey)) {
+                return context.getProductionVersionByYearMonthMap().get(yearMonthKey);
+            }
+            return null;
+        }
+        return context.getProductionVersion();
+    }
+
+    /**
+     * 获取指定年月的定稿需求版本。
+     *
+     * @param context 排程上下文
+     * @param year 年份
+     * @param month 月份
+     * @return 需求版本
+     */
+    private String resolveMonthPlanVersion(LhScheduleContext context, int year, int month) {
+        String yearMonthKey = MonthPlanDateResolver.buildYearMonthKey(year, month);
+        if (!CollectionUtils.isEmpty(context.getMonthPlanVersionByYearMonthMap())) {
+            if (context.getMonthPlanVersionByYearMonthMap().containsKey(yearMonthKey)) {
+                return context.getMonthPlanVersionByYearMonthMap().get(yearMonthKey);
+            }
+            return null;
+        }
+        return context.getMonthPlanVersion();
     }
 
     /**
@@ -755,19 +915,165 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param year        年份（yyyy）
      * @param month       月份（m）
      */
+    private void loadMonthPlan(LhScheduleContext context,
+                               String factoryCode,
+                               Map<String, LocalDate> requiredMonthMap) {
+        List<FactoryMonthPlanProductionFinalResult> loadedPlanList = new ArrayList<FactoryMonthPlanProductionFinalResult>(256);
+        if (CollectionUtils.isEmpty(requiredMonthMap)) {
+            Calendar cal = Calendar.getInstance();
+            cal.setTime(context.getScheduleTargetDate());
+            loadedPlanList.addAll(queryMonthPlan(context, factoryCode,
+                    cal.get(Calendar.YEAR), cal.get(Calendar.MONTH) + 1));
+        } else {
+            for (LocalDate monthStartDate : requiredMonthMap.values()) {
+                loadedPlanList.addAll(queryMonthPlan(context, factoryCode,
+                        monthStartDate.getYear(), monthStartDate.getMonthValue()));
+            }
+        }
+        context.setLoadedMonthPlanList(loadedPlanList);
+        context.setMonthPlanByMaterialMonthMap(MonthPlanDateResolver.buildMaterialMonthPlanMap(loadedPlanList));
+        context.setMonthPlanList(selectSchedulingMonthPlanList(context, loadedPlanList));
+        log.info("月生产计划加载完成, loadedCount: {}, scheduleSkuCount: {}, requiredMonths: {}",
+                loadedPlanList.size(), context.getMonthPlanList().size(),
+                CollectionUtils.isEmpty(requiredMonthMap) ? new ArrayList<String>(0) : requiredMonthMap.keySet());
+    }
+
     private void loadMonthPlan(LhScheduleContext context, String factoryCode, int year, int month) {
+        List<FactoryMonthPlanProductionFinalResult> monthPlanList = queryMonthPlan(context, factoryCode, year, month);
+        context.setLoadedMonthPlanList(monthPlanList);
+        context.setMonthPlanByMaterialMonthMap(MonthPlanDateResolver.buildMaterialMonthPlanMap(monthPlanList));
+        context.setMonthPlanList(monthPlanList);
+        log.debug("月生产计划加载完成, 数量: {}", context.getMonthPlanList().size());
+    }
+
+    /**
+     * 查询指定月份月生产计划。
+     *
+     * @param context 排程上下文
+     * @param factoryCode 工厂编码
+     * @param year 年份
+     * @param month 月份
+     * @return 月计划列表
+     */
+    private List<FactoryMonthPlanProductionFinalResult> queryMonthPlan(LhScheduleContext context,
+                                                                       String factoryCode,
+                                                                       int year,
+                                                                       int month) {
+        String locationText = formatFactoryYearMonth(context.getFactoryDisplayName(), year, month);
+        String monthPlanVersion = resolveMonthPlanVersion(context, year, month);
+        if (StringUtils.isEmpty(monthPlanVersion)) {
+            log.error("月生产计划加载失败，需求版本为空, factoryCode: {}, year: {}, month: {}",
+                    factoryCode, year, month);
+            interruptByDataIncomplete(context, String.format("%s 的定稿需求版本为空", locationText));
+            return new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
+        }
+        String productionVersion = resolveProductionVersion(context, year, month);
+        if (StringUtils.isEmpty(productionVersion)) {
+            log.error("月生产计划加载失败，排产版本为空, factoryCode: {}, year: {}, month: {}",
+                    factoryCode, year, month);
+            interruptByDataIncomplete(context, String.format("%s 的定稿排产版本为空", locationText));
+            return new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
+        }
         LambdaQueryWrapper<FactoryMonthPlanProductionFinalResult> wrapper = new LambdaQueryWrapper<FactoryMonthPlanProductionFinalResult>()
                 .eq(FactoryMonthPlanProductionFinalResult::getFactoryCode, factoryCode)
                 .eq(FactoryMonthPlanProductionFinalResult::getYear, year)
                 .eq(FactoryMonthPlanProductionFinalResult::getMonth, month)
+                .eq(FactoryMonthPlanProductionFinalResult::getMonthPlanVersion, monthPlanVersion)
+                .eq(FactoryMonthPlanProductionFinalResult::getProductionVersion, productionVersion)
                 .eq(FactoryMonthPlanProductionFinalResult::getIsDelete, DeleteFlagEnum.NORMAL.getCode());
-        String productionVersion = context.getProductionVersion();
-        if (StringUtils.isNotEmpty(productionVersion)) {
-            wrapper.eq(FactoryMonthPlanProductionFinalResult::getProductionVersion, productionVersion);
-        }
         List<FactoryMonthPlanProductionFinalResult> monthPlanList = monthPlanMapper.selectList(wrapper);
-        context.setMonthPlanList(monthPlanList != null ? monthPlanList : context.getMonthPlanList());
-        log.debug("月生产计划加载完成, 数量: {}", context.getMonthPlanList().size());
+        return monthPlanList != null ? monthPlanList : new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
+    }
+
+    /**
+     * 为 S4.3 SKU 归集选择每个物料唯一的基础月计划。
+     * <p>跨月时同一物料可能同时存在两个月计划，归集只能生成一个 DTO；dayN 读取仍由 Resolver 按业务日期取对应月份。</p>
+     *
+     * @param context 排程上下文
+     * @param loadedPlanList 多月月计划
+     * @return 去重后的归集月计划
+     */
+    private List<FactoryMonthPlanProductionFinalResult> selectSchedulingMonthPlanList(
+            LhScheduleContext context, List<FactoryMonthPlanProductionFinalResult> loadedPlanList) {
+        Map<String, FactoryMonthPlanProductionFinalResult> selectedPlanMap =
+                new LinkedHashMap<String, FactoryMonthPlanProductionFinalResult>(128);
+        if (CollectionUtils.isEmpty(loadedPlanList)) {
+            return new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
+        }
+        for (FactoryMonthPlanProductionFinalResult plan : loadedPlanList) {
+            if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())) {
+                continue;
+            }
+            FactoryMonthPlanProductionFinalResult selectedPlan = selectedPlanMap.get(plan.getMaterialCode());
+            if (Objects.isNull(selectedPlan) || shouldReplaceSchedulingPlan(context, selectedPlan, plan)) {
+                selectedPlanMap.put(plan.getMaterialCode(), plan);
+            }
+        }
+        return new ArrayList<FactoryMonthPlanProductionFinalResult>(selectedPlanMap.values());
+    }
+
+    /**
+     * 判断候选月计划是否更适合作为本轮 SKU 归集基础计划。
+     *
+     * @param context 排程上下文
+     * @param selectedPlan 已选计划
+     * @param candidatePlan 候选计划
+     * @return true-替换
+     */
+    private boolean shouldReplaceSchedulingPlan(LhScheduleContext context,
+                                                FactoryMonthPlanProductionFinalResult selectedPlan,
+                                                FactoryMonthPlanProductionFinalResult candidatePlan) {
+        boolean selectedHasWindowPlan = hasWindowPlanQty(selectedPlan, context.getScheduleDate(), context.getWindowEndDate());
+        boolean candidateHasWindowPlan = hasWindowPlanQty(candidatePlan, context.getScheduleDate(), context.getWindowEndDate());
+        if (selectedHasWindowPlan != candidateHasWindowPlan) {
+            return candidateHasWindowPlan;
+        }
+        return !isPlanInScheduleMonth(selectedPlan, context.getScheduleDate())
+                && isPlanInScheduleMonth(candidatePlan, context.getScheduleDate());
+    }
+
+    /**
+     * 判断月计划在排程窗口内是否有日计划量。
+     *
+     * @param plan 月计划
+     * @param startDate 窗口开始日期
+     * @param endDate 窗口结束日期
+     * @return true-窗口内有计划
+     */
+    private boolean hasWindowPlanQty(FactoryMonthPlanProductionFinalResult plan, Date startDate, Date endDate) {
+        if (Objects.isNull(plan) || Objects.isNull(startDate) || Objects.isNull(endDate)
+                || Objects.isNull(plan.getYear()) || Objects.isNull(plan.getMonth())) {
+            return false;
+        }
+        LocalDate startLocalDate = toLocalDate(startDate);
+        LocalDate endLocalDate = toLocalDate(endDate);
+        LocalDate cursor = startLocalDate;
+        while (!cursor.isAfter(endLocalDate)) {
+            if (cursor.getYear() == plan.getYear() && cursor.getMonthValue() == plan.getMonth()
+                    && MonthPlanDateResolver.hasPlanQty(
+                    MonthPlanDayQtyUtil.resolveDayQty(plan, cursor.getDayOfMonth()))) {
+                return true;
+            }
+            cursor = cursor.plusDays(1);
+        }
+        return false;
+    }
+
+    /**
+     * 判断月计划是否属于排程窗口 T 日所在月份。
+     *
+     * @param plan 月计划
+     * @param scheduleDate T 日
+     * @return true-属于 T 日月份
+     */
+    private boolean isPlanInScheduleMonth(FactoryMonthPlanProductionFinalResult plan, Date scheduleDate) {
+        if (Objects.isNull(plan) || Objects.isNull(scheduleDate)
+                || Objects.isNull(plan.getYear()) || Objects.isNull(plan.getMonth())) {
+            return false;
+        }
+        LocalDate scheduleLocalDate = toLocalDate(scheduleDate);
+        return scheduleLocalDate.getYear() == plan.getYear()
+                && scheduleLocalDate.getMonthValue() == plan.getMonth();
     }
 
     /**
@@ -778,13 +1084,53 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param year 年份
      * @param month 月份
      */
+    private void loadAdjustResult(LhScheduleContext context,
+                                  String factoryCode,
+                                  Map<String, LocalDate> requiredMonthMap) {
+        Map<String, List<MpAdjustResult>> adjustResultMap = new HashMap<>(64);
+        if (CollectionUtils.isEmpty(requiredMonthMap)) {
+            Calendar calendar = Calendar.getInstance();
+            calendar.setTime(context.getScheduleTargetDate());
+            mergeAdjustResult(context, factoryCode, calendar.get(Calendar.YEAR),
+                    calendar.get(Calendar.MONTH) + 1, adjustResultMap);
+        } else {
+            for (LocalDate monthStartDate : requiredMonthMap.values()) {
+                mergeAdjustResult(context, factoryCode, monthStartDate.getYear(), monthStartDate.getMonthValue(),
+                        adjustResultMap);
+            }
+        }
+        context.setMpAdjustResultMap(adjustResultMap);
+        log.debug("周程滚动调整结果加载完成, 物料数: {}, requiredMonths: {}",
+                adjustResultMap.size(),
+                CollectionUtils.isEmpty(requiredMonthMap) ? new ArrayList<String>(0) : requiredMonthMap.keySet());
+    }
+
     private void loadAdjustResult(LhScheduleContext context, String factoryCode, int year, int month) {
-        String monthPlanVersion = context.getMonthPlanVersion();
-        String productionVersion = context.getProductionVersion();
+        Map<String, List<MpAdjustResult>> adjustResultMap = new HashMap<>(64);
+        mergeAdjustResult(context, factoryCode, year, month, adjustResultMap);
+        context.setMpAdjustResultMap(adjustResultMap);
+    }
+
+    /**
+     * 合并指定月份周程滚动调整结果。
+     *
+     * @param context 排程上下文
+     * @param factoryCode 工厂编码
+     * @param year 年份
+     * @param month 月份
+     * @param adjustResultMap 聚合结果
+     */
+    private void mergeAdjustResult(LhScheduleContext context,
+                                   String factoryCode,
+                                   int year,
+                                   int month,
+                                   Map<String, List<MpAdjustResult>> adjustResultMap) {
+        String monthPlanVersion = resolveMonthPlanVersion(context, year, month);
+        String productionVersion = resolveProductionVersion(context, year, month);
         if (StringUtils.isEmpty(monthPlanVersion) || StringUtils.isEmpty(productionVersion)) {
-            context.setMpAdjustResultMap(new HashMap<>(16));
-            log.warn("月计划版本或排产版本为空，跳过周程滚动调整结果加载, 工厂: {}, monthPlanVersion: {}, productionVersion: {}",
-                    factoryCode, monthPlanVersion, productionVersion);
+            log.warn("月计划版本或排产版本为空，跳过周程滚动调整结果加载, 工厂: {}, year: {}, month: {}, "
+                            + "monthPlanVersion: {}, productionVersion: {}",
+                    factoryCode, year, month, monthPlanVersion, productionVersion);
             return;
         }
 
@@ -795,7 +1141,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 .eq(MpAdjustResult::getMonthPlanVersion, monthPlanVersion)
                 .eq(MpAdjustResult::getProductionVersion, productionVersion)
                 .eq(MpAdjustResult::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
-        Map<String, List<MpAdjustResult>> adjustResultMap = new HashMap<>(64);
         if (!CollectionUtils.isEmpty(adjustResults)) {
             for (MpAdjustResult adjustResult : adjustResults) {
                 if (StringUtils.isEmpty(adjustResult.getMaterialCode())) {
@@ -804,9 +1149,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 adjustResultMap.computeIfAbsent(adjustResult.getMaterialCode(), key -> new ArrayList<>()).add(adjustResult);
             }
         }
-        context.setMpAdjustResultMap(adjustResultMap);
-        log.debug("周程滚动调整结果加载完成, 记录数: {}, 物料数: {}",
-                CollectionUtils.isEmpty(adjustResults) ? 0 : adjustResults.size(), adjustResultMap.size());
+        log.debug("周程滚动调整结果加载完成, year: {}, month: {}, 记录数: {}, 累计物料数: {}",
+                year, month, CollectionUtils.isEmpty(adjustResults) ? 0 : adjustResults.size(), adjustResultMap.size());
     }
 
     /**
@@ -1277,8 +1621,70 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param month       月计划所属月份
      * @param cutoffDate  截止日期（T-1日，含当天）
      */
+    private void loadMaterialMonthFinishedQty(LhScheduleContext context,
+                                              String factoryCode,
+                                              Map<String, LocalDate> requiredMonthMap,
+                                              Date cutoffDate,
+                                              int primaryYear,
+                                              int primaryMonth) {
+        Map<String, Integer> primaryMonthFinishedQtyMap = new HashMap<>(64);
+        Map<String, Integer> materialMonthFinishedQtyByMonthMap = new HashMap<>(128);
+        Map<String, Integer> materialMonthDailyFinishedQtyMap = new HashMap<>(128);
+        if (CollectionUtils.isEmpty(requiredMonthMap)) {
+            mergeMaterialMonthFinishedQty(context, factoryCode, primaryYear, primaryMonth, cutoffDate,
+                    primaryMonthFinishedQtyMap, materialMonthFinishedQtyByMonthMap, materialMonthDailyFinishedQtyMap);
+        } else {
+            for (LocalDate monthStartDate : requiredMonthMap.values()) {
+                Map<String, Integer> monthFinishedQtyMap = new HashMap<>(64);
+                mergeMaterialMonthFinishedQty(context, factoryCode, monthStartDate.getYear(),
+                        monthStartDate.getMonthValue(), cutoffDate, monthFinishedQtyMap,
+                        materialMonthFinishedQtyByMonthMap, materialMonthDailyFinishedQtyMap);
+                if (monthStartDate.getYear() == primaryYear && monthStartDate.getMonthValue() == primaryMonth) {
+                    primaryMonthFinishedQtyMap.putAll(monthFinishedQtyMap);
+                }
+            }
+        }
+        context.setMaterialMonthFinishedQtyMap(primaryMonthFinishedQtyMap);
+        context.setMaterialMonthFinishedQtyByMonthMap(materialMonthFinishedQtyByMonthMap);
+        context.setMaterialMonthDailyFinishedQtyMap(materialMonthDailyFinishedQtyMap);
+        log.debug("月累计完成量加载完成, primaryCount: {}, monthKeyCount: {}, dailyCount: {}, requiredMonths: {}",
+                primaryMonthFinishedQtyMap.size(), materialMonthFinishedQtyByMonthMap.size(),
+                materialMonthDailyFinishedQtyMap.size(),
+                CollectionUtils.isEmpty(requiredMonthMap) ? new ArrayList<String>(0) : requiredMonthMap.keySet());
+    }
+
     private void loadMaterialMonthFinishedQty(LhScheduleContext context, String factoryCode,
                                               int year, int month, Date cutoffDate) {
+        Map<String, Integer> monthFinishedQtyMap = new HashMap<>(64);
+        Map<String, Integer> materialMonthFinishedQtyByMonthMap = new HashMap<>(128);
+        Map<String, Integer> materialMonthDailyFinishedQtyMap = new HashMap<>(128);
+        mergeMaterialMonthFinishedQty(context, factoryCode, year, month, cutoffDate, monthFinishedQtyMap,
+                materialMonthFinishedQtyByMonthMap, materialMonthDailyFinishedQtyMap);
+        context.setMaterialMonthFinishedQtyMap(monthFinishedQtyMap);
+        context.setMaterialMonthFinishedQtyByMonthMap(materialMonthFinishedQtyByMonthMap);
+        context.setMaterialMonthDailyFinishedQtyMap(materialMonthDailyFinishedQtyMap);
+    }
+
+    /**
+     * 合并指定月份的月累计完成量。
+     *
+     * @param context 排程上下文
+     * @param factoryCode 工厂编码
+     * @param year 年份
+     * @param month 月份
+     * @param cutoffDate 截止日期
+     * @param monthFinishedQtyMap 当前月份物料完成量
+     * @param materialMonthFinishedQtyByMonthMap 跨月物料完成量
+     * @param materialMonthDailyFinishedQtyMap 逐日完成量
+     */
+    private void mergeMaterialMonthFinishedQty(LhScheduleContext context,
+                                               String factoryCode,
+                                               int year,
+                                               int month,
+                                               Date cutoffDate,
+                                               Map<String, Integer> monthFinishedQtyMap,
+                                               Map<String, Integer> materialMonthFinishedQtyByMonthMap,
+                                               Map<String, Integer> materialMonthDailyFinishedQtyMap) {
         Date cutoffDay = LhScheduleTimeUtil.clearTime(cutoffDate);
         Calendar calendar = Calendar.getInstance();
         calendar.clear();
@@ -1295,13 +1701,11 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             queryEndDate = nextMonthStart;
         }
 
-        Map<String, Integer> materialMonthFinishedQtyMap = buildMonthPlanMaterialFinishedQtyMap(context);
-        Map<String, Integer> materialMonthDailyFinishedQtyMap = new HashMap<>(128);
+        monthFinishedQtyMap.putAll(buildMonthPlanMaterialFinishedQtyMap(context, year, month));
         if (!queryEndDate.after(monthStart)) {
-            context.setMaterialMonthFinishedQtyMap(materialMonthFinishedQtyMap);
-            context.setMaterialMonthDailyFinishedQtyMap(materialMonthDailyFinishedQtyMap);
+            appendMonthFinishedQtyByMonth(monthFinishedQtyMap, materialMonthFinishedQtyByMonthMap, year, month);
             log.debug("月累计完成量加载完成, 数量: {}, 月计划月份: {}-{}, 起始日: {}, 截止日: {}, 实际查询结束日: {}",
-                    materialMonthFinishedQtyMap.size(), year, month, LhScheduleTimeUtil.formatDate(monthStart),
+                    monthFinishedQtyMap.size(), year, month, LhScheduleTimeUtil.formatDate(monthStart),
                     LhScheduleTimeUtil.formatDate(cutoffDay), LhScheduleTimeUtil.formatDate(queryEndDate));
             return;
         }
@@ -1320,7 +1724,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 if (StringUtils.isEmpty(finishQty.getMaterialCode())) {
                     continue;
                 }
-                materialMonthFinishedQtyMap.merge(
+                monthFinishedQtyMap.merge(
                         finishQty.getMaterialCode(),
                         resolveDayFinishedQty(finishQty),
                         Integer::sum);
@@ -1335,10 +1739,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             }
         }
 
-        context.setMaterialMonthFinishedQtyMap(materialMonthFinishedQtyMap);
-        context.setMaterialMonthDailyFinishedQtyMap(materialMonthDailyFinishedQtyMap);
+        appendMonthFinishedQtyByMonth(monthFinishedQtyMap, materialMonthFinishedQtyByMonthMap, year, month);
         log.debug("月累计完成量加载完成, 数量: {}, 月计划月份: {}-{}, 起始日: {}, 截止日: {}, 实际查询结束日: {}",
-                materialMonthFinishedQtyMap.size(),
+                monthFinishedQtyMap.size(),
                 year, month, LhScheduleTimeUtil.formatDate(monthStart),
                 LhScheduleTimeUtil.formatDate(cutoffDay), LhScheduleTimeUtil.formatDate(queryEndDate));
     }
@@ -1361,6 +1764,73 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             materialMonthFinishedQtyMap.putIfAbsent(plan.getMaterialCode(), 0);
         }
         return materialMonthFinishedQtyMap;
+    }
+
+    /**
+     * 按指定年月的已加载月计划物料初始化月累计完成量。
+     *
+     * @param context 排程上下文
+     * @param year 年份
+     * @param month 月份
+     * @return 物料完成量Map
+     */
+    private Map<String, Integer> buildMonthPlanMaterialFinishedQtyMap(LhScheduleContext context, int year, int month) {
+        Map<String, Integer> materialMonthFinishedQtyMap = new HashMap<>(64);
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getLoadedMonthPlanList())) {
+            return materialMonthFinishedQtyMap;
+        }
+        for (FactoryMonthPlanProductionFinalResult plan : context.getLoadedMonthPlanList()) {
+            if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())
+                    || !isMonthPlanBelongToMonth(plan, year, month)) {
+                continue;
+            }
+            materialMonthFinishedQtyMap.putIfAbsent(plan.getMaterialCode(), 0);
+        }
+        return materialMonthFinishedQtyMap;
+    }
+
+    /**
+     * 判断月计划是否归属指定年月。
+     * <p>历史测试和部分内存构造对象可能不带年月字段，按当前查询月初始化，避免目标月无完成记录时误触发历史回退。</p>
+     *
+     * @param plan 月计划
+     * @param year 年份
+     * @param month 月份
+     * @return true-属于指定年月；false-不属于
+     */
+    private boolean isMonthPlanBelongToMonth(FactoryMonthPlanProductionFinalResult plan, int year, int month) {
+        if (Objects.isNull(plan)) {
+            return false;
+        }
+        if (Objects.isNull(plan.getYear()) && Objects.isNull(plan.getMonth())) {
+            return true;
+        }
+        return Objects.equals(plan.getYear(), year) && Objects.equals(plan.getMonth(), month);
+    }
+
+    /**
+     * 将单月物料完成量写入物料+年月维度Map。
+     *
+     * @param monthFinishedQtyMap 单月物料完成量
+     * @param materialMonthFinishedQtyByMonthMap 物料+年月维度完成量
+     * @param year 年份
+     * @param month 月份
+     */
+    private void appendMonthFinishedQtyByMonth(Map<String, Integer> monthFinishedQtyMap,
+                                               Map<String, Integer> materialMonthFinishedQtyByMonthMap,
+                                               int year,
+                                               int month) {
+        if (CollectionUtils.isEmpty(monthFinishedQtyMap)) {
+            return;
+        }
+        for (Map.Entry<String, Integer> entry : monthFinishedQtyMap.entrySet()) {
+            if (StringUtils.isEmpty(entry.getKey())) {
+                continue;
+            }
+            materialMonthFinishedQtyByMonthMap.put(
+                    MonthPlanDateResolver.buildMaterialMonthKey(entry.getKey(), year, month),
+                    Math.max(0, Objects.isNull(entry.getValue()) ? 0 : entry.getValue()));
+        }
     }
 
     /**

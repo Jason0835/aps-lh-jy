@@ -41,7 +41,7 @@ import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
 import com.zlt.aps.lh.util.LhMultiMachineDistributionUtil;
 import com.zlt.aps.lh.util.LhSpecifyMachineUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
-import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.lh.util.ResultDowntimeSummaryUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -52,7 +52,6 @@ import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
-import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -1100,14 +1099,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 || CollectionUtils.isEmpty(shiftMapByDate)) {
             return 0;
         }
-        FactoryMonthPlanProductionFinalResult plan = findMonthPlanByMaterial(context, sourceSku.getMaterialCode());
-        if (plan == null) {
-            return 0;
-        }
         int firstDayPlanQty = 0;
         boolean first = true;
         for (LocalDate productionDate : shiftMapByDate.keySet()) {
-            int dayPlanQty = Math.max(0, MonthPlanDayQtyUtil.resolveDayQty(plan, productionDate.getDayOfMonth()));
+            int dayPlanQty = MonthPlanDateResolver.resolveDayQty(context, sourceSku.getMaterialCode(), productionDate);
             if (first) {
                 firstDayPlanQty = dayPlanQty;
                 first = false;
@@ -1118,26 +1113,6 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
         }
         return firstDayPlanQty;
-    }
-
-    /**
-     * 按物料编码查找月计划。
-     *
-     * @param context 排程上下文
-     * @param materialCode 物料编码
-     * @return 月计划，未找到返回null
-     */
-    private FactoryMonthPlanProductionFinalResult findMonthPlanByMaterial(LhScheduleContext context, String materialCode) {
-        if (context == null || StringUtils.isEmpty(materialCode)
-                || CollectionUtils.isEmpty(context.getMonthPlanList())) {
-            return null;
-        }
-        for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
-            if (plan != null && StringUtils.equals(materialCode, plan.getMaterialCode())) {
-                return plan;
-            }
-        }
-        return null;
     }
 
     /**
@@ -2048,27 +2023,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                SkuScheduleDTO sourceSku,
                                                LocalDate productionDate) {
         if (context == null || sourceSku == null || productionDate == null
-                || StringUtils.isEmpty(sourceSku.getMaterialCode())
-                || CollectionUtils.isEmpty(context.getMonthPlanList())) {
+                || StringUtils.isEmpty(sourceSku.getMaterialCode())) {
             return 0;
         }
-        for (FactoryMonthPlanProductionFinalResult plan : context.getMonthPlanList()) {
-            if (plan == null || !StringUtils.equals(sourceSku.getMaterialCode(), plan.getMaterialCode())) {
-                continue;
-            }
-            Integer year = plan.getYear();
-            Integer month = plan.getMonth();
-            if (year != null && month != null
-                    && (year.intValue() != productionDate.getYear()
-                    || month.intValue() != productionDate.getMonthValue())) {
-                continue;
-            }
-            int dayPlanQty = MonthPlanDayQtyUtil.resolveDayQty(plan, productionDate.getDayOfMonth());
-            log.debug("续作单机降模月计划T日量解析, materialCode: {}, 日期: {}, monthPlanDayQty: {}",
-                    sourceSku.getMaterialCode(), productionDate, dayPlanQty);
-            return Math.max(0, dayPlanQty);
-        }
-        return 0;
+        int dayPlanQty = MonthPlanDateResolver.resolveDayQty(context, sourceSku.getMaterialCode(), productionDate);
+        log.debug("续作单机降模月计划T日量解析, materialCode: {}, 日期: {}, monthPlanDayQty: {}",
+                sourceSku.getMaterialCode(), productionDate, dayPlanQty);
+        return dayPlanQty;
     }
 
     /**

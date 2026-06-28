@@ -760,3 +760,55 @@ T = 6.8
 不是改硫化余量公式；
 而是把公式中的“月计划总量”从整月总量口径，改为按排程窗口、月计划断点、跨月计划段动态计算的口径。
 ```
+
+## 十三、已落地实现口径（方案 1）
+
+本次新增 `com.zlt.aps.lh.component.CuringMonthPlanTotalCalculator` 和 `com.zlt.aps.lh.api.domain.dto.CuringMonthPlanTotalResult`，作为硫化月计划总量的公共计算入口。该计算器只负责计算“硫化月计划总量”，不修改已完成量和上月超欠产逻辑。
+
+### 1. 调用边界
+
+S4.3 初始化 SKU 余量时，继续沿用原公式：
+
+```text
+硫化余量 = 硫化月计划总量 - 已完成量 + 上月超欠产
+```
+
+其中：
+
+* `已完成量`：仍按项目现有“月累计完成量 + T 日排程晚班完成量”口径；
+* `上月超欠产`：仍按项目现有 `lastMonthValidFlag` 口径；
+* `硫化月计划总量`：改为调用 `com.zlt.aps.lh.component.CuringMonthPlanTotalCalculator`，按窗口、断点和跨月段动态计算。
+
+### 2. 断点与跨月计算
+
+计算器统一通过 `com.zlt.aps.lh.component.MonthPlanDateResolver` 读取真实业务日期所属年月的 dayN，并复用统一 `hasPlanQty` 判断。
+
+窗口内有计划时：
+
+* 先找 T～T+2 内最晚有计划日期；
+* 从该日期所属月份继续向后找断点；
+* 非跨月时汇总当月 day1～断点日；
+* 最晚计划日跨月时，汇总 T 日所属月份断点前计划量 + 跨月月份 day1～跨月断点日计划量。
+
+窗口内无计划时：
+
+* 先用“当前月 day1～T 日计划量 - 已完成量 + 上月超欠产”判断历史余量；
+* 仍有余量时，月计划总量取当前月 day1～T 日；
+* 无余量时，仅在 T 日所属自然月内向后扫描后续计划段并按断点汇总；
+* 不允许把下月计划段计入本月“窗口无计划”场景的硫化月计划总量。
+
+### 3. 日志与排查
+
+余量计算日志需要同时输出：
+
+* `monthPlanTotal`；
+* `actualFinishedQty`；
+* `lastMonthOverdueQty`；
+* `remainQty`；
+* `crossMonth`；
+* `breakPointDate`；
+* `currentMonthPlanTotal`；
+* `crossMonthPlanTotal`；
+* `calculateScene`。
+
+日志必须能区分“月计划总量怎么算”和“余量公式怎么算”。
