@@ -55,7 +55,7 @@ public final class LhScheduleParamConstant {
     /** 首检时间（小时） */
     public static final String FIRST_INSPECTION_HOURS = "SYS0303001";
     /** 每班最大首检次数 */
-    public static final String MAX_FIRST_INSPECTION_PER_SHIFT = "SYS0303002";
+    public static final String MAX_FIRST_INSPECTION_PER_SHIFT = "SYS0303099";
     /** 首检数量 */
     public static final String FIRST_INSPECTION_QTY = "SYS0303003";
     /** 收尾判定天数 */
