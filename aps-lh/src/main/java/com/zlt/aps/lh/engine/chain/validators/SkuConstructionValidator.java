@@ -4,7 +4,6 @@ import com.zlt.aps.lh.api.constant.LhDataValidationGroupConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.ValidationPolicyEnum;
 import com.zlt.aps.lh.engine.chain.IDataValidator;
-import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.SkuConstructionRefResolverUtil;
@@ -129,8 +128,7 @@ public class SkuConstructionValidator implements IDataValidator {
     }
 
     /**
-     * 判断月计划在排程窗口内是否存在有效日计划量。
-     * 跨月时自动查找对应月份的月计划记录。
+     * 判断当前月计划在排程窗口内（仅限本月份范围）是否存在有效日计划量。
      *
      * @param context 排程上下文
      * @param plan 当前月计划
@@ -139,26 +137,22 @@ public class SkuConstructionValidator implements IDataValidator {
     private boolean hasWindowPlanQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
         Date scheduleDate = context.getScheduleDate();
         Date windowEndDate = context.getWindowEndDate();
-        if (Objects.isNull(scheduleDate) || Objects.isNull(windowEndDate)) {
+        if (Objects.isNull(scheduleDate) || Objects.isNull(windowEndDate)
+                || Objects.isNull(plan.getYear()) || Objects.isNull(plan.getMonth())) {
             return true;
         }
         Calendar cursor = Calendar.getInstance();
         cursor.setTime(LhScheduleTimeUtil.clearTime(scheduleDate));
         Calendar endCal = Calendar.getInstance();
         endCal.setTime(LhScheduleTimeUtil.clearTime(windowEndDate));
+        int planYear = plan.getYear().intValue();
+        int planMonth = plan.getMonth().intValue();
         while (!cursor.after(endCal)) {
             int year = cursor.get(Calendar.YEAR);
             int month = cursor.get(Calendar.MONTH) + 1;
-            int dayOfMonth = cursor.get(Calendar.DAY_OF_MONTH);
-            // 如果遍历到不同月份，从跨月索引中查找对应月份的计划
-            FactoryMonthPlanProductionFinalResult targetPlan = plan;
-            if (Objects.nonNull(plan.getYear()) && Objects.nonNull(plan.getMonth())
-                    && (plan.getYear().intValue() != year || plan.getMonth().intValue() != month)) {
-                String key = MonthPlanDateResolver.buildMaterialMonthKey(plan.getMaterialCode(), year, month);
-                targetPlan = context.getMonthPlanByMaterialMonthMap().get(key);
-            }
-            if (Objects.nonNull(targetPlan)) {
-                int dayQty = MonthPlanDayQtyUtil.resolveDayQty(targetPlan, dayOfMonth);
+            // 只检查属于本计划月份的天，跨月天数由对应月份的 plan 单独处理
+            if (year == planYear && month == planMonth) {
+                int dayQty = MonthPlanDayQtyUtil.resolveDayQty(plan, cursor.get(Calendar.DAY_OF_MONTH));
                 if (dayQty > 0) {
                     return true;
                 }
