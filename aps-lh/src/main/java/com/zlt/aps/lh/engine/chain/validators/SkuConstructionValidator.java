@@ -56,12 +56,12 @@ public class SkuConstructionValidator implements IDataValidator {
             if (plan.getTotalQty() == null || plan.getTotalQty() == 0) {
                 continue;
             }
-            // 排程窗口内所有日计划量均为0或空的物料跳过校验
-            if (!hasWindowPlanQty(context, plan)) {
-                continue;
-            }
             String materialCode = plan.getMaterialCode();
             if (StringUtils.isEmpty(materialCode)) {
+                continue;
+            }
+            // 排程窗口内所有日计划量均为0或空的物料跳过校验
+            if (!hasWindowPlanQty(context, plan)) {
                 continue;
             }
             String productStatus = plan.getProductStatus();
