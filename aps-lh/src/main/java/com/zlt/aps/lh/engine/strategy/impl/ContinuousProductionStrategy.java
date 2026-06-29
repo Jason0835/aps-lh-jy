@@ -179,7 +179,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                         Math.max(0, shortageQuotaPlan.getFutureMonthPlanQtyAfterWindow()));
                 continue;
             }
-            if (shouldReleaseFirstDayNoPlanContinuousSku(sku, shifts, shortageQuotaPlan)) {
+            if (shouldReleaseFirstDayNoPlanContinuousSku(context, sku, shifts, shortageQuotaPlan)) {
                 registerReleasedFirstDayNoPlanContinuousMachine(context, machineCode, sku.getMaterialCode());
                 log.info("续作SKU当前day1日计划为0，跳过day1续作并释放机台给换活字块/新增排产, "
                                 + "materialCode: {}, machineCode: {}, windowPlanQty: {}, quotaRemainingQty: {}, dayPlanSummary: {}",
@@ -221,7 +221,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             boolean isSingleMachine = continuationGroupMachineCountMap
                     .getOrDefault(buildContinuationGroupKey(sku), 0) == 1;
 
-            // 滚动衔接时沿用机台继承后的可用时间；非收尾在机续作首日有计划时从窗口首班满排。
+            // 续作按原始dayN定位起排日；若机台已被占用，则沿用机台真实可用时间。
             Date startTime = resolveContinuousStartTime(context, sku, machine, shifts, isEnding);
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine, shortageQuotaPlan);
@@ -343,16 +343,16 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 windowCapacityQty, sku.resolveTargetScheduleQty(), appliedRule);
     }
 
-    /**
+     /**
      * 解析续作起排时间。
-     * <p>滚动衔接场景下从机台继承后的可用时间继续排；非收尾在机续作首日有日计划时从窗口首班开始。</p>
+     * <p>续作按原始dayN定位起排日；滚动衔接或机台已占用时沿用机台真实可用时间。</p>
      */
     private Date resolveContinuousStartTime(LhScheduleContext context,
                                             SkuScheduleDTO sku,
                                             MachineScheduleDTO machine,
                                             List<LhShiftConfigVO> shifts,
                                             boolean isEnding) {
-        Date defaultStartTime = resolveFirstPositiveDailyPlanStartTime(sku, shifts, isEnding);
+        Date defaultStartTime = resolveFirstPositiveDailyPlanStartTime(context, sku, shifts, isEnding);
         if (context == null || !context.isRollingScheduleHandoff()) {
             return defaultStartTime;
         }
@@ -370,26 +370,36 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 解析首个有日计划剩余额度的续作起排班次。
+     * 解析首个有原始日计划的续作起排班次。
+     * <p>续作不需要换模/换活字块，dayN 只判断从哪天起排；排产量由硫化余量控制，
+     * 不能用运行态剩余额度扣完后的结果跳过 T 日班次。</p>
      *
+     * @param context 排程上下文
      * @param sku 续作SKU
      * @param shifts 排程窗口班次
+     * @param isEnding 是否收尾
      * @return 首个可排班次开始时间；无可识别额度时返回窗口首班开始时间
      */
-    private Date resolveFirstPositiveDailyPlanStartTime(SkuScheduleDTO sku,
+    private Date resolveFirstPositiveDailyPlanStartTime(LhScheduleContext context,
+                                                        SkuScheduleDTO sku,
                                                         List<LhShiftConfigVO> shifts,
                                                         boolean isEnding) {
         Date defaultStartTime = CollectionUtils.isEmpty(shifts) ? new Date() : shifts.get(0).getShiftStartDateTime();
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
             return defaultStartTime;
         }
-        if (!isEnding && hasFirstWindowDateDailyPlan(sku, shifts)) {
+        if (hasFirstWindowDateDailyPlan(context, sku, shifts)) {
             return defaultStartTime;
         }
-        Set<LocalDate> positivePlanDateSet = resolvePositiveDailyPlanDateSet(sku);
+        Set<LocalDate> positivePlanDateSet = resolvePositiveDailyPlanDateSet(context, sku);
         for (LhShiftConfigVO shift : shifts) {
             LocalDate workDate = resolveShiftWorkDate(shift);
             if (workDate != null && positivePlanDateSet.contains(workDate)) {
+                log.info("续作按原始dayN定位起排班次, materialCode: {}, machineCode: {}, isEnding: {}, "
+                                + "startWorkDate: {}, startTime: {}, dayN: {}",
+                        sku.getMaterialCode(), sku.getContinuousMachineCode(), isEnding, workDate,
+                        LhScheduleTimeUtil.formatDateTime(shift.getShiftStartDateTime()),
+                        formatDailyPlanQuotaSummary(sku));
                 return shift.getShiftStartDateTime();
             }
         }
@@ -403,7 +413,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param shifts 排程窗口班次
      * @return true-首日有日计划
      */
-    private boolean hasFirstWindowDateDailyPlan(SkuScheduleDTO sku, List<LhShiftConfigVO> shifts) {
+    private boolean hasFirstWindowDateDailyPlan(LhScheduleContext context,
+                                                SkuScheduleDTO sku,
+                                                List<LhShiftConfigVO> shifts) {
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
             return false;
         }
@@ -411,8 +423,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (firstWindowDate == null) {
             return false;
         }
-        SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(firstWindowDate);
-        return quota != null && Math.max(0, quota.getDayPlanQty()) > 0;
+        return resolveContinuationDayPlanQtyByDate(context, sku, firstWindowDate) > 0;
     }
 
     /**
@@ -422,7 +433,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param shifts 排程窗口班次
      * @return true-首日无计划，后续日期才有计划
      */
-    private boolean isFirstPositiveDailyPlanLaterThanWindowFirstDate(SkuScheduleDTO sku, List<LhShiftConfigVO> shifts) {
+    private boolean isFirstPositiveDailyPlanLaterThanWindowFirstDate(LhScheduleContext context,
+                                                                     SkuScheduleDTO sku,
+                                                                     List<LhShiftConfigVO> shifts) {
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
             return false;
         }
@@ -430,7 +443,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (firstWindowDate == null) {
             return false;
         }
-        Set<LocalDate> positivePlanDateSet = resolvePositiveDailyPlanDateSet(sku);
+        Set<LocalDate> positivePlanDateSet = resolvePositiveDailyPlanDateSet(context, sku);
         for (LhShiftConfigVO shift : shifts) {
             LocalDate workDate = resolveShiftWorkDate(shift);
             if (workDate != null && positivePlanDateSet.contains(workDate)) {
@@ -445,12 +458,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * <p>MES 在机同物料后续窗口仍有正日计划时，必须保留续作身份，
      * 由续作起排时间推进到首个正日计划班次，避免同物料被释放后按新增换模上机。</p>
      *
+     * @param context 排程上下文
      * @param sku 续作SKU
      * @param shifts 排程窗口班次
      * @param shortageQuotaPlan 欠产账本准备结果
      * @return true-释放原续作机台
      */
-    private boolean shouldReleaseFirstDayNoPlanContinuousSku(SkuScheduleDTO sku,
+    private boolean shouldReleaseFirstDayNoPlanContinuousSku(LhScheduleContext context,
+                                                             SkuScheduleDTO sku,
                                                              List<LhShiftConfigVO> shifts,
                                                              DailyMachineShortageQuotaPlan shortageQuotaPlan) {
         if (sku == null || CollectionUtils.isEmpty(shifts)
@@ -458,8 +473,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 : shortageQuotaPlan.getHistoryShortageQty()) > 0) {
             return false;
         }
-        if (isFirstWindowDateNoDailyPlan(sku, shifts)
-                && isFirstPositiveDailyPlanLaterThanWindowFirstDate(sku, shifts)) {
+        if (isFirstWindowDateNoDailyPlan(context, sku, shifts)
+                && isFirstPositiveDailyPlanLaterThanWindowFirstDate(context, sku, shifts)) {
             log.info("续作首日无计划但后续仍有正日计划，保留续作身份, materialCode: {}, continuousMachineCode: {}, dayN: {}",
                     sku.getMaterialCode(), sku.getContinuousMachineCode(), formatDailyPlanQuotaSummary(sku));
             return false;
@@ -500,13 +515,16 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 判断排程窗口首个业务日是否无日计划剩余额度。
+     * 判断排程窗口首个业务日是否无原始日计划。
      *
+     * @param context 排程上下文
      * @param sku 续作SKU
      * @param shifts 排程窗口班次
-     * @return true-首日无计划且无剩余额度
+     * @return true-首日无原始日计划
      */
-    private boolean isFirstWindowDateNoDailyPlan(SkuScheduleDTO sku, List<LhShiftConfigVO> shifts) {
+    private boolean isFirstWindowDateNoDailyPlan(LhScheduleContext context,
+                                                 SkuScheduleDTO sku,
+                                                 List<LhShiftConfigVO> shifts) {
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
             return false;
         }
@@ -514,25 +532,24 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (firstWindowDate == null) {
             return false;
         }
-        SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(firstWindowDate);
-        return quota != null && Math.max(0, quota.getDayPlanQty()) <= 0
-                && Math.max(0, quota.getRemainingQty()) <= 0;
+        return resolveContinuationDayPlanQtyByDate(context, sku, firstWindowDate) <= 0;
     }
 
     /**
-     * 解析续作SKU窗口内仍有剩余额度的业务日期集合。
+     * 解析续作SKU窗口内仍有原始日计划的业务日期集合。
+     * <p>优先读取月计划原始 dayN，运行态账本只作为缺省回退，避免 T 日完成量扣减后误跳起排日。</p>
      *
+     * @param context 排程上下文
      * @param sku 续作SKU
-     * @return 有剩余额度的业务日期集合
+     * @return 有原始日计划的业务日期集合
      */
-    private Set<LocalDate> resolvePositiveDailyPlanDateSet(SkuScheduleDTO sku) {
+    private Set<LocalDate> resolvePositiveDailyPlanDateSet(LhScheduleContext context, SkuScheduleDTO sku) {
         Set<LocalDate> positivePlanDateSet = new LinkedHashSet<LocalDate>(4);
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return positivePlanDateSet;
         }
         for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : sku.getDailyPlanQuotaMap().entrySet()) {
-            SkuDailyPlanQuotaDTO quota = entry.getValue();
-            if (quota != null && quota.getRemainingQty() > 0) {
+            if (resolveContinuationDayPlanQtyByDate(context, sku, entry.getKey()) > 0) {
                 positivePlanDateSet.add(entry.getKey());
             }
         }
@@ -6746,7 +6763,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                         sku.getMaterialCode(), "窗口内无日计划");
                 continue;
             }
-            if (shouldReleaseFirstDayNoPlanContinuousSku(sku, shifts, null)) {
+            if (shouldReleaseFirstDayNoPlanContinuousSku(context, sku, shifts, null)) {
                 registerReleasedFirstDayNoPlanContinuousMachine(context,
                         sku.getContinuousMachineCode(), sku.getMaterialCode());
             }

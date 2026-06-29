@@ -1224,10 +1224,10 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 非收尾续作首日有日计划时，即使额度被T日晚班扣完，也应从窗口首班起排满在机班次。
+     * 续作首日有原始日计划时，即使额度被T日晚班扣完，也应从窗口首班起排。
      */
     @Test
-    public void shouldStartNonEndingContinuousFromFirstShiftWhenFirstDayHasPlan() throws Exception {
+    public void shouldStartContinuousFromFirstShiftWhenOriginalFirstDayHasPlan() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
@@ -1244,7 +1244,58 @@ public class SchedulingStrategyRegressionTest {
         Date endingStartTime = (Date) method.invoke(strategy, context, sku, machine, shifts, true);
 
         Assertions.assertEquals(shifts.get(0).getShiftStartDateTime(), nonEndingStartTime);
-        Assertions.assertEquals(shifts.get(2).getShiftStartDateTime(), endingStartTime);
+        Assertions.assertEquals(shifts.get(0).getShiftStartDateTime(), endingStartTime);
+    }
+
+    /**
+     * 续作排产以原始dayN判断起排日，以硫化余量作为排产目标；T日已完成量不能导致跳过C1/C2。
+     */
+    @Test
+    public void shouldScheduleEndingContinuousFromFirstShiftByOriginalDayPlanWhenFirstDayRemainingConsumed() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        context.setScheduleDate(dateTime(2026, 6, 27, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 6, 27, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001454", 18, 42,
+                buildQuotaMapByShifts(shifts, 8, 42, 0));
+        sku.setContinuousMachineCode("K2021");
+        sku.setScheduleDayFinishQty(18);
+        sku.setLhTimeSeconds(3600);
+        sku.setMonthPlanQty(50);
+        sku.setEmbryoStock(42);
+        SkuDailyPlanQuotaDTO day1Quota = sku.getDailyPlanQuotaMap().get(resolveShiftWorkDate(shifts, 1));
+        day1Quota.setScheduledQty(18);
+        day1Quota.setRemainingQty(0);
+        appendMonthPlan(context, sku.getMaterialCode(), resolveShiftWorkDate(shifts, 1), 8, 42, 0);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setStandardCapacity(52);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+        context.getContinuousSkuList().add(sku);
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K2021");
+        machine.setMachineName("K2021");
+        machine.setCurrentMaterialCode(sku.getMaterialCode());
+        machine.setMaxMoldNum(2);
+        machine.setEstimatedEndTime(shifts.get(0).getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getInitialMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        strategy.scheduleContinuousEnding(context);
+
+        Assertions.assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        Assertions.assertEquals("3302001454", result.getMaterialCode());
+        Assertions.assertEquals("K2021", result.getLhMachineCode());
+        Assertions.assertEquals(18, resolveShiftPlanQty(result, 1));
+        Assertions.assertEquals(16, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(8, resolveShiftPlanQty(result, 3));
+        Assertions.assertEquals(0, resolveShiftPlanQty(result, 4));
+        Assertions.assertEquals(0, resolveShiftPlanQty(result, 5));
+        Assertions.assertEquals(Integer.valueOf(42), result.getDailyPlanQty());
     }
 
     /**
@@ -1261,9 +1312,9 @@ public class SchedulingStrategyRegressionTest {
 
         Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
                 "shouldReleaseFirstDayNoPlanContinuousSku",
-                SkuScheduleDTO.class, List.class, DailyMachineShortageQuotaPlan.class);
+                LhScheduleContext.class, SkuScheduleDTO.class, List.class, DailyMachineShortageQuotaPlan.class);
         method.setAccessible(true);
-        boolean release = (Boolean) method.invoke(strategy, sku, shifts, null);
+        boolean release = (Boolean) method.invoke(strategy, context, sku, shifts, null);
 
         Assertions.assertFalse(release);
     }
@@ -1973,6 +2024,15 @@ public class SchedulingStrategyRegressionTest {
             case 13:
                 plan.setDay13(qty);
                 break;
+            case 27:
+                plan.setDay27(qty);
+                break;
+            case 28:
+                plan.setDay28(qty);
+                break;
+            case 29:
+                plan.setDay29(qty);
+                break;
             default:
                 throw new IllegalArgumentException("测试月计划日期未支持: " + date);
         }
@@ -2044,6 +2104,11 @@ public class SchedulingStrategyRegressionTest {
                 return;
             }
         }
+    }
+
+    private int resolveShiftPlanQty(LhScheduleResult result, int shiftIndex) {
+        Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+        return planQty == null ? 0 : Math.max(0, planQty);
     }
 
     private List<LhShiftConfigVO> buildSimulationShifts() {
