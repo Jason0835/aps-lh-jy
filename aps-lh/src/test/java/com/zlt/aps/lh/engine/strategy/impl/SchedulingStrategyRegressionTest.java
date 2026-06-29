@@ -152,6 +152,35 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 同一班次内，换模首检数量应按统一顺序取参数：前2台取4，第3台及之后取2，单控机台再折半。
+     */
+    @Test
+    public void shouldApplyOrderedFirstInspectionQtyForChangeoverInSameShift() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectNewSpecBuildDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        Map<String, String> paramMap = new HashMap<String, String>(4);
+        paramMap.put("SYS0303002", "4");
+        paramMap.put("SYS0303003", "2");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+
+        LhScheduleResult firstResult = buildNewSpecFirstInspectionResult(strategy, context,
+                buildNewSpecMachine("K1101"), buildNewSpecFirstInspectionSku(16));
+        LhScheduleResult secondResult = buildNewSpecFirstInspectionResult(strategy, context,
+                buildNewSpecMachine("K1102"), buildNewSpecFirstInspectionSku(16));
+        LhScheduleResult thirdResult = buildNewSpecFirstInspectionResult(strategy, context,
+                buildNewSpecMachine("K1103"), buildNewSpecFirstInspectionSku(16));
+        LhScheduleResult singleControlResult = buildNewSpecFirstInspectionResult(strategy, context,
+                buildNewSpecMachine("K1501L"), buildNewSpecFirstInspectionSku(16));
+
+        Assertions.assertEquals(4, ShiftFieldUtil.getShiftPlanQty(firstResult, 1));
+        Assertions.assertEquals(4, ShiftFieldUtil.getShiftPlanQty(secondResult, 1));
+        Assertions.assertEquals(2, ShiftFieldUtil.getShiftPlanQty(thirdResult, 1));
+        Assertions.assertEquals(1, ShiftFieldUtil.getShiftPlanQty(singleControlResult, 1));
+        Assertions.assertEquals(4, context.getShiftFirstInspectionCountMap().get("2026-06-01#1").intValue());
+    }
+
+    /**
      * T+2 当日换模/换活字块总次数已满时，应返回失败并记录可直接写未排的原因。
      */
     @Test
@@ -1615,8 +1644,8 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals("03", result.getScheduleType());
         Assertions.assertEquals("1", result.getIsTypeBlock());
         Assertions.assertEquals("1", result.getIsChangeMould());
-        Assertions.assertEquals(Integer.valueOf(15), result.getClass8PlanQty());
-        Assertions.assertEquals(Integer.valueOf(15), result.getDailyPlanQty());
+        Assertions.assertEquals(Integer.valueOf(20), result.getClass8PlanQty());
+        Assertions.assertEquals(Integer.valueOf(20), result.getDailyPlanQty());
     }
 
     /**
@@ -2188,6 +2217,21 @@ public class SchedulingStrategyRegressionTest {
         sku.setEmbryoStock(targetQty);
         sku.setMonthPlanQty(targetQty);
         return sku;
+    }
+
+    private LhScheduleResult buildNewSpecFirstInspectionResult(NewSpecProductionStrategy strategy,
+                                                               LhScheduleContext context,
+                                                               MachineScheduleDTO machine,
+                                                               SkuScheduleDTO sku) throws Exception {
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        LhScheduleResult result = invokeBuildNewSpecScheduleResult(
+                strategy, context, machine, sku,
+                dateTime(2026, 6, 1, 14, 0),
+                dateTime(2026, 6, 1, 6, 0),
+                dateTime(2026, 6, 1, 14, 0),
+                context.getScheduleWindowShifts(), 1, false);
+        context.getScheduleResultList().add(result);
+        return result;
     }
 
     private LhScheduleResult invokeBuildNewSpecScheduleResult(NewSpecProductionStrategy strategy,

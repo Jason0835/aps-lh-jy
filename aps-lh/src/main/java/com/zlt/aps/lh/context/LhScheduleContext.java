@@ -280,6 +280,8 @@ public class LhScheduleContext {
     private Map<String, String> mouldChangeLimitBlockedReasonMap = new LinkedHashMap<>();
     /** 每日首检计数, key=dateString, value=[早班首检数, 中班首检数] */
     private Map<String, int[]> dailyFirstInspectionCountMap = new LinkedHashMap<>();
+    /** 班次首检数量顺序计数, key=业务日期#班次索引, value=已计入首检数量的机台数 */
+    private Map<String, Integer> shiftFirstInspectionCountMap = new LinkedHashMap<>(8);
     /** 每日精度保养计数, key=dateString, value=已安排保养机台数 */
     private Map<String, Integer> dailyMaintenanceCountMap = new LinkedHashMap<>();
 

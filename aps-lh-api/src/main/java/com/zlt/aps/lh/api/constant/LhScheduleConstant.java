@@ -80,8 +80,11 @@ public final class LhScheduleConstant {
     /** 首检时间（小时） */
     public static final int FIRST_INSPECTION_HOURS = 1;
 
-    /** 首检数量 */
-    public static final int FIRST_INSPECTION_QTY = 4;
+    /** 同班次前2台首检计划量 */
+    public static final int FIRST_TWO_FIRST_INSPECTION_QTY = 4;
+
+    /** 同班次非前2台首检计划量 */
+    public static final int FIRST_INSPECTION_QTY = 2;
 
     /** 每班最大首检次数（-1 表示不限制） */
     public static final int MAX_FIRST_INSPECTION_PER_SHIFT = -1;

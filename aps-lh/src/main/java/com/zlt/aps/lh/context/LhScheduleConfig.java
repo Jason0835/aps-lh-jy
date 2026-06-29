@@ -203,6 +203,11 @@ public class LhScheduleConfig {
         return getParamIntValue(LhScheduleParamConstant.MAX_FIRST_INSPECTION_PER_SHIFT, LhScheduleConstant.MAX_FIRST_INSPECTION_PER_SHIFT);
     }
 
+    public int getFirstTwoFirstInspectionQty() {
+        return Math.max(0, getParamIntValue(LhScheduleParamConstant.FIRST_TWO_FIRST_INSPECTION_QTY,
+                LhScheduleConstant.FIRST_TWO_FIRST_INSPECTION_QTY));
+    }
+
     public int getFirstInspectionQty() {
         return Math.max(0, getParamIntValue(LhScheduleParamConstant.FIRST_INSPECTION_QTY,
                 LhScheduleConstant.FIRST_INSPECTION_QTY));

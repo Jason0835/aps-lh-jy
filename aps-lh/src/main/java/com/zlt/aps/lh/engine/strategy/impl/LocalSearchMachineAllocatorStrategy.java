@@ -30,6 +30,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 局部搜索机台分配器
@@ -435,9 +436,13 @@ public class LocalSearchMachineAllocatorStrategy {
         Date cursorStartTime = productionStartTime;
         Date mouldChangeCompleteTime = mouldChangeStartTime == null ? null
                 : LhScheduleTimeUtil.addHours(mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
-        int firstInspectionShiftIndex = FirstInspectionQtyUtil.resolveAttributionShiftIndex(
+        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveAttributionShift(
                 shifts, mouldChangeCompleteTime);
-        int firstInspectionQty = FirstInspectionQtyUtil.getFirstInspectionQty(context, machine.getMachineCode());
+        int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
+                || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
+        int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
+                context, firstInspectionShift, shiftCapacity, Math.max(remainingQty, shiftCapacity),
+                null, machine.getMachineCode());
         Date specEndTime = null;
         int totalQty = 0;
         boolean started = false;
@@ -524,10 +529,10 @@ public class LocalSearchMachineAllocatorStrategy {
         }
         Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                 context, shifts, mouldChangeCompleteTime, new HashMap<Integer, Integer>(0),
-                shiftCapacity, Math.max(remainingQty, FirstInspectionQtyUtil.getFirstInspectionQty(context, machineCode)),
+                shiftCapacity, Math.max(remainingQty, shiftCapacity),
                 null, machineCode);
         Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());
-        return Math.max(0, firstInspectionQty == null ? 0 : firstInspectionQty);
+        return Math.max(0, Objects.isNull(firstInspectionQty) ? 0 : firstInspectionQty);
     }
 
     /**

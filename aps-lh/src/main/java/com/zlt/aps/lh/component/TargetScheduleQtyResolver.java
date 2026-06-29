@@ -536,9 +536,13 @@ public class TargetScheduleQtyResolver {
         Date cursorStartTime = firstProductionStartTime;
         int totalQty = 0;
         Date mouldChangeCompleteTime = resolveMouldChangeCompleteTime(context, switchStartTime, scheduleType);
-        int firstInspectionShiftIndex = FirstInspectionQtyUtil.resolveAttributionShiftIndex(
+        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveAttributionShift(
                 shifts, mouldChangeCompleteTime);
-        int firstInspectionQty = FirstInspectionQtyUtil.getFirstInspectionQty(context, machine.getMachineCode());
+        int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
+                || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
+        int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
+                context, firstInspectionShift, shiftCapacity, Math.max(sku.resolveTargetScheduleQty(), shiftCapacity),
+                scheduleType, machine.getMachineCode());
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
             if (!started) {
@@ -607,10 +611,10 @@ public class TargetScheduleQtyResolver {
         }
         Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                 context, shifts, mouldChangeCompleteTime, new LinkedHashMap<Integer, Integer>(0),
-                shiftCapacity, Math.max(remainingQty, FirstInspectionQtyUtil.getFirstInspectionQty(context, machineCode)),
+                shiftCapacity, Math.max(remainingQty, shiftCapacity),
                 scheduleType, machineCode);
         Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());
-        return Math.max(0, firstInspectionQty == null ? 0 : firstInspectionQty);
+        return Math.max(0, Objects.isNull(firstInspectionQty) ? 0 : firstInspectionQty);
     }
 
     /**

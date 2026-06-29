@@ -803,6 +803,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty, null);
                     // 无有效产能时回滚首检和换模占用，避免影响后续SKU排产
                     inspectionBalance.rollbackInspection(context, inspectionTime);
+                    FirstInspectionQtyUtil.rollbackFirstInspectionSequence(context,
+                            FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime));
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     // 候选机台失败时恢复原目标量，避免把本次失败收敛值泄漏到后续候选机台。

@@ -1530,6 +1530,36 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
+    void scheduleTypeBlockChange_shouldAddFirstInspectionQtyToCompletionShift() {
+        LhScheduleContext context = newContext();
+        Map<String, String> paramMap = new HashMap<>(4);
+        paramMap.put("SYS0303002", "4");
+        paramMap.put("SYS0303003", "2");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+        context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
+        context.getContinuousSkuList().add(buildContinuousSku("MAT-C1", "M1", "EMB-1", "STRUCT-A", "SPEC-A", "PAT-A", 14));
+        context.getNewSpecSkuList().add(buildNewSku("MAT-T1", "EMB-1", "STRUCT-B", "SPEC-A", "PAT-B", 8));
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-1", "ORD-2");
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenAnswer(invocation -> {
+            SkuScheduleDTO sku = invocation.getArgument(1);
+            return sku != null && "MAT-C1".equals(sku.getMaterialCode());
+        });
+
+        strategy.scheduleContinuousEnding(context);
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(1);
+        assertEquals(6, ShiftFieldUtil.getShiftPlanQty(typeBlockResult, 3),
+                "换活字块完成落在夜班时，应在该班次先扣停机后加首检数量");
+        assertEquals(2, ShiftFieldUtil.getShiftPlanQty(typeBlockResult, 4),
+                "首检已占用夜班数量后，剩余目标量应顺延到下一班次");
+        assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-04-19#3").intValue());
+    }
+
+    @Test
     void scheduleTypeBlockChange_shouldDelaySwitchUntilOpenProductionShiftStart() {
         LhScheduleContext context = newContext();
         context.setOpenProductionMode(true);
@@ -1624,8 +1654,10 @@ class ContinuousProductionTypeBlockRegressionTest {
         assertEquals(1, context.getScheduleResultList().size());
         LhScheduleResult typeBlockResult = context.getScheduleResultList().get(0);
         assertEquals("3302002174", typeBlockResult.getMaterialCode());
-        assertEquals(dateTime(2026, 4, 22, 14, 0, 0), resolveFirstStartTime(typeBlockResult),
-                "停机重叠且夜班禁换时，应顺延到次日早班发起换活字块，次日中班开始生产");
+        assertEquals(dateTime(2026, 4, 22, 6, 0, 0), resolveFirstStartTime(typeBlockResult),
+                "换活字块完成时间落在早班结束点时，首检数量应归入完成所在早班");
+        assertEquals(Integer.valueOf(4), ShiftFieldUtil.getShiftPlanQty(typeBlockResult, 4),
+                "完成所在早班应写入换活字块首检数量");
         Integer class3PlanQty = ShiftFieldUtil.getShiftPlanQty(typeBlockResult, 3);
         assertTrue(class3PlanQty == null || class3PlanQty <= 0, "停机日夜班不应出现换活字块后的生产计划量");
     }

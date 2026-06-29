@@ -270,10 +270,10 @@ public final class LhScheduleTimeUtil {
     }
 
     /**
-     * 获取普通换模首检数量。
+     * 获取同班次非前2台首检数量。
      *
      * @param context 排程上下文
-     * @return 首检数量，默认4
+     * @return 首检数量，默认2
      */
     public static int getFirstInspectionQty(LhScheduleContext context) {
         if (Objects.isNull(context) || Objects.isNull(context.getScheduleConfig())) {

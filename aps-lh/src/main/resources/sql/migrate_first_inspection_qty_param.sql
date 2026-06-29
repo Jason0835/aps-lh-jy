@@ -1,6 +1,6 @@
 -- ============================================
 -- SYS0303003 迁移脚本
--- 目标：为现有工厂补齐“首检数量”参数，默认值为 4
+-- 目标：为现有工厂补齐“同班次非前2台首检的计划量”参数，默认值为 2
 -- ============================================
 
 INSERT INTO T_LH_PARAMS (
@@ -17,9 +17,9 @@ INSERT INTO T_LH_PARAMS (
 )
 SELECT t.FACTORY_CODE,
        'SYS0303003',
-       '4',
-       '首检数量',
-       '普通换模8小时已包含首检，首检数量只影响班次计划量归属和班产占用',
+       '2',
+       '同班次非前2台首检的计划量',
+       '同班次内第3台及之后换模或换活字块首检计划量，单位：条',
        'system',
        NOW(),
        'system',
@@ -39,11 +39,11 @@ LEFT JOIN T_LH_PARAMS p
 WHERE p.ID IS NULL;
 
 UPDATE T_LH_PARAMS
-SET PARAM_VALUE = '4',
-    PARAM_NAME = '首检数量',
-    REMARK = '普通换模8小时已包含首检，首检数量只影响班次计划量归属和班产占用',
+SET PARAM_VALUE = '2',
+    PARAM_NAME = '同班次非前2台首检的计划量',
+    REMARK = '同班次内第3台及之后换模或换活字块首检计划量，单位：条',
     UPDATE_BY = 'system',
     UPDATE_TIME = NOW()
 WHERE PARAM_CODE = 'SYS0303003'
   AND IS_DELETE = 0
-  AND (PARAM_VALUE IS NULL OR PARAM_VALUE = '');
+  AND (PARAM_VALUE IS NULL OR PARAM_VALUE = '' OR PARAM_VALUE = '4');
