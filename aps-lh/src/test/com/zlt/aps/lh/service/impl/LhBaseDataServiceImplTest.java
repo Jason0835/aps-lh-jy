@@ -30,13 +30,11 @@ import com.zlt.aps.lh.mapper.MdmSkuConstructionRefMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
-import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
 import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
-import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import org.junit.jupiter.api.Assertions;
@@ -343,16 +341,6 @@ public class LhBaseDataServiceImplTest {
                 Collections.singletonList(julyStatistics));
         injectField(service, "monthPlanStatisticsMapper", statisticsMapper);
 
-        MpAdjustResultMapper adjustResultMapper = mockMapper(MpAdjustResultMapper.class);
-        MpAdjustResult juneAdjustResult = new MpAdjustResult();
-        juneAdjustResult.setMaterialCode("3302001606");
-        MpAdjustResult julyAdjustResult = new MpAdjustResult();
-        julyAdjustResult.setMaterialCode("3302001607");
-        Mockito.when(adjustResultMapper.selectList(ArgumentMatchers.any())).thenReturn(
-                Collections.singletonList(juneAdjustResult),
-                Collections.singletonList(julyAdjustResult));
-        injectField(service, "mpAdjustResultMapper", adjustResultMapper);
-
         service.loadAllBaseData(context);
 
         Assertions.assertEquals("MP-07", context.getMonthPlanVersion(), "主上下文需求版本应优先使用目标业务日所在年月");
@@ -362,8 +350,6 @@ public class LhBaseDataServiceImplTest {
         Assertions.assertEquals("PV-06", context.getProductionVersionByYearMonthMap().get("2026_6"));
         Assertions.assertEquals("PV-07", context.getProductionVersionByYearMonthMap().get("2026_7"));
         Assertions.assertEquals(2, context.getLoadedMonthPlanList().size(), "跨月应加载两个自然月的月计划");
-        Assertions.assertTrue(context.getMpAdjustResultMap().containsKey("3302001606"), "6月周程调整结果应进入上下文");
-        Assertions.assertTrue(context.getMpAdjustResultMap().containsKey("3302001607"), "7月周程调整结果应进入上下文");
     }
 
     /**
@@ -543,7 +529,6 @@ public class LhBaseDataServiceImplTest {
         LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
         injectField(service, "monthPlanMapper", mockMapper(FactoryMonthPlanProductionFinalResultMapper.class));
         injectField(service, "mpFactoryProductionVersionMapper", buildProductionVersionMapper());
-        injectField(service, "mpAdjustResultMapper", mockMapper(MpAdjustResultMapper.class));
         injectField(service, "monthPlanStatisticsMapper", buildMonthPlanStatisticsMapper());
         injectField(service, "workCalendarMapper", mockMapper(MdmWorkCalendarMapper.class));
         injectField(service, "skuLhCapacityMapper", mockMapper(MdmSkuLhCapacityMapper.class));

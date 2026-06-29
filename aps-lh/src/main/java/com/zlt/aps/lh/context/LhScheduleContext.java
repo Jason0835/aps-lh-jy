@@ -26,7 +26,6 @@ import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
-import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
 import lombok.Data;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
@@ -122,8 +121,6 @@ public class LhScheduleContext {
     private Map<String, String> productionVersionByYearMonthMap = new LinkedHashMap<>();
     /** 物料+年月 -> 月累计完成量，避免同一物料跨月时完成量串月 */
     private Map<String, Integer> materialMonthFinishedQtyByMonthMap = new HashMap<>();
-    /** 周程滚动调整结果Map, key=materialCode */
-    private Map<String, List<MpAdjustResult>> mpAdjustResultMap = new HashMap<>();
     /** 工作日历列表 */
     private List<MdmWorkCalendar> workCalendarList = new ArrayList<>();
     /** SKU日硫化产能Map, key=materialCode */

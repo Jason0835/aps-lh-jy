@@ -33,7 +33,6 @@ import com.zlt.aps.lh.mapper.MdmSkuConstructionRefMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
-import com.zlt.aps.lh.mapper.MpAdjustResultMapper;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.mapper.LhSpecialMaterialBomEntityMapper;
 import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
@@ -58,7 +57,6 @@ import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
-import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
 import com.zlt.aps.mp.api.domain.entity.MpFactoryProductionVersion;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
@@ -110,9 +108,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private MpFactoryProductionVersionMapper mpFactoryProductionVersionMapper;
-
-    @Resource
-    private MpAdjustResultMapper mpAdjustResultMapper;
 
     @Resource
     private MpMonthPlanStatisticsMapper monthPlanStatisticsMapper;
@@ -267,9 +262,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 monthPlanStatisticsFuture,
                 specialMaterialBomFuture,
                 embryoStockFuture,
-                runDataInitTaskAsync("周程滚动调整结果",
-                        () -> loadAdjustResult(context, factoryCode, requiredMonthMap),
-                        () -> sizeOf(context.getMpAdjustResultMap())),
                 runDataInitTaskAsync("工作日历",
                         () -> loadWorkCalendar(context, factoryCode, calendarControlStartDate, endDate),
                         () -> sizeOf(context.getWorkCalendarList())),
@@ -1066,83 +1058,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         LocalDate scheduleLocalDate = toLocalDate(scheduleDate);
         return scheduleLocalDate.getYear() == plan.getYear()
                 && scheduleLocalDate.getMonthValue() == plan.getMonth();
-    }
-
-    /**
-     * 加载周程滚动调整结果，按物料编码聚合。
-     *
-     * @param context 排程上下文
-     * @param factoryCode 分厂编号
-     * @param year 年份
-     * @param month 月份
-     */
-    private void loadAdjustResult(LhScheduleContext context,
-                                  String factoryCode,
-                                  Map<String, LocalDate> requiredMonthMap) {
-        Map<String, List<MpAdjustResult>> adjustResultMap = new HashMap<>(64);
-        if (CollectionUtils.isEmpty(requiredMonthMap)) {
-            Calendar calendar = Calendar.getInstance();
-            calendar.setTime(context.getScheduleTargetDate());
-            mergeAdjustResult(context, factoryCode, calendar.get(Calendar.YEAR),
-                    calendar.get(Calendar.MONTH) + 1, adjustResultMap);
-        } else {
-            for (LocalDate monthStartDate : requiredMonthMap.values()) {
-                mergeAdjustResult(context, factoryCode, monthStartDate.getYear(), monthStartDate.getMonthValue(),
-                        adjustResultMap);
-            }
-        }
-        context.setMpAdjustResultMap(adjustResultMap);
-        log.debug("周程滚动调整结果加载完成, 物料数: {}, requiredMonths: {}",
-                adjustResultMap.size(),
-                CollectionUtils.isEmpty(requiredMonthMap) ? new ArrayList<String>(0) : requiredMonthMap.keySet());
-    }
-
-    private void loadAdjustResult(LhScheduleContext context, String factoryCode, int year, int month) {
-        Map<String, List<MpAdjustResult>> adjustResultMap = new HashMap<>(64);
-        mergeAdjustResult(context, factoryCode, year, month, adjustResultMap);
-        context.setMpAdjustResultMap(adjustResultMap);
-    }
-
-    /**
-     * 合并指定月份周程滚动调整结果。
-     *
-     * @param context 排程上下文
-     * @param factoryCode 工厂编码
-     * @param year 年份
-     * @param month 月份
-     * @param adjustResultMap 聚合结果
-     */
-    private void mergeAdjustResult(LhScheduleContext context,
-                                   String factoryCode,
-                                   int year,
-                                   int month,
-                                   Map<String, List<MpAdjustResult>> adjustResultMap) {
-        String monthPlanVersion = resolveMonthPlanVersion(context, year, month);
-        String productionVersion = resolveProductionVersion(context, year, month);
-        if (StringUtils.isEmpty(monthPlanVersion) || StringUtils.isEmpty(productionVersion)) {
-            log.warn("月计划版本或排产版本为空，跳过周程滚动调整结果加载, 工厂: {}, year: {}, month: {}, "
-                            + "monthPlanVersion: {}, productionVersion: {}",
-                    factoryCode, year, month, monthPlanVersion, productionVersion);
-            return;
-        }
-
-        List<MpAdjustResult> adjustResults = mpAdjustResultMapper.selectList(new LambdaQueryWrapper<MpAdjustResult>()
-                .eq(MpAdjustResult::getFactoryCode, factoryCode)
-                .eq(MpAdjustResult::getYear, year)
-                .eq(MpAdjustResult::getMonth, month)
-                .eq(MpAdjustResult::getMonthPlanVersion, monthPlanVersion)
-                .eq(MpAdjustResult::getProductionVersion, productionVersion)
-                .eq(MpAdjustResult::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
-        if (!CollectionUtils.isEmpty(adjustResults)) {
-            for (MpAdjustResult adjustResult : adjustResults) {
-                if (StringUtils.isEmpty(adjustResult.getMaterialCode())) {
-                    continue;
-                }
-                adjustResultMap.computeIfAbsent(adjustResult.getMaterialCode(), key -> new ArrayList<>()).add(adjustResult);
-            }
-        }
-        log.debug("周程滚动调整结果加载完成, year: {}, month: {}, 记录数: {}, 累计物料数: {}",
-                year, month, CollectionUtils.isEmpty(adjustResults) ? 0 : adjustResults.size(), adjustResultMap.size());
     }
 
     /**
