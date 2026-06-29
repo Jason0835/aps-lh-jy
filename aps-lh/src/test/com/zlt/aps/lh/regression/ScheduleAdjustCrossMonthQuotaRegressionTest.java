@@ -5,7 +5,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
-import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -98,17 +98,20 @@ class ScheduleAdjustCrossMonthQuotaRegressionTest {
     }
 
     @Test
-    void isDeliveryLocked_shouldOnlyUseTargetMonthAdjustResult() {
+    void isDeliveryLocked_shouldReadFromMonthPlanIsLockSchedule() {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         LhScheduleContext context = new LhScheduleContext();
-        FactoryMonthPlanProductionFinalResult julyPlan = buildPlan("3302000004", 2026, 7);
-        MpAdjustResult juneAdjustResult = buildAdjustResult("3302000004", 2026, 6, "1");
-        MpAdjustResult julyAdjustResult = buildAdjustResult("3302000004", 2026, 7, "0");
-        context.getMpAdjustResultMap().put("3302000004", Arrays.asList(juneAdjustResult, julyAdjustResult));
+        FactoryMonthPlanProductionFinalResult plan = buildPlan("3302000004", 2026, 7);
 
-        Boolean locked = ReflectionTestUtils.invokeMethod(handler, "isDeliveryLocked", context, julyPlan);
+        // isLockSchedule = 0 时返回 false
+        plan.setIsLockSchedule("0");
+        Boolean locked0 = ReflectionTestUtils.invokeMethod(handler, "isDeliveryLocked", context, plan);
+        assertEquals(Boolean.FALSE, locked0);
 
-        assertEquals(Boolean.FALSE, locked);
+        // isLockSchedule = 1 时返回 true
+        plan.setIsLockSchedule("1");
+        Boolean locked1 = ReflectionTestUtils.invokeMethod(handler, "isDeliveryLocked", context, plan);
+        assertEquals(Boolean.TRUE, locked1);
     }
 
     private static FactoryMonthPlanProductionFinalResult buildPlan(String materialCode, Integer year, Integer month) {
@@ -117,15 +120,6 @@ class ScheduleAdjustCrossMonthQuotaRegressionTest {
         plan.setYear(year);
         plan.setMonth(month);
         return plan;
-    }
-
-    private static MpAdjustResult buildAdjustResult(String materialCode, int year, int month, String isLockSchedule) {
-        MpAdjustResult adjustResult = new MpAdjustResult();
-        adjustResult.setMaterialCode(materialCode);
-        adjustResult.setYear(year);
-        adjustResult.setMonth(month);
-        adjustResult.setIsLockSchedule(isLockSchedule);
-        return adjustResult;
     }
 
     private static Date date(int year, int month, int day) {

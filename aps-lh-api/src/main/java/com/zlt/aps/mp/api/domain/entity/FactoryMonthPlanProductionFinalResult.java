@@ -767,6 +767,11 @@ public class FactoryMonthPlanProductionFinalResult extends BaseEntity {
     @TableField(value = "IS_RELEASE")
     private String isRelease;
 
+    /** 是否锁定上机日期：0-否，1-是 */
+    @ApiModelProperty(value = "是否锁定上机日期：0-否，1-是", name = "isLockSchedule")
+    @TableField(value = "IS_LOCK_SCHEDULE")
+    private String isLockSchedule;
+
     public Integer getDayLhQty() {
         if(null == this.dayVulcanizationQty) {
             return 0;

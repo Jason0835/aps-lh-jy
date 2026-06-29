@@ -18,7 +18,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
-import com.zlt.aps.mp.api.domain.entity.MpAdjustResult;
+
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -725,12 +725,7 @@ class ScheduleAdjustCarryForwardRegressionTest {
         plan.setConventionProductionQty(5);
         context.setMonthPlanList(Collections.singletonList(plan));
 
-        MpAdjustResult adjustResult = new MpAdjustResult();
-        adjustResult.setMaterialCode("MAT-LOCK");
-        adjustResult.setYear(2026);
-        adjustResult.setMonth(4);
-        adjustResult.setIsLockSchedule("1");
-        context.getMpAdjustResultMap().put("MAT-LOCK", Collections.singletonList(adjustResult));
+        plan.setIsLockSchedule("1");
 
         ReflectionTestUtils.invokeMethod(handler, "doHandle", context);
 
