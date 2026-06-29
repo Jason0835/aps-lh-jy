@@ -21,7 +21,6 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
-import com.zlt.aps.mdm.api.domain.entity.MdmMonthSurplus;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -139,8 +138,6 @@ public class LhScheduleContext {
     private Map<String, LhMachineInfo> machineInfoMap = new LinkedHashMap<>();
     /** 模具清洗计划列表 */
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
-    /** 月底计划余量Map, key=materialCode */
-    private Map<String, MdmMonthSurplus> monthSurplusMap = new HashMap<>();
     /** 胎胚实时库存Map, key=embryoCode；S4.3 会按同胎胚 SKU 标准产能占比分摊到 SKU 维度 */
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
     /** 日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd) */

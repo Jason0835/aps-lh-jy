@@ -26,7 +26,6 @@ import com.zlt.aps.lh.mapper.MdmCapsuleChuckMapper;
 import com.zlt.aps.lh.mapper.MdmDevicePlanShutMapper;
 import com.zlt.aps.lh.mapper.MdmMaterialInfoMapper;
 import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
-import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
 import com.zlt.aps.lh.mapper.MdmSkuConstructionRefMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
@@ -553,7 +552,6 @@ public class LhBaseDataServiceImplTest {
         injectField(service, "mdmModelInfoMapper", mockMapper(MdmModelInfoMapper.class));
         injectField(service, "lhMachineInfoMapper", buildMachineInfoMapper());
         injectField(service, "lhMouldCleanPlanMapper", mockMapper(LhMouldCleanPlanMapper.class));
-        injectField(service, "monthSurplusMapper", mockMapper(MdmMonthSurplusMapper.class));
         injectField(service, "lhDayFinishQtyMapper", mockMapper(LhDayFinishQtyMapper.class));
         injectField(service, "lhScheFinishQtyMapper", mockMapper(LhScheFinishQtyMapper.class));
         injectField(service, "mdmMaterialInfoMapper", mockMapper(MdmMaterialInfoMapper.class));

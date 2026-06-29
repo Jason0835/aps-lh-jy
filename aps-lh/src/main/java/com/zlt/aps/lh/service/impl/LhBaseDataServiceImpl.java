@@ -29,7 +29,6 @@ import com.zlt.aps.lh.mapper.LhRepairCapsuleMapper;
 import com.zlt.aps.lh.mapper.MdmCapsuleChuckMapper;
 import com.zlt.aps.lh.mapper.MdmMaterialInfoMapper;
 import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
-import com.zlt.aps.lh.mapper.MdmMonthSurplusMapper;
 import com.zlt.aps.lh.mapper.MdmSkuConstructionRefMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
@@ -54,7 +53,6 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
-import com.zlt.aps.mdm.api.domain.entity.MdmMonthSurplus;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -139,9 +137,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private LhMouldCleanPlanMapper lhMouldCleanPlanMapper;
-
-    @Resource
-    private MdmMonthSurplusMapper monthSurplusMapper;
 
     @Resource
     private LhDayFinishQtyMapper lhDayFinishQtyMapper;
@@ -288,9 +283,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 modelInfoFuture,
                 machineInfoFuture,
                 cleaningPlanFuture,
-                runDataInitTaskAsync("月底计划余量",
-                        () -> loadMonthSurplus(context, factoryCode, year, month),
-                        () -> sizeOf(context.getMonthSurplusMap())),
                 runDataInitTaskAsync("前日物料日完成量",
                         () -> loadDayFinishQty(context, factoryCode, previousDataDate),
                         () -> sizeOf(context.getMaterialDayFinishedQtyMap())),
@@ -1552,32 +1544,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         log.debug("模具清洗计划加载完成, 数量: {}", context.getCleaningPlanList().size());
     }
 
-    /**
-     * 加载月底计划余量，按物料编号建立Map
-     *
-     * @param context     排程上下文
-     * @param factoryCode 分厂编号
-     * @param year        年份
-     * @param month       月份
-     */
-    private void loadMonthSurplus(LhScheduleContext context, String factoryCode, int year, int month) {
-        List<MdmMonthSurplus> monthSurplusList = monthSurplusMapper.selectList(
-                new LambdaQueryWrapper<MdmMonthSurplus>()
-                        .eq(MdmMonthSurplus::getFactoryCode, factoryCode)
-                        .eq(MdmMonthSurplus::getYear, year)
-                        .eq(MdmMonthSurplus::getMonth, month)
-                        .eq(MdmMonthSurplus::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
-        Map<String, MdmMonthSurplus> monthSurplusMap = new HashMap<>(64);
-        if (monthSurplusList != null) {
-            for (MdmMonthSurplus surplus : monthSurplusList) {
-                if (StringUtils.isNotEmpty(surplus.getMaterialCode())) {
-                    monthSurplusMap.put(surplus.getMaterialCode(), surplus);
-                }
-            }
-        }
-        context.setMonthSurplusMap(monthSurplusMap);
-        log.debug("月底计划余量加载完成, 数量: {}", monthSurplusMap.size());
-    }
 
     /**
      * 加载指定日期的物料日完成量，按"物料+完成日期"建立Map。
