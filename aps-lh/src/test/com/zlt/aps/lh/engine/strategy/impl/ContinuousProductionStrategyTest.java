@@ -63,6 +63,52 @@ public class ContinuousProductionStrategyTest {
     private static final ZoneId ZONE_ID = ZoneId.of("Asia/Shanghai");
 
     @Test
+    public void applySingleMachineContinuousTargetRule_shouldUseEmbryoStockEndingForNonEndingSku() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-END-01", "1");
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302005001");
+        sku.setEmbryoCode("EMB-END-01");
+        sku.setSurplusQty(80);
+        sku.setEmbryoStock(5);
+        sku.setTargetScheduleQty(80);
+        sku.setRemainingScheduleQty(80);
+        sku.setMouldQty(2);
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501");
+        machine.setMaxMoldNum(2);
+
+        ReflectionTestUtils.invokeMethod(strategy, "applySingleMachineContinuousTargetRule",
+                context, sku, machine, null, Collections.<LhShiftConfigVO>emptyList(), false, true, null);
+
+        assertEquals(5, sku.resolveTargetScheduleQty());
+        assertEquals(5, sku.getRemainingScheduleQty());
+        assertTrue(sku.isStrictTargetQty());
+    }
+
+    @Test
+    public void shouldNotSkipSmallEndingSurplusWhenEmbryoStockEndingIsConfigured() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-END-03", "1");
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302005003");
+        sku.setEmbryoCode("EMB-END-03");
+        sku.setSurplusQty(1);
+        sku.setEmbryoStock(5);
+        sku.setShiftCapacity(16);
+
+        Boolean originalSkip = ReflectionTestUtils.invokeMethod(strategy,
+                "shouldSkipSmallEndingSurplusContinuous", context, sku, true);
+        Boolean guardedSkip = ReflectionTestUtils.invokeMethod(strategy,
+                "shouldSkipSmallEndingSurplusContinuousConsideringEmbryoEnding", context, sku, true);
+
+        assertTrue(originalSkip, "旧SKU收尾小余量规则在该场景会命中");
+        assertFalse(guardedSkip, "成型胎胚库存收尾应优先按胎胚库存排产，不能提前未排");
+    }
+
+    @Test
     public void selectPreferredSkuFromCandidates_shouldPickFirstForPriorityOneCandidates() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         IEndingJudgmentStrategy endingJudgmentStrategy = mock(IEndingJudgmentStrategy.class);

@@ -137,6 +137,8 @@ public class LhScheduleContext {
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
     /** 胎胚实时库存Map, key=embryoCode；S4.3 会按同胎胚 SKU 标准产能占比分摊到 SKU 维度 */
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
+    /** 是否成型胎胚库存收尾Map, key=胎胚代码, value=1表示按胎胚库存严格收尾，0表示沿用现有目标量规则；本次仅预留字段，赋值链路另行接入 */
+    private Map<String, String> embryoIsEndMap = new LinkedHashMap<>();
     /** 日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd) */
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
     /** 本月日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd)，仅覆盖当前排程月份截至T-1 */

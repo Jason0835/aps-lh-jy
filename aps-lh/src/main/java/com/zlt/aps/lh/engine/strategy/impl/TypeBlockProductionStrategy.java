@@ -1156,6 +1156,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             recordTypeBlockAppendFailure(failureReason, "换活字块开产时间为空");
             return false;
         }
+        // 成型胎胚库存收尾优先按胎胚库存严格控量，避免被零目标或共用胎胚零余量规则提前拦截。
+        boolean embryoStockEndingTargetApplied = getTargetScheduleQtyResolver()
+                .applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "换活字块");
         if (sku.resolveTargetScheduleQty() <= 0) {
             recordTypeBlockAppendFailure(failureReason, "换活字块目标量为0");
             log.info("换活字块目标量为0，跳过排产, machineCode: {}, materialCode: {}",
@@ -1183,7 +1186,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         boolean isEnding = endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
         boolean typeBlockExpansionContinuation = hasScheduledTypeBlockResult(context, sku);
         applySingleMachineTypeBlockTargetRule(context, machine, sku, startTime, switchStartTime, shifts,
-                isEnding, isSingleMachine, typeBlockExpansionContinuation);
+                isEnding, isSingleMachine, typeBlockExpansionContinuation, embryoStockEndingTargetApplied);
         int adoptedTargetQty = sku.resolveTargetScheduleQty();
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
         sku.setMouldQty(machineMouldQty);
@@ -1270,6 +1273,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private boolean isSharedEmbryoZeroSurplusSku(LhScheduleContext context, SkuScheduleDTO sku) {
         if (context == null || sku == null || sku.getSurplusQty() > 0
                 || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return false;
+        }
+        if (getTargetScheduleQtyResolver().isEmbryoStockEnding(context, sku)) {
             return false;
         }
         return Boolean.TRUE.equals(context.getMaterialSharedEmbryoMap().get(sku.getMaterialCode()));
@@ -1410,7 +1416,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                        List<LhShiftConfigVO> shifts,
                                                        boolean isEnding,
                                                        boolean isSingleMachine,
-                                                       boolean typeBlockExpansionContinuation) {
+                                                       boolean typeBlockExpansionContinuation,
+                                                       boolean embryoStockEndingTargetApplied) {
         if (sku == null || machine == null) {
             return;
         }
@@ -1420,7 +1427,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 context, sku, machine, switchStartTime, startTime, shifts,
                 ScheduleTypeEnum.TYPE_BLOCK.getCode());
         String appliedRule = "沿用原规则";
-        if (typeBlockExpansionContinuation) {
+        if (embryoStockEndingTargetApplied) {
+            appliedRule = "成型胎胚库存收尾-直接按胎胚库存";
+        } else if (typeBlockExpansionContinuation) {
             sku.setStrictTargetQty(isEnding || sku.isStrictTargetQty());
             appliedRule = "多机台续排剩余目标量";
         } else if (isSingleMachine && isEnding) {
@@ -2577,8 +2586,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                         result.getMaterialCode(), result.getLhMachineCode(), configPlusShiftType, shiftCapacity,
                         shift.getShiftIndex(), shift.resolveShiftTypeEnum(), actualShiftPlanQty, shiftCapacity);
             }
-            int shiftQty = ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(
-                    Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
+            int shiftQty = getTargetScheduleQtyResolver().resolveAllocatedShiftQty(
+                    context, result, Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
             if (shiftQty <= 0) {
                 continue;
             }
@@ -3473,8 +3482,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(
                     result.getMouldQty() != null ? result.getMouldQty() : 0);
             int allowedPlanQty = Math.min(planQty, quotaCap);
-            int normalizedPlanQty = ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(
-                    allowedPlanQty, planQty, mouldQty);
+            int normalizedPlanQty = getTargetScheduleQtyResolver().resolveAllocatedShiftQty(
+                    context, sku, allowedPlanQty, planQty, mouldQty);
             // 按历史欠产、当日计划、受限追补窗口消费同一SKU的日计划账本
             int consumed = normalizedPlanQty > 0
                     ? SkuDailyPlanQuotaUtil.consumeRollingQuota(
