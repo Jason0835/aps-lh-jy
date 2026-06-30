@@ -520,6 +520,18 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         List<String> activeSkuList = context.getActiveEmbryoSkuMap().get(sku.getEmbryoCode());
         return CollectionUtils.isEmpty(activeSkuList) ? 0 : activeSkuList.size();
     }
+    
+    /**
+     * 计算指定月计划记录的硫化余量（只读计算，不修改上下文）。
+     * <p>供基础数据初始化阶段以胎胚维度合并余量使用，口径与排程阶段 {@link #calculateSurplusQty} 完全一致。</p>
+     *
+     * @param context 排程上下文
+     * @param plan    月生产计划记录
+     * @return 硫化余量（Max(月度计划总量 - 已完成量 + 有效上月超欠产量, 0)）
+     */
+    public int calculatePlanSurplusQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
+        return this.calculateSurplusQty(context, plan).getSurplusQty();
+    }
 
     /**
      * 计算SKU的硫化余量

@@ -13,7 +13,9 @@ import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
+import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
+import com.zlt.aps.lh.mapper.MdmSkuScheduleCategoryMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhScheFinishQtyMapper;
@@ -36,6 +38,7 @@ import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.mapper.LhSpecialMaterialBomEntityMapper;
 import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuScheduleCategory;
 import com.zlt.aps.mp.api.domain.entity.MpMonthPlanStatistics;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
@@ -87,6 +90,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 import java.util.function.IntSupplier;
+import java.util.stream.Collectors;
 
 /**
  * 硫化排程基础数据服务实现
@@ -103,6 +107,22 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     /** 查询最新排产版本时返回前两条，用于判断是否存在多条数据 */
     private static final String FINAL_PRODUCTION_VERSION_LIMIT_TWO = "LIMIT 2";
+
+    /** 主销产品排产类型（与 t_mdm_sku_schedule_category.SCHEDULE_TYPE='01' 一致） */
+    private static final String MAIN_PRODUCT_SCHEDULE_TYPE = "01";
+
+    /** 非主销合并胎胚的收尾余量阈值：胎胚余量 <= 该值视为收尾 */
+    private static final int NON_MAIN_PRODUCT_ENDING_THRESHOLD = 2;
+
+    /** 主销合并胎胚的收尾余量阈值：胎胚余量 <= 该值视为收尾 */
+    private static final int MAIN_PRODUCT_ENDING_THRESHOLD = 0;
+
+    /** 胎胚收尾标识：收尾 */
+    private static final int EMBRYO_ENDING_FLAG_YES = 1;
+
+    /** 胎胚收尾标识：非收尾 */
+    private static final int EMBRYO_ENDING_FLAG_NO = 0;
+
     @Resource
     private FactoryMonthPlanProductionFinalResultMapper monthPlanMapper;
 
@@ -171,6 +191,12 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private MdmSkuConstructionRefMapper skuConstructionRefMapper;
+
+    @Resource
+    private MdmSkuScheduleCategoryMapper skuScheduleCategoryMapper;
+
+    @Resource
+    private ScheduleAdjustHandler scheduleAdjustHandler;
 
     @Resource(name = "lhDataInitExecutor")
     private Executor lhDataInitExecutor;
@@ -316,6 +342,10 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         () -> loadHistoryCureFormulaResults(context, factoryCode, targetDate),
                         () -> sizeOf(context.getPreviousCureFormulaResultList()))
         );
+
+        // 4. 胎胚收尾标识：依赖月计划、胎胚库存、月累计完成量、T日班次完成量、前日排程结果等均已就绪，
+        //    故在屏障同步之后计算；以胎胚维度合并硫化余量并按主销参与情况判定收尾。
+        this.loadEmbryoEndingFlagMap(context);
 
         if (context.isInterrupted()) {
             log.warn("基础数据加载中断, 工厂: {}, 目标日: {}, T日: {}, 原因: {}",
@@ -1113,6 +1143,80 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         context.setEmbryoRealtimeStockMap(stockMap);
         log.debug("胎胚实时库存加载完成, 数量: {}", stockMap.size());
     }
+
+
+    /**
+     * 加载胎胚收尾标识Map。
+     * <p>以胎胚维度合并硫化余量（口径与排程阶段 {@link ScheduleAdjustHandler#calculatePlanSurplusQty} 一致），
+     * 结合胎胚实时库存计算胎胚余量，按主销产品参与情况判定收尾标识：
+     * <ul>
+     *   <li>合并余量中含主销产品：胎胚余量 &lt;= 0 标识收尾(1)</li>
+     *   <li>合并余量全为非主销：胎胚余量 &lt;= 2 标识收尾(1)</li>
+     *   <li>其余标识非收尾(0)</li>
+     * </ul>
+     * 胎胚余量 = 合并后硫化余量 - 胎胚库存；key取月计划中所有胎胚代码全集，无库存记录默认0。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void loadEmbryoEndingFlagMap(LhScheduleContext context) {
+        List<FactoryMonthPlanProductionFinalResult> monthPlanList = context.getMonthPlanList();
+        Map<String, Integer> embryoEndingFlagMap = new LinkedHashMap<>();
+        if (CollectionUtils.isEmpty(monthPlanList)) {
+            context.setEmbryoEndingFlagMap(embryoEndingFlagMap);
+            log.debug("月生产计划为空，胎胚收尾标识Map为空");
+            return;
+        }
+
+        // 1. 查询主销产品物料集合（SCHEDULE_TYPE='01'），逻辑删除由框架自动过滤
+        Set<String> mainProductCodes = skuScheduleCategoryMapper.selectList(
+                new LambdaQueryWrapper<MdmSkuScheduleCategory>()
+                        .eq(MdmSkuScheduleCategory::getScheduleType, MAIN_PRODUCT_SCHEDULE_TYPE))
+                .stream()
+                .map(MdmSkuScheduleCategory::getMaterialCode)
+                .filter(StringUtils::isNotEmpty)
+                .collect(Collectors.toSet());
+
+        // 2. 以胎胚维度合并硫化余量，并记录该胎胚下是否含主销产品
+        Map<String, Integer> embryoSurplusMap = new LinkedHashMap<>();
+        Map<String, Boolean> embryoHasMainMap = new LinkedHashMap<>();
+        for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
+            String embryoCode = plan.getEmbryoCode();
+            if (StringUtils.isEmpty(embryoCode)) {
+                continue;
+            }
+            // 复用排程阶段余量计算口径，保证基础数据与排程判定一致
+            int surplusQty = scheduleAdjustHandler.calculatePlanSurplusQty(context, plan);
+            embryoSurplusMap.merge(embryoCode, surplusQty, Integer::sum);
+            // 任一主销参与合并即标记为含主销，否则保持默认false
+            if (mainProductCodes.contains(plan.getMaterialCode())) {
+                embryoHasMainMap.put(embryoCode, Boolean.TRUE);
+            } else {
+                embryoHasMainMap.putIfAbsent(embryoCode, Boolean.FALSE);
+            }
+        }
+
+        // 3. 按主销参与情况判定收尾标识：胎胚余量 = 合并硫化余量 - 胎胚库存
+        Map<String, Integer> embryoStockMap = context.getEmbryoRealtimeStockMap();
+        for (Map.Entry<String, Integer> entry : embryoSurplusMap.entrySet()) {
+            String embryoCode = entry.getKey();
+            int mergedSurplusQty = entry.getValue();
+            int embryoStock = embryoStockMap.getOrDefault(embryoCode, 0);
+            int embryoRemainQty = mergedSurplusQty - embryoStock;
+            boolean hasMain = embryoHasMainMap.getOrDefault(embryoCode, Boolean.FALSE);
+            int threshold = hasMain ? MAIN_PRODUCT_ENDING_THRESHOLD : NON_MAIN_PRODUCT_ENDING_THRESHOLD;
+            int endingFlag = embryoRemainQty <= threshold ? EMBRYO_ENDING_FLAG_YES : EMBRYO_ENDING_FLAG_NO;
+            embryoEndingFlagMap.put(embryoCode, endingFlag);
+        }
+
+        context.setEmbryoEndingFlagMap(embryoEndingFlagMap);
+        int endingCount = embryoEndingFlagMap.values().stream()
+                .mapToInt(Integer::intValue)
+                .filter(v -> v == EMBRYO_ENDING_FLAG_YES)
+                .sum();
+        log.info("胎胚收尾标识加载完成, 胎胚数量: {}, 主销产品数量: {}, 收尾胎胚数量: {}",
+                embryoSurplusMap.size(), mainProductCodes.size(), endingCount);
+    }
+
 
     /**
      * 加载特殊物料清单，并按当前月计划范围构建分类Map。
