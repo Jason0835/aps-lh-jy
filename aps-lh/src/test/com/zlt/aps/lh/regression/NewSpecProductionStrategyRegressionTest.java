@@ -4279,6 +4279,7 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
                 context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
         context.getNewSpecSkuList().add(sku);
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001592");
 
         MachineScheduleDTO k1115 = buildMachine("K1115", dateTime(2026, 5, 9, 6, 0));
 
@@ -4319,6 +4320,7 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
                 context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
         context.getNewSpecSkuList().add(sku);
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001592");
 
         MachineScheduleDTO k1115 = buildMachine("K1115", dateTime(2026, 5, 9, 6, 0));
 
@@ -4329,6 +4331,54 @@ class NewSpecProductionStrategyRegressionTest {
         LhScheduleResult result = context.getScheduleResultList().get(0);
         assertEquals(100, result.getDailyPlanQty().intValue(), "仅补欠产不能被收尾上调目标量");
         assertEquals("0", result.getIsEnd(), "月底仍有后续计划时必须强制按非收尾结果落库");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldSkipSmallSurplusEndingWhenShortageOnlyHasFutureMonthPlan() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 29, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 6, 30, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302000795");
+        sku.setMaterialDesc("新增收尾小余量且仅补欠产物料");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(2);
+        sku.setPendingQty(2);
+        sku.setDailyPlanQty(0);
+        sku.setTargetScheduleQty(2);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(2);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(6);
+        sku.setFutureMonthPlanQtyAfterWindow(344);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302000795");
+        appendTargetPreviousT1NightResult(context, sku.getMaterialCode(), 8);
+
+        MachineScheduleDTO k1207 = buildMachine("K1207", dateTime(2026, 6, 29, 6, 0));
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(k1207),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(),
+                "收尾小余量且业务目标日前一日T+1夜班无排产时，即使月底仍有计划也不能排产");
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "命中收尾小余量规则后应移出新增待排队列");
+        assertEquals(1, context.getUnscheduledResultList().size(), "命中收尾小余量规则后应写入未排结果");
+        assertEquals(sku.getMaterialCode(), context.getUnscheduledResultList().get(0).getMaterialCode());
+        assertEquals(Integer.valueOf(2), context.getUnscheduledResultList().get(0).getUnscheduledQty());
+        assertEquals("收尾余量小于等于允许欠产偏差值，且前日 T+1 夜班未排满，本次不排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
     @Test

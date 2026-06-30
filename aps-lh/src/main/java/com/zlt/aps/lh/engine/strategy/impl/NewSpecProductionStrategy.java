@@ -407,14 +407,20 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
             boolean forceEndingByNoFuturePlan = prepareNewSpecShortageQuota(context, sku);
+            boolean smallEndingSurplusRuleEnding = isEnding;
             if (forceEndingByNoFuturePlan) {
                 // 窗口和月底均无未来计划时，新增按收尾清量处理，目标量允许结合胎胚库存上调。
                 isEnding = true;
+                smallEndingSurplusRuleEnding = true;
             } else if (sku.isStrictNewSpecShortageOnly()) {
-                // 窗口无计划但月底仍有计划时，仅补本月历史欠产，不按收尾满清，也不触发满班超排。
+                /*
+                 * 窗口无计划但月底仍有计划时，排产结果仍按非收尾严格补本月历史欠产；
+                 * 但收尾小余量规则必须保留原始收尾口径，避免硫化余量已收尾的小尾数绕过未排判断。
+                 */
                 isEnding = false;
             }
-            if (handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku, isEnding, unscheduledReasonCountMap)) {
+            if (handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku,
+                    smallEndingSurplusRuleEnding, unscheduledReasonCountMap)) {
                 progressed = true;
                 continue;
             }
@@ -1566,8 +1572,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         StringBuilder detail = new StringBuilder(192);
         detail.append("新增收尾小余量业务目标日前一日夜班判断, materialCode: ")
                 .append(sku.getMaterialCode())
+                .append(", scheduleTargetDate: ")
+                .append(LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()))
                 .append(", surplusQty: ")
                 .append(Math.max(0, sku.getSurplusQty()))
+                .append(", monthlyHistoryShortageQty: ")
+                .append(Math.max(0, sku.getMonthlyHistoryShortageQty()))
+                .append(", futurePlanQtyAfterWindow: ")
+                .append(Math.max(0, sku.getFutureMonthPlanQtyAfterWindow()))
                 .append(", toleranceQty: ")
                 .append(toleranceQty)
                 .append(", targetPreviousT1NightPlanQty: ")
