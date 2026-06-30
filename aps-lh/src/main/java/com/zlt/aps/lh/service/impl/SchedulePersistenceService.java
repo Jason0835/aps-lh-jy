@@ -2,7 +2,6 @@ package com.zlt.aps.lh.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
-import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
@@ -32,7 +31,6 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
-import java.util.Comparator;
 import java.util.Date;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -67,8 +65,6 @@ public class SchedulePersistenceService {
     private static final String YES_FLAG = "1";
 
     private static final String NO_FLAG = "0";
-
-    private static final String CONTINUOUS_SCHEDULE_TYPE = "01";
 
     @Resource
     private LhScheduleResultMapper scheduleResultMapper;
@@ -205,8 +201,8 @@ public class SchedulePersistenceService {
     /**
      * 保存前统一计算1-8班收尾标记。
      *
-     * <p>同 SKU 多机台场景下，辅助机台最后一个有计划量的班次也视为机台收尾；
-     * 单机台或普通非收尾场景则仅按 SKU 收尾标记回填。</p>
+     * <p>每台机在当前分组内最后一个有计划量的班次早于窗口末班时视为机台收尾；
+     * 若最后有量班次已经是窗口末班，则仅在 SKU 整体收尾时标记收尾。</p>
      *
      * @param context 排程上下文
      * @param scheduleResults 排程结果列表
@@ -286,20 +282,24 @@ public class SchedulePersistenceService {
         List<LhScheduleResult> plannedResults = resolvePlannedResults(resultGroup);
         boolean multiMachine = countDistinctMachine(plannedResults) > 1;
         boolean skuEnding = containsSkuEnding(plannedResults);
-        LhScheduleResult primaryResult = multiMachine ? resolvePrimaryResult(context, plannedResults) : null;
+        Map<String, Integer> machineLastPlannedShiftMap = buildMachineLastPlannedShiftMap(plannedResults);
         for (LhScheduleResult result : resultGroup) {
             if (Objects.isNull(result)) {
                 continue;
             }
             boolean hasPlanQty = ShiftFieldUtil.resolveScheduledQty(result) > 0;
-            boolean auxiliaryMachine = hasPlanQty && multiMachine && Objects.nonNull(primaryResult)
-                    && !StringUtils.equals(result.getLhMachineCode(), primaryResult.getLhMachineCode());
-            boolean endingMachine = hasPlanQty && (skuEnding || auxiliaryMachine);
+            int currentLastPlannedShift = ShiftFieldUtil.resolveLastPlannedShiftIndex(result);
+            boolean currentMachineLastPlan = hasPlanQty
+                    && isMachineLastPlannedResult(result, currentLastPlannedShift, machineLastPlannedShiftMap);
+            boolean beforeWindowEndShift = currentLastPlannedShift > 0
+                    && currentLastPlannedShift < LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+            boolean windowEndShift = currentLastPlannedShift == LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+            boolean endingMachine = currentMachineLastPlan && (beforeWindowEndShift || (windowEndShift && skuEnding));
             int lastPlannedShift = ShiftFieldUtil.applyLastPlannedShiftEndMark(result, endingMachine);
             log.info("排程结果班次收尾标记, SKU: {}, 机台: {}, 是否多机台: {}, SKU是否收尾: {}, "
-                            + "是否收尾机台: {}, 是否辅助机台: {}, 最后有计划量班次: {}, {}",
+                            + "是否收尾机台: {}, 是否机台最后计划: {}, 是否窗口末班: {}, 最后有计划量班次: {}, {}",
                     result.getMaterialCode(), result.getLhMachineCode(), oneZero(multiMachine), oneZero(skuEnding),
-                    oneZero(endingMachine), oneZero(auxiliaryMachine),
+                    oneZero(endingMachine), oneZero(currentMachineLastPlan), oneZero(windowEndShift),
                     lastPlannedShift > 0 ? lastPlannedShift : 0, ShiftFieldUtil.buildShiftIsEndSummary(result));
         }
     }
@@ -358,87 +358,44 @@ public class SchedulePersistenceService {
     }
 
     /**
-     * 解析同SKU多机台主机台。
-     * <p>口径与新增同SKU多机台收口一致：优先更早开产，其次排产量更大，最后按机台号稳定排序。</p>
+     * 构建每台机在同 SKU 分组内的最后有量班次。
      *
      * @param plannedResults 有计划量的结果
-     * @return 主机台结果
+     * @return 机台号到最后有量班次的映射
      */
-    private LhScheduleResult resolvePrimaryResult(LhScheduleContext context, List<LhScheduleResult> plannedResults) {
-        if (CollectionUtils.isEmpty(plannedResults)) {
-            return null;
+    private Map<String, Integer> buildMachineLastPlannedShiftMap(List<LhScheduleResult> plannedResults) {
+        Map<String, Integer> machineLastPlannedShiftMap = new LinkedHashMap<>(plannedResults.size());
+        for (LhScheduleResult result : plannedResults) {
+            if (Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())) {
+                continue;
+            }
+            int lastPlannedShift = ShiftFieldUtil.resolveLastPlannedShiftIndex(result);
+            if (lastPlannedShift <= 0) {
+                continue;
+            }
+            machineLastPlannedShiftMap.merge(result.getLhMachineCode(), lastPlannedShift, Math::max);
         }
-        List<LhScheduleResult> sortedResults = new ArrayList<>(plannedResults);
-        if (isContinuousResultGroup(plannedResults)) {
-            sortedResults.sort(Comparator
-                    .comparingInt((LhScheduleResult result) -> -resolveCapsuleUsageCount(context, result))
-                    .thenComparing(result -> StringUtils.defaultString(result.getLhMachineCode())));
-            return sortedResults.get(0);
-        }
-        sortedResults.sort(Comparator
-                .comparingInt((LhScheduleResult result) -> {
-                    int firstShiftIndex = resolveFirstPlannedShiftIndex(result);
-                    return firstShiftIndex > 0 ? firstShiftIndex : Integer.MAX_VALUE;
-                })
-                .thenComparing((LhScheduleResult left, LhScheduleResult right) ->
-                        Integer.compare(ShiftFieldUtil.resolveScheduledQty(right),
-                                ShiftFieldUtil.resolveScheduledQty(left)))
-                .thenComparing(result -> StringUtils.defaultString(result.getLhMachineCode())));
-        return sortedResults.get(0);
+        return machineLastPlannedShiftMap;
     }
 
     /**
-     * 判断是否为续作结果分组。
+     * 判断当前结果是否为该机台在同 SKU 分组内的最后一次排产。
      *
-     * @param plannedResults 有计划量的结果
-     * @return true-续作结果；false-非续作结果
+     * @param result 排程结果
+     * @param currentLastPlannedShift 当前结果最后有量班次
+     * @param machineLastPlannedShiftMap 机台号到最后有量班次的映射
+     * @return true-该结果是机台最后计划；false-不是
      */
-    private boolean isContinuousResultGroup(List<LhScheduleResult> plannedResults) {
-        if (CollectionUtils.isEmpty(plannedResults)) {
+    private boolean isMachineLastPlannedResult(LhScheduleResult result,
+                                               int currentLastPlannedShift,
+                                               Map<String, Integer> machineLastPlannedShiftMap) {
+        if (Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())
+                || currentLastPlannedShift <= 0 || CollectionUtils.isEmpty(machineLastPlannedShiftMap)) {
             return false;
         }
-        for (LhScheduleResult result : plannedResults) {
-            if (Objects.isNull(result) || !StringUtils.equals(CONTINUOUS_SCHEDULE_TYPE, result.getScheduleType())
-                    || StringUtils.equals(YES_FLAG, result.getIsTypeBlock())) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * 解析机台胶囊使用次数。
-     *
-     * @param context 排程上下文
-     * @param result 排程结果
-     * @return 胶囊使用次数
-     */
-    private int resolveCapsuleUsageCount(LhScheduleContext context, LhScheduleResult result) {
-        if (Objects.isNull(context) || Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())
-                || CollectionUtils.isEmpty(context.getMachineScheduleMap())) {
-            return 0;
-        }
-        MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
-        return Objects.nonNull(machine) ? machine.getCapsuleUsageCount() : 0;
-    }
-
-    /**
-     * 获取首个有计划量的班次索引。
-     *
-     * @param result 排程结果
-     * @return 班次索引，未找到返回 -1
-     */
-    private int resolveFirstPlannedShiftIndex(LhScheduleResult result) {
-        if (Objects.isNull(result)) {
-            return -1;
-        }
-        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
-            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
-            if (Objects.nonNull(planQty) && planQty > 0) {
-                return shiftIndex;
-            }
-        }
-        return -1;
+        Integer machineLastPlannedShift = machineLastPlannedShiftMap.get(result.getLhMachineCode());
+        return Objects.nonNull(machineLastPlannedShift)
+                && Objects.equals(machineLastPlannedShift, currentLastPlannedShift);
     }
 
     /**

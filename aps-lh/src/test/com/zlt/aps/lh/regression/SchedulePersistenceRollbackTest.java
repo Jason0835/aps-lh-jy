@@ -2,7 +2,6 @@ package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
-import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
 import com.zlt.aps.lh.mapper.LhScheduleProcessLogMapper;
@@ -110,7 +109,7 @@ class SchedulePersistenceRollbackTest {
     }
 
     @Test
-    void replaceScheduleAtomically_marksOnlyAuxiliaryMachineForNonEndingMultiMachine() {
+    void replaceScheduleAtomically_marksEachMachineLastShiftBeforeWindowEnd() {
         LhScheduleContext context = buildContext();
         LhScheduleResult primaryResult = buildResult("3302002546", "K1206", "0");
         ShiftFieldUtil.setShiftPlanQty(primaryResult, 2, 17, null, null);
@@ -126,46 +125,38 @@ class SchedulePersistenceRollbackTest {
         schedulePersistenceService.replaceScheduleAtomically(context);
 
         List<LhScheduleResult> savedResults = captureSavedResults();
-        assertClassEndFlags(savedResults.get(0), 0);
+        assertClassEndFlags(savedResults.get(0), 3);
         assertClassEndFlags(savedResults.get(1), 4);
     }
 
     @Test
-    void replaceScheduleAtomically_usesContinuousKeepOrderForNonEndingMultiMachine() {
+    void replaceScheduleAtomically_marksEachContinuousMachineLastShiftBeforeWindowEnd() {
         LhScheduleContext context = buildContext();
-        MachineScheduleDTO lowCapsuleMachine = new MachineScheduleDTO();
-        lowCapsuleMachine.setMachineCode("K1206");
-        lowCapsuleMachine.setCapsuleUsageCount(1);
-        MachineScheduleDTO highCapsuleMachine = new MachineScheduleDTO();
-        highCapsuleMachine.setMachineCode("K1313");
-        highCapsuleMachine.setCapsuleUsageCount(9);
-        context.getMachineScheduleMap().put("K1206", lowCapsuleMachine);
-        context.getMachineScheduleMap().put("K1313", highCapsuleMachine);
-
-        LhScheduleResult auxiliaryResult = buildResult("3302002546", "K1206", "0");
-        auxiliaryResult.setScheduleType("01");
-        ShiftFieldUtil.setShiftPlanQty(auxiliaryResult, 2, 17, null, null);
-        ShiftFieldUtil.setShiftPlanQty(auxiliaryResult, 3, 17, null, null);
-        ShiftFieldUtil.syncDailyPlanQty(auxiliaryResult);
-        LhScheduleResult primaryResult = buildResult("3302002546", "K1313", "0");
-        primaryResult.setScheduleType("01");
-        ShiftFieldUtil.setShiftPlanQty(primaryResult, 2, 17, null, null);
-        ShiftFieldUtil.setShiftPlanQty(primaryResult, 3, 17, null, null);
-        ShiftFieldUtil.syncDailyPlanQty(primaryResult);
-        context.setScheduleResultList(Arrays.asList(auxiliaryResult, primaryResult));
+        LhScheduleResult firstResult = buildResult("3302002546", "K1206", "0");
+        firstResult.setScheduleType("01");
+        ShiftFieldUtil.setShiftPlanQty(firstResult, 2, 17, null, null);
+        ShiftFieldUtil.setShiftPlanQty(firstResult, 3, 17, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(firstResult);
+        LhScheduleResult secondResult = buildResult("3302002546", "K1313", "0");
+        secondResult.setScheduleType("01");
+        ShiftFieldUtil.setShiftPlanQty(secondResult, 2, 17, null, null);
+        ShiftFieldUtil.setShiftPlanQty(secondResult, 3, 17, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(secondResult);
+        context.setScheduleResultList(Arrays.asList(firstResult, secondResult));
         mockReplaceDependencies();
 
         schedulePersistenceService.replaceScheduleAtomically(context);
 
         List<LhScheduleResult> savedResults = captureSavedResults();
         assertClassEndFlags(savedResults.get(0), 3);
-        assertClassEndFlags(savedResults.get(1), 0);
+        assertClassEndFlags(savedResults.get(1), 3);
     }
 
     private LhScheduleContext buildContext() {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("FC01");
         context.setBatchNo("LHPC20260413001");
+        context.setScheduleDate(date(2026, 4, 13));
         context.setScheduleTargetDate(date(2026, 4, 13));
         return context;
     }
