@@ -119,7 +119,7 @@ public class LhScheduleContext {
     private Map<String, String> monthPlanVersionByYearMonthMap = new LinkedHashMap<>();
     /** 年月 -> 定稿排产版本，跨月加载月计划和结构机台统计时按自然月取版本 */
     private Map<String, String> productionVersionByYearMonthMap = new LinkedHashMap<>();
-    /** 物料+年月 -> 月累计完成量，避免同一物料跨月时完成量串月 */
+    /** 物料+产品状态+年月 -> 月累计完成量，避免同一物料不同产品状态或跨月时完成量串月 */
     private Map<String, Integer> materialMonthFinishedQtyByMonthMap = new HashMap<>();
     /** 工作日历列表 */
     private List<MdmWorkCalendar> workCalendarList = new ArrayList<>();
@@ -137,11 +137,11 @@ public class LhScheduleContext {
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
     /** 胎胚实时库存Map, key=embryoCode；S4.3 会按同胎胚 SKU 标准产能占比分摊到 SKU 维度 */
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
-    /** 日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd) */
+    /** 日完成量Map（按物料+产品状态+完成日期聚合）, key=materialCode_productStatus_finishDate(yyyy-MM-dd) */
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
-    /** 本月日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd)，仅覆盖当前排程月份截至T-1 */
+    /** 本月日完成量Map（按物料+产品状态+完成日期聚合）, key=materialCode_productStatus_finishDate(yyyy-MM-dd)，仅覆盖当前排程月份截至T-1 */
     private Map<String, Integer> materialMonthDailyFinishedQtyMap = new HashMap<>();
-    /** 月累计完成量Map（按月计划所属月份统计，截至排程窗口T日前一日）, key=materialCode */
+    /** 月累计完成量Map（按月计划所属月份统计，截至排程窗口T日前一日）, key=materialCode_productStatus */
     private Map<String, Integer> materialMonthFinishedQtyMap = new HashMap<>();
     /** T日排程班次完成量Map, key=materialCode, value=T日class1FinishQty按物料汇总值 */
     private Map<String, Integer> materialScheDayFinishQtyMap = new HashMap<>();

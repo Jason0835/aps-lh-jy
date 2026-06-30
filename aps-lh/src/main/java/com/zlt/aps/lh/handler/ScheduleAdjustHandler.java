@@ -583,6 +583,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private int calculateFinishedQty(LhScheduleContext context, FactoryMonthPlanProductionFinalResult plan) {
         // 已完成量 = 月累计完成量（截至T-1日）+ T日排程晚班完成量（class1FinishQty）
         String materialCode = plan.getMaterialCode();
+        String productStatus = plan.getProductStatus();
         if (StringUtils.isNotEmpty(materialCode)) {
             Integer monthFinishedQty = resolveMaterialMonthFinishedQty(context, plan);
             if (Objects.nonNull(monthFinishedQty)) {
@@ -590,7 +591,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             }
             if (canFallbackToPreviousFinishedQty(context)) {
                 Integer dayFinishedQty = context.getMaterialDayFinishedQtyMap().get(
-                        buildMaterialDayKey(materialCode, resolvePreviousScheduleDate(context)));
+                        buildMaterialDayKey(materialCode, productStatus, resolvePreviousScheduleDate(context)));
                 if (Objects.nonNull(dayFinishedQty)) {
                     return Math.max(dayFinishedQty, 0);
                 }
@@ -619,16 +620,17 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         if (Objects.isNull(context) || Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())) {
             return null;
         }
+        String materialStatusKey = buildMaterialStatusKey(plan.getMaterialCode(), plan.getProductStatus());
         if (Objects.nonNull(plan.getYear()) && Objects.nonNull(plan.getMonth())
                 && !CollectionUtils.isEmpty(context.getMaterialMonthFinishedQtyByMonthMap())) {
             String materialMonthKey = MonthPlanDateResolver.buildMaterialMonthKey(
-                    plan.getMaterialCode(), plan.getYear(), plan.getMonth());
+                    materialStatusKey, plan.getYear(), plan.getMonth());
             Integer monthFinishedQty = context.getMaterialMonthFinishedQtyByMonthMap().get(materialMonthKey);
             if (Objects.nonNull(monthFinishedQty)) {
                 return monthFinishedQty;
             }
         }
-        return context.getMaterialMonthFinishedQtyMap().get(plan.getMaterialCode());
+        return context.getMaterialMonthFinishedQtyMap().get(materialStatusKey);
     }
 
     /**
@@ -1440,18 +1442,20 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 获取指定日期的物料日完成量（按"物料+日期"聚合）。
+     * 获取指定日期的物料日完成量（按"物料+产品状态+日期"聚合）。
      *
      * @param context 排程上下文
-     * @param materialCode 物料编码
+     * @param plan 月计划
      * @param finishDate 完成日期
      * @return 日完成量
      */
-    private int resolveMaterialDayFinishedQty(LhScheduleContext context, String materialCode, Date finishDate) {
-        if (StringUtils.isEmpty(materialCode) || Objects.isNull(finishDate)) {
+    private int resolveMaterialDayFinishedQty(LhScheduleContext context,
+                                              FactoryMonthPlanProductionFinalResult plan,
+                                              Date finishDate) {
+        if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode()) || Objects.isNull(finishDate)) {
             return 0;
         }
-        String key = buildMaterialDayKey(materialCode, finishDate);
+        String key = buildMaterialDayKey(plan.getMaterialCode(), plan.getProductStatus(), finishDate);
         Integer dayFinishedQty = context.getMaterialDayFinishedQtyMap().get(key);
         return Objects.nonNull(dayFinishedQty) ? Math.max(dayFinishedQty, 0) : 0;
     }
@@ -1480,7 +1484,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         LocalDate cursor = monthStartDate;
         while (!cursor.isAfter(historyEndDate)) {
             int dayPlanQty = MonthPlanDateResolver.resolveDayQty(context, plan.getMaterialCode(), cursor);
-            int finishedQty = resolveMonthDailyFinishedQty(context, plan.getMaterialCode(), cursor);
+            int finishedQty = resolveMonthDailyFinishedQty(context, plan, cursor);
             int dayShortageQty = Math.max(dayPlanQty - finishedQty, 0);
             int dayIgnoredOverQty = Math.max(finishedQty - dayPlanQty, 0);
             shortageQty += dayShortageQty;
@@ -1496,8 +1500,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                     .append("]");
             cursor = cursor.plusDays(1);
         }
-        log.info("本月历史欠产统计, materialCode: {}, scheduleMonth: {}, historyRange: {}~{}, shortageQty: {}, ignoredOverProductionQty: {}, detail: {}",
-                plan.getMaterialCode(), monthStartDate.getMonthValue(), monthStartDate, historyEndDate,
+        log.info("本月历史欠产统计, materialCode: {}, productStatus: {}, scheduleMonth: {}, historyRange: {}~{}, shortageQty: {}, ignoredOverProductionQty: {}, detail: {}",
+                plan.getMaterialCode(), plan.getProductStatus(), monthStartDate.getMonthValue(), monthStartDate, historyEndDate,
                 shortageQty, ignoredOverProductionQty, detailBuilder.toString());
         return new MonthlyShortageSummary(shortageQty, ignoredOverProductionQty);
     }
@@ -1522,33 +1526,51 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 获取当前排程月份内某个物料在指定自然日的完成量。
+     * 获取当前排程月份内某个物料+产品状态在指定自然日的完成量。
      *
      * @param context 排程上下文
-     * @param materialCode 物料编码
+     * @param plan 月计划
      * @param productionDate 自然日
      * @return 日完成量
      */
     private int resolveMonthDailyFinishedQty(LhScheduleContext context,
-                                             String materialCode,
+                                             FactoryMonthPlanProductionFinalResult plan,
                                              LocalDate productionDate) {
-        if (Objects.isNull(context) || StringUtils.isEmpty(materialCode) || Objects.isNull(productionDate)) {
+        if (Objects.isNull(context) || Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())
+                || Objects.isNull(productionDate)) {
             return 0;
         }
         Integer finishedQty = context.getMaterialMonthDailyFinishedQtyMap()
-                .get(materialCode + "_" + productionDate);
+                .get(buildMaterialStatusKey(plan.getMaterialCode(), plan.getProductStatus()) + "_" + productionDate);
         return Objects.nonNull(finishedQty) ? Math.max(finishedQty, 0) : 0;
     }
 
     /**
-     * 构建"物料+日期"聚合Key。
+     * 构建"物料+产品状态"聚合Key。
      *
      * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @return 聚合Key
+     */
+    private String buildMaterialStatusKey(String materialCode, String productStatus) {
+        String trimmedProductStatus = StringUtils.trimToEmpty(productStatus);
+        if (StringUtils.isEmpty(trimmedProductStatus)) {
+            return materialCode;
+        }
+        return materialCode + "_" + trimmedProductStatus;
+    }
+
+    /**
+     * 构建"物料+产品状态+日期"聚合Key。
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
      * @param date 日期
      * @return 聚合Key
      */
-    private String buildMaterialDayKey(String materialCode, Date date) {
-        return materialCode + "_" + LhScheduleTimeUtil.formatDate(LhScheduleTimeUtil.clearTime(date));
+    private String buildMaterialDayKey(String materialCode, String productStatus, Date date) {
+        return buildMaterialStatusKey(materialCode, productStatus) + "_"
+                + LhScheduleTimeUtil.formatDate(LhScheduleTimeUtil.clearTime(date));
     }
 
     /**

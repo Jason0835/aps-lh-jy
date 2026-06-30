@@ -132,7 +132,7 @@ public class ScheduleAdjustHandlerTest {
 
         FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 300, 100, 100, 100);
         context.setMonthPlanList(Collections.singletonList(plan));
-        context.getMaterialMonthFinishedQtyMap().put("3302001575", 230);
+        context.getMaterialMonthFinishedQtyMap().put("3302001575", 180);
         setMonthDailyFinishedQtyMap(context, buildMonthFinishedQtyMap(
                 LocalDate.of(2026, 5, 1), 150,
                 LocalDate.of(2026, 5, 2), 80));
@@ -155,10 +155,10 @@ public class ScheduleAdjustHandlerTest {
     public void shouldIncludeValidLastMonthOverdueQtyWhenCalculatingSurplus() throws Exception {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 3)));
-        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 3)));
+        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 1)));
 
-        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
         plan.setLastMonthValidFlag("1");
         plan.setLastMonthOverdueQty(30);
         context.setMonthPlanList(Collections.singletonList(plan));
@@ -175,6 +175,34 @@ public class ScheduleAdjustHandlerTest {
     }
 
     /**
+     * 用例说明：LhDayFinishQty 来源的月累计完成量必须按月计划产品状态读取，T日晚班完成量仍按物料编码读取。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldReadMonthFinishedQtyByMaterialAndProductStatus() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 1)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
+        plan.setProductStatus("S");
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575_S", 70);
+        context.getMaterialMonthFinishedQtyMap().put("3302001575_T", 15);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575", 20);
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(90, sku.getFinishedQty(), "月累计完成量应取S状态70，再叠加T日晚班20");
+        Assertions.assertEquals(20, sku.getScheduleDayFinishQty(), "T日晚班完成量仍按物料编码读取");
+        Assertions.assertEquals(10, sku.getSurplusQty());
+        Assertions.assertEquals(10, sku.getPendingQty());
+    }
+
+    /**
      * 用例说明：上月超欠产标志有效且超欠产为负数（超产）时，硫化余量需要减去超产量。
      *
      * @throws Exception 反射调用异常
@@ -183,10 +211,10 @@ public class ScheduleAdjustHandlerTest {
     public void shouldSubtractNegativeLastMonthOverdueQtyWhenCalculatingSurplus() throws Exception {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 18)));
-        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 18)));
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 1)));
 
-        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
         plan.setLastMonthValidFlag("1");
         plan.setLastMonthOverdueQty(-10);
         context.setMonthPlanList(Collections.singletonList(plan));
@@ -212,10 +240,10 @@ public class ScheduleAdjustHandlerTest {
     public void shouldClampSurplusToZeroWhenNegativeLastMonthOverdueQtyExceedsRemaining() throws Exception {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 18)));
-        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 18)));
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 1)));
 
-        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
         plan.setLastMonthValidFlag("1");
         plan.setLastMonthOverdueQty(-15);
         context.setMonthPlanList(Collections.singletonList(plan));
@@ -224,12 +252,10 @@ public class ScheduleAdjustHandlerTest {
 
         invokeGatherSkuByStructure(handler, context);
 
-        SkuScheduleDTO sku = getFirstGatheredSku(context);
-        Assertions.assertEquals(90, sku.getFinishedQty());
-        Assertions.assertEquals(20, sku.getScheduleDayFinishQty());
-        // 余量 = max(0, 100 - 90 + (-15)) = max(0, -5) = 0
-        Assertions.assertEquals(0, sku.getSurplusQty());
-        Assertions.assertEquals(0, sku.getPendingQty());
+        // 余量 = max(0, 100 - 90 + (-15)) = max(0, -5) = 0，目标量为0时不进入结构分组。
+        Assertions.assertTrue(context.getStructureSkuMap().isEmpty());
+        Assertions.assertEquals(1, context.getUnscheduledResultList().size());
+        Assertions.assertEquals(0, context.getUnscheduledResultList().get(0).getUnscheduledQty());
     }
 
     /**
@@ -241,10 +267,10 @@ public class ScheduleAdjustHandlerTest {
     public void shouldIgnoreInvalidLastMonthOverdueQtyWhenCalculatingSurplus() throws Exception {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 3)));
-        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 3)));
+        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 1)));
 
-        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
         plan.setLastMonthValidFlag("0");
         plan.setLastMonthOverdueQty(30);
         context.setMonthPlanList(Collections.singletonList(plan));
@@ -269,10 +295,10 @@ public class ScheduleAdjustHandlerTest {
     public void shouldIgnoreNegativeLastMonthOverdueQtyWhenFlagInvalid() throws Exception {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         LhScheduleContext context = new LhScheduleContext();
-        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 18)));
-        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 18)));
+        context.setScheduleDate(toDate(LocalDate.of(2026, 6, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 6, 1)));
 
-        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 60, 0, 0);
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
         plan.setLastMonthValidFlag("0");
         plan.setLastMonthOverdueQty(-10);
         context.setMonthPlanList(Collections.singletonList(plan));
@@ -307,6 +333,33 @@ public class ScheduleAdjustHandlerTest {
         setMonthDailyFinishedQtyMap(context, buildMonthFinishedQtyMap(
                 LocalDate.of(2026, 5, 1), 70,
                 LocalDate.of(2026, 5, 2), 80));
+
+        invokeAdjustPreviousSchedule(handler, context);
+
+        Assertions.assertEquals(50, context.getCarryForwardQtyMap().get("3302001575"));
+    }
+
+    /**
+     * 用例说明：本月历史欠产统计必须按月计划产品状态读取逐日完成量，不能混用同物料其他状态。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldReadMonthDailyFinishedQtyByMaterialAndProductStatus() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 3)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 3)));
+        enableCarryForwardQty(context);
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 300, 100, 100, 100);
+        plan.setProductStatus("S");
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575_S", 150);
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302001575_S_2026-05-01", 70);
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302001575_S_2026-05-02", 80);
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302001575_T_2026-05-01", 100);
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302001575_T_2026-05-02", 100);
 
         invokeAdjustPreviousSchedule(handler, context);
 

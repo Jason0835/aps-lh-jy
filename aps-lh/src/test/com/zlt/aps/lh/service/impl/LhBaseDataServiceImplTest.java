@@ -279,6 +279,71 @@ public class LhBaseDataServiceImplTest {
     }
 
     /**
+     * 用例说明：LhDayFinishQty 来源的日完成量和月累计完成量必须按物料编码+示方类型汇总，避免同物料不同产品状态串量。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldAggregateDayFinishQtyByMaterialAndLhType() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(buildDate(2026, 6, 14));
+        context.setScheduleTargetDate(buildDate(2026, 6, 14));
+
+        FactoryMonthPlanProductionFinalResult formalPlan = new FactoryMonthPlanProductionFinalResult();
+        formalPlan.setMaterialCode("3302001139");
+        formalPlan.setProductStatus("S");
+        FactoryMonthPlanProductionFinalResult trialPlan = new FactoryMonthPlanProductionFinalResult();
+        trialPlan.setMaterialCode("3302001139");
+        trialPlan.setProductStatus("T");
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper =
+                mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any()))
+                .thenReturn(Arrays.asList(formalPlan, trialPlan));
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        LhDayFinishQty formalPreviousDayQty = buildDayFinishQty(
+                "3302001139", "S", 2026, 6, 13, BigDecimal.valueOf(9));
+        LhDayFinishQty trialPreviousDayQty = buildDayFinishQty(
+                "3302001139", "T", 2026, 6, 13, BigDecimal.valueOf(7));
+        LhDayFinishQty formalMonthQtyA = buildDayFinishQty(
+                "3302001139", "S", 2026, 6, 11, BigDecimal.valueOf(10));
+        LhDayFinishQty formalMonthQtyB = buildDayFinishQty(
+                "3302001139", "S", 2026, 6, 12, BigDecimal.valueOf(20));
+        LhDayFinishQty trialMonthQty = buildDayFinishQty(
+                "3302001139", "T", 2026, 6, 12, BigDecimal.valueOf(5));
+        LhDayFinishQtyMapper dayFinishQtyMapper = mockMapper(LhDayFinishQtyMapper.class);
+        Mockito.when(dayFinishQtyMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Arrays.asList(formalMonthQtyA, formalMonthQtyB, trialMonthQty),
+                Arrays.asList(formalPreviousDayQty, trialPreviousDayQty));
+        injectField(service, "lhDayFinishQtyMapper", dayFinishQtyMapper);
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertEquals(Integer.valueOf(9),
+                context.getMaterialDayFinishedQtyMap().get("3302001139_S_2026-06-13"));
+        Assertions.assertEquals(Integer.valueOf(7),
+                context.getMaterialDayFinishedQtyMap().get("3302001139_T_2026-06-13"));
+        Assertions.assertFalse(context.getMaterialDayFinishedQtyMap().containsKey("3302001139_2026-06-13"),
+                "日完成量不能再按物料+日期旧key聚合");
+        Assertions.assertEquals(Integer.valueOf(30),
+                context.getMaterialMonthFinishedQtyMap().get("3302001139_S"));
+        Assertions.assertEquals(Integer.valueOf(5),
+                context.getMaterialMonthFinishedQtyMap().get("3302001139_T"));
+        Assertions.assertEquals(Integer.valueOf(10),
+                context.getMaterialMonthDailyFinishedQtyMap().get("3302001139_S_2026-06-11"));
+        Assertions.assertEquals(Integer.valueOf(20),
+                context.getMaterialMonthDailyFinishedQtyMap().get("3302001139_S_2026-06-12"));
+        Assertions.assertEquals(Integer.valueOf(5),
+                context.getMaterialMonthDailyFinishedQtyMap().get("3302001139_T_2026-06-12"));
+        Assertions.assertEquals(Integer.valueOf(30),
+                context.getMaterialMonthFinishedQtyByMonthMap().get("3302001139_S_2026_6"));
+        Assertions.assertEquals(Integer.valueOf(5),
+                context.getMaterialMonthFinishedQtyByMonthMap().get("3302001139_T_2026_6"));
+    }
+
+    /**
      * 用例说明：跨月加载必须按各自然月定稿记录中的需求版本和排产版本查询月计划、结构统计与周程调整。
      *
      * @throws Exception 反射注入异常
@@ -605,8 +670,14 @@ public class LhBaseDataServiceImplTest {
 
     private LhDayFinishQty buildDayFinishQty(String materialCode, int year, int month,
                                              int day, BigDecimal finishedQty) {
+        return buildDayFinishQty(materialCode, null, year, month, day, finishedQty);
+    }
+
+    private LhDayFinishQty buildDayFinishQty(String materialCode, String lhType, int year, int month,
+                                             int day, BigDecimal finishedQty) {
         LhDayFinishQty result = new LhDayFinishQty();
         result.setMaterialCode(materialCode);
+        result.setLhType(lhType);
         result.setFinishDate(buildDate(year, month, day));
         result.setDayFinishQty(finishedQty);
         return result;

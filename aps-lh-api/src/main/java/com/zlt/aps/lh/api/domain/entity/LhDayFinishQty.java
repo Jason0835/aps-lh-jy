@@ -54,4 +54,12 @@ public class LhDayFinishQty extends BaseEntity implements Serializable {
     @TableField(value = "FACTORY_CODE")
     private String factoryCode;
 
+    @ApiModelProperty(value = "示方号")
+    @TableField(value = "LH_NO")
+    private String lhNo;
+
+    @ApiModelProperty(value = "示方类型")
+    @TableField(value = "LH_TYPE")
+    private String lhType;
+
 }

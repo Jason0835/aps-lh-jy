@@ -1461,7 +1461,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
 
     /**
-     * 加载指定日期的物料日完成量，按"物料+完成日期"建立Map。
+     * 加载指定日期的物料日完成量，按"物料+示方类型+完成日期"建立Map。
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
@@ -1484,7 +1484,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 if (StringUtils.isEmpty(finishQty.getMaterialCode())) {
                     continue;
                 }
-                String key = buildMaterialDayKey(finishQty.getMaterialCode(), dayStart);
+                String key = buildMaterialDayKey(finishQty.getMaterialCode(), finishQty.getLhType(), dayStart);
                 materialDayFinishedQtyMap.merge(key, resolveDayFinishedQty(finishQty), Integer::sum);
             }
         }
@@ -1494,7 +1494,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载月累计完成量（截至排产T-1日（包含）），按物料编号建立Map。
+     * 加载月累计完成量（截至排产T-1日（包含）），按物料编号+示方类型建立Map。
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
@@ -1605,14 +1605,12 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 if (StringUtils.isEmpty(finishQty.getMaterialCode())) {
                     continue;
                 }
-                monthFinishedQtyMap.merge(
-                        finishQty.getMaterialCode(),
-                        resolveDayFinishedQty(finishQty),
-                        Integer::sum);
+                String materialStatusKey = buildMaterialStatusKey(finishQty.getMaterialCode(), finishQty.getLhType());
+                monthFinishedQtyMap.merge(materialStatusKey, resolveDayFinishedQty(finishQty), Integer::sum);
                 // 逐日Map仅保留完成量非空的日期；0是有效数据，供“最近一次完成量”判断停止回溯。
                 if (Objects.nonNull(finishQty.getDayFinishQty())) {
                     materialMonthDailyFinishedQtyMap.merge(
-                            buildMaterialDayKey(finishQty.getMaterialCode(),
+                            buildMaterialDayKey(finishQty.getMaterialCode(), finishQty.getLhType(),
                                     LhScheduleTimeUtil.clearTime(finishQty.getFinishDate())),
                             resolveDayFinishedQty(finishQty),
                             Integer::sum);
@@ -1628,7 +1626,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 按月计划物料初始化月累计完成量，确保目标月无完成记录时下游按0处理，不回退到上月完成量。
+     * 按月计划物料+产品状态初始化月累计完成量，确保目标月无完成记录时下游按0处理，不回退到上月完成量。
      *
      * @param context 排程上下文
      * @return 月计划物料完成量Map
@@ -1642,13 +1640,14 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())) {
                 continue;
             }
-            materialMonthFinishedQtyMap.putIfAbsent(plan.getMaterialCode(), 0);
+            materialMonthFinishedQtyMap.putIfAbsent(
+                    buildMaterialStatusKey(plan.getMaterialCode(), plan.getProductStatus()), 0);
         }
         return materialMonthFinishedQtyMap;
     }
 
     /**
-     * 按指定年月的已加载月计划物料初始化月累计完成量。
+     * 按指定年月的已加载月计划物料+产品状态初始化月累计完成量。
      *
      * @param context 排程上下文
      * @param year 年份
@@ -1665,7 +1664,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                     || !isMonthPlanBelongToMonth(plan, year, month)) {
                 continue;
             }
-            materialMonthFinishedQtyMap.putIfAbsent(plan.getMaterialCode(), 0);
+            materialMonthFinishedQtyMap.putIfAbsent(
+                    buildMaterialStatusKey(plan.getMaterialCode(), plan.getProductStatus()), 0);
         }
         return materialMonthFinishedQtyMap;
     }
@@ -1690,10 +1690,10 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 将单月物料完成量写入物料+年月维度Map。
+     * 将单月物料+产品状态完成量写入物料+产品状态+年月维度Map。
      *
-     * @param monthFinishedQtyMap 单月物料完成量
-     * @param materialMonthFinishedQtyByMonthMap 物料+年月维度完成量
+     * @param monthFinishedQtyMap 单月物料+产品状态完成量
+     * @param materialMonthFinishedQtyByMonthMap 物料+产品状态+年月维度完成量
      * @param year 年份
      * @param month 月份
      */
@@ -1755,14 +1755,31 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 生成"物料+完成日期"聚合Key。
+     * 构建"物料+产品状态"聚合Key。
      *
      * @param materialCode 物料编码
+     * @param productStatus 产品状态或示方类型
+     * @return 聚合Key
+     */
+    private String buildMaterialStatusKey(String materialCode, String productStatus) {
+        String trimmedProductStatus = StringUtils.trimToEmpty(productStatus);
+        if (StringUtils.isEmpty(trimmedProductStatus)) {
+            return materialCode;
+        }
+        return materialCode + "_" + trimmedProductStatus;
+    }
+
+    /**
+     * 生成"物料+产品状态+完成日期"聚合Key。
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态或示方类型
      * @param finishDate 完成日期
      * @return 聚合Key
      */
-    private String buildMaterialDayKey(String materialCode, Date finishDate) {
-        return materialCode + "_" + LhScheduleTimeUtil.formatDate(LhScheduleTimeUtil.clearTime(finishDate));
+    private String buildMaterialDayKey(String materialCode, String productStatus, Date finishDate) {
+        return buildMaterialStatusKey(materialCode, productStatus) + "_"
+                + LhScheduleTimeUtil.formatDate(LhScheduleTimeUtil.clearTime(finishDate));
     }
 
     /**
