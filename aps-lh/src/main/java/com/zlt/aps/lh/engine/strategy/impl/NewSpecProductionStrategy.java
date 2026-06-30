@@ -4246,7 +4246,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private int resolveOriginalNewSpecDayPlanQty(LhScheduleContext context,
                                                  SkuScheduleDTO sku,
                                                  LocalDate productionDate) {
-        int dayPlanQty = MonthPlanDateResolver.resolveDayQty(context, sku.getMaterialCode(), productionDate);
+        int dayPlanQty = MonthPlanDateResolver.resolveDayQty(
+                context, sku.getMaterialCode(), sku.getProductStatus(), productionDate);
         if (dayPlanQty > 0 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return dayPlanQty;
         }

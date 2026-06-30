@@ -477,7 +477,7 @@ public class SchedulePersistenceService {
 
     /**
      * 为排程结果填充 T~T+2 日计划量（来自月计划 dayN）。
-     * <p>按 materialCode 匹配月计划，取 scheduleDate 对应日以及后两天的月计划量，逗号分隔。</p>
+     * <p>按 materialCode + productStatus 匹配月计划，取 scheduleDate 对应日以及后两天的月计划量，逗号分隔。</p>
      *
      * @param context 排程上下文
      * @param scheduleResults 排程结果列表
@@ -492,20 +492,25 @@ public class SchedulePersistenceService {
                 continue;
             }
             // 使用全局窗口起点 T 日计算 DAY_N_RANGE，而非 result 上的目标日
-            String dayNRange = resolveDayNRange(context, result.getMaterialCode(), context.getScheduleDate());
+            String dayNRange = resolveDayNRange(
+                    context, result.getMaterialCode(), result.getProductStatus(), context.getScheduleDate());
             result.setDayNRange(dayNRange);
         }
     }
 
     /**
-     * 根据排程窗口起点和物料编码，返回 T~T+2 的日计划量逗号分隔字符串。
+     * 根据排程窗口起点、物料编码和产品状态，返回 T~T+2 的日计划量逗号分隔字符串。
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
+     * @param productStatus 产品状态
      * @param scheduleDate 排程日期 T
      * @return 日计划量逗号分隔，如 "100,120,110"
      */
-    private String resolveDayNRange(LhScheduleContext context, String materialCode, Date scheduleDate) {
+    private String resolveDayNRange(LhScheduleContext context,
+                                    String materialCode,
+                                    String productStatus,
+                                    Date scheduleDate) {
         Calendar cal = Calendar.getInstance();
         cal.setTime(scheduleDate);
         StringBuilder sb = new StringBuilder(16);
@@ -514,7 +519,7 @@ public class SchedulePersistenceService {
                 sb.append(",");
             }
             LocalDate productionDate = cal.getTime().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
-            int qty = MonthPlanDateResolver.resolveDayQty(context, materialCode, productionDate);
+            int qty = MonthPlanDateResolver.resolveDayQty(context, materialCode, productStatus, productionDate);
             sb.append(qty);
             cal.add(Calendar.DAY_OF_MONTH, 1);
         }
@@ -523,7 +528,7 @@ public class SchedulePersistenceService {
 
     /**
      * 为排程结果填充月初至 T-1 日累计欠产量。
-     * <p>欠产数据来源于上下文 {@code carryForwardQtyMap}，由 ScheduleAdjustHandler 排程前归集。</p>
+     * <p>欠产数据来源于上下文 {@code carryForwardQtyMap}，由 ScheduleAdjustHandler 按物料+产品状态归集。</p>
      *
      * @param context 排程上下文
      * @param scheduleResults 排程结果列表
@@ -540,7 +545,9 @@ public class SchedulePersistenceService {
             if (Objects.isNull(result) || StringUtils.isEmpty(result.getMaterialCode())) {
                 continue;
             }
-            Integer shortageQty = carryForwardQtyMap.get(result.getMaterialCode());
+            String materialStatusKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                    result.getMaterialCode(), result.getProductStatus());
+            Integer shortageQty = carryForwardQtyMap.get(materialStatusKey);
             if (Objects.nonNull(shortageQty)) {
                 result.setShortageQty(shortageQty);
             }

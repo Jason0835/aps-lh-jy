@@ -1018,9 +1018,11 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())) {
                 continue;
             }
-            FactoryMonthPlanProductionFinalResult selectedPlan = selectedPlanMap.get(plan.getMaterialCode());
+            String materialStatusKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                    plan.getMaterialCode(), plan.getProductStatus());
+            FactoryMonthPlanProductionFinalResult selectedPlan = selectedPlanMap.get(materialStatusKey);
             if (Objects.isNull(selectedPlan) || shouldReplaceSchedulingPlan(context, selectedPlan, plan)) {
-                selectedPlanMap.put(plan.getMaterialCode(), plan);
+                selectedPlanMap.put(materialStatusKey, plan);
             }
         }
         return new ArrayList<FactoryMonthPlanProductionFinalResult>(selectedPlanMap.values());

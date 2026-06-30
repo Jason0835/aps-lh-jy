@@ -143,6 +143,37 @@ class RollingScheduleHandoffServiceRegressionTest {
     }
 
     @Test
+    void apply_shouldIsolateInheritedPlanQtyByProductStatus() {
+        LhScheduleContext context = newRollingContext();
+        FactoryMonthPlanProductionFinalResult formalPlan = buildPlan("MAT-A");
+        formalPlan.setProductStatus("S");
+        formalPlan.setMonthPlanVersion("MP-S");
+        formalPlan.setProductionVersion("PV-S");
+        FactoryMonthPlanProductionFinalResult trialPlan = buildPlan("MAT-A");
+        trialPlan.setProductStatus("T");
+        trialPlan.setMonthPlanVersion("MP-T");
+        trialPlan.setProductionVersion("PV-T");
+        context.setMonthPlanList(Arrays.asList(formalPlan, trialPlan));
+        LhScheduleResult previousResult = buildPreviousResult();
+        previousResult.setProductStatus("S");
+        previousResult.setMonthPlanVersion("MP-S");
+        previousResult.setProductionVersion("PV-S");
+        context.setPreviousScheduleResultList(Collections.singletonList(previousResult));
+
+        service.apply(context);
+
+        assertTrue(!context.isInterrupted(), "同物料不同产品状态时应按上一批产品状态匹配当前月计划");
+        assertEquals(1, context.getRollingInheritedScheduleResultList().size());
+        LhScheduleResult inherited = context.getRollingInheritedScheduleResultList().get(0);
+        assertEquals("S", inherited.getProductStatus());
+        assertEquals("MP-S", inherited.getMonthPlanVersion());
+        assertEquals("PV-S", inherited.getProductionVersion());
+        assertEquals(150, context.getInheritedPlanQtyMap().get("MAT-A_S").intValue());
+        assertNull(context.getInheritedPlanQtyMap().get("MAT-A_T"));
+        assertNull(context.getInheritedPlanQtyMap().get("MAT-A"));
+    }
+
+    @Test
     void apply_shouldClearDowntimeSummaryFieldsOnInheritedResult() {
         LhScheduleContext context = newRollingContext();
         context.setMonthPlanList(Collections.singletonList(buildPlan("MAT-A")));
@@ -293,6 +324,7 @@ class RollingScheduleHandoffServiceRegressionTest {
         context.setProductionVersion("PV-V1");
         context.setScheduleDate(date(2026, 4, 24));
         context.setScheduleTargetDate(date(2026, 4, 26));
+        context.setWindowEndDate(date(2026, 4, 26));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
 
         MachineScheduleDTO machine = new MachineScheduleDTO();

@@ -54,6 +54,26 @@ class CuringMonthPlanTotalCalculatorTest {
         assertEquals(0, result.getCrossMonthPlanTotal());
     }
 
+    @Test
+    void calculate_shouldUseProductStatusWhenSameMaterialHasMultipleMonthPlans() {
+        LhScheduleContext context = new LhScheduleContext();
+        FactoryMonthPlanProductionFinalResult trialPlan = buildPlan("3302000003", 2026, 6);
+        trialPlan.setProductStatus("T");
+        trialPlan.setDay1(300);
+        FactoryMonthPlanProductionFinalResult formalPlan = buildPlan("3302000003", 2026, 6);
+        formalPlan.setProductStatus("S");
+        formalPlan.setDay1(100);
+        context.setMonthPlanList(Arrays.asList(trialPlan, formalPlan));
+        context.setMonthPlanByMaterialMonthMap(MonthPlanDateResolver.buildMaterialMonthPlanMap(
+                context.getMonthPlanList()));
+
+        CuringMonthPlanTotalResult result = CuringMonthPlanTotalCalculator.calculate(context, formalPlan,
+                LocalDate.of(2026, 6, 1), LocalDate.of(2026, 6, 1), 0, 0);
+
+        assertEquals(100, result.getMonthPlanTotal());
+        assertEquals(LocalDate.of(2026, 6, 1), result.getBreakPointDate());
+    }
+
     private static FactoryMonthPlanProductionFinalResult buildPlan(String materialCode, int year, int month) {
         FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
         plan.setFactoryCode("116");

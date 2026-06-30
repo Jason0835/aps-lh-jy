@@ -50,14 +50,15 @@ public final class CuringMonthPlanTotalCalculator {
             return result;
         }
         String materialCode = plan.getMaterialCode();
-        LocalDate latestPlanDateInWindow = findLatestPlanDateInWindow(context, materialCode,
+        String productStatus = plan.getProductStatus();
+        LocalDate latestPlanDateInWindow = findLatestPlanDateInWindow(context, materialCode, productStatus,
                 scheduleStartDate, windowEndDate);
         result.setLatestPlanDateInWindow(latestPlanDateInWindow);
         if (Objects.nonNull(latestPlanDateInWindow)) {
-            fillWindowPlanResult(context, result, materialCode, scheduleStartDate, latestPlanDateInWindow);
+            fillWindowPlanResult(context, result, materialCode, productStatus, scheduleStartDate, latestPlanDateInWindow);
             return result;
         }
-        fillNoWindowPlanResult(context, result, materialCode, scheduleStartDate,
+        fillNoWindowPlanResult(context, result, materialCode, productStatus, scheduleStartDate,
                 actualFinishedQty, lastMonthOverdueQty);
         return result;
     }
@@ -65,6 +66,7 @@ public final class CuringMonthPlanTotalCalculator {
     private static void fillWindowPlanResult(LhScheduleContext context,
                                              CuringMonthPlanTotalResult result,
                                              String materialCode,
+                                             String productStatus,
                                              LocalDate scheduleStartDate,
                                              LocalDate latestPlanDateInWindow) {
         boolean crossMonth = scheduleStartDate.getYear() != latestPlanDateInWindow.getYear()
@@ -72,12 +74,13 @@ public final class CuringMonthPlanTotalCalculator {
         result.setCrossMonth(crossMonth);
         if (crossMonth) {
             LocalDate latestCurrentMonthPlanDate = findLatestPlanDateInCurrentMonthWindow(
-                    context, materialCode, scheduleStartDate);
-            int currentMonthPlanTotal = calculateSegmentTotal(context, materialCode, latestCurrentMonthPlanDate);
+                    context, materialCode, productStatus, scheduleStartDate);
+            int currentMonthPlanTotal = calculateSegmentTotal(
+                    context, materialCode, productStatus, latestCurrentMonthPlanDate);
             LocalDate crossBreakPointDate = MonthPlanDateResolver.findBreakPointDate(
-                    context, materialCode, latestPlanDateInWindow);
+                    context, materialCode, productStatus, latestPlanDateInWindow);
             int crossMonthPlanTotal = MonthPlanDateResolver.sumMonthPlanQtyToDate(
-                    context, materialCode, crossBreakPointDate);
+                    context, materialCode, productStatus, crossBreakPointDate);
             result.setBreakPointDate(crossBreakPointDate);
             result.setCurrentMonthPlanTotal(currentMonthPlanTotal);
             result.setCrossMonthPlanTotal(crossMonthPlanTotal);
@@ -86,8 +89,9 @@ public final class CuringMonthPlanTotalCalculator {
             return;
         }
         LocalDate breakPointDate = MonthPlanDateResolver.findBreakPointDate(
-                context, materialCode, latestPlanDateInWindow);
-        int monthPlanTotal = MonthPlanDateResolver.sumMonthPlanQtyToDate(context, materialCode, breakPointDate);
+                context, materialCode, productStatus, latestPlanDateInWindow);
+        int monthPlanTotal = MonthPlanDateResolver.sumMonthPlanQtyToDate(
+                context, materialCode, productStatus, breakPointDate);
         result.setBreakPointDate(breakPointDate);
         result.setCurrentMonthPlanTotal(monthPlanTotal);
         result.setMonthPlanTotal(monthPlanTotal);
@@ -97,10 +101,12 @@ public final class CuringMonthPlanTotalCalculator {
     private static void fillNoWindowPlanResult(LhScheduleContext context,
                                                CuringMonthPlanTotalResult result,
                                                String materialCode,
+                                               String productStatus,
                                                LocalDate scheduleStartDate,
                                                int actualFinishedQty,
                                                int lastMonthOverdueQty) {
-        int previousPlanTotal = MonthPlanDateResolver.sumMonthPlanQtyToDate(context, materialCode, scheduleStartDate);
+        int previousPlanTotal = MonthPlanDateResolver.sumMonthPlanQtyToDate(
+                context, materialCode, productStatus, scheduleStartDate);
         int previousSurplusQty = previousPlanTotal - Math.max(0, actualFinishedQty) + lastMonthOverdueQty;
         if (previousSurplusQty > 0) {
             result.setBreakPointDate(scheduleStartDate);
@@ -109,9 +115,11 @@ public final class CuringMonthPlanTotalCalculator {
             result.setCalculateScene(SCENE_NO_WINDOW_PLAN_WITH_HISTORY_SURPLUS);
             return;
         }
-        LocalDate futurePlanDate = findFirstFuturePlanDate(context, materialCode, scheduleStartDate);
-        LocalDate breakPointDate = MonthPlanDateResolver.findBreakPointDate(context, materialCode, futurePlanDate);
-        int monthPlanTotal = MonthPlanDateResolver.sumMonthPlanQtyToDate(context, materialCode, breakPointDate);
+        LocalDate futurePlanDate = findFirstFuturePlanDate(context, materialCode, productStatus, scheduleStartDate);
+        LocalDate breakPointDate = MonthPlanDateResolver.findBreakPointDate(
+                context, materialCode, productStatus, futurePlanDate);
+        int monthPlanTotal = MonthPlanDateResolver.sumMonthPlanQtyToDate(
+                context, materialCode, productStatus, breakPointDate);
         result.setCrossMonth(Objects.nonNull(futurePlanDate)
                 && (scheduleStartDate.getYear() != futurePlanDate.getYear()
                 || scheduleStartDate.getMonthValue() != futurePlanDate.getMonthValue()));
@@ -124,12 +132,14 @@ public final class CuringMonthPlanTotalCalculator {
 
     private static LocalDate findLatestPlanDateInWindow(LhScheduleContext context,
                                                        String materialCode,
+                                                       String productStatus,
                                                        LocalDate startDate,
                                                        LocalDate endDate) {
         LocalDate latestPlanDate = null;
         LocalDate cursor = startDate;
         while (!cursor.isAfter(endDate)) {
-            if (MonthPlanDateResolver.hasPlanQty(MonthPlanDateResolver.resolveDayQty(context, materialCode, cursor))) {
+            if (MonthPlanDateResolver.hasPlanQty(
+                    MonthPlanDateResolver.resolveDayQty(context, materialCode, productStatus, cursor))) {
                 latestPlanDate = cursor;
             }
             cursor = cursor.plusDays(1);
@@ -139,12 +149,14 @@ public final class CuringMonthPlanTotalCalculator {
 
     private static LocalDate findLatestPlanDateInCurrentMonthWindow(LhScheduleContext context,
                                                                     String materialCode,
+                                                                    String productStatus,
                                                                     LocalDate scheduleStartDate) {
         LocalDate monthEndDate = scheduleStartDate.withDayOfMonth(scheduleStartDate.lengthOfMonth());
         LocalDate latestPlanDate = null;
         LocalDate cursor = scheduleStartDate;
         while (!cursor.isAfter(monthEndDate)) {
-            if (MonthPlanDateResolver.hasPlanQty(MonthPlanDateResolver.resolveDayQty(context, materialCode, cursor))) {
+            if (MonthPlanDateResolver.hasPlanQty(
+                    MonthPlanDateResolver.resolveDayQty(context, materialCode, productStatus, cursor))) {
                 latestPlanDate = cursor;
             }
             cursor = cursor.plusDays(1);
@@ -154,11 +166,13 @@ public final class CuringMonthPlanTotalCalculator {
 
     private static LocalDate findFirstFuturePlanDate(LhScheduleContext context,
                                                      String materialCode,
+                                                     String productStatus,
                                                      LocalDate scheduleStartDate) {
         LocalDate scanEndDate = scheduleStartDate.withDayOfMonth(scheduleStartDate.lengthOfMonth());
         LocalDate cursor = scheduleStartDate;
         while (!cursor.isAfter(scanEndDate)) {
-            if (MonthPlanDateResolver.hasPlanQty(MonthPlanDateResolver.resolveDayQty(context, materialCode, cursor))) {
+            if (MonthPlanDateResolver.hasPlanQty(
+                    MonthPlanDateResolver.resolveDayQty(context, materialCode, productStatus, cursor))) {
                 return cursor;
             }
             cursor = cursor.plusDays(1);
@@ -168,11 +182,13 @@ public final class CuringMonthPlanTotalCalculator {
 
     private static int calculateSegmentTotal(LhScheduleContext context,
                                              String materialCode,
+                                             String productStatus,
                                              LocalDate latestPlanDate) {
         if (Objects.isNull(latestPlanDate)) {
             return 0;
         }
-        LocalDate breakPointDate = MonthPlanDateResolver.findBreakPointDate(context, materialCode, latestPlanDate);
-        return MonthPlanDateResolver.sumMonthPlanQtyToDate(context, materialCode, breakPointDate);
+        LocalDate breakPointDate = MonthPlanDateResolver.findBreakPointDate(
+                context, materialCode, productStatus, latestPlanDate);
+        return MonthPlanDateResolver.sumMonthPlanQtyToDate(context, materialCode, productStatus, breakPointDate);
     }
 }

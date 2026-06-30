@@ -1125,7 +1125,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         int firstDayPlanQty = 0;
         boolean first = true;
         for (LocalDate productionDate : shiftMapByDate.keySet()) {
-            int dayPlanQty = MonthPlanDateResolver.resolveDayQty(context, sourceSku.getMaterialCode(), productionDate);
+            int dayPlanQty = MonthPlanDateResolver.resolveDayQty(
+                    context, sourceSku.getMaterialCode(), sourceSku.getProductStatus(), productionDate);
             if (first) {
                 firstDayPlanQty = dayPlanQty;
                 first = false;
@@ -2181,9 +2182,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 || StringUtils.isEmpty(sourceSku.getMaterialCode())) {
             return 0;
         }
-        int dayPlanQty = MonthPlanDateResolver.resolveDayQty(context, sourceSku.getMaterialCode(), productionDate);
-        log.debug("续作单机降模月计划T日量解析, materialCode: {}, 日期: {}, monthPlanDayQty: {}",
-                sourceSku.getMaterialCode(), productionDate, dayPlanQty);
+        int dayPlanQty = MonthPlanDateResolver.resolveDayQty(
+                context, sourceSku.getMaterialCode(), sourceSku.getProductStatus(), productionDate);
+        log.debug("续作单机降模月计划T日量解析, materialCode: {}, productStatus: {}, 日期: {}, monthPlanDayQty: {}",
+                sourceSku.getMaterialCode(), sourceSku.getProductStatus(), productionDate, dayPlanQty);
         return dayPlanQty;
     }
 

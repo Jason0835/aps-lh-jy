@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
@@ -95,9 +96,11 @@ public class RollingScheduleHandoffService {
             inheritedResults.add(inheritedResult);
             context.getScheduleResultList().add(inheritedResult);
             context.getRollingInheritedScheduleResultList().add(inheritedResult);
-            // 累计继承量，后续 ScheduleAdjustHandler 用此扣减待排量
+            // 按物料+产品状态累计继承量，后续 ScheduleAdjustHandler 只扣减同状态 SKU。
+            String materialStatusKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                    inheritedResult.getMaterialCode(), inheritedResult.getProductStatus());
             context.getInheritedPlanQtyMap().merge(
-                    inheritedResult.getMaterialCode(), inheritedResult.getDailyPlanQty(), Integer::sum);
+                    materialStatusKey, inheritedResult.getDailyPlanQty(), Integer::sum);
             registerMachineAssignment(context, inheritedResult);
         }
 
@@ -182,8 +185,10 @@ public class RollingScheduleHandoffService {
             return null;
         }
 
-        // 校验物料在本次月计划中存在、且月计划/排产版本一致
-        FactoryMonthPlanProductionFinalResult currentPlan = currentMaterialPlanMap.get(previousResult.getMaterialCode());
+        // 校验同物料同产品状态在本次月计划中存在，且月计划/排产版本一致。
+        String materialStatusKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                previousResult.getMaterialCode(), previousResult.getProductStatus());
+        FactoryMonthPlanProductionFinalResult currentPlan = currentMaterialPlanMap.get(materialStatusKey);
         validateInheritedResult(context, previousResult, currentPlan);
         if (context.isInterrupted()) {
             return null;
@@ -592,7 +597,7 @@ public class RollingScheduleHandoffService {
      * 构建当前月计划物料Map。
      *
      * @param context 排程上下文
-     * @return 物料编码 -> 月计划记录
+     * @return 物料编码+产品状态 -> 月计划记录
      */
     private Map<String, FactoryMonthPlanProductionFinalResult> buildCurrentMaterialPlanMap(LhScheduleContext context) {
         if (CollectionUtils.isEmpty(context.getMonthPlanList())) {
@@ -603,7 +608,9 @@ public class RollingScheduleHandoffService {
             if (Objects.isNull(plan) || StringUtils.isEmpty(plan.getMaterialCode())) {
                 continue;
             }
-            map.putIfAbsent(plan.getMaterialCode(), plan);
+            String materialStatusKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                    plan.getMaterialCode(), plan.getProductStatus());
+            map.putIfAbsent(materialStatusKey, plan);
         }
         return map;
     }

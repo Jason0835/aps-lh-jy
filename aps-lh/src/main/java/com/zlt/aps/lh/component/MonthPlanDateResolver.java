@@ -35,10 +35,27 @@ public final class MonthPlanDateResolver {
     public static FactoryMonthPlanProductionFinalResult resolvePlan(LhScheduleContext context,
                                                                     String materialCode,
                                                                     LocalDate bizDate) {
+        return resolvePlan(context, materialCode, null, bizDate);
+    }
+
+    /**
+     * 解析指定业务日期的月计划记录。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param bizDate 业务日期
+     * @return 月计划记录
+     */
+    public static FactoryMonthPlanProductionFinalResult resolvePlan(LhScheduleContext context,
+                                                                    String materialCode,
+                                                                    String productStatus,
+                                                                    LocalDate bizDate) {
         if (Objects.isNull(context) || StringUtils.isEmpty(materialCode) || Objects.isNull(bizDate)) {
             return null;
         }
-        String materialMonthKey = buildMaterialMonthKey(materialCode, bizDate.getYear(), bizDate.getMonthValue());
+        String materialStatusKey = buildMaterialStatusKey(materialCode, productStatus);
+        String materialMonthKey = buildMaterialMonthKey(materialStatusKey, bizDate.getYear(), bizDate.getMonthValue());
         if (!CollectionUtils.isEmpty(context.getMonthPlanByMaterialMonthMap())) {
             FactoryMonthPlanProductionFinalResult indexedPlan =
                     context.getMonthPlanByMaterialMonthMap().get(materialMonthKey);
@@ -50,9 +67,15 @@ public final class MonthPlanDateResolver {
         if (CollectionUtils.isEmpty(planList)) {
             return null;
         }
+        String trimmedProductStatus = StringUtils.trimToEmpty(productStatus);
+        boolean needMatchProductStatus = StringUtils.isNotEmpty(trimmedProductStatus);
         FactoryMonthPlanProductionFinalResult materialFallbackPlan = null;
         for (FactoryMonthPlanProductionFinalResult plan : planList) {
             if (Objects.isNull(plan) || !StringUtils.equals(materialCode, plan.getMaterialCode())) {
+                continue;
+            }
+            if (needMatchProductStatus && !StringUtils.equals(trimmedProductStatus,
+                    StringUtils.trimToEmpty(plan.getProductStatus()))) {
                 continue;
             }
             if (Objects.equals(plan.getYear(), bizDate.getYear())
@@ -75,10 +98,26 @@ public final class MonthPlanDateResolver {
      * @return 日计划量
      */
     public static int resolveDayQty(LhScheduleContext context, String materialCode, LocalDate bizDate) {
+        return resolveDayQty(context, materialCode, null, bizDate);
+    }
+
+    /**
+     * 解析指定业务日期的日计划量。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param bizDate 业务日期
+     * @return 日计划量
+     */
+    public static int resolveDayQty(LhScheduleContext context,
+                                    String materialCode,
+                                    String productStatus,
+                                    LocalDate bizDate) {
         if (Objects.isNull(bizDate)) {
             return 0;
         }
-        FactoryMonthPlanProductionFinalResult plan = resolvePlan(context, materialCode, bizDate);
+        FactoryMonthPlanProductionFinalResult plan = resolvePlan(context, materialCode, productStatus, bizDate);
         return Math.max(0, MonthPlanDayQtyUtil.resolveDayQty(plan, bizDate.getDayOfMonth()));
     }
 
@@ -95,13 +134,31 @@ public final class MonthPlanDateResolver {
                                            String materialCode,
                                            LocalDate startDate,
                                            LocalDate endDate) {
+        return resolveWindowPlanQty(context, materialCode, null, startDate, endDate);
+    }
+
+    /**
+     * 汇总指定业务日期窗口内的日计划量。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param startDate 窗口开始日期
+     * @param endDate 窗口结束日期
+     * @return 窗口日计划量
+     */
+    public static int resolveWindowPlanQty(LhScheduleContext context,
+                                           String materialCode,
+                                           String productStatus,
+                                           LocalDate startDate,
+                                           LocalDate endDate) {
         if (Objects.isNull(startDate) || Objects.isNull(endDate) || startDate.isAfter(endDate)) {
             return 0;
         }
         int totalQty = 0;
         LocalDate cursor = startDate;
         while (!cursor.isAfter(endDate)) {
-            totalQty += resolveDayQty(context, materialCode, cursor);
+            totalQty += resolveDayQty(context, materialCode, productStatus, cursor);
             cursor = cursor.plusDays(1);
         }
         return Math.max(0, totalQty);
@@ -116,13 +173,29 @@ public final class MonthPlanDateResolver {
      * @return 月初至截止日计划量
      */
     public static int sumMonthPlanQtyToDate(LhScheduleContext context, String materialCode, LocalDate endDate) {
+        return sumMonthPlanQtyToDate(context, materialCode, null, endDate);
+    }
+
+    /**
+     * 汇总指定月份 day1 到 endDate 当日的计划量。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param endDate 截止业务日期
+     * @return 月初至截止日计划量
+     */
+    public static int sumMonthPlanQtyToDate(LhScheduleContext context,
+                                            String materialCode,
+                                            String productStatus,
+                                            LocalDate endDate) {
         if (Objects.isNull(endDate)) {
             return 0;
         }
         LocalDate cursor = endDate.withDayOfMonth(1);
         int totalQty = 0;
         while (!cursor.isAfter(endDate)) {
-            totalQty += resolveDayQty(context, materialCode, cursor);
+            totalQty += resolveDayQty(context, materialCode, productStatus, cursor);
             cursor = cursor.plusDays(1);
         }
         return Math.max(0, totalQty);
@@ -140,6 +213,23 @@ public final class MonthPlanDateResolver {
     public static LocalDate findBreakPointDate(LhScheduleContext context,
                                                String materialCode,
                                                LocalDate startDate) {
+        return findBreakPointDate(context, materialCode, null, startDate);
+    }
+
+    /**
+     * 查找从指定计划日开始向后扫描得到的月计划断点日。
+     * <p>断点日为“断开前最后一个有计划量的日期”。如果到月底未断开，则取最后一个有计划量日期。</p>
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param startDate 开始扫描日期
+     * @return 断点日
+     */
+    public static LocalDate findBreakPointDate(LhScheduleContext context,
+                                               String materialCode,
+                                               String productStatus,
+                                               LocalDate startDate) {
         if (Objects.isNull(startDate)) {
             return null;
         }
@@ -147,7 +237,7 @@ public final class MonthPlanDateResolver {
         LocalDate lastPlanDate = null;
         LocalDate cursor = startDate;
         while (!cursor.isAfter(monthEndDate)) {
-            int dayPlanQty = resolveDayQty(context, materialCode, cursor);
+            int dayPlanQty = resolveDayQty(context, materialCode, productStatus, cursor);
             if (hasPlanQty(dayPlanQty)) {
                 lastPlanDate = cursor;
                 cursor = cursor.plusDays(1);
@@ -172,10 +262,10 @@ public final class MonthPlanDateResolver {
     }
 
     /**
-     * 构建物料月计划索引。
+     * 构建物料+产品状态月计划索引。
      *
      * @param planList 月计划列表
-     * @return key=materialCode_year_month 的月计划索引
+     * @return key=materialCode_productStatus_year_month 的月计划索引
      */
     public static Map<String, FactoryMonthPlanProductionFinalResult> buildMaterialMonthPlanMap(
             List<FactoryMonthPlanProductionFinalResult> planList) {
@@ -190,9 +280,25 @@ public final class MonthPlanDateResolver {
                 continue;
             }
             planMap.putIfAbsent(buildMaterialMonthKey(
-                    plan.getMaterialCode(), plan.getYear(), plan.getMonth()), plan);
+                    buildMaterialStatusKey(plan.getMaterialCode(), plan.getProductStatus()),
+                    plan.getYear(), plan.getMonth()), plan);
         }
         return planMap;
+    }
+
+    /**
+     * 构建物料+产品状态 key。
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @return 物料+产品状态 key
+     */
+    public static String buildMaterialStatusKey(String materialCode, String productStatus) {
+        String trimmedProductStatus = StringUtils.trimToEmpty(productStatus);
+        if (StringUtils.isEmpty(trimmedProductStatus)) {
+            return materialCode;
+        }
+        return materialCode + KEY_SEPARATOR + trimmedProductStatus;
     }
 
     /**

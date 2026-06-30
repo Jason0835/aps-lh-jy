@@ -9,6 +9,7 @@ import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
@@ -29,6 +30,7 @@ import com.zlt.aps.lh.mapper.MdmModelInfoMapper;
 import com.zlt.aps.lh.mapper.MdmSkuConstructionRefMapper;
 import com.zlt.aps.lh.mapper.MdmSkuLhCapacityMapper;
 import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
+import com.zlt.aps.lh.mapper.MdmSkuScheduleCategoryMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
 import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
@@ -42,6 +44,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
 import java.lang.reflect.Field;
@@ -418,6 +421,36 @@ public class LhBaseDataServiceImplTest {
     }
 
     /**
+     * 用例说明：S4.3 SKU 归集基础月计划必须按物料编码+产品状态去重，不能丢失同物料的不同产品状态。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void selectSchedulingMonthPlanListShouldKeepSameMaterialDifferentProductStatus() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(buildDate(2026, 6, 29));
+        context.setWindowEndDate(buildDate(2026, 7, 1));
+        FactoryMonthPlanProductionFinalResult formalPlan = new FactoryMonthPlanProductionFinalResult();
+        formalPlan.setMaterialCode("3302001606");
+        formalPlan.setProductStatus("S");
+        formalPlan.setYear(2026);
+        formalPlan.setMonth(6);
+        formalPlan.setDay29(12);
+        FactoryMonthPlanProductionFinalResult trialPlan = new FactoryMonthPlanProductionFinalResult();
+        trialPlan.setMaterialCode("3302001606");
+        trialPlan.setProductStatus("T");
+        trialPlan.setYear(2026);
+        trialPlan.setMonth(6);
+        trialPlan.setDay29(8);
+
+        List<FactoryMonthPlanProductionFinalResult> selectedPlanList = ReflectionTestUtils.invokeMethod(service,
+                "selectSchedulingMonthPlanList", context, Arrays.asList(formalPlan, trialPlan));
+
+        Assertions.assertEquals(2, selectedPlanList.size(), "同物料不同产品状态必须分别生成归集基础计划");
+    }
+
+    /**
      * 用例说明：SKU与模具关系应在月计划加载后按本次月计划SKU范围查询，模具台账应在关系加载后按关联模具号范围查询。
      *
      * @throws Exception 反射注入异常
@@ -615,6 +648,8 @@ public class LhBaseDataServiceImplTest {
         injectField(service, "cxStockMapper", mockMapper(CxStockMapper.class));
         injectField(service, "lhSpecialMaterialBomEntityMapper", mockMapper(LhSpecialMaterialBomEntityMapper.class));
         injectField(service, "skuConstructionRefMapper", mockMapper(MdmSkuConstructionRefMapper.class));
+        injectField(service, "skuScheduleCategoryMapper", mockMapper(MdmSkuScheduleCategoryMapper.class));
+        injectField(service, "scheduleAdjustHandler", Mockito.mock(ScheduleAdjustHandler.class));
         return service;
     }
 
