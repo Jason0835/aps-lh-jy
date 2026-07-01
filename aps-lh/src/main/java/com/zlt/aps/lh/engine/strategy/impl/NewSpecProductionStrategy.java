@@ -390,7 +390,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
             Integer latestPreviousFinishedQty = resolveLatestPreviousFinishedQty(context, sku.getMaterialCode());
-            if (shouldSkipHistoryShortageOnlyRecentlyProducedSku(context, sku,
+            if (!getTargetScheduleQtyResolver().isEmbryoStockEnding(context, sku)
+                    && shouldSkipHistoryShortageOnlyRecentlyProducedSku(context, sku,
                     latestPreviousFinishedQty)) {
                 int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
                 addUnscheduledResult(context, sku, historyShortageQty,
@@ -419,6 +420,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                  */
                 isEnding = false;
             }
+            // 成型胎胚库存收尾优先于SKU收尾判断，直接按胎胚库存严格控量。
+            boolean embryoStockEndingTargetApplied = getTargetScheduleQtyResolver()
+                    .applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
+            if (!embryoStockEndingTargetApplied
+                    && handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku, isEnding, unscheduledReasonCountMap)) {
+                progressed = true;
+                continue;
+            }
             if (handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku,
                     smallEndingSurplusRuleEnding, unscheduledReasonCountMap)) {
                 progressed = true;
@@ -426,7 +435,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
             // 收尾SKU在排产前上调目标量（考虑胎胚库存），非收尾SKU保持按余量计算的目标量
             boolean sharedEmbryoZeroSurplusEnding = false;
-            if (isEnding) {
+            if (isEnding && !embryoStockEndingTargetApplied) {
                 sharedEmbryoZeroSurplusEnding = getTargetScheduleQtyResolver()
                         .isSharedEmbryoZeroSurplusEnding(context, sku);
                 getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sku);
@@ -437,6 +446,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
             }
             ProductionQuantityPolicy quantityPolicy = ProductionQuantityPolicy.from(sku, isEnding);
+            if (embryoStockEndingTargetApplied) {
+                quantityPolicy.setAllowFillStartedShift(false);
+                quantityPolicy.setStrictUpperLimit(true);
+                quantityPolicy.setFullRunForNonTailMachine(false);
+            }
             sku.setStrictTargetQty(quantityPolicy.isStrictUpperLimit());
             log.info("新增SKU开始排产, materialCode: {}, 结构: {}, 规格: {}, 月计划量: {}, 目标量: {}, "
                             + "day1/day2/day3窗口量: {}, 余量: {}, 胎胚库存: {}, 是否收尾: {}, "
@@ -7952,8 +7966,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
             }
 
-            int shiftQty = ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(
-                    Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
+            int shiftQty = getTargetScheduleQtyResolver().resolveAllocatedShiftQty(
+                    context, sku, Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
             if (shiftQty > 0) {
                 Date shiftPlanEndTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
                         context.getDevicePlanShutList(),

@@ -60,6 +60,9 @@ import java.util.Set;
 @Component
 public class TargetScheduleQtyResolver {
 
+    /** 成型胎胚库存收尾标识：是 */
+    private static final String EMBRYO_STOCK_ENDING_YES = "1";
+
     @Resource
     private IMachineMatchStrategy machineMatchStrategy;
 
@@ -181,6 +184,96 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 判断当前SKU是否命中成型胎胚库存收尾。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-按胎胚库存严格排产；false-沿用现有目标量逻辑
+     */
+    public boolean isEmbryoStockEnding(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)
+                || StringUtils.isEmpty(sku.getEmbryoCode())
+                || CollectionUtils.isEmpty(context.getEmbryoIsEndMap())) {
+            return false;
+        }
+        return StringUtils.equals(EMBRYO_STOCK_ENDING_YES, context.getEmbryoIsEndMap().get(sku.getEmbryoCode()));
+    }
+
+    /**
+     * 判断当前排程结果是否命中成型胎胚库存收尾。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return true-结果按胎胚库存严格数量落地；false-沿用现有模台数量口径
+     */
+    public boolean isEmbryoStockEnding(LhScheduleContext context, LhScheduleResult result) {
+        if (Objects.isNull(context) || Objects.isNull(result)
+                || StringUtils.isEmpty(result.getEmbryoCode())
+                || CollectionUtils.isEmpty(context.getEmbryoIsEndMap())) {
+            return false;
+        }
+        return StringUtils.equals(EMBRYO_STOCK_ENDING_YES, context.getEmbryoIsEndMap().get(result.getEmbryoCode()));
+    }
+
+    /**
+     * 命中成型胎胚库存收尾时，直接按胎胚库存设置排产目标量。
+     * <p>该规则不依赖SKU收尾标记，不取MAX，不做模台数/奇偶修正；实际排产上限同步到SKU实际消费账本。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param scene 调用场景
+     * @return true-已应用成型胎胚库存收尾规则；false-未命中
+     */
+    public boolean applyEmbryoStockEndingTargetQtyIfNecessary(LhScheduleContext context,
+                                                              SkuScheduleDTO sku,
+                                                              String scene) {
+        if (!isEmbryoStockEnding(context, sku)) {
+            return false;
+        }
+        int currentTargetQty = Math.max(0, sku.resolveTargetScheduleQty());
+        int embryoStock = Math.max(0, sku.getEmbryoStock());
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
+        sku.setStrictTargetQty(true);
+        sku.setTargetScheduleQty(embryoStock);
+        syncEndingDailyQuotaToTargetQty(sku, embryoStock, windowRemainingPlanQty);
+        int remainingQty = syncEmbryoStockEndingProductionRemainingQty(context, sku, embryoStock);
+        sku.setRemainingScheduleQty(remainingQty);
+        String direction = embryoStock > currentTargetQty ? "上调" : embryoStock < currentTargetQty ? "下调" : "保持";
+        log.info("成型胎胚库存收尾目标量{}, scene: {}, materialCode: {}, 胎胚编码: {}, 原目标量: {}, "
+                        + "胎胚库存目标量: {}, 当前可排剩余: {}, 月计划余量: {}, 窗口日计划剩余: {}, "
+                        + "rule: 直接按胎胚库存且不做奇偶修正",
+                direction, scene, sku.getMaterialCode(), sku.getEmbryoCode(), currentTargetQty,
+                embryoStock, remainingQty, surplusQty, windowRemainingPlanQty);
+        return true;
+    }
+
+    /**
+     * 同步成型胎胚库存收尾的实际消费账本。
+     * <p>首次命中按胎胚库存初始化；若前序入口已消费过账本，则只保留已扣减后的剩余额度，避免跨入口重复放大。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param embryoStock 胎胚库存目标量
+     * @return 当前实际可排剩余量
+     */
+    private int syncEmbryoStockEndingProductionRemainingQty(LhScheduleContext context,
+                                                            SkuScheduleDTO sku,
+                                                            int embryoStock) {
+        int targetQty = Math.max(0, embryoStock);
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return targetQty;
+        }
+        Map<String, Integer> remainingQtyMap = context.getSkuProductionRemainingQtyMap();
+        Integer oldQty = remainingQtyMap.get(sku.getMaterialCode());
+        int remainingQty = Objects.isNull(oldQty) ? targetQty : Math.min(Math.max(0, oldQty), targetQty);
+        remainingQtyMap.put(sku.getMaterialCode(), remainingQty);
+        log.info("成型胎胚库存收尾实际消费账本同步, materialCode: {}, 胎胚库存目标量: {}, 原账本剩余: {}, 同步后剩余: {}",
+                sku.getMaterialCode(), targetQty, oldQty, remainingQty);
+        return remainingQty;
+    }
+
+    /**
      * 扣减 SKU 实际排产剩余账本。
      *
      * @param context 排程上下文
@@ -259,7 +352,8 @@ public class TargetScheduleQtyResolver {
             if (Objects.isNull(planQty) || planQty <= 0) {
                 continue;
             }
-            int currentShiftQty = normalizeRetainedShiftQty(Math.min(planQty, remainingRetainQty), mouldQty);
+            int currentShiftQty = resolveRetainedShiftQty(
+                    context, sku, Math.min(planQty, remainingRetainQty), mouldQty);
             Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shift.getShiftIndex());
             if (currentShiftQty <= 0) {
                 ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
@@ -335,6 +429,69 @@ public class TargetScheduleQtyResolver {
         return StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag())
                 || StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
                 || sku.isStrictNewSpecShortageOnly();
+    }
+
+    /**
+     * 解析班次分配量。
+     * <p>成型胎胚库存收尾必须严格按胎胚库存落地，不做模台数向上修正；其余场景沿用既有模台数规则。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param allocationQty 原始分配量
+     * @param shiftMaxQty 班次最大可排量
+     * @param mouldQty 模台数
+     * @return 实际班次分配量
+     */
+    public int resolveAllocatedShiftQty(LhScheduleContext context,
+                                        SkuScheduleDTO sku,
+                                        int allocationQty,
+                                        int shiftMaxQty,
+                                        int mouldQty) {
+        if (isEmbryoStockEnding(context, sku)) {
+            return Math.max(0, allocationQty);
+        }
+        return ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(allocationQty, shiftMaxQty, mouldQty);
+    }
+
+    /**
+     * 解析排程结果班次分配量。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param allocationQty 原始分配量
+     * @param shiftMaxQty 班次最大可排量
+     * @param mouldQty 模台数
+     * @return 实际班次分配量
+     */
+    public int resolveAllocatedShiftQty(LhScheduleContext context,
+                                        LhScheduleResult result,
+                                        int allocationQty,
+                                        int shiftMaxQty,
+                                        int mouldQty) {
+        if (isEmbryoStockEnding(context, result)) {
+            return Math.max(0, allocationQty);
+        }
+        return ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(allocationQty, shiftMaxQty, mouldQty);
+    }
+
+    /**
+     * 解析账本裁剪后的班次保留量。
+     * <p>成型胎胚库存收尾必须严格保留剩余胎胚库存数量，不按模台数向下裁成偶数。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param retainedQty 原始保留量
+     * @param mouldQty 模台数
+     * @return 实际保留量
+     */
+    private int resolveRetainedShiftQty(LhScheduleContext context,
+                                        SkuScheduleDTO sku,
+                                        int retainedQty,
+                                        int mouldQty) {
+        if (isEmbryoStockEnding(context, sku)) {
+            return Math.max(0, retainedQty);
+        }
+        return normalizeRetainedShiftQty(retainedQty, mouldQty);
     }
 
     /**
@@ -1040,6 +1197,9 @@ public class TargetScheduleQtyResolver {
     public int upsizeEndingTargetQty(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(sku)) {
             return 0;
+        }
+        if (applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "收尾目标量")) {
+            return sku.resolveTargetScheduleQty();
         }
         // 收尾场景下严格限制目标量，禁止补满班次超排
         sku.setStrictTargetQty(true);

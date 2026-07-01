@@ -17,6 +17,7 @@ import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.component.IncrSerialGenerator;
+import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEvent;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
@@ -77,6 +78,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
     @Resource
     private SchedulePersistenceService schedulePersistenceService;
+
+    @Resource
+    private TargetScheduleQtyResolver targetScheduleQtyResolver;
 
     private static final AtomicInteger ORDER_SEQ = new AtomicInteger(0);
     private static final AtomicInteger CHG_SEQ = new AtomicInteger(0);
@@ -214,6 +218,13 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         if (mouldQty <= 1) {
             return;
         }
+        if (getTargetScheduleQtyResolver().isEmbryoStockEnding(context, result)) {
+            log.info("成型胎胚库存收尾结果跳过模台数保存前收敛, batchNo: {}, materialCode: {}, embryoCode: {}, "
+                            + "machineCode: {}, mouldQty: {}",
+                    context.getBatchNo(), result.getMaterialCode(), result.getEmbryoCode(),
+                    result.getLhMachineCode(), mouldQty);
+            return;
+        }
         boolean adjusted = false;
         for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
             Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
@@ -236,6 +247,15 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         if (adjusted) {
             ShiftFieldUtil.syncDailyPlanQty(result);
         }
+    }
+
+    /**
+     * 获取目标量解析器。
+     *
+     * @return 目标量解析器
+     */
+    private TargetScheduleQtyResolver getTargetScheduleQtyResolver() {
+        return Objects.nonNull(targetScheduleQtyResolver) ? targetScheduleQtyResolver : new TargetScheduleQtyResolver();
     }
 
     /**

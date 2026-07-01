@@ -139,7 +139,9 @@ public class LhScheduleContext {
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
     /** 胎胚收尾标识Map, key=embryoCode, value=1-收尾/0-非收尾；以胎胚维度合并硫化余量后按主销参与情况判定 */
     private Map<String, Integer> embryoEndingFlagMap = new HashMap<>();
-    /** 日完成量Map（按物料+产品状态+完成日期聚合）, key=materialCode_productStatus_finishDate(yyyy-MM-dd) */
+    /** 是否成型胎胚库存收尾Map, key=胎胚代码, value=1表示按胎胚库存严格收尾，0表示沿用现有目标量规则；本次仅预留字段，赋值链路另行接入 */
+    private Map<String, String> embryoIsEndMap = new LinkedHashMap<>();
+    /** 日完成量Map（按物料+完成日期聚合）, key=materialCode_finishDate(yyyy-MM-dd) */
     private Map<String, Integer> materialDayFinishedQtyMap = new HashMap<>();
     /** 本月日完成量Map（按物料+产品状态+完成日期聚合）, key=materialCode_productStatus_finishDate(yyyy-MM-dd)，仅覆盖当前排程月份截至T-1 */
     private Map<String, Integer> materialMonthDailyFinishedQtyMap = new HashMap<>();

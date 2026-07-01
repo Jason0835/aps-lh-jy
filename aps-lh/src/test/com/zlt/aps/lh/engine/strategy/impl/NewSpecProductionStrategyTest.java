@@ -393,11 +393,13 @@ public class NewSpecProductionStrategyTest {
         quotaMap.put(LocalDate.of(2026, 5, 3), buildQuota(14));
         sku.setDailyPlanQuotaMap(quotaMap);
 
+        LhScheduleContext context = new LhScheduleContext();
+        context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), 158);
         Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
-                "resolveSchedulableRemainingQty", SkuScheduleDTO.class);
+                "resolveSchedulableRemainingQty", LhScheduleContext.class, SkuScheduleDTO.class);
         method.setAccessible(true);
 
-        Integer remainingQty = (Integer) method.invoke(strategy, sku);
+        Integer remainingQty = (Integer) method.invoke(strategy, context, sku);
 
         Assertions.assertEquals(158, remainingQty.intValue());
     }
@@ -420,11 +422,13 @@ public class NewSpecProductionStrategyTest {
         quotaMap.put(LocalDate.of(2026, 5, 1), day1Quota);
         sku.setDailyPlanQuotaMap(quotaMap);
 
+        LhScheduleContext context = new LhScheduleContext();
+        context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), 94);
         Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
-                "resolveSchedulableRemainingQty", SkuScheduleDTO.class);
+                "resolveSchedulableRemainingQty", LhScheduleContext.class, SkuScheduleDTO.class);
         method.setAccessible(true);
 
-        Integer remainingQty = (Integer) method.invoke(strategy, sku);
+        Integer remainingQty = (Integer) method.invoke(strategy, context, sku);
 
         Assertions.assertEquals(94, remainingQty.intValue());
     }
@@ -454,12 +458,13 @@ public class NewSpecProductionStrategyTest {
         quotaMap.put(LocalDate.of(2026, 5, 27), buildQuota(0, 0));
         sku.setDailyPlanQuotaMap(quotaMap);
 
-        resolver.upsizeEndingTargetQty(new LhScheduleContext(), sku);
+        LhScheduleContext context = new LhScheduleContext();
+        resolver.upsizeEndingTargetQty(context, sku);
 
         Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
-                "resolveSchedulableRemainingQty", SkuScheduleDTO.class);
+                "resolveSchedulableRemainingQty", LhScheduleContext.class, SkuScheduleDTO.class);
         method.setAccessible(true);
-        Integer remainingQty = (Integer) method.invoke(strategy, sku);
+        Integer remainingQty = (Integer) method.invoke(strategy, context, sku);
 
         Assertions.assertEquals(26, sku.resolveTargetScheduleQty());
         Assertions.assertEquals(26, sku.getWindowPlanQty());
@@ -479,6 +484,7 @@ public class NewSpecProductionStrategyTest {
         injectTargetScheduleQtyResolver(strategy, new TargetScheduleQtyResolver());
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(toDate(2026, 5, 1, 0, 0, 0));
+        context.getSkuProductionRemainingQtyMap().put("3302001724", 48);
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate());
 
         SkuScheduleDTO sku = new SkuScheduleDTO();

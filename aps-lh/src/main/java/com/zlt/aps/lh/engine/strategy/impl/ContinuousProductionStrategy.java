@@ -168,7 +168,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             sku.setMouldQty(machineMouldQty);
             DailyMachineShortageQuotaPlan shortageQuotaPlan =
                     DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "续作排产");
-            if (shouldReleaseWindowNoPlanContinuousSku(sku, shortageQuotaPlan)) {
+            boolean embryoStockEnding = getTargetScheduleQtyResolver().isEmbryoStockEnding(context, sku);
+            if (!embryoStockEnding && shouldReleaseWindowNoPlanContinuousSku(sku, shortageQuotaPlan)) {
                 // 当前窗口没有日计划且无本月历史欠产时，不提前消耗远期计划，释放机台给换活字块/新增。
                 appendWindowNoPlanContinuousUnscheduledResult(context, sku);
                 registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(), "窗口内无日计划");
@@ -179,7 +180,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                         Math.max(0, shortageQuotaPlan.getFutureMonthPlanQtyAfterWindow()));
                 continue;
             }
-            if (shouldReleaseFirstDayNoPlanContinuousSku(context, sku, shifts, shortageQuotaPlan)) {
+            if (!embryoStockEnding && shouldReleaseFirstDayNoPlanContinuousSku(context, sku, shifts, shortageQuotaPlan)) {
                 registerReleasedFirstDayNoPlanContinuousMachine(context, machineCode, sku.getMaterialCode());
                 log.info("续作SKU当前day1日计划为0，跳过day1续作并释放机台给换活字块/新增排产, "
                                 + "materialCode: {}, machineCode: {}, windowPlanQty: {}, quotaRemainingQty: {}, dayPlanSummary: {}",
@@ -192,18 +193,20 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             // 窗口无计划但仍有续作余量时必须先排完，再沿用既有收尾机台释放链。
             boolean finishWindowNoPlanSurplus =
                     shouldFinishWindowNoPlanContinuousSurplus(sku, shortageQuotaPlan);
-            if (finishWindowNoPlanSurplus) {
+            if (finishWindowNoPlanSurplus && !embryoStockEnding) {
                 applyContinuousWindowNoPlanSurplusStrictTarget(context, sku, shortageQuotaPlan);
             }
             // SKU收尾判定决定是否严格控量：收尾必须按目标量停，非收尾才允许后续补满可用班次。
             boolean isEnding = finishWindowNoPlanSurplus || endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
             if (shortageQuotaPlan.isForceEndingByNoFuturePlan()) {
                 isEnding = true;
-                applyContinuousNoFutureEndingStrictTarget(sku, shortageQuotaPlan);
+                if (!embryoStockEnding) {
+                    applyContinuousNoFutureEndingStrictTarget(sku, shortageQuotaPlan);
+                }
             } else if (sku.isStrictNewSpecShortageOnly()) {
                 isEnding = false;
             }
-            if (shouldSkipSmallEndingSurplusContinuous(context, sku, isEnding)) {
+            if (shouldSkipSmallEndingSurplusContinuousConsideringEmbryoEnding(context, sku, isEnding)) {
                 // 收尾小余量 + 前日 T+1 夜班未排满不排产：释放原续作机台给换活字块/新增链路。
                 appendSmallEndingSurplusUnscheduledResult(context, sku);
                 registerReleasedContinuousMachine(context, machineCode, sku.getMaterialCode(),
@@ -317,7 +320,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 : getTargetScheduleQtyResolver().calcMachineAvailableCapacityByStartTime(
                 context, sku, machine, null, startTime, shifts, ScheduleTypeEnum.CONTINUOUS.getCode());
         String appliedRule = "沿用原规则";
-        if (isSingleMachine && isEnding
+        boolean embryoStockEndingTargetApplied = getTargetScheduleQtyResolver()
+                .applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "续作目标量决策");
+        if (embryoStockEndingTargetApplied) {
+            appliedRule = "成型胎胚库存收尾-直接按胎胚库存";
+        } else if (isSingleMachine && isEnding
                 && shortageQuotaPlan != null && shortageQuotaPlan.isForceEndingByNoFuturePlan()) {
             appliedRule = "窗口及月底无计划收尾严格控量";
         } else if (isSingleMachine && isEnding) {
@@ -1426,15 +1433,25 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return;
         }
         int originalTargetQty = sourceSku.resolveTargetScheduleQty();
-        int endingTargetQty = resolveMultiMachineEndingTargetQty(context, sourceSku, skuResults);
-        if (originalTargetQty != endingTargetQty) {
-            endingTargetQty = getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sourceSku);
+        int endingTargetQty;
+        String ruleName;
+        boolean embryoStockEndingTargetApplied = getTargetScheduleQtyResolver()
+                .applyEmbryoStockEndingTargetQtyIfNecessary(context, sourceSku, "续作多机台收尾");
+        if (embryoStockEndingTargetApplied) {
+            endingTargetQty = sourceSku.resolveTargetScheduleQty();
+            ruleName = "成型胎胚库存收尾-直接按胎胚库存";
+        } else {
+            endingTargetQty = resolveMultiMachineEndingTargetQty(context, sourceSku, skuResults);
+            if (originalTargetQty != endingTargetQty) {
+                endingTargetQty = getTargetScheduleQtyResolver().upsizeEndingTargetQty(context, sourceSku);
+            }
+            ruleName = "多机台收尾MAX(余量,胎胚库存)";
         }
         log.info("续作多机台收尾目标量决策, materialCode: {}, 机台列表: {}, 原目标量: {}, "
-                        + "收尾目标量: {}, surplusQty: {}, embryoStock: {}, rule: 多机台收尾MAX(余量,胎胚库存)",
+                        + "收尾目标量: {}, surplusQty: {}, embryoStock: {}, rule: {}",
                 sourceSku.getMaterialCode(), joinMachineCodes(skuResults), originalTargetQty,
                 endingTargetQty, Math.max(0, sourceSku.getSurplusQty()),
-                Math.max(0, sourceSku.getEmbryoStock()));
+                Math.max(0, sourceSku.getEmbryoStock()), ruleName);
     }
 
     /**
@@ -1579,6 +1596,24 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 sku.getMaterialCode(), sku.getContinuousMachineCode(), isEnding, surplusQty, toleranceQty,
                 previousNightPlanQty, sku.getShiftCapacity(), previousNightFull, skip);
         return skip;
+    }
+
+    /**
+     * 判断续作收尾小余量是否允许本次不排产。
+     * <p>成型胎胚库存收尾优先于SKU收尾小余量规则，命中时必须继续按胎胚库存目标量排产。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 续作SKU
+     * @param isEnding 是否SKU收尾
+     * @return true-本次不排产并释放续作机台；false-继续排产
+     */
+    private boolean shouldSkipSmallEndingSurplusContinuousConsideringEmbryoEnding(LhScheduleContext context,
+                                                                                  SkuScheduleDTO sku,
+                                                                                  boolean isEnding) {
+        if (getTargetScheduleQtyResolver().isEmbryoStockEnding(context, sku)) {
+            return false;
+        }
+        return shouldSkipSmallEndingSurplusContinuous(context, sku, isEnding);
     }
 
     /**
@@ -3288,7 +3323,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private int resolveRemainingEndingQtyForContinuationGroup(LhScheduleContext context, SkuScheduleDTO sourceSku) {
         // 共用胎胚收尾只按硫化余量，不按胎胚库存
         int endingDemandQty;
-        if (getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sourceSku)) {
+        if (getTargetScheduleQtyResolver().isEmbryoStockEnding(context, sourceSku)) {
+            endingDemandQty = Math.max(0, sourceSku.getEmbryoStock());
+        } else if (getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sourceSku)) {
             endingDemandQty = Math.max(0, sourceSku.getSurplusQty());
         } else {
             endingDemandQty = Math.max(Math.max(0, sourceSku.getSurplusQty()), Math.max(0, sourceSku.getEmbryoStock()));
@@ -4266,8 +4303,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (shiftMaxQty <= 0) {
                 continue;
             }
-            int shiftQty = ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(
-                    Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
+            int shiftQty = getTargetScheduleQtyResolver().resolveAllocatedShiftQty(
+                    context, result, Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
             if (shiftQty <= 0) {
                 continue;
             }

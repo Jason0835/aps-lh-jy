@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.component;
 
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -11,12 +12,14 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -168,6 +171,109 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
+     * 用例说明：成型胎胚库存收尾优先于SKU收尾规则，必须严格按胎胚库存排产，不做模台数向上修正。
+     */
+    @Test
+    public void shouldUseEmbryoStockEndingTargetWithoutMouldRounding() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-02", "1");
+        SkuScheduleDTO sku = buildSku("3302002530", "EMB-02", 10, 3, 10);
+        sku.setMouldQty(2);
+
+        int targetQty = resolver.upsizeEndingTargetQty(context, sku);
+
+        Assertions.assertEquals(3, targetQty);
+        Assertions.assertEquals(3, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(3, sku.getRemainingScheduleQty());
+        Assertions.assertTrue(sku.isStrictTargetQty());
+        Assertions.assertEquals(Integer.valueOf(3),
+                context.getSkuProductionRemainingQtyMap().get("3302002530"));
+    }
+
+    /**
+     * 用例说明：成型胎胚库存收尾不是SKU收尾标签，非收尾SKU也必须直接按胎胚库存设置目标量。
+     */
+    @Test
+    public void shouldApplyEmbryoStockEndingTargetForNonEndingSku() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-03", "1");
+        SkuScheduleDTO sku = buildSku("3302003005", "EMB-03", 80, 5, 80);
+        sku.setMouldQty(2);
+
+        boolean applied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
+
+        Assertions.assertTrue(applied);
+        Assertions.assertNull(sku.getSkuTag());
+        Assertions.assertEquals(5, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(5, sku.getRemainingScheduleQty());
+        Assertions.assertEquals(Integer.valueOf(5),
+                context.getSkuProductionRemainingQtyMap().get("3302003005"));
+    }
+
+    /**
+     * 用例说明：未配置成型胎胚库存收尾时，SKU收尾仍沿用现有MAX和模台数修正规则。
+     */
+    @Test
+    public void shouldKeepExistingEndingRuleWhenEmbryoStockEndingIsZero() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-04", "0");
+        SkuScheduleDTO sku = buildSku("3302003006", "EMB-04", 3, 3, 3);
+        sku.setMouldQty(2);
+
+        int targetQty = resolver.upsizeEndingTargetQty(context, sku);
+
+        Assertions.assertEquals(4, targetQty);
+        Assertions.assertEquals(4, sku.resolveTargetScheduleQty());
+    }
+
+    /**
+     * 用例说明：成型胎胚库存收尾目标量高于当前账本时，需要补齐运行态日计划账本，避免后续被dayN回裁。
+     */
+    @Test
+    public void shouldSyncDailyQuotaWhenEmbryoStockEndingTargetExceedsQuota() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-05", "1");
+        SkuScheduleDTO sku = buildSku("3302003007", "EMB-05", 2, 5, 2);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        quotaMap.put(LocalDate.of(2026, 6, 29), buildQuota(2, 2));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        sku.setWindowPlanQty(2);
+        sku.setWindowRemainingPlanQty(2);
+
+        boolean applied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
+
+        Assertions.assertTrue(applied);
+        Assertions.assertEquals(5, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(5, sku.getWindowPlanQty());
+        Assertions.assertEquals(5, sku.getWindowRemainingPlanQty());
+        Assertions.assertEquals(5, quotaMap.get(LocalDate.of(2026, 6, 29)).getRemainingQty());
+    }
+
+    /**
+     * 用例说明：成型胎胚库存收尾跨入口重复应用时，不能把已扣减的实际消费账本恢复成完整胎胚库存。
+     */
+    @Test
+    public void shouldKeepDeductedLedgerWhenEmbryoStockEndingAppliedAgain() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-06", "1");
+        SkuScheduleDTO sku = buildSku("3302003008", "EMB-06", 10, 5, 10);
+
+        boolean firstApplied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "换活字块");
+        int deductedQty = resolver.deductProductionRemainingQty(context, sku, 3, "换活字块", "K1105");
+        sku.setTargetScheduleQty(10);
+        sku.setRemainingScheduleQty(10);
+        boolean secondApplied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
+
+        Assertions.assertTrue(firstApplied);
+        Assertions.assertEquals(3, deductedQty);
+        Assertions.assertTrue(secondApplied);
+        Assertions.assertEquals(5, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(2, sku.getRemainingScheduleQty());
+        Assertions.assertEquals(Integer.valueOf(2),
+                context.getSkuProductionRemainingQtyMap().get("3302003008"));
+    }
+
+    /**
      * 用例说明：当前SKU初始目标量已经为0时，仍要先按动态有效SKU集合识别共用胎胚。
      */
     @Test
@@ -275,6 +381,36 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
+     * 用例说明：成型胎胚库存收尾按奇数胎胚库存严格落地，班次分配和账本回裁都不能按模台数修正。
+     */
+    @Test
+    public void shouldKeepOddQtyWhenEmbryoStockEndingAllocatesAndCapsResult() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoIsEndMap().put("EMB-07", "1");
+        SkuScheduleDTO sku = buildSku("3302003009", "EMB-07", 10, 3, 3);
+        sku.setMouldQty(2);
+        int allocatedQty = resolver.resolveAllocatedShiftQty(context, sku, 3, 16, 2);
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302003009");
+        result.setEmbryoCode("EMB-07");
+        result.setLhMachineCode("K1108");
+        result.setMouldQty(2);
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 4, new Date(), null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getSkuProductionRemainingQtyMap().put("3302003009", 3);
+        LhShiftConfigVO firstShift = new LhShiftConfigVO();
+        firstShift.setShiftIndex(1);
+
+        int cappedQty = resolver.capResultByProductionRemainingQty(
+                context, sku, result, Collections.singletonList(firstShift), "新增排产");
+
+        Assertions.assertEquals(3, allocatedQty);
+        Assertions.assertEquals(3, cappedQty);
+        Assertions.assertEquals(Integer.valueOf(3), ShiftFieldUtil.getShiftPlanQty(result, 1));
+        Assertions.assertEquals(Integer.valueOf(3), result.getDailyPlanQty());
+    }
+
+    /**
      * 用例说明：收尾目标量上调后，实际消费账本应同步覆盖为收尾目标量。
      */
     @Test
@@ -349,6 +485,13 @@ public class TargetScheduleQtyResolverTest {
         sku.setTargetScheduleQty(targetScheduleQty);
         sku.setRemainingScheduleQty(targetScheduleQty);
         return sku;
+    }
+
+    private SkuDailyPlanQuotaDTO buildQuota(int dayPlanQty, int remainingQty) {
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setDayPlanQty(dayPlanQty);
+        quota.setRemainingQty(remainingQty);
+        return quota;
     }
 
     private SkuScheduleDTO buildEndingSku(String materialCode,
