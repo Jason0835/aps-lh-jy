@@ -86,6 +86,9 @@ public final class LhScheduleConstant {
     /** 同班次非前2台首检计划量 */
     public static final int FIRST_INSPECTION_QTY = 2;
 
+    /** 同班次总计划量上限默认值，<=0 表示不限制 */
+    public static final int DEFAULT_CLASS_TOTAL_QTY_UP_LIMIT = 2800;
+
     /** 每班最大首检次数（-1 表示不限制） */
     public static final int MAX_FIRST_INSPECTION_PER_SHIFT = -1;
 

@@ -5214,6 +5214,145 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void distributeToShifts_shouldSkipCurrentShiftWhenClassTotalQtyExceedsLimit() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.getLhParamsMap().put("SYS0303004", "100");
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+
+        LhScheduleResult existingResult = buildEndingResult(context, buildSku(), "K1001");
+        existingResult.setMaterialCode("3302000001");
+        existingResult.setScheduleType("01");
+        ShiftFieldUtil.setShiftPlanQty(existingResult, 1, 90,
+                shifts.get(0).getShiftStartDateTime(), shifts.get(0).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(existingResult);
+        context.getScheduleResultList().add(existingResult);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302000002");
+        sku.setLhTimeSeconds(3600);
+        sku.setMouldQty(1);
+        sku.setShiftCapacity(16);
+        sku.setTargetScheduleQty(32);
+        sku.setSurplusQty(32);
+        sku.setEmbryoStock(32);
+
+        LhScheduleResult currentResult = buildEndingResult(context, sku, "K1002");
+        currentResult.setIsEnd("0");
+        currentResult.setSingleMouldShiftQty(16);
+
+        invokeDistributeToShifts(strategy, context, currentResult, shifts,
+                shifts.get(0).getShiftStartDateTime(), 16, 3600, 1, 32, sku, false);
+
+        assertEquals(90, resolveShiftQty(existingResult, 1), "续作等既有结果只作为同班次总量基数，不应被回改");
+        assertEquals(0, resolveShiftQty(currentResult, 1), "当前班次超过总量上限时应跳过，不允许拆分剩余10条");
+        assertEquals(16, resolveShiftQty(currentResult, 2), "超限只跳过当前班次，后续班次仍按原规则排产");
+        assertEquals(16, resolveShiftQty(currentResult, 3), "未被拆分的剩余量应继续进入后续班次判断");
+    }
+
+    @Test
+    void distributeToShifts_shouldRestoreOriginalShiftTimeWhenFirstInspectionExceedsClassTotalLimit() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.getLhParamsMap().put("SYS0303004", "100");
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO firstShift = shifts.get(0);
+
+        LhScheduleResult existingResult = buildEndingResult(context, buildSku(), "K1001");
+        existingResult.setMaterialCode("3302000001");
+        existingResult.setScheduleType("01");
+        ShiftFieldUtil.setShiftPlanQty(existingResult, firstShift.getShiftIndex(), 95,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(existingResult);
+        context.getScheduleResultList().add(existingResult);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302000003");
+        sku.setLhTimeSeconds(3600);
+        sku.setMouldQty(1);
+        sku.setShiftCapacity(16);
+        sku.setTargetScheduleQty(10);
+        sku.setSurplusQty(10);
+        sku.setEmbryoStock(10);
+
+        LhScheduleResult currentResult = buildEndingResult(context, sku, "K1003");
+        currentResult.setIsEnd("0");
+        currentResult.setSingleMouldShiftQty(16);
+        Date originalStartTime = dateTime(2026, 4, 17, 2, 0);
+        Date originalEndTime = dateTime(2026, 4, 17, 4, 0);
+        ShiftFieldUtil.setShiftPlanQty(currentResult, firstShift.getShiftIndex(), 4,
+                originalStartTime, originalEndTime);
+        ShiftFieldUtil.syncDailyPlanQty(currentResult);
+
+        Date startAfterWindow = shifts.get(shifts.size() - 1).getShiftEndDateTime();
+        invokeDistributeToShifts(strategy, context, currentResult, shifts, startAfterWindow,
+                16, 3600, 1, 10, sku, false, firstShift.getShiftStartDateTime());
+
+        assertEquals(4, resolveShiftQty(currentResult, firstShift.getShiftIndex()),
+                "首检超限回滚后应恢复当前结果原班次计划量");
+        assertEquals(originalStartTime, ShiftFieldUtil.getShiftStartTime(currentResult, firstShift.getShiftIndex()),
+                "首检超限回滚后应恢复当前结果原班次开始时间");
+        assertEquals(originalEndTime, ShiftFieldUtil.getShiftEndTime(currentResult, firstShift.getShiftIndex()),
+                "首检超限回滚后应恢复当前结果原班次结束时间");
+    }
+
+    @Test
+    void adjustSameSkuMultiMachineEndingStagger_shouldSkipWhenReceiverShiftExceedsClassTotalLimit() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+
+        LhScheduleContext context = buildContext();
+        context.getLhParamsMap().put("SYS0303004", "40");
+        Date scheduleDate = dateTime(2026, 5, 1, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate);
+        context.setScheduleWindowShifts(shifts);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302004010");
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+
+        LhScheduleResult otherSkuResult = buildEndingResult(context, sku, "K1101");
+        otherSkuResult.setMaterialCode("3302009999");
+        otherSkuResult.setScheduleType("01");
+        ShiftFieldUtil.setShiftPlanQty(otherSkuResult, 8, 30,
+                shifts.get(7).getShiftStartDateTime(), shifts.get(7).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(otherSkuResult);
+
+        LhScheduleResult receiver = buildEndingResult(context, sku, "K1105");
+        ShiftFieldUtil.setShiftPlanQty(receiver, 6, 16,
+                shifts.get(5).getShiftStartDateTime(), shifts.get(5).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(receiver, 7, 16,
+                shifts.get(6).getShiftStartDateTime(), shifts.get(6).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(receiver);
+
+        LhScheduleResult donor = buildEndingResult(context, sku, "K1110");
+        ShiftFieldUtil.setShiftPlanQty(donor, 6, 16,
+                shifts.get(5).getShiftStartDateTime(), shifts.get(5).getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(donor, 7, 14,
+                shifts.get(6).getShiftStartDateTime(), shifts.get(6).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(donor);
+
+        context.getScheduleResultList().add(otherSkuResult);
+        context.getScheduleResultList().add(receiver);
+        context.getScheduleResultList().add(donor);
+        context.getMachineScheduleMap().put("K1105", buildMachine("K1105", shifts.get(6).getShiftEndDateTime()));
+        context.getMachineScheduleMap().put("K1110", buildMachine("K1110", shifts.get(6).getShiftEndDateTime()));
+
+        invokeSameSkuMultiMachineEndingStagger(strategy, context, sku, shifts);
+
+        assertEquals(0, resolveShiftQty(receiver, 8), "承接班次若会超过同班次总量上限，应跳过尾量错峰");
+        assertEquals(14, resolveShiftQty(donor, 7), "尾量错峰跳过时，释放机台原班次计划量应保持不变");
+    }
+
+    @Test
     void adjustSameSkuMultiMachineEndingStagger_shouldMoveMorningTailQtyToNextShift() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
@@ -5823,6 +5962,55 @@ class NewSpecProductionStrategyRegressionTest {
                 boolean.class);
         method.setAccessible(true);
         method.invoke(strategy, context, sku, shifts, quantityPolicy, isEnding);
+    }
+
+    private void invokeDistributeToShifts(NewSpecProductionStrategy strategy,
+                                          LhScheduleContext context,
+                                          LhScheduleResult result,
+                                          List<LhShiftConfigVO> shifts,
+                                          Date startTime,
+                                          int shiftCapacity,
+                                          int lhTimeSeconds,
+                                          int mouldQty,
+                                          int remaining,
+                                          SkuScheduleDTO sku,
+                                          boolean isEnding) throws Exception {
+        invokeDistributeToShifts(strategy, context, result, shifts, startTime, shiftCapacity, lhTimeSeconds,
+                mouldQty, remaining, sku, isEnding, null);
+    }
+
+    private void invokeDistributeToShifts(NewSpecProductionStrategy strategy,
+                                          LhScheduleContext context,
+                                          LhScheduleResult result,
+                                          List<LhShiftConfigVO> shifts,
+                                          Date startTime,
+                                          int shiftCapacity,
+                                          int lhTimeSeconds,
+                                          int mouldQty,
+                                          int remaining,
+                                          SkuScheduleDTO sku,
+                                          boolean isEnding,
+                                          Date mouldChangeCompleteTime) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "distributeToShifts",
+                LhScheduleContext.class,
+                LhScheduleResult.class,
+                List.class,
+                Date.class,
+                int.class,
+                int.class,
+                int.class,
+                int.class,
+                List.class,
+                List.class,
+                SkuScheduleDTO.class,
+                boolean.class,
+                Date.class,
+                Map.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
+                remaining, Collections.emptyList(), Collections.emptyList(), sku, isEnding,
+                mouldChangeCompleteTime, Collections.emptyMap());
     }
 
     private LhShiftConfigVO resolveNextWorkDateShift(List<LhShiftConfigVO> shifts, LhShiftConfigVO firstShift) {

@@ -213,6 +213,17 @@ public class LhScheduleConfig {
                 LhScheduleConstant.FIRST_INSPECTION_QTY));
     }
 
+    /**
+     * 获取同班次总计划量上限。
+     * <p>该参数只由新增排产入口消费，配置为0或负数时由策略入口按不限制处理。</p>
+     *
+     * @return 同班次总计划量上限
+     */
+    public int getClassTotalQtyUpLimit() {
+        return getParamIntValue(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT,
+                LhScheduleConstant.DEFAULT_CLASS_TOTAL_QTY_UP_LIMIT);
+    }
+
     public int getEndingDetectDays() {
         return getParamIntValue(LhScheduleParamConstant.ENDING_DETECT_DAYS, LhScheduleConstant.DEFAULT_ENDING_DAYS);
     }

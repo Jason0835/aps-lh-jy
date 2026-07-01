@@ -112,6 +112,31 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：同班次总计划量上限默认2800，配置为0或负数时由策略入口按不限制处理。
+     */
+    @Test
+    public void shouldReadClassTotalQtyUpLimitConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals(2800, defaultConfig.getClassTotalQtyUpLimit());
+
+        Map<String, String> configuredParamMap = new HashMap<>(1);
+        configuredParamMap.put(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT, "100");
+        Assertions.assertEquals(100, new LhScheduleConfig(configuredParamMap).getClassTotalQtyUpLimit());
+
+        Map<String, String> zeroParamMap = new HashMap<>(1);
+        zeroParamMap.put(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT, "0");
+        Assertions.assertEquals(0, new LhScheduleConfig(zeroParamMap).getClassTotalQtyUpLimit());
+
+        Map<String, String> negativeParamMap = new HashMap<>(1);
+        negativeParamMap.put(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT, "-1");
+        Assertions.assertEquals(-1, new LhScheduleConfig(negativeParamMap).getClassTotalQtyUpLimit());
+
+        Map<String, String> textParamMap = new HashMap<>(1);
+        textParamMap.put(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT, "abc");
+        Assertions.assertEquals(2800, new LhScheduleConfig(textParamMap).getClassTotalQtyUpLimit());
+    }
+
+    /**
      * 用例说明：收尾小余量允许欠产偏差默认2，配置后按配置值读取。
      */
     @Test
