@@ -424,12 +424,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             boolean embryoStockEndingTargetApplied = getTargetScheduleQtyResolver()
                     .applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
             if (!embryoStockEndingTargetApplied
-                    && handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku, isEnding, unscheduledReasonCountMap)) {
-                progressed = true;
-                continue;
-            }
-            if (handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku,
-                    smallEndingSurplusRuleEnding, unscheduledReasonCountMap)) {
+                    && handleSmallEndingSurplusSkipIfNecessary(context, iterator, sku, smallEndingSurplusRuleEnding, unscheduledReasonCountMap)) {
                 progressed = true;
                 continue;
             }
