@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -36,6 +37,7 @@ import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -66,6 +68,86 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 新增排产回归：首选机台窗口内无产能时，应继续尝试后续候选机台，避免直接误判未排产。
  */
 class NewSpecProductionStrategyRegressionTest {
+
+    @Test
+    void scheduleNewSpecs_shouldSkipHistoryShortageWhenCrossMonthFuturePlanOnlyInNextMonth() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 29, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 7, 1, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3202000550");
+        sku.setMaterialDesc("3202000550");
+        sku.setProductStatus("S");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setEmbryoCode("EMBRYO-3202000550");
+        sku.setPendingQty(3);
+        sku.setDailyPlanQty(0);
+        sku.setTargetScheduleQty(3);
+        sku.setSurplusQty(3);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(3);
+        sku.setFutureMonthPlanQtyAfterWindow(180);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+
+        FactoryMonthPlanProductionFinalResult junePlan = buildMonthPlan(sku.getMaterialCode(), sku.getProductStatus(),
+                2026, 6);
+        junePlan.setDay29(0);
+        junePlan.setDay30(0);
+        FactoryMonthPlanProductionFinalResult julyPlan = buildMonthPlan(sku.getMaterialCode(), sku.getProductStatus(),
+                2026, 7);
+        julyPlan.setDay7(8);
+        julyPlan.setDay8(48);
+        context.setLoadedMonthPlanList(Arrays.asList(junePlan, julyPlan));
+        context.setMonthPlanList(context.getLoadedMonthPlanList());
+        context.setMonthPlanByMaterialMonthMap(
+                MonthPlanDateResolver.buildMaterialMonthPlanMap(context.getLoadedMonthPlanList()));
+        context.getMaterialMonthDailyFinishedQtyMap().put(
+                MonthPlanDateResolver.buildMaterialStatusKey(sku.getMaterialCode(), sku.getProductStatus())
+                        + "_2026-06-15", 2);
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 1);
+        context.getNewSpecSkuList().add(sku);
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                throw new AssertionError("命中仅历史欠产跨月跳过时，不应进入新增选机");
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(), "命中仅历史欠产跨月跳过时，不应生成排程结果");
+        assertEquals(1, context.getUnscheduledResultList().size(), "命中仅历史欠产跨月跳过时，应写入未排结果");
+        assertEquals("3202000550", context.getUnscheduledResultList().get(0).getMaterialCode());
+        assertEquals(3, context.getUnscheduledResultList().get(0).getUnscheduledQty());
+        assertEquals("仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
 
     @Test
     void scheduleNewSpecs_shouldFallbackToNextCandidateWhenFirstMachineHasNoCapacity() throws Exception {
@@ -5934,6 +6016,16 @@ class NewSpecProductionStrategyRegressionTest {
         result.setLhTime(3600);
         result.setMouldQty(1);
         return result;
+    }
+
+    private FactoryMonthPlanProductionFinalResult buildMonthPlan(String materialCode, String productStatus,
+                                                                 int year, int month) {
+        FactoryMonthPlanProductionFinalResult monthPlan = new FactoryMonthPlanProductionFinalResult();
+        monthPlan.setMaterialCode(materialCode);
+        monthPlan.setProductStatus(productStatus);
+        monthPlan.setYear(year);
+        monthPlan.setMonth(month);
+        return monthPlan;
     }
 
     private void appendTargetPreviousT1NightResult(LhScheduleContext context, String materialCode, int nightPlanQty) {

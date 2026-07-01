@@ -221,7 +221,7 @@ public class LhScheduleConfig {
      */
     public int getClassTotalQtyUpLimit() {
         return getParamIntValue(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT,
-                LhScheduleConstant.DEFAULT_CLASS_TOTAL_QTY_UP_LIMIT);
+                LhScheduleConstant.CLASS_TOTAL_QTY_UP_LIMIT);
     }
 
     public int getEndingDetectDays() {
