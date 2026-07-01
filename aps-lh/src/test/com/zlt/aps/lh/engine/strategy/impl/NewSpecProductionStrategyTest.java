@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
@@ -213,6 +214,37 @@ public class NewSpecProductionStrategyTest {
         Assertions.assertNotNull(selected);
         Assertions.assertEquals("K1105", selected.getMachineCode(),
                 "当天有空闲候选时，补偿锁回不得覆盖空闲优先");
+    }
+
+    /**
+     * 用例说明：续作加机台候选已经进入新增候选池后，应先尝试原续作机台，
+     * 不再被当天空闲机台优先规则覆盖；若原续作机台后续试算失败，再回落普通候选排序。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldPreferOriginalContinuousMachineForContinuationAddMachineSource() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildTodayIdleContext();
+
+        SkuScheduleDTO sku = buildFirstDayDemandSku("3302002319", 32);
+        sku.setContinuousCompensationSku(true);
+        sku.setSourceType(SkuScheduleSourceTypeEnum.CONTINUATION_ADD_MACHINE.getCode());
+        sku.setPreferredContinuousMachineCode("K1407");
+
+        MachineScheduleDTO idleMachine = buildReadyMachine("K1105", toDate(2026, 4, 20, 8, 0, 0));
+        MachineScheduleDTO preferredBusyMachine = buildReadyMachine("K1407", toDate(2026, 4, 21, 8, 0, 0));
+        context.getMachineAssignmentMap().put("K1407", Collections.singletonList(
+                buildAssignedResult("K1407", "3302001465", toDate(2026, 4, 21, 14, 0, 0))));
+        List<MachineScheduleDTO> candidates = Arrays.asList(idleMachine, preferredBusyMachine);
+
+        MachineScheduleDTO selected = invokeSelectCandidateMachineFromScopedList(
+                strategy, context, sku, candidates, new FirstCandidateMachineMatchStrategy(),
+                null, ProductionQuantityPolicy.from(sku, false));
+
+        Assertions.assertNotNull(selected);
+        Assertions.assertEquals("K1407", selected.getMachineCode(),
+                "续作加机台候选轮到自己选机时，应先尝试原续作机台");
     }
 
     /**

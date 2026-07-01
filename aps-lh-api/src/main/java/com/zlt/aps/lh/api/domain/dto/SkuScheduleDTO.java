@@ -78,6 +78,8 @@ public class SkuScheduleDTO {
     private String skuTag;
     /** 排程类型: 01-续作, 02-新增, 03-换活字块 */
     private String scheduleType;
+    /** 新增排产候选来源类型，仅用于运行态识别候选来源，不改变排程结果SCHEDULE_TYPE落库语义 */
+    private String sourceType;
     /** 是否续作欠产转入S4.5的补偿SKU，仅用于新增SKU组内排序识别，不落库 */
     private boolean continuousCompensationSku;
     /** 是否试制量试 */

@@ -9,6 +9,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
@@ -825,6 +826,47 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(1550, compensationSku.getTargetScheduleQty());
         Assertions.assertEquals(1550, compensationSku.getPendingQty());
         Assertions.assertEquals(1550, compensationSku.getRemainingScheduleQty());
+    }
+
+    /**
+     * 续作触发加机台时，只生成新增排产候选，并标记运行态来源为续作加机台。
+     */
+    @Test
+    public void shouldMarkContinuationAddMachineSourceWhenAppendingNewSpecCandidate() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001271", 16, 1978,
+                buildQuotaMapByShifts(shifts, 1368, 230, 230));
+        sku.setContinuousMachineCode("K1104");
+        sku.setStrictTargetQty(true);
+        sku.setMonthlyHistoryShortageQty(210);
+        sku.setScheduleDayFinishQty(60);
+        context.getContinuousSkuList().add(sku);
+        String[] machineCodes = new String[]{"K1104", "K1412", "K1512", "K1917"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult("3302001271", machineCode, 16, shifts, "0");
+            setShiftPlanQty(result, shifts, 2, 14);
+            setShiftPlanQty(result, shifts, 5, 14);
+            setShiftPlanQty(result, shifts, 8, 14);
+            ShiftFieldUtil.syncDailyPlanQty(result);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "appendContinuousCompensationSkuList", LhScheduleContext.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context);
+
+        Assertions.assertFalse(context.getNewSpecSkuList().isEmpty());
+        SkuScheduleDTO addMachineCandidate = context.getNewSpecSkuList().get(0);
+        Assertions.assertEquals(SkuScheduleSourceTypeEnum.CONTINUATION_ADD_MACHINE.getCode(),
+                addMachineCandidate.getSourceType());
+        Assertions.assertEquals(ScheduleTypeEnum.NEW_SPEC.getCode(), addMachineCandidate.getScheduleType());
+        Assertions.assertTrue(addMachineCandidate.isContinuousCompensationSku());
+        Assertions.assertEquals("K1104", addMachineCandidate.getPreferredContinuousMachineCode());
+        Assertions.assertSame(sku.getDailyPlanQuotaMap(), addMachineCandidate.getDailyPlanQuotaMap());
     }
 
     /**

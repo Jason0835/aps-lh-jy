@@ -20,6 +20,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
+import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
@@ -5195,13 +5196,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
             SkuScheduleDTO compensationSku = copyContinuousCompensationSku(sourceSku, remainingQty);
-            // 补偿 SKU 保留同一日计划账本，S4.5 排到后会继续消费剩余额度，避免重复扩大日计划。
+            // 续作加机台候选保留同一日计划账本，S4.5 排到后会继续消费剩余额度，避免重复扩大日计划。
             context.getNewSpecSkuList().add(compensationSku);
-            log.info("续作目标量未满足，转新增规格链路补量, materialCode: {}, 原续作机台: {}, "
-                            + "已排: {}, 补偿量: {}, 窗口日计划剩余: {}, dayPlanSummary: {}",
+            log.info("续作加机台需求生成，转新增规格链路统一竞争, materialCode: {}, 原续作机台: {}, "
+                            + "已排: {}, 需求量: {}, 窗口日计划剩余: {}, sourceType: {}, dayPlanSummary: {}",
                     sourceSku.getMaterialCode(), sourceSku.getContinuousMachineCode(),
                     resolveScheduledQtyBySourceSku(context, sourceSku), remainingQty,
                     SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap()),
+                    compensationSku.getSourceType(),
                     formatDailyPlanQuotaSummary(sourceSku));
         }
     }
@@ -5927,6 +5929,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         BeanUtil.copyProperties(sourceSku, compensationSku);
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty());
         compensationSku.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
+        compensationSku.setSourceType(SkuScheduleSourceTypeEnum.CONTINUATION_ADD_MACHINE.getCode());
         compensationSku.setContinuousMachineCode(null);
         compensationSku.setPreferredContinuousMachineCode(sourceSku.getContinuousMachineCode());
         compensationSku.setContinuousCompensationSku(true);

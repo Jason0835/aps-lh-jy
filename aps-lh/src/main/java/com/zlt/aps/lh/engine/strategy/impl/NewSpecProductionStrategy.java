@@ -24,6 +24,7 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.NewSpecFailReasonEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
+import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
@@ -2131,6 +2132,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         MachineScheduleDTO preferredContinuousMachine =
                 resolvePreferredContinuousCompensationMachine(sku, scopedCandidates);
         if (preferredContinuousMachine != null) {
+            if (isContinuationAddMachineCandidate(sku)) {
+                // 续作加机台候选已经进入新增统一排序，轮到该SKU时先尝试原续作机台，失败后再回落普通候选。
+                log.info("新增排产续作加机台候选优先尝试原续作机台, materialCode: {}, machineCode: {}",
+                        sku.getMaterialCode(), preferredContinuousMachine.getMachineCode());
+                return preferredContinuousMachine;
+            }
             MachineScheduleDTO todayIdleMachine = resolveTodayIdleMachineBeforePreferred(
                     context, sku, scopedCandidates, preferredContinuousMachine);
             if (todayIdleMachine != null) {
@@ -2218,6 +2225,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
         }
         return null;
+    }
+
+    /**
+     * 判断当前新增候选是否来源于续作加机台需求。
+     *
+     * @param sku 当前待排SKU
+     * @return true-续作加机台候选，false-其他新增候选
+     */
+    private boolean isContinuationAddMachineCandidate(SkuScheduleDTO sku) {
+        return sku != null && sku.isContinuousCompensationSku()
+                && SkuScheduleSourceTypeEnum.isContinuationAddMachine(sku.getSourceType());
     }
 
     /**
