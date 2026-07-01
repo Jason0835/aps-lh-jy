@@ -64,7 +64,7 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
     void postValidation_shouldKeepOddShiftQtyForEmbryoStockEnding() {
         ResultValidationHandler handler = new ResultValidationHandler();
         LhScheduleContext context = newContext();
-        context.getEmbryoIsEndMap().put("EMB-END-07", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-END-07", 1);
         LhScheduleResult result = new LhScheduleResult();
         result.setFactoryCode("116");
         result.setBatchNo("LHPC20260614001");

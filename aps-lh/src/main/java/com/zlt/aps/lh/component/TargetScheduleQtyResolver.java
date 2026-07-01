@@ -61,7 +61,7 @@ import java.util.Set;
 public class TargetScheduleQtyResolver {
 
     /** 成型胎胚库存收尾标识：是 */
-    private static final String EMBRYO_STOCK_ENDING_YES = "1";
+    private static final int EMBRYO_STOCK_ENDING_YES = 1;
 
     @Resource
     private IMachineMatchStrategy machineMatchStrategy;
@@ -193,10 +193,10 @@ public class TargetScheduleQtyResolver {
     public boolean isEmbryoStockEnding(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(context) || Objects.isNull(sku)
                 || StringUtils.isEmpty(sku.getEmbryoCode())
-                || CollectionUtils.isEmpty(context.getEmbryoIsEndMap())) {
+                || CollectionUtils.isEmpty(context.getEmbryoEndingFlagMap())) {
             return false;
         }
-        return StringUtils.equals(EMBRYO_STOCK_ENDING_YES, context.getEmbryoIsEndMap().get(sku.getEmbryoCode()));
+        return EMBRYO_STOCK_ENDING_YES == context.getEmbryoEndingFlagMap().getOrDefault(sku.getEmbryoCode(), 0);
     }
 
     /**
@@ -209,10 +209,10 @@ public class TargetScheduleQtyResolver {
     public boolean isEmbryoStockEnding(LhScheduleContext context, LhScheduleResult result) {
         if (Objects.isNull(context) || Objects.isNull(result)
                 || StringUtils.isEmpty(result.getEmbryoCode())
-                || CollectionUtils.isEmpty(context.getEmbryoIsEndMap())) {
+                || CollectionUtils.isEmpty(context.getEmbryoEndingFlagMap())) {
             return false;
         }
-        return StringUtils.equals(EMBRYO_STOCK_ENDING_YES, context.getEmbryoIsEndMap().get(result.getEmbryoCode()));
+        return EMBRYO_STOCK_ENDING_YES == context.getEmbryoEndingFlagMap().getOrDefault(result.getEmbryoCode(), 0);
     }
 
     /**

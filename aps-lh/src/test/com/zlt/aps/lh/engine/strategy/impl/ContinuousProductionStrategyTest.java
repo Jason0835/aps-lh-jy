@@ -66,7 +66,7 @@ public class ContinuousProductionStrategyTest {
     public void applySingleMachineContinuousTargetRule_shouldUseEmbryoStockEndingForNonEndingSku() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-END-01", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-END-01", 1);
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("3302005001");
         sku.setEmbryoCode("EMB-END-01");
@@ -91,7 +91,7 @@ public class ContinuousProductionStrategyTest {
     public void shouldNotSkipSmallEndingSurplusWhenEmbryoStockEndingIsConfigured() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-END-03", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-END-03", 1);
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("3302005003");
         sku.setEmbryoCode("EMB-END-03");

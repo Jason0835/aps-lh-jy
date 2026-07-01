@@ -176,7 +176,7 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldUseEmbryoStockEndingTargetWithoutMouldRounding() {
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-02", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-02", 1);
         SkuScheduleDTO sku = buildSku("3302002530", "EMB-02", 10, 3, 10);
         sku.setMouldQty(2);
 
@@ -196,7 +196,7 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldApplyEmbryoStockEndingTargetForNonEndingSku() {
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-03", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-03", 1);
         SkuScheduleDTO sku = buildSku("3302003005", "EMB-03", 80, 5, 80);
         sku.setMouldQty(2);
 
@@ -216,7 +216,7 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldKeepExistingEndingRuleWhenEmbryoStockEndingIsZero() {
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-04", "0");
+        context.getEmbryoEndingFlagMap().put("EMB-04", 0);
         SkuScheduleDTO sku = buildSku("3302003006", "EMB-04", 3, 3, 3);
         sku.setMouldQty(2);
 
@@ -232,7 +232,7 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldSyncDailyQuotaWhenEmbryoStockEndingTargetExceedsQuota() {
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-05", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-05", 1);
         SkuScheduleDTO sku = buildSku("3302003007", "EMB-05", 2, 5, 2);
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
         quotaMap.put(LocalDate.of(2026, 6, 29), buildQuota(2, 2));
@@ -255,7 +255,7 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldKeepDeductedLedgerWhenEmbryoStockEndingAppliedAgain() {
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-06", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-06", 1);
         SkuScheduleDTO sku = buildSku("3302003008", "EMB-06", 10, 5, 10);
 
         boolean firstApplied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "换活字块");
@@ -386,7 +386,7 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldKeepOddQtyWhenEmbryoStockEndingAllocatesAndCapsResult() {
         LhScheduleContext context = new LhScheduleContext();
-        context.getEmbryoIsEndMap().put("EMB-07", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-07", 1);
         SkuScheduleDTO sku = buildSku("3302003009", "EMB-07", 10, 3, 3);
         sku.setMouldQty(2);
         int allocatedQty = resolver.resolveAllocatedShiftQty(context, sku, 3, 16, 2);

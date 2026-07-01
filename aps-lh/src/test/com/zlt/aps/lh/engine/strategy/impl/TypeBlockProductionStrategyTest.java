@@ -21,7 +21,7 @@ public class TypeBlockProductionStrategyTest {
         TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
         LhScheduleContext context = new LhScheduleContext();
         context.getMaterialSharedEmbryoMap().put("3302005002", true);
-        context.getEmbryoIsEndMap().put("EMB-END-02", "1");
+        context.getEmbryoEndingFlagMap().put("EMB-END-02", 1);
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("3302005002");
         sku.setEmbryoCode("EMB-END-02");
