@@ -8349,10 +8349,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      */
     private int resolveClassTotalQtyLimit(LhScheduleContext context) {
         if (Objects.isNull(context)) {
-            return LhScheduleConstant.DEFAULT_CLASS_TOTAL_QTY_UP_LIMIT;
+            return LhScheduleConstant.CLASS_TOTAL_QTY_UP_LIMIT;
         }
         return context.getParamIntValue(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT,
-                LhScheduleConstant.DEFAULT_CLASS_TOTAL_QTY_UP_LIMIT);
+                LhScheduleConstant.CLASS_TOTAL_QTY_UP_LIMIT);
     }
 
     /**
