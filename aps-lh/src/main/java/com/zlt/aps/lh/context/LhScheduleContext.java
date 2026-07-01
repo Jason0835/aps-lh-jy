@@ -69,6 +69,11 @@ public class LhScheduleContext {
      */
     private Date scheduleDate;
     /**
+     * 当前正在排程的业务日期：由具体排程策略在处理日维度业务前刷新，
+     * 不等同于排程窗口起点 {@link #scheduleDate}，也不等同于业务保存目标日 {@link #scheduleTargetDate}。
+     */
+    private Date currentScheduleDate;
+    /**
      * 排程窗口结束日期 T+2 日：由 {@link #scheduleDate} + 2 得到，
      * 用于 day1/day2/day3 月计划映射、产能计算、加机台、收尾、欠产追补、换模日上限、
      * 跨月检测、滚动续作追加起点、班次日期反推等排程核心逻辑，

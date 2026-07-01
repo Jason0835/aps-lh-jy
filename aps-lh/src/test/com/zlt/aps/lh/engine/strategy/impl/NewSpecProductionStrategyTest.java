@@ -311,6 +311,35 @@ public class NewSpecProductionStrategyTest {
     }
 
     /**
+     * 用例说明：新增候选机台分配模具前，应先把上下文当前排程日期设置为SKU日计划账本首个业务日。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldSetCurrentScheduleDateBeforeMouldResourceAllocation() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildMouldResourceContext("SKU-001",
+                Collections.singletonList("M001"), Collections.singletonList(buildMachine("K1105", 1)));
+        context.setScheduleDate(toDate(2026, 6, 4, 0, 0, 0));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("SKU-001");
+        Map<LocalDate, SkuDailyPlanQuotaDTO> dailyPlanQuotaMap =
+                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(2);
+        SkuDailyPlanQuotaDTO firstQuota = new SkuDailyPlanQuotaDTO();
+        firstQuota.setProductionDate(LocalDate.of(2026, 6, 5));
+        firstQuota.setDayPlanQty(16);
+        dailyPlanQuotaMap.put(firstQuota.getProductionDate(), firstQuota);
+        sku.setDailyPlanQuotaMap(dailyPlanQuotaMap);
+
+        Assertions.assertNull(context.getCurrentScheduleDate());
+        MouldResourceAllocationResult result = invokeTryAllocateMouldResourceForAddMachine(
+                strategy, context, sku, buildMachine("K1105", 1), 1, 0);
+
+        Assertions.assertTrue(result.isAllowed());
+        Assertions.assertEquals(toDate(2026, 6, 5, 0, 0, 0), context.getCurrentScheduleDate());
+    }
+
+    /**
      * 用例说明：候选机台通过模具校验后，如果后续换模、首检或产能失败，应释放本次预占模具。
      *
      * @throws Exception 反射调用异常

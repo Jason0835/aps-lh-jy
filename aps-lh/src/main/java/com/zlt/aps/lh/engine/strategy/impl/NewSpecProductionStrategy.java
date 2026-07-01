@@ -552,6 +552,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             failReason, NewSpecFailReasonEnum.MACHINE_SELECTION_FAILED);
                     break;
                 }
+                refreshCurrentScheduleDate(context, sku, currentAddMachineProductionDate);
                 // SKU新增机台必须先按候选机台模数预占可用模具；模具不足只跳过当前机台，不能中断排程主链。
                 MouldResourceAllocationResult mouldResourceAllocationResult = tryAllocateMouldResourceForAddMachine(
                         context, sku, candidateMachine, originalAddMachineCount, actualAllowedAddMachineCount);
@@ -1917,6 +1918,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             MachineScheduleDTO candidateMachine,
             int originalAddMachineCount,
             int actualAllowedAddMachineCount) {
+        if (Objects.nonNull(context) && Objects.isNull(context.getCurrentScheduleDate())) {
+            refreshCurrentScheduleDate(context, sku, null);
+        }
         MouldResourceContext mouldResourceContext = resolveMouldResourceContext(context);
         MouldResourceAllocationResult allocationResult = mouldResourceContext.tryAllocate(
                 sku.getMaterialCode(), candidateMachine.getMachineCode());
@@ -1958,6 +1962,65 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             context.setMouldResourceContext(MouldResourceContext.from(context));
         }
         return context.getMouldResourceContext();
+    }
+
+    /**
+     * 新增SKU分配模具前刷新上下文当前业务日期。
+     * <p>模具资源上下文本身只负责占用和释放，不负责推导排程日期；
+     * 因此在策略层进入模具预占前，先把当前候选机台所属业务日写入排程上下文。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前新增SKU
+     * @param preferredProductionDate dayN扩机台推导出的当前候选生效业务日
+     */
+    private void refreshCurrentScheduleDate(LhScheduleContext context,
+                                                                 SkuScheduleDTO sku,
+                                                                 LocalDate preferredProductionDate) {
+        Date currentScheduleDate = resolveCurrentScheduleDate(
+                context, sku, preferredProductionDate);
+        if (Objects.nonNull(context) && Objects.nonNull(currentScheduleDate)) {
+            context.setCurrentScheduleDate(currentScheduleDate);
+        }
+    }
+
+    /**
+     * 解析新增SKU模具预占前应写入上下文的当前业务日期。
+     *
+     * @param context 排程上下文
+     * @param sku 当前新增SKU
+     * @param preferredProductionDate dayN扩机台推导出的当前候选生效业务日
+     * @return 当前业务日期，取不到时返回null
+     */
+    private Date resolveCurrentScheduleDate(LhScheduleContext context,
+                                                              SkuScheduleDTO sku,
+                                                              LocalDate preferredProductionDate) {
+        if (Objects.nonNull(preferredProductionDate)) {
+            return toDate(preferredProductionDate);
+        }
+        if (Objects.nonNull(sku) && !CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
+            for (LocalDate productionDate : sku.getDailyPlanQuotaMap().keySet()) {
+                if (Objects.nonNull(productionDate)) {
+                    return toDate(productionDate);
+                }
+            }
+        }
+        if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleDate())) {
+            return LhScheduleTimeUtil.clearTime(context.getScheduleDate());
+        }
+        return null;
+    }
+
+    /**
+     * 将业务日期转换为系统默认时区下的当天零点。
+     *
+     * @param productionDate 业务日期
+     * @return 当天零点日期
+     */
+    private Date toDate(LocalDate productionDate) {
+        if (Objects.isNull(productionDate)) {
+            return null;
+        }
+        return Date.from(productionDate.atStartOfDay(ZoneId.systemDefault()).toInstant());
     }
 
     /**
