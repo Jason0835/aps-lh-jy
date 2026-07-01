@@ -2,6 +2,7 @@ package com.zlt.aps.lh.handler;
 
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
+import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
 import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
@@ -32,6 +33,8 @@ class ContinuousProductionHandlerTest {
     private ISkuPriorityStrategy skuPriorityStrategy;
     @Mock
     private ITypeBlockProductionStrategy typeBlockProductionStrategy;
+    @Mock
+    private IMachineMatchStrategy machineMatchStrategy;
 
     @InjectMocks
     private ContinuousProductionHandler handler;
@@ -40,15 +43,16 @@ class ContinuousProductionHandlerTest {
     void handle_shouldSortBeforeContinuousEnding() {
         when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
         when(strategyFactory.getProductionStrategy("01")).thenReturn(strategy);
+        when(strategyFactory.getMachineMatchStrategy()).thenReturn(machineMatchStrategy);
 
         handler.handle(new LhScheduleContext());
 
         InOrder inOrder = inOrder(skuPriorityStrategy, strategy, typeBlockProductionStrategy);
         inOrder.verify(skuPriorityStrategy).sortByPriority(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleContinuousEnding(any(LhScheduleContext.class));
-        inOrder.verify(typeBlockProductionStrategy).scheduleTypeBlockChange(any(LhScheduleContext.class));
         inOrder.verify(strategy).allocateShiftPlanQty(any(LhScheduleContext.class));
         inOrder.verify(strategy).adjustEmbryoStock(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleReduceMould(any(LhScheduleContext.class));
+        inOrder.verify(typeBlockProductionStrategy).scheduleTypeBlockChange(any(LhScheduleContext.class));
     }
 }

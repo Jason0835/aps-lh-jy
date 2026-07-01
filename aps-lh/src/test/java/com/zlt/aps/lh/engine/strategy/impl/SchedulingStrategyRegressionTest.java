@@ -501,6 +501,33 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * dayN 节奏已满足但业务目标仍有剩余时，新增排产不能直接移出SKU；
+     * 只要原候选列表里还有未尝试机台，就继续按现有候选顺序消费尾部产能。
+     */
+    @Test
+    public void shouldContinueForTailCapacityWhenDailyRhythmSatisfiedButCandidateRemains() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        SkuScheduleDTO sku = buildContinuousSku("3302002661", 16, 128, buildQuotaMap(8, 60, 60));
+        MachineScheduleDTO firstMachine = buildNewSpecMachine("K1110");
+        MachineScheduleDTO tailMachine = buildNewSpecMachine("K1614");
+        List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
+        candidates.add(firstMachine);
+        candidates.add(tailMachine);
+        Set<String> excludedMachineCodes = new HashSet<String>(2);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "shouldContinueForTailCapacity",
+                LhScheduleContext.class, SkuScheduleDTO.class, List.class, Set.class,
+                String.class, int.class, int.class, int.class, boolean.class);
+        method.setAccessible(true);
+        boolean continueForTailCapacity = (Boolean) method.invoke(strategy, context, sku, candidates,
+                excludedMachineCodes, firstMachine.getMachineCode(), 64, 64, 128, false);
+
+        Assertions.assertTrue(continueForTailCapacity);
+    }
+
+    /**
      * 续作日计划下降时，非收尾多机台也必须按业务日降模，不能被“非收尾不降模”提前跳过。
      */
     @Test

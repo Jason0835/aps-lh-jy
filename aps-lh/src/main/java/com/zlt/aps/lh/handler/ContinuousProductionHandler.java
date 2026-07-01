@@ -56,24 +56,26 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
         log.info("续作收尾排产完成, 排程结果数: {}, 待新增SKU: {}",
                 context.getScheduleResultList().size(), context.getNewSpecSkuList().size());
 
-        // S4.4.2 收尾后换活字块衔接排产：仅在同胎胚、同模具等规则满足时衔接新增SKU。
-        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
-        log.info("换活字块衔接排产完成, 排程结果数: {}, 待新增SKU: {}",
-                context.getScheduleResultList().size(), context.getNewSpecSkuList().size());
-
-        // S4.4.3 班次计划量分配：续作策略中部分结果已携带班次量，此处保留统一策略入口。
+        // S4.4.2 班次计划量分配：续作策略中部分结果已携带班次量，此处保留统一策略入口。
         strategy.allocateShiftPlanQty(context);
         log.debug("续作班次计划量分配完成, 排程结果数: {}", context.getScheduleResultList().size());
 
-        // S4.4.4 胎胚库存调整：按 SKU 维度库存裁剪，避免同胎胚多个 SKU 共享库存导致超排。
+        // S4.4.3 胎胚库存调整：按 SKU 维度库存裁剪，避免同胎胚多个 SKU 共享库存导致超排。
         strategy.adjustEmbryoStock(context);
         log.info("续作胎胚库存调整完成, 排程结果数: {}, 未排产数: {}",
                 context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
 
-        // S4.4.5 降模排产：对同 SKU 多机台续作按 dayN 保障量和收尾规则释放冗余机台。
+        // S4.4.4 降模排产：对同 SKU 多机台续作按 dayN 保障量和收尾规则释放冗余机台。
         strategy.scheduleReduceMould(context);
         log.info("续作降模排产完成, 排程结果数: {}, 未排产数: {}",
                 context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
+
+        // S4.4.5 收尾后换活字块衔接排产：必须放在降模之后，读取续作最终收口后的真实机台可用时间。
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+        // 换活字块可能移出或回写待新增SKU，需重新构建结构视图供 S4.5 新增排序使用。
+        context.rebuildStructureSkuMapFromPending(context.getNewSpecSkuList());
+        log.info("换活字块衔接排产完成, 排程结果数: {}, 待新增SKU: {}",
+                context.getScheduleResultList().size(), context.getNewSpecSkuList().size());
 
         // S4.4.6 续作后全量启用机台排序日志：排除续作排满机台、保留续作收尾机台，不依赖具体SKU。
         strategyFactory.getMachineMatchStrategy().traceEnabledMachineSort(context);
