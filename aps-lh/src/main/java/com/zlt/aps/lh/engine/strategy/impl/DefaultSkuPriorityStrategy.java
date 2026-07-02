@@ -155,8 +155,8 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         return Comparator
                 // 顺序4：供应链优先按四类待排量逐级比较。
                 .comparingInt((SkuScheduleDTO s) -> -s.getHighPriorityPendingQty())
-                .thenComparingInt((SkuScheduleDTO s) -> -s.getCycleProductionPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getMidPriorityPendingQty())
+                .thenComparingInt((SkuScheduleDTO s) -> -s.getCycleProductionPendingQty())
                 .thenComparingInt((SkuScheduleDTO s) -> -s.getConventionProductionPendingQty())
                 // 顺序5：开产模式下雪地胎、不同英寸、特殊材料仅在同等条件下靠后。
                 .thenComparingInt((SkuScheduleDTO s) -> resolveOpenProductionLateScore(context, s));
