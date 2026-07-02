@@ -217,8 +217,10 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         Date startDate = LhScheduleTimeUtil.clearTime(scheduleDate);
         int scheduleDays = LhScheduleTimeUtil.getScheduleDays(context);
         Date endDate = LhScheduleTimeUtil.addDays(startDate, scheduleDays);
-        Map<String, LocalDate> requiredMonthMap = resolveRequiredMonthMap(
-                startDate, LhScheduleTimeUtil.addDays(endDate, 1));
+        int earlyProductionDaysThreshold = resolveEarlyProductionDaysThreshold(context);
+        // SKU提前生产需要从窗口结束日继续向后观察N个自然日，月计划和结构机台数按真实年月批量加载。
+        Date earlyProductionLookupEndDate = LhScheduleTimeUtil.addDays(endDate, earlyProductionDaysThreshold);
+        Map<String, LocalDate> requiredMonthMap = resolveRequiredMonthMap(startDate, earlyProductionLookupEndDate);
         // 喷砂时间允许前移一天，工作日历与设备停机需覆盖 T-1；清洗计划仍按当前排程窗口加载。
         Date calendarControlStartDate = LhScheduleTimeUtil.addDays(startDate, -1);
 
@@ -253,7 +255,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 () -> sizeOf(context.getMonthPlanList()));
         CompletableFuture<Void> monthPlanStatisticsFuture = runDataInitTaskAsync("月计划结构机台统计",
                 () -> loadMonthPlanStatistics(context, factoryCode, requiredMonthMap, startDate,
-                        LhScheduleTimeUtil.addDays(endDate, 1)),
+                        earlyProductionLookupEndDate),
                 () -> sizeOf(context.getStructurePlanMachineCountMap()));
         CompletableFuture<Void> specialMaterialBomFuture = runAfterDataInitTask(monthPlanFuture, "特殊物料清单",
                 () -> loadSpecialMaterialBom(context, factoryCode),
@@ -500,15 +502,37 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
+     * 解析SKU提前生产天数阈值。
+     *
+     * @param context 排程上下文
+     * @return 提前生产天数阈值，范围1～31
+     */
+    private int resolveEarlyProductionDaysThreshold(LhScheduleContext context) {
+        int threshold;
+        if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleConfig())) {
+            threshold = context.getScheduleConfig().getEarlyProductionDaysThreshold();
+        } else if (Objects.nonNull(context)) {
+            threshold = context.getParamIntValue(LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD,
+                    LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD);
+        } else {
+            threshold = LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        if (threshold <= 0) {
+            return LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        return Math.min(threshold, LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD);
+    }
+
+    /**
      * 解析本次排程需要访问的月计划月份集合。
-     * <p>范围覆盖 T～T+2 以及 T+3 后看日期，按自然月去重后用于批量加载月计划，避免策略层循环查库。</p>
+     * <p>范围覆盖排程窗口和SKU提前生产向后观察日期，按自然月去重后用于批量加载月计划，避免策略层循环查库。</p>
      *
      * @param startDate 开始日期，包含当天
      * @param endDateExclusive 结束日期，不含当天
      * @return key=year_month，value=该月月初
      */
     private Map<String, LocalDate> resolveRequiredMonthMap(Date startDate, Date endDateExclusive) {
-        Map<String, LocalDate> requiredMonthMap = new LinkedHashMap<String, LocalDate>(2);
+        Map<String, LocalDate> requiredMonthMap = new LinkedHashMap<String, LocalDate>(4);
         LocalDate startLocalDate = toLocalDate(startDate);
         LocalDate endExclusiveLocalDate = toLocalDate(endDateExclusive);
         if (Objects.isNull(startLocalDate) || Objects.isNull(endExclusiveLocalDate)

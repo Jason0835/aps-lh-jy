@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.zlt.aps.cx.api.domain.entity.CxStock;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -421,6 +422,52 @@ public class LhBaseDataServiceImplTest {
     }
 
     /**
+     * 用例说明：提前生产最多可向后查看31天，基础数据必须提前加载窗口结束日后31天覆盖到的自然月。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldLoadMonthsCoveredByEarlyProductionThreshold() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
+        LhScheduleContext context = buildContext();
+        context.setScheduleDate(buildDate(2026, 7, 30));
+        context.setScheduleTargetDate(buildDate(2026, 8, 1));
+        context.setScheduleConfig(scheduleConfigWithEarlyProductionDays(31));
+
+        MpFactoryProductionVersionMapper versionMapper = mockMapper(MpFactoryProductionVersionMapper.class);
+        Mockito.when(versionMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(buildProductionVersion("PV-07", "MP-07")),
+                Collections.singletonList(buildProductionVersion("PV-08", "MP-08")),
+                Collections.singletonList(buildProductionVersion("PV-09", "MP-09")));
+        injectField(service, "mpFactoryProductionVersionMapper", versionMapper);
+
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper =
+                mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(monthPlan("3302001606", 2026, 7, "MP-07", "PV-07")),
+                Collections.singletonList(monthPlan("3302001606", 2026, 8, "MP-08", "PV-08")),
+                Collections.singletonList(monthPlan("3302001606", 2026, 9, "MP-09", "PV-09")));
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        MpMonthPlanStatisticsMapper statisticsMapper = mockMapper(MpMonthPlanStatisticsMapper.class);
+        Mockito.when(statisticsMapper.selectList(ArgumentMatchers.any())).thenReturn(
+                Collections.singletonList(monthStatistics("STRUCT-001")),
+                Collections.singletonList(monthStatistics("STRUCT-001")),
+                Collections.singletonList(monthStatistics("STRUCT-001")));
+        injectField(service, "monthPlanStatisticsMapper", statisticsMapper);
+
+        service.loadAllBaseData(context);
+
+        Assertions.assertEquals("MP-09", context.getMonthPlanVersionByYearMonthMap().get("2026_9"),
+                "提前生产31天视野覆盖到9月时，应加载9月需求版本");
+        Assertions.assertEquals("PV-09", context.getProductionVersionByYearMonthMap().get("2026_9"),
+                "提前生产31天视野覆盖到9月时，应加载9月排产版本");
+        Assertions.assertEquals(3, context.getLoadedMonthPlanList().size(),
+                "基础月计划应覆盖T日至窗口结束日后31天涉及的所有自然月");
+    }
+
+    /**
      * 用例说明：S4.3 SKU 归集基础月计划必须按物料编码+产品状态去重，不能丢失同物料的不同产品状态。
      *
      * @throws Exception 反射注入异常
@@ -667,6 +714,28 @@ public class LhBaseDataServiceImplTest {
         return version;
     }
 
+    private FactoryMonthPlanProductionFinalResult monthPlan(String materialCode, int year, int month,
+                                                            String monthPlanVersion, String productionVersion) {
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setFactoryCode("116");
+        plan.setMaterialCode(materialCode);
+        plan.setYear(year);
+        plan.setMonth(month);
+        plan.setMonthPlanVersion(monthPlanVersion);
+        plan.setProductionVersion(productionVersion);
+        plan.setEmbryoCode("EMB-" + month);
+        plan.setStructureName("STRUCT-001");
+        plan.setDay1(10);
+        return plan;
+    }
+
+    private MpMonthPlanStatistics monthStatistics(String structureName) {
+        MpMonthPlanStatistics statistics = new MpMonthPlanStatistics();
+        statistics.setStructureName(structureName);
+        statistics.setDay1("{\"lhMachines\":1}");
+        return statistics;
+    }
+
     private MpMonthPlanStatisticsMapper buildMonthPlanStatisticsMapper() {
         MpMonthPlanStatistics statistics = new MpMonthPlanStatistics();
         statistics.setStructureName("STRUCT-001");
@@ -692,6 +761,12 @@ public class LhBaseDataServiceImplTest {
         context.setScheduleTargetDate(new Date(1767283200000L));
         context.setScheduleConfig(new LhScheduleConfig(new HashMap<>(16)));
         return context;
+    }
+
+    private LhScheduleConfig scheduleConfigWithEarlyProductionDays(int threshold) {
+        HashMap<String, String> paramMap = new HashMap<String, String>(16);
+        paramMap.put(LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD, String.valueOf(threshold));
+        return new LhScheduleConfig(paramMap);
     }
 
     private Date buildDate(int year, int month, int day) {

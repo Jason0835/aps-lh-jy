@@ -339,6 +339,12 @@ public final class LhScheduleConstant {
     /** 新增排产欠产增机台阈值默认值 */
     public static final int NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD = 200;
 
+    /** SKU提前生产天数阈值默认值 */
+    public static final int DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD = 2;
+
+    /** SKU提前生产最多允许提前31个自然日 */
+    public static final int MAX_EARLY_PRODUCTION_DAYS_THRESHOLD = 31;
+
     /** 收尾小余量允许欠产偏差值默认值 */
     public static final int CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY = 2;
 

@@ -4340,7 +4340,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         request.setWindowEndDate(windowEndDate);
         request.setWindowLastDayNextPlanLookAheadEnabled(true);
         LocalDate firstFuturePlanDate = EarlyProductionChecker.resolveFirstFuturePlanDate(
-                sku, currentProductionDate, windowEndDate);
+                context, sku, currentProductionDate);
         if (EarlyProductionChecker.isEndingStructureLargeSurplus(
                 context, sku, currentProductionDate, firstFuturePlanDate)) {
             request.setForceShortageWindowMode(true);
@@ -4975,7 +4975,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 解析新增排产模拟使用的日计划账本。
-     * <p>SKU提前生产准入通过后，只在当前加机台模拟中使用前移一天的临时日计划视图；
+     * <p>SKU提前生产准入通过后，只在当前加机台模拟中使用按实际提前天数前移的临时日计划视图；
      * 不回写月计划，也不替换 SKU 原始 {@code dailyPlanQuotaMap}。</p>
      *
      * @param context 排程上下文
@@ -5003,7 +5003,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         Map<LocalDate, SkuDailyPlanQuotaDTO> shiftedQuotaMap =
                 SkuDailyPlanQuotaUtil.buildShiftedEarlyProductionQuotaMap(
-                        sourceQuotaMap, currentProductionDate, windowEndDate);
+                        sourceQuotaMap, currentProductionDate, windowEndDate, decision.getFuturePlanDate());
         if (CollectionUtils.isEmpty(shiftedQuotaMap)) {
             return sourceQuotaMap;
         }

@@ -2,12 +2,12 @@
 
 ### Requirement: 新增链路收尾和续作补偿 SKU 参与提前生产判定
 
-系统 SHALL 对已经进入 `NewSpecProductionStrategy` 的新增收尾 SKU 和续作补偿 SKU 复用 SKU 提前生产准入规则；当当前业务日无日计划量且下一业务日存在有效日计划量时，系统 SHALL 使用同一份 `EarlyProductionDecision` 判断是否允许保留当前业务日换模和开产，并在实际生成结果后回写提前生产备注与 `IS_EARLY_PRODUCTION`。
+系统 SHALL 对已经进入 `NewSpecProductionStrategy` 的新增收尾 SKU 和续作补偿 SKU 复用 SKU 提前生产准入规则；当当前业务日无日计划量且提前生产阈值范围内存在有效日计划量时，系统 SHALL 使用同一份 `EarlyProductionDecision` 判断是否允许保留当前业务日换模和开产，并在实际生成结果后回写提前生产备注与 `IS_EARLY_PRODUCTION`。
 
-#### Scenario: 新增收尾 SKU 提前一天排产时回写提前生产标识
+#### Scenario: 新增收尾 SKU 提前排产时回写提前生产标识
 
 - **WHEN** 新增收尾 SKU 当前业务日无日计划量
-- **AND** 下一业务日存在有效日计划量
+- **AND** 提前生产阈值范围内存在有效 `futurePlanDate` 日计划量
 - **AND** SKU 通过提前生产准入并生成新增排产结果
 - **THEN** 系统 SHALL 将结果 `IS_EARLY_PRODUCTION` 写为 `1`
 - **AND** 系统 SHALL 按提前生产备注规则追加结构计划机台数
@@ -16,7 +16,7 @@
 
 - **WHEN** 续作补偿 SKU 已转入 S4.5 新增排产
 - **AND** 当前业务日无日计划量
-- **AND** 下一业务日存在有效日计划量
+- **AND** 提前生产阈值范围内存在有效 `futurePlanDate` 日计划量
 - **AND** SKU 通过提前生产准入
 - **THEN** 系统 SHALL 保留当前业务日首台换模和首个可排时间
 - **AND** 系统 SHALL 继续执行候选机台、模具、胎胚、换模、首检、单控保护和日计划回裁等既有校验

@@ -215,6 +215,7 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_LOOK_AHEAD_DAYS, 1);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD,
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, 0);
+        putEarlyProductionDaysThreshold(resolvedParamMap, lhParamsMap);
         putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE,
                 LhScheduleConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE,
@@ -294,6 +295,42 @@ public class LhScheduleConfigResolver {
         }
         if (minValue != null && resolvedValue < minValue) {
             resolvedValue = minValue;
+        }
+        resolvedParamMap.put(paramCode, String.valueOf(resolvedValue));
+    }
+
+    /**
+     * 解析SKU提前生产天数阈值。
+     * <p>提前生产最多允许向后查看31个自然日，非法、缺失或小于等于0时统一回退默认值2。</p>
+     *
+     * @param resolvedParamMap 解析后参数
+     * @param lhParamsMap      原始参数
+     */
+    private void putEarlyProductionDaysThreshold(Map<String, String> resolvedParamMap, Map<String, String> lhParamsMap) {
+        String paramCode = LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD;
+        int defaultValue = LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        int resolvedValue = defaultValue;
+        String value = lhParamsMap.get(paramCode);
+        if (StringUtils.isEmpty(value)) {
+            log.warn("SKU提前生产天数阈值未配置或为空，使用默认值, paramCode={}, defaultValue={}",
+                    paramCode, defaultValue);
+        } else {
+            try {
+                resolvedValue = Integer.parseInt(value.trim());
+            } catch (NumberFormatException e) {
+                log.warn("硫化参数解析失败, paramCode={}, value={}, 使用默认值: {}", paramCode, value, defaultValue);
+                resolvedValue = defaultValue;
+            }
+        }
+        if (resolvedValue <= 0) {
+            log.warn("SKU提前生产天数阈值配置无效，使用默认值, paramCode={}, value={}, defaultValue={}",
+                    paramCode, value, defaultValue);
+            resolvedValue = defaultValue;
+        }
+        if (resolvedValue > LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD) {
+            log.warn("SKU提前生产天数阈值超过最大上限，按31天生效, paramCode={}, value={}, maxValue={}",
+                    paramCode, value, LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD);
+            resolvedValue = LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD;
         }
         resolvedParamMap.put(paramCode, String.valueOf(resolvedValue));
     }

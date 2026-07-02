@@ -528,6 +528,21 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 获取SKU提前生产天数阈值。
+     * <p>该阈值只控制新增排产提前生产准入向后查找的自然日范围，实际排程窗口仍保持T～T+2。</p>
+     *
+     * @return 提前生产天数阈值，范围1～31
+     */
+    public int getEarlyProductionDaysThreshold() {
+        int threshold = getParamIntValue(LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD,
+                LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD);
+        if (threshold <= 0) {
+            return LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        return Math.min(threshold, LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD);
+    }
+
+    /**
      * 获取收尾小余量允许欠产偏差值。
      *
      * <p>该参数用于 S4.4 续作和 S4.5 新增的收尾小余量场景，

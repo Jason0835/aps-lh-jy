@@ -132,6 +132,30 @@ class SkuDailyPlanQuotaUtilRegressionTest {
         assertEquals(0, shiftedQuotaMap.get(day3).getDayPlanQty(), "缺少T+3原始计划时，T+2临时计划按0处理");
     }
 
+    @Test
+    void buildShiftedEarlyProductionQuotaMap_shouldMovePlanByFuturePlanDateGap() {
+        LocalDate day1 = LocalDate.of(2026, 6, 14);
+        LocalDate day2 = LocalDate.of(2026, 6, 15);
+        LocalDate day3 = LocalDate.of(2026, 6, 16);
+        LocalDate day4 = LocalDate.of(2026, 6, 17);
+        LocalDate day5 = LocalDate.of(2026, 6, 18);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>(8);
+        quotaMap.put(day1, quota("3302001724", day1, 0));
+        quotaMap.put(day2, quota("3302001724", day2, 0));
+        quotaMap.put(day3, quota("3302001724", day3, 0));
+        quotaMap.put(day4, quota("3302001724", day4, 46));
+        quotaMap.put(day5, quota("3302001724", day5, 50));
+
+        Map<LocalDate, SkuDailyPlanQuotaDTO> shiftedQuotaMap =
+                SkuDailyPlanQuotaUtil.buildShiftedEarlyProductionQuotaMap(quotaMap, day1, day3, day4);
+
+        assertEquals(46, shiftedQuotaMap.get(day1).getDayPlanQty(), "T+3计划应前移到T日参与节奏判断");
+        assertEquals(50, shiftedQuotaMap.get(day2).getDayPlanQty(), "T+4计划应随同前移到T+1日参与节奏判断");
+        assertEquals(0, shiftedQuotaMap.get(day3).getDayPlanQty(), "缺少T+5计划时T+2临时计划按0处理");
+        assertEquals(0, quotaMap.get(day1).getDayPlanQty(), "动态前移不能污染原始账本");
+        assertNotSame(quotaMap.get(day4), shiftedQuotaMap.get(day1), "动态前移视图必须克隆来源对象");
+    }
+
     private SkuDailyPlanQuotaDTO quota(String materialCode, LocalDate productionDate, int dayPlanQty) {
         SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
         quota.setMaterialCode(materialCode);

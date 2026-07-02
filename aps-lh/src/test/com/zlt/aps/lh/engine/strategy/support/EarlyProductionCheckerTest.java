@@ -2,11 +2,14 @@ package com.zlt.aps.lh.engine.strategy.support;
 
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -111,7 +114,7 @@ class EarlyProductionCheckerTest {
     }
 
     @Test
-    void canEnterEarlyProductionCheck_shouldRejectThirdDayPlanWithinScheduleWindow() {
+    void canEnterEarlyProductionCheck_shouldAllowSecondFutureDayWhenDefaultThresholdIsTwo() {
         LocalDate day1 = LocalDate.of(2026, 6, 12);
         LocalDate day2 = LocalDate.of(2026, 6, 13);
         LocalDate day3 = LocalDate.of(2026, 6, 14);
@@ -123,7 +126,43 @@ class EarlyProductionCheckerTest {
         boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
                 context, sku, day1, day3, 200);
 
-        assertFalse(allowed, "提前生产只允许提前一天，T日不能判断T+2日计划量");
+        assertTrue(allowed, "默认提前生产阈值为2天，T日应允许判断T+2日计划量");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldRejectPlanBeyondDefaultThresholdTwo() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LocalDate day4 = LocalDate.of(2026, 6, 15);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
+                quotaMap(new LocalDate[]{day1, day2, day3, day4}, new int[]{0, 0, 0, 60}));
+
+        boolean allowed = EarlyProductionChecker.canEnterEarlyProductionCheck(
+                context, sku, day1, day4, 200);
+
+        assertFalse(allowed, "默认提前生产阈值为2天，T日不能提前消耗T+3日计划量");
+    }
+
+    @Test
+    void canEnterEarlyProductionCheck_shouldAllowThirdFutureDayWhenThresholdIsThree() {
+        LocalDate day1 = LocalDate.of(2026, 6, 12);
+        LocalDate day2 = LocalDate.of(2026, 6, 13);
+        LocalDate day3 = LocalDate.of(2026, 6, 14);
+        LocalDate day4 = LocalDate.of(2026, 6, 15);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
+        context.setScheduleConfig(scheduleConfigWithEarlyProductionDays(3));
+        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
+                quotaMap(new LocalDate[]{day1, day2, day3, day4}, new int[]{0, 0, 0, 60}));
+
+        EarlyProductionDecision decision = EarlyProductionChecker.checkEarlyProduction(
+                context, sku, day1, day1, day4, 200);
+
+        assertTrue(decision.isAllowed(), "提前生产阈值为3天时，T日应允许判断T+3日计划量");
+        assertEquals(day4, decision.getFuturePlanDate());
     }
 
     @Test
@@ -251,6 +290,12 @@ class EarlyProductionCheckerTest {
         return context;
     }
 
+    private LhScheduleConfig scheduleConfigWithEarlyProductionDays(int threshold) {
+        Map<String, String> paramMap = new HashMap<String, String>(4);
+        paramMap.put(LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD, String.valueOf(threshold));
+        return new LhScheduleConfig(paramMap);
+    }
+
     private SkuScheduleDTO sku(String materialCode,
                                String structureName,
                                int historyShortageQty,
@@ -281,6 +326,17 @@ class EarlyProductionCheckerTest {
         quotaMap.get(day2).setRemainingQty(day2Qty);
         quotaMap.get(day3).setDayPlanQty(day3Qty);
         quotaMap.get(day3).setRemainingQty(day3Qty);
+        return quotaMap;
+    }
+
+    private Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap(LocalDate[] dates, int[] dayPlanQtyArray) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap =
+                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(dates.length);
+        for (int index = 0; index < dates.length; index++) {
+            LocalDate date = dates[index];
+            int dayPlanQty = dayPlanQtyArray[index];
+            quotaMap.put(date, quota(date, dayPlanQty));
+        }
         return quotaMap;
     }
 

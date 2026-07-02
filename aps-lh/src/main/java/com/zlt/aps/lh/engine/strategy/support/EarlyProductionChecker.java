@@ -1,13 +1,17 @@
 package com.zlt.aps.lh.engine.strategy.support;
 
+import com.zlt.aps.lh.api.constant.LhScheduleConstant;
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
 import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -63,17 +67,22 @@ public final class EarlyProductionChecker {
                 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return EarlyProductionDecision.notEarlyProduction(true, "非提前生产判定范围");
         }
-        if (hasCurrentDayPlan(sku, currentDate)) {
+        if (hasCurrentDayPlan(context, sku, currentDate)) {
             return EarlyProductionDecision.notEarlyProduction(true, "当前业务日已有日计划量");
         }
-        LocalDate firstFuturePlanDate = resolveFirstFuturePlanDate(sku, currentDate, windowEndDate);
+        int earlyProductionDaysThreshold = resolveEarlyProductionDaysThreshold(context);
+        LocalDate firstFuturePlanDate = resolveFirstFuturePlanDate(context, sku, currentDate);
         if (Objects.isNull(firstFuturePlanDate)) {
             logEarlyProductionDecision(context, sku, currentDate, null, 0,
                     context.getStructureScheduledMachineCount(currentDate, sku.getStructureName()),
                     context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode()),
-                    shortageThreshold, false, "下一业务日无日计划量");
-            return EarlyProductionDecision.notEarlyProduction(false, "下一业务日无日计划量");
+                    shortageThreshold, earlyProductionDaysThreshold, 0, 0, false,
+                    "未来" + earlyProductionDaysThreshold + "天无日计划量");
+            return EarlyProductionDecision.notEarlyProduction(false,
+                    "未来" + earlyProductionDaysThreshold + "天无日计划量");
         }
+        int futurePlanQty = resolveDayPlanQty(context, sku, firstFuturePlanDate);
+        int earlyDays = (int) ChronoUnit.DAYS.between(currentDate, firstFuturePlanDate);
         List<Integer> structurePlanMachineCounts = resolveWindowStructurePlanMachineCounts(
                 context, sku.getStructureName(), windowStartDate);
         int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
@@ -82,7 +91,8 @@ public final class EarlyProductionChecker {
             logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, 0,
                     context.getStructureScheduledMachineCount(currentDate, sku.getStructureName()),
                     context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode()),
-                    threshold, true, "本月前日累计欠产超过阈值，复用原强制加机台逻辑");
+                    threshold, earlyProductionDaysThreshold, earlyDays, futurePlanQty, true,
+                    "本月前日累计欠产超过阈值，复用原强制加机台逻辑");
             return EarlyProductionDecision.earlyProduction(true, EarlyProductionDecision.SCENE_NORMAL,
                     firstFuturePlanDate, structurePlanMachineCounts,
                     "本月前日累计欠产超过阈值，复用原强制加机台逻辑");
@@ -97,7 +107,8 @@ public final class EarlyProductionChecker {
         if (planMachineCount > 0) {
             boolean allowed = scheduledStructureCount < planMachineCount;
             logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, planMachineCount,
-                    scheduledStructureCount, scheduledSkuCount, threshold, allowed,
+                    scheduledStructureCount, scheduledSkuCount, threshold,
+                    earlyProductionDaysThreshold, earlyDays, futurePlanQty, allowed,
                     allowed ? "结构已排机台数未达到计划机台数" : "结构已排机台数已达到计划机台数");
             String sceneType = currentPlanMachineCount > 0
                     ? EarlyProductionDecision.SCENE_NORMAL : EarlyProductionDecision.SCENE_STRUCTURE_SWITCH;
@@ -108,7 +119,8 @@ public final class EarlyProductionChecker {
         boolean allowedByEndingSurplus = isEndingStructureLargeSurplus(
                 context, sku, currentDate, firstFuturePlanDate);
         logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, planMachineCount,
-                scheduledStructureCount, scheduledSkuCount, threshold, allowedByEndingSurplus,
+                scheduledStructureCount, scheduledSkuCount, threshold, earlyProductionDaysThreshold,
+                earlyDays, futurePlanQty, allowedByEndingSurplus,
                 allowedByEndingSurplus ? "结构已收尾且SKU余量大于已排机台日硫化量" : "结构无有效计划且SKU余量不足");
         return EarlyProductionDecision.earlyProduction(allowedByEndingSurplus,
                 EarlyProductionDecision.SCENE_STRUCTURE_ENDING, firstFuturePlanDate,
@@ -170,28 +182,44 @@ public final class EarlyProductionChecker {
     }
 
     /**
-     * 解析当前日后一日是否有 dayN 日计划量。
-     * <p>SKU提前生产只允许提前一天，当前业务日只能判断下一业务日的计划量，
-     * 不再向 T+2 或更后日期扫描。</p>
+     * 解析当前日后配置阈值内最早有 dayN 日计划量的日期。
+     * <p>历史调用未传排程上下文时，仅使用 SKU 运行态账本判断，阈值按默认值处理。</p>
      *
      * @param sku SKU
      * @param currentDate 当前业务日期
-     * @param windowEndDate 排程窗口结束日期
-     * @return 下一业务日；无下一日计划返回 null
+     * @param windowEndDate 排程窗口结束日期，保留兼容旧调用，不再限制提前生产观察范围
+     * @return 最早未来计划日；阈值内无计划返回 null
      */
     public static LocalDate resolveFirstFuturePlanDate(SkuScheduleDTO sku,
                                                        LocalDate currentDate,
                                                        LocalDate windowEndDate) {
-        if (Objects.isNull(sku) || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())
-                || Objects.isNull(currentDate)) {
+        return resolveFirstFuturePlanDate(null, sku, currentDate);
+    }
+
+    /**
+     * 解析当前日后配置阈值内最早有 dayN 日计划量的日期。
+     * <p>优先读取 SKU 运行态账本；账本未覆盖未来日期时，再按日期所属真实年月从上下文月计划读取，
+     * 避免跨月、跨年提前生产误用 day32 或排程目标月。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param currentDate 当前业务日期
+     * @return 最早未来计划日；阈值内无计划返回 null
+     */
+    public static LocalDate resolveFirstFuturePlanDate(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       LocalDate currentDate) {
+        if (Objects.isNull(sku) || Objects.isNull(currentDate)) {
             return null;
         }
-        LocalDate nextDate = currentDate.plusDays(1);
-        if (Objects.nonNull(windowEndDate) && nextDate.isAfter(windowEndDate)) {
-            return null;
-        }
-        if (hasDayPlan(sku.getDailyPlanQuotaMap().get(nextDate))) {
-            return nextDate;
+        int earlyProductionDaysThreshold = resolveEarlyProductionDaysThreshold(context);
+        LocalDate endDate = currentDate.plusDays(earlyProductionDaysThreshold);
+        LocalDate date = currentDate.plusDays(1);
+        while (!date.isAfter(endDate)) {
+            if (resolveDayPlanQty(context, sku, date) > 0) {
+                return date;
+            }
+            date = date.plusDays(1);
         }
         return null;
     }
@@ -199,16 +227,59 @@ public final class EarlyProductionChecker {
     /**
      * 判断当前日是否已有 dayN 日计划量。
      *
+     * @param context 排程上下文
      * @param sku SKU
      * @param currentDate 当前业务日期
      * @return true-当前日有计划；false-当前日无计划
      */
-    private static boolean hasCurrentDayPlan(SkuScheduleDTO sku, LocalDate currentDate) {
-        if (Objects.isNull(sku) || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())
-                || Objects.isNull(currentDate)) {
-            return false;
+    private static boolean hasCurrentDayPlan(LhScheduleContext context, SkuScheduleDTO sku, LocalDate currentDate) {
+        return resolveDayPlanQty(context, sku, currentDate) > 0;
+    }
+
+    /**
+     * 解析指定日期的 SKU 原始 dayN 日计划量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param productionDate 计划日期
+     * @return 日计划量
+     */
+    private static int resolveDayPlanQty(LhScheduleContext context, SkuScheduleDTO sku, LocalDate productionDate) {
+        if (Objects.isNull(sku) || Objects.isNull(productionDate)) {
+            return 0;
         }
-        return hasDayPlan(sku.getDailyPlanQuotaMap().get(currentDate));
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
+        if (!CollectionUtils.isEmpty(quotaMap) && quotaMap.containsKey(productionDate)) {
+            SkuDailyPlanQuotaDTO quota = quotaMap.get(productionDate);
+            return Objects.isNull(quota) ? 0 : Math.max(0, quota.getDayPlanQty());
+        }
+        if (Objects.isNull(context)) {
+            return 0;
+        }
+        return Math.max(0, MonthPlanDateResolver.resolveDayQty(
+                context, sku.getMaterialCode(), sku.getProductStatus(), productionDate));
+    }
+
+    /**
+     * 解析 SKU 提前生产天数阈值。
+     *
+     * @param context 排程上下文
+     * @return 提前生产天数阈值，范围1～31
+     */
+    private static int resolveEarlyProductionDaysThreshold(LhScheduleContext context) {
+        int threshold;
+        if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleConfig())) {
+            threshold = context.getScheduleConfig().getEarlyProductionDaysThreshold();
+        } else if (Objects.nonNull(context)) {
+            threshold = context.getParamIntValue(LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD,
+                    LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD);
+        } else {
+            threshold = LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        if (threshold <= 0) {
+            return LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        return Math.min(threshold, LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD);
     }
 
     /**
@@ -263,6 +334,9 @@ public final class EarlyProductionChecker {
      * @param scheduledStructureCount 结构已排机台数
      * @param scheduledSkuCount SKU已排机台数
      * @param threshold 欠产阈值
+     * @param earlyProductionDaysThreshold 提前生产天数阈值
+     * @param earlyDays 实际提前自然日
+     * @param futurePlanQty 未来计划日原始日计划量
      * @param allowed 是否允许进入新增判断
      * @param reason 原因
      */
@@ -274,14 +348,20 @@ public final class EarlyProductionChecker {
                                                    int scheduledStructureCount,
                                                    int scheduledSkuCount,
                                                    int threshold,
+                                                   int earlyProductionDaysThreshold,
+                                                   int earlyDays,
+                                                   int futurePlanQty,
                                                    boolean allowed,
                                                    String reason) {
         log.info("提前生产准入判断, factoryCode: {}, currentDate: {}, futurePlanDate: {}, materialCode: {}, "
                         + "structureName: {}, historyShortageQty: {}, threshold: {}, planMachineCount: {}, "
-                        + "scheduledStructureCount: {}, scheduledSkuCount: {}, dailyQty: {}, result: {}, reason: {}",
+                        + "scheduledStructureCount: {}, scheduledSkuCount: {}, dailyQty: {}, "
+                        + "earlyProductionDaysThreshold: {}, earlyDays: {}, futurePlanQty: {}, "
+                        + "result: {}, reason: {}",
                 context.getFactoryCode(), currentDate, futurePlanDate, sku.getMaterialCode(),
                 sku.getStructureName(), Math.max(0, sku.getMonthlyHistoryShortageQty()), threshold,
                 planMachineCount, scheduledStructureCount, scheduledSkuCount,
-                Math.max(0, sku.getDailyCapacity()), allowed, reason);
+                Math.max(0, sku.getDailyCapacity()), earlyProductionDaysThreshold, earlyDays,
+                futurePlanQty, allowed, reason);
     }
 }

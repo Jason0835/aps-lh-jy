@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import org.springframework.util.CollectionUtils;
 
 import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -123,7 +124,7 @@ public final class SkuDailyPlanQuotaUtil {
 
     /**
      * 构造提前生产临时日计划额度视图。
-     * <p>提前生产只允许提前一天，因此当前业务日到窗口结束日逐日读取下一天额度；
+     * <p>历史三参调用仍按提前一天处理，因此当前业务日到窗口结束日逐日读取下一天额度；
      * 该方法只克隆运行态账本，不修改原始月计划日计划量和原始额度对象。</p>
      *
      * @param quotaMap 原始日计划额度账本
@@ -135,16 +136,57 @@ public final class SkuDailyPlanQuotaUtil {
             Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
             LocalDate currentDate,
             LocalDate windowEndDate) {
+        return buildShiftedEarlyProductionQuotaMap(quotaMap, currentDate, windowEndDate, 1);
+    }
+
+    /**
+     * 构造提前生产临时日计划额度视图。
+     * <p>按实际提前天数将未来 dayN 日计划前移到当前排程窗口，仅用于新增机台节奏判断和加机台模拟；
+     * 该方法只克隆运行态账本，不修改原始月计划日计划量和原始额度对象。</p>
+     *
+     * @param quotaMap 原始日计划额度账本
+     * @param currentDate 当前业务日期
+     * @param windowEndDate 排程窗口结束日期
+     * @param futurePlanDate 提前生产命中的未来计划日
+     * @return 按实际提前天数前移后的临时额度账本
+     */
+    public static Map<LocalDate, SkuDailyPlanQuotaDTO> buildShiftedEarlyProductionQuotaMap(
+            Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+            LocalDate currentDate,
+            LocalDate windowEndDate,
+            LocalDate futurePlanDate) {
+        int shiftDays = 1;
+        if (Objects.nonNull(currentDate) && Objects.nonNull(futurePlanDate)) {
+            shiftDays = (int) Math.max(1, ChronoUnit.DAYS.between(currentDate, futurePlanDate));
+        }
+        return buildShiftedEarlyProductionQuotaMap(quotaMap, currentDate, windowEndDate, shiftDays);
+    }
+
+    /**
+     * 构造提前生产临时日计划额度视图。
+     *
+     * @param quotaMap 原始日计划额度账本
+     * @param currentDate 当前业务日期
+     * @param windowEndDate 排程窗口结束日期
+     * @param shiftDays 实际提前天数
+     * @return 按提前天数前移后的临时额度账本
+     */
+    private static Map<LocalDate, SkuDailyPlanQuotaDTO> buildShiftedEarlyProductionQuotaMap(
+            Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+            LocalDate currentDate,
+            LocalDate windowEndDate,
+            int shiftDays) {
         Map<LocalDate, SkuDailyPlanQuotaDTO> shiftedQuotaMap =
                 new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
         if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(currentDate) || Objects.isNull(windowEndDate)
                 || currentDate.isAfter(windowEndDate)) {
             return shiftedQuotaMap;
         }
+        int safeShiftDays = Math.max(1, shiftDays);
         String materialCode = resolveMaterialCode(quotaMap);
         LocalDate date = currentDate;
         while (!date.isAfter(windowEndDate)) {
-            SkuDailyPlanQuotaDTO sourceQuota = quotaMap.get(date.plusDays(1));
+            SkuDailyPlanQuotaDTO sourceQuota = quotaMap.get(date.plusDays(safeShiftDays));
             shiftedQuotaMap.put(date, cloneQuotaForProductionDate(sourceQuota, date, materialCode));
             date = date.plusDays(1);
         }
