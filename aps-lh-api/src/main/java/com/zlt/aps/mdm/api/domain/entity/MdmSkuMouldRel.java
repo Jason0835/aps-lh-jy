@@ -4,12 +4,15 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.ruoyi.common.core.annotation.Excel;
 import com.ruoyi.common.core.web.domain.BaseEntity;
 import com.zlt.common.annotation.ImportExcelValidated;
 import io.swagger.annotations.ApiModel;
 import io.swagger.annotations.ApiModelProperty;
 import lombok.Data;
+
+import java.util.Date;
 
 
 @ApiModel(value = "SKU与模具关系对象", description = "SKU与模具关系对象")
@@ -202,4 +205,13 @@ public class MdmSkuMouldRel extends BaseEntity {
     @ApiModelProperty(value = "模具类型，4-型腔，5-侧板", name = "mouldType")
     @TableField(exist = false)
     private String mouldType;
+
+    /**
+     * 模具可用日期
+     */
+    @JsonFormat(pattern = "yyyy-MM-dd")
+    @ApiModelProperty(value = "模具可用日期", name = "boardingDate")
+    @TableField(exist = false)
+    private Date boardingDate;
+
 }

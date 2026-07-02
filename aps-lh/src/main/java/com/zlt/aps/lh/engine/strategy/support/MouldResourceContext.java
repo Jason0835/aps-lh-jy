@@ -222,6 +222,11 @@ public class MouldResourceContext {
                 if (Objects.nonNull(modelInfo) && MouldStatusUtil.isEnabled(modelInfo.getMouldStatus())) {
                     mouldCodeSet.add(mouldCode);
                 }
+                // 若模具台账没有，但模具到货计划存在且模具可用日期<=当前排程日期，模具视为可用
+                if (modelInfo == null && rel.getBoardingDate() != null && context.getCurrentScheduleDate() != null &&
+                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0){
+                    mouldCodeSet.add(mouldCode);
+                }
             }
             List<String> mouldCodeList = new ArrayList<String>(mouldCodeSet);
             sortMouldCodesBySharedSkuCount(mouldCodeList, mouldSharedSkuCountMap);
@@ -245,6 +250,11 @@ public class MouldResourceContext {
                     continue;
                 }
                 MdmModelInfo modelInfo = CollectionUtils.isEmpty(modelInfoMap) ? null : modelInfoMap.get(mouldCode);
+                // 若模具台账没有，但模具到货计划存在且模具可用日期 > 当前排程日期，模具视为可用
+                if (Objects.isNull(modelInfo) && rel.getBoardingDate() != null && context.getCurrentScheduleDate() != null &&
+                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0){
+                    continue;
+                }
                 if (Objects.isNull(modelInfo) || !MouldStatusUtil.isEnabled(modelInfo.getMouldStatus())) {
                     unavailableMouldCodeList.add(mouldCode);
                 }
@@ -269,6 +279,11 @@ public class MouldResourceContext {
                     continue;
                 }
                 MdmModelInfo modelInfo = CollectionUtils.isEmpty(modelInfoMap) ? null : modelInfoMap.get(mouldCode);
+                // 若模具台账没有，但模具到货计划存在且模具可用日期 > 当前排程日期，模具视为可用
+                if (Objects.isNull(modelInfo) && rel.getBoardingDate() != null && context.getCurrentScheduleDate() != null &&
+                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0){
+                    continue;
+                }
                 if (Objects.isNull(modelInfo) || !MouldStatusUtil.isEnabled(modelInfo.getMouldStatus())) {
                     hasUnavailableModelInfo = true;
                     break;
