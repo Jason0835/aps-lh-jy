@@ -4476,8 +4476,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * SKU收尾特殊补满。
-     * <p>仅当SKU为收尾、月计划排产类型为主销或常规、胎胚收尾标识为0、机台真实收尾时间晚于业务日20:00，
-     * 且结构已排机台数未达到月计划结构机台数时，才允许补满当天中班和下一个晚班。</p>
+     * <p>仅当SKU为收尾、月计划排产类型为主销或常规、运行态共用胎胚、胎胚收尾标识为0、
+     * 机台真实收尾时间晚于业务日20:00，且结构已排机台数未达到月计划结构机台数时，
+     * 才允许补满当天中班和下一个晚班。</p>
      *
      * @param context 排程上下文
      * @param result 续作结果
@@ -4489,6 +4490,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                             SkuScheduleDTO sku,
                                             List<LhShiftConfigVO> shifts) {
         if (!isEndingFillCandidate(context, result, sku, shifts)) {
+            return;
+        }
+        // 收尾补满只允许运行态共用胎胚触发，单胎胚或动态剔除后转单胎胚的SKU继续严格按收尾目标量控制。
+        if (!isRuntimeSharedEmbryoForEndingFill(context, sku)) {
+            log.info("SKU收尾补满跳过, materialCode: {}, machineCode: {}, productionType: {}, embryoCode: {}, "
+                            + "activeSkuList: {}, 原因: 非运行态共用胎胚",
+                    sku.getMaterialCode(), result.getLhMachineCode(), sku.getProductionType(), sku.getEmbryoCode(),
+                    resolveActiveEmbryoSkuList(context, sku));
             return;
         }
         // 胎胚收尾标识来自基础数据上下文，缺失或非0均视为胎胚不在机，避免收尾补满误超排。
@@ -4581,6 +4590,20 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 判断SKU是否满足收尾补满的运行态共用胎胚条件。
+     *
+     * <p>共用胎胚必须以本轮排程仍有效参与排产的SKU集合为准，不能只看月计划静态关系；
+     * 当共用胎胚组内其他SKU已收尾、未排或被动态剔除后，当前SKU应回到普通收尾严格目标量控制。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 来源SKU
+     * @return true-当前胎胚仍存在多个有效SKU；false-单胎胚或无法识别为运行态共用胎胚
+     */
+    private boolean isRuntimeSharedEmbryoForEndingFill(LhScheduleContext context, SkuScheduleDTO sku) {
+        return getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku);
+    }
+
+    /**
      * 判断胎胚是否满足收尾补满的在机条件。
      *
      * @param context 排程上下文
@@ -4606,6 +4629,23 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return null;
         }
         return context.getEmbryoEndingFlagMap().get(sku.getEmbryoCode());
+    }
+
+    /**
+     * 获取当前胎胚的运行态有效SKU集合。
+     *
+     * @param context 排程上下文
+     * @param sku 来源SKU
+     * @return 当前胎胚有效SKU集合；缺失时返回空集合
+     */
+    private List<String> resolveActiveEmbryoSkuList(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)
+                || StringUtils.isEmpty(sku.getEmbryoCode())
+                || CollectionUtils.isEmpty(context.getActiveEmbryoSkuMap())) {
+            return Collections.emptyList();
+        }
+        List<String> activeSkuList = context.getActiveEmbryoSkuMap().get(sku.getEmbryoCode());
+        return CollectionUtils.isEmpty(activeSkuList) ? Collections.emptyList() : activeSkuList;
     }
 
     /**
