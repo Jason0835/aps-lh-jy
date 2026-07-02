@@ -8,6 +8,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
@@ -150,6 +151,92 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(4, ShiftFieldUtil.getShiftPlanQty(result, 1));
         Assertions.assertEquals(12, ShiftFieldUtil.getShiftPlanQty(result, 2));
         Assertions.assertEquals(16, result.getDailyPlanQty());
+    }
+
+    /**
+     * 试制SKU早班完成换模后，首检和生产必须推迟到同业务日中班，早班只保留换模占用。
+     */
+    @Test
+    public void shouldMoveTrialSkuFirstInspectionAndProductionToAfternoonAfterMorningChangeover() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectNewSpecBuildDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        MachineScheduleDTO machine = buildNewSpecMachine("K1101");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+
+        LhScheduleResult result = invokeBuildNewSpecScheduleResult(
+                strategy, context, machine, sku,
+                dateTime(2026, 6, 1, 14, 0),
+                dateTime(2026, 6, 1, 6, 0),
+                dateTime(2026, 6, 1, 14, 0),
+                context.getScheduleWindowShifts(), 1, false);
+
+        Assertions.assertEquals(0, resolveShiftPlanQty(result, 1));
+        Assertions.assertEquals(16, resolveShiftPlanQty(result, 2));
+        Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#1"));
+        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#2").intValue());
+    }
+
+    /**
+     * 量试、正规、小批量SKU仍按换模完成班次归属首检，不因早班换模完成被强制推迟到中班。
+     */
+    @Test
+    public void shouldKeepNonTrialSkuFirstInspectionOnMorningAfterMorningChangeover() throws Exception {
+        assertNewSpecMorningChangeoverKeepsMorning(ConstructionStageEnum.MASS_TRIAL.getCode(), false);
+        assertNewSpecMorningChangeoverKeepsMorning(ConstructionStageEnum.FORMAL.getCode(), false);
+        assertNewSpecMorningChangeoverKeepsMorning(ConstructionStageEnum.FORMAL.getCode(), true);
+    }
+
+    /**
+     * 试制SKU中班完成换模时沿用现有中班归属，不需要额外推迟。
+     */
+    @Test
+    public void shouldKeepTrialSkuFirstInspectionOnAfternoonWhenChangeoverCompletesInAfternoon() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectNewSpecBuildDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        MachineScheduleDTO machine = buildNewSpecMachine("K1101");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+
+        LhScheduleResult result = invokeBuildNewSpecScheduleResult(
+                strategy, context, machine, sku,
+                dateTime(2026, 6, 1, 15, 0),
+                dateTime(2026, 6, 1, 14, 0),
+                dateTime(2026, 6, 1, 15, 0),
+                context.getScheduleWindowShifts(), 1, false);
+
+        Assertions.assertEquals(0, resolveShiftPlanQty(result, 1));
+        Assertions.assertEquals(16, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#2").intValue());
+    }
+
+    /**
+     * 试制SKU早班完成换活字块后，首检同样归属中班，避免S4.4在早班落首检量。
+     */
+    @Test
+    public void shouldMoveTrialSkuTypeBlockFirstInspectionToAfternoonAfterMorningSwitch() throws Exception {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        injectTypeBlockAppendDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        MachineScheduleDTO machine = buildNewSpecMachine("K1305");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+
+        LhScheduleResult result = invokeBuildTypeBlockScheduleResult(
+                strategy, context, machine, sku,
+                dateTime(2026, 6, 1, 14, 0),
+                dateTime(2026, 6, 1, 6, 0),
+                context.getScheduleWindowShifts(), 1, false);
+
+        Assertions.assertEquals(0, resolveShiftPlanQty(result, 1));
+        Assertions.assertEquals(16, resolveShiftPlanQty(result, 2));
+        Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#1"));
+        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#2").intValue());
     }
 
     /**
@@ -2368,6 +2455,30 @@ public class SchedulingStrategyRegressionTest {
         return result;
     }
 
+    private void assertNewSpecMorningChangeoverKeepsMorning(String constructionStage,
+                                                            boolean smallBatchValidation) throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectNewSpecBuildDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        MachineScheduleDTO machine = buildNewSpecMachine("K1101");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+        sku.setConstructionStage(constructionStage);
+        sku.setSmallBatchValidation(smallBatchValidation);
+
+        LhScheduleResult result = invokeBuildNewSpecScheduleResult(
+                strategy, context, machine, sku,
+                dateTime(2026, 6, 1, 14, 0),
+                dateTime(2026, 6, 1, 6, 0),
+                dateTime(2026, 6, 1, 14, 0),
+                context.getScheduleWindowShifts(), 1, false);
+
+        Assertions.assertEquals(4, resolveShiftPlanQty(result, 1));
+        Assertions.assertEquals(12, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#1").intValue());
+        Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#2"));
+    }
+
     private LhScheduleResult invokeBuildNewSpecScheduleResult(NewSpecProductionStrategy strategy,
                                                               LhScheduleContext context,
                                                               MachineScheduleDTO machine,
@@ -2385,6 +2496,23 @@ public class SchedulingStrategyRegressionTest {
         method.setAccessible(true);
         return (LhScheduleResult) method.invoke(strategy, context, machine, sku, startTime,
                 mouldChangeStartTime, mouldChangeEndTime, shifts, mouldQty, isEnding, null);
+    }
+
+    private LhScheduleResult invokeBuildTypeBlockScheduleResult(TypeBlockProductionStrategy strategy,
+                                                                LhScheduleContext context,
+                                                                MachineScheduleDTO machine,
+                                                                SkuScheduleDTO sku,
+                                                                Date startTime,
+                                                                Date switchStartTime,
+                                                                List<LhShiftConfigVO> shifts,
+                                                                int mouldQty,
+                                                                boolean isEnding) throws Exception {
+        Method method = TypeBlockProductionStrategy.class.getDeclaredMethod(
+                "buildScheduleResult", LhScheduleContext.class, MachineScheduleDTO.class,
+                SkuScheduleDTO.class, Date.class, Date.class, List.class, int.class, boolean.class);
+        method.setAccessible(true);
+        return (LhScheduleResult) method.invoke(strategy, context, machine, sku, startTime,
+                switchStartTime, shifts, mouldQty, isEnding);
     }
 
     private LhScheduleContext buildTypeBlockAppendContext() {

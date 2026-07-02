@@ -759,6 +759,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 // 基础换模时间永远执行，换模均衡仅在开关开启时介入。
                 Date mouldChangeStartTime = null;
                 Date mouldChangeCompleteTime = null;
+                LhShiftConfigVO firstInspectionAttributionShift = null;
                 Date inspectionTime = null;
                 Date productionStartTime = null;
                 NewSpecFailReasonEnum switchAllocateFailReason = null;
@@ -783,9 +784,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
                 if (mouldChangeStartTime != null) {
                     mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
-                    inspectionTime = inspectionBalance.allocateInspection(context, machineCode, mouldChangeCompleteTime);
-                    if (inspectionTime == null) {
-                        log.debug("新增SKU首检分配失败, materialCode: {}, 机台: {}, 换模开始: {}, 换模完成: {}",
+                    firstInspectionAttributionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                            context, sku, shifts, mouldChangeCompleteTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+                    Date firstInspectionAttributionTime = FirstInspectionQtyUtil.resolveFirstInspectionAttributionTime(
+                            context, sku, shifts, mouldChangeCompleteTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+                    if (firstInspectionAttributionTime == null) {
+                        log.debug("新增SKU首检归属班次为空, materialCode: {}, 机台: {}, 换模开始: {}, 换模完成: {}",
                                 sku.getMaterialCode(), machineCode,
                                 LhScheduleTimeUtil.formatDateTime(mouldChangeStartTime),
                                 LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime));
@@ -793,14 +797,30 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         mouldChangeStartTime = null;
                         switchAllocateFailReason = NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED;
                     } else {
-                        /*
-                         * 普通换模8小时已包含首检，首检均衡只占用首检资源，不得再推迟正常生产；
-                         * 维保重叠专用口径仍按“4小时切换 + 1小时首检”顺延开产。
-                         */
-                        productionStartTime = maintenanceOverlapSwitch
-                                ? LhScheduleTimeUtil.addHours(
-                                        inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
-                                : mouldChangeCompleteTime;
+                        inspectionTime = inspectionBalance.allocateInspection(
+                                context, machineCode, firstInspectionAttributionTime);
+                        if (inspectionTime == null) {
+                            log.debug("新增SKU首检分配失败, materialCode: {}, 机台: {}, 换模开始: {}, 换模完成: {}",
+                                    sku.getMaterialCode(), machineCode,
+                                    LhScheduleTimeUtil.formatDateTime(mouldChangeStartTime),
+                                    LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime));
+                            rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                            mouldChangeStartTime = null;
+                            switchAllocateFailReason = NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED;
+                        } else {
+                            /*
+                             * 普通换模8小时已包含首检，首检均衡只占用首检资源，不得再推迟正常生产；
+                             * 维保重叠专用口径仍按“4小时切换 + 1小时首检”顺延开产。
+                             */
+                            Date defaultProductionStartTime = maintenanceOverlapSwitch
+                                    ? LhScheduleTimeUtil.addHours(
+                                            inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
+                                    : mouldChangeCompleteTime;
+                            // 试制SKU早班换模后只能在同业务日中班开始生产，早班仍只保存真实换模占用。
+                            productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
+                                    context, sku, shifts, mouldChangeCompleteTime, defaultProductionStartTime,
+                                    ScheduleTypeEnum.NEW_SPEC.getCode());
+                        }
                     }
                 }
                 if (mouldChangeStartTime == null) {
@@ -885,9 +905,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 Map<Integer, Integer> shiftCapacityMap = calculateShiftCapacityMap(
                         context, candidateMachine, sku, firstProductionStartTime, mouldChangeStartTime,
                         shifts, machineMouldQty, runtimeShiftCapacity, isEnding);
-                // 普通换模8小时已包含首检：首检数量按换模完成落班计入产能，不额外推迟开产时间。
+                // 普通换模8小时已包含首检：非试制按完成班次计入产能，试制早班完成则计入中班。
                 shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
-                        context, shifts, mouldChangeCompleteTime, shiftCapacityMap,
+                        context, shifts, firstInspectionAttributionShift, shiftCapacityMap,
                         runtimeShiftCapacity, dynamicTargetQty,
                         ScheduleTypeEnum.NEW_SPEC.getCode(), machineCode);
                 shiftCapacityMap = applyDailyStandardCapacityAdjust(
@@ -976,7 +996,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 LhScheduleResult result = buildNewSpecScheduleResult(
                         context, candidateMachine, sku, firstProductionStartTime, mouldChangeStartTime,
                         mouldChangeCompleteTime, shifts, machineMouldQty, isEnding,
-                        mouldResourceAllocationResult, shiftCapacityMap);
+                        mouldResourceAllocationResult, shiftCapacityMap, firstInspectionAttributionShift);
                 if (result == null || result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
                     log.debug("新增SKU结果无有效班次计划量, materialCode: {}, 机台: {}, 目标量: {}, 开产时间: {}",
                             sku.getMaterialCode(), machineCode, sku.resolveTargetScheduleQty(),
@@ -987,8 +1007,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty, null);
                     // 无有效产能时回滚首检和换模占用，避免影响后续SKU排产
                     inspectionBalance.rollbackInspection(context, inspectionTime);
-                    FirstInspectionQtyUtil.rollbackFirstInspectionSequence(context,
-                            FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime));
+                    FirstInspectionQtyUtil.rollbackFirstInspectionSequence(context, firstInspectionAttributionShift);
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult);
                     // 候选机台失败时恢复原目标量，避免把本次失败收敛值泄漏到后续候选机台。
@@ -5386,6 +5405,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 ? LhScheduleTimeUtil.addHours(
                 mouldChangeCompleteTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
                 : mouldChangeCompleteTime;
+        productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
+                context, sku, shifts, mouldChangeCompleteTime, productionStartTime,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+        if (productionStartTime == null) {
+            return capacityMap;
+        }
+        LhShiftConfigVO firstInspectionAttributionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                context, sku, shifts, mouldChangeCompleteTime, ScheduleTypeEnum.NEW_SPEC.getCode());
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(candidate);
         int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
                 context, candidate, sku.getShiftCapacity());
@@ -5404,7 +5431,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, candidate, sku, firstProductionStartTime, mouldChangeStartTime,
                 shifts, machineMouldQty, runtimeShiftCapacity, policy != null && policy.isEnding());
         shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
-                context, shifts, mouldChangeCompleteTime, shiftCapacityMap, runtimeShiftCapacity,
+                context, shifts, firstInspectionAttributionShift, shiftCapacityMap, runtimeShiftCapacity,
                 sku.resolveTargetScheduleQty(), ScheduleTypeEnum.NEW_SPEC.getCode(), candidate.getMachineCode());
         shiftCapacityMap = applyDailyStandardCapacityAdjust(
                 context, sku, candidate.getMachineCode(), shifts, shiftCapacityMap, runtimeShiftCapacity);
@@ -6683,6 +6710,28 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                          boolean isEnding,
                                                          MouldResourceAllocationResult mouldResourceAllocationResult,
                                                          Map<Integer, Integer> shiftPlanCapacityMap) {
+        LhShiftConfigVO firstInspectionAttributionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                context, sku, shifts, mouldChangeEndTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+        return buildNewSpecScheduleResult(context, machine, sku, startTime, mouldChangeStartTime,
+                mouldChangeEndTime, shifts, mouldQty, isEnding, mouldResourceAllocationResult,
+                shiftPlanCapacityMap, firstInspectionAttributionShift);
+    }
+
+    /**
+     * 构建新增规格排程结果，并按修正后的班次上限和首检归属班次分配计划量。
+     */
+    private LhScheduleResult buildNewSpecScheduleResult(LhScheduleContext context,
+                                                         MachineScheduleDTO machine,
+                                                         SkuScheduleDTO sku,
+                                                         Date startTime,
+                                                         Date mouldChangeStartTime,
+                                                         Date mouldChangeEndTime,
+                                                         List<LhShiftConfigVO> shifts,
+                                                         int mouldQty,
+                                                         boolean isEnding,
+                                                         MouldResourceAllocationResult mouldResourceAllocationResult,
+                                                         Map<Integer, Integer> shiftPlanCapacityMap,
+                                                         LhShiftConfigVO firstInspectionAttributionShift) {
         LhScheduleResult result = new LhScheduleResult();
         result.setFactoryCode(context.getFactoryCode());
         result.setBatchNo(context.getBatchNo());
@@ -6774,7 +6823,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         // 保存真实换模开始时间，供下游换模计划表直接复用。
         result.setMouldChangeStartTime(mouldChangeStartTime);
 
-        // 按班次分配计划量；普通换模首检数量按换模完成时间落班，8小时换模耗时不再额外增加。
+        // 按班次分配计划量；试制SKU早班换模后首检归中班，8小时换模耗时不再额外增加。
         int pendingQty = sku.resolveTargetScheduleQty();
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
                 context, result.getLhMachineCode(), mouldChangeStartTime, startTime);
@@ -6782,7 +6831,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, result.getLhMachineCode());
         distributeToShifts(context, result, shifts, startTime,
                 runtimeShiftCapacity, sku.getLhTimeSeconds(), mouldQty, pendingQty, cleaningWindowList,
-                maintenanceWindowList, sku, isEnding, mouldChangeEndTime, shiftPlanCapacityMap);
+                maintenanceWindowList, sku, isEnding, mouldChangeEndTime, shiftPlanCapacityMap,
+                firstInspectionAttributionShift);
         refreshResultSummary(context, result);
         applyCleaningMouldChangeAnalysis(context, result);
         return result;
@@ -8334,7 +8384,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                    SkuScheduleDTO sku,
                                    boolean isEnding,
                                    Date mouldChangeCompleteTime,
-                                   Map<Integer, Integer> shiftPlanCapacityMap) {
+                                   Map<Integer, Integer> shiftPlanCapacityMap,
+                                   LhShiftConfigVO firstInspectionAttributionShift) {
         if (lhTimeSeconds <= 0 || mouldQty <= 0 || remaining <= 0 || startTime == null) {
             return remaining;
         }
@@ -8342,10 +8393,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
          * 普通换模首检数量归属口径：
          * 1. 换模8小时已包含首检，不额外增加首检时间；
          * 2. 首检只影响数量归属和班产占用；
-         * 3. 归属班次由换模完成时间落点决定；
+         * 3. 非试制归属班次由换模完成时间落点决定，试制早班切换后归同业务日中班；
          * 4. 首检数量参与排产量、余量消耗和班产上限校验。
          */
-        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime);
+        LhShiftConfigVO firstInspectionShift = firstInspectionAttributionShift;
         int previewFirstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
                 context, firstInspectionShift, shiftCapacity, remaining, ScheduleTypeEnum.NEW_SPEC.getCode(),
                 result.getLhMachineCode());
@@ -8354,7 +8405,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 && canIncreaseShiftQtyByClassTotalLimit(context, sku, result, firstInspectionShift.getShiftIndex(),
                 previewFirstInspectionQty, "新增排产首检数量归属")) {
             firstInspectionQty = FirstInspectionQtyUtil.addFirstInspectionQtyToResult(
-                    context, result, shifts, mouldChangeCompleteTime, shiftCapacity,
+                    context, result, firstInspectionShift, mouldChangeCompleteTime, shiftCapacity,
                     remaining, ScheduleTypeEnum.NEW_SPEC.getCode());
         }
         remaining -= firstInspectionQty;

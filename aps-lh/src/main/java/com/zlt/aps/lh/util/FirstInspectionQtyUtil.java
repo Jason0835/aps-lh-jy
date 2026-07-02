@@ -2,8 +2,10 @@ package com.zlt.aps.lh.util;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -118,6 +120,115 @@ public final class FirstInspectionQtyUtil {
             }
         }
         return null;
+    }
+
+    /**
+     * 解析换模/换活字块后的首检归属班次。
+     *
+     * <p>默认仍按切换完成时间归属；仅当试制 SKU 的切换完成归属早班时，
+     * 首检与生产开产归属调整为同业务日中班。找不到同日中班时返回 null，
+     * 由上游按无可归属班次处理，不构造兜底时间。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU 排程信息
+     * @param shifts 排程窗口班次
+     * @param switchCompleteTime 换模/换活字块完成时间
+     * @param scheduleType 排程类型
+     * @return 首检归属班次，未命中返回 null
+     */
+    public static LhShiftConfigVO resolveFirstInspectionAttributionShift(LhScheduleContext context,
+                                                                         SkuScheduleDTO sku,
+                                                                         List<LhShiftConfigVO> shifts,
+                                                                         Date switchCompleteTime,
+                                                                         String scheduleType) {
+        LhShiftConfigVO defaultShift = resolveAttributionShift(shifts, switchCompleteTime);
+        if (!isTrialMorningSwitchAttribution(sku, defaultShift, scheduleType)) {
+            return defaultShift;
+        }
+        LhShiftConfigVO afternoonShift = resolveAfternoonShiftOnSameWorkDate(shifts, defaultShift);
+        if (Objects.isNull(afternoonShift)) {
+            log.warn("试制SKU早班切换后未找到同业务日中班，首检无归属班次, batchNo: {}, materialCode: {}, "
+                            + "scheduleType: {}, 切换完成: {}, 早班日期: {}, 早班班次: {}",
+                    Objects.isNull(context) ? null : context.getBatchNo(),
+                    Objects.isNull(sku) ? null : sku.getMaterialCode(),
+                    scheduleType, LhScheduleTimeUtil.formatDateTime(switchCompleteTime),
+                    LhScheduleTimeUtil.formatDate(defaultShift.getWorkDate()), defaultShift.getShiftIndex());
+            return null;
+        }
+        log.debug("试制SKU早班切换首检归属调整为中班, batchNo: {}, materialCode: {}, scheduleType: {}, "
+                        + "切换完成: {}, 原归属班次: {}, 调整后班次: {}",
+                Objects.isNull(context) ? null : context.getBatchNo(),
+                Objects.isNull(sku) ? null : sku.getMaterialCode(),
+                scheduleType, LhScheduleTimeUtil.formatDateTime(switchCompleteTime),
+                defaultShift.getShiftIndex(), afternoonShift.getShiftIndex());
+        return afternoonShift;
+    }
+
+    /**
+     * 解析首检资源占用起点。
+     *
+     * <p>试制 SKU 早班切换完成时，首检资源从同业务日中班开始占用；
+     * 其他 SKU 仍以切换完成时间作为首检资源占用起点。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU 排程信息
+     * @param shifts 排程窗口班次
+     * @param switchCompleteTime 换模/换活字块完成时间
+     * @param scheduleType 排程类型
+     * @return 首检资源占用起点，未命中返回 null
+     */
+    public static Date resolveFirstInspectionAttributionTime(LhScheduleContext context,
+                                                             SkuScheduleDTO sku,
+                                                             List<LhShiftConfigVO> shifts,
+                                                             Date switchCompleteTime,
+                                                             String scheduleType) {
+        LhShiftConfigVO defaultShift = resolveAttributionShift(shifts, switchCompleteTime);
+        LhShiftConfigVO attributionShift = resolveFirstInspectionAttributionShift(
+                context, sku, shifts, switchCompleteTime, scheduleType);
+        if (Objects.isNull(attributionShift)) {
+            return null;
+        }
+        if (isTrialMorningSwitchAttribution(sku, defaultShift, scheduleType)) {
+            return attributionShift.getShiftStartDateTime();
+        }
+        return switchCompleteTime;
+    }
+
+    /**
+     * 解析试制 SKU 切换后的实际开产时间。
+     *
+     * <p>仅当试制 SKU 的切换完成归属早班时，开产时间不得早于同业务日中班开始；
+     * 量试、正规、小批量沿用传入的默认开产时间。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU 排程信息
+     * @param shifts 排程窗口班次
+     * @param switchCompleteTime 换模/换活字块完成时间
+     * @param defaultProductionStartTime 默认开产时间
+     * @param scheduleType 排程类型
+     * @return 实际开产时间，未命中必要归属班次时返回 null
+     */
+    public static Date resolveTrialProductionStartTime(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       List<LhShiftConfigVO> shifts,
+                                                       Date switchCompleteTime,
+                                                       Date defaultProductionStartTime,
+                                                       String scheduleType) {
+        if (Objects.isNull(defaultProductionStartTime)) {
+            return null;
+        }
+        LhShiftConfigVO defaultShift = resolveAttributionShift(shifts, switchCompleteTime);
+        if (!isTrialMorningSwitchAttribution(sku, defaultShift, scheduleType)) {
+            return defaultProductionStartTime;
+        }
+        LhShiftConfigVO attributionShift = resolveFirstInspectionAttributionShift(
+                context, sku, shifts, switchCompleteTime, scheduleType);
+        if (Objects.isNull(attributionShift) || Objects.isNull(attributionShift.getShiftStartDateTime())) {
+            return null;
+        }
+        Date afternoonStartTime = attributionShift.getShiftStartDateTime();
+        return defaultProductionStartTime.before(afternoonStartTime)
+                ? afternoonStartTime : defaultProductionStartTime;
     }
 
     /**
@@ -275,6 +386,32 @@ public final class FirstInspectionQtyUtil {
                                                     int remainingQty,
                                                     String scheduleType) {
         LhShiftConfigVO attributionShift = resolveAttributionShift(shifts, mouldChangeCompleteTime);
+        return addFirstInspectionQtyToResult(
+                context, result, attributionShift, mouldChangeCompleteTime, shiftCapacity, remainingQty, scheduleType);
+    }
+
+    /**
+     * 将首检数量写入指定归属班次。
+     *
+     * <p>用于试制 SKU 早班切换后将首检归属调整到中班；普通场景仍可传入
+     * {@link #resolveAttributionShift(List, Date)} 的结果。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param attributionShift 首检归属班次
+     * @param switchCompleteTime 换模/换活字块完成时间
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前结果剩余目标量
+     * @param scheduleType 排程类型
+     * @return 实际写入的首检数量
+     */
+    public static int addFirstInspectionQtyToResult(LhScheduleContext context,
+                                                    LhScheduleResult result,
+                                                    LhShiftConfigVO attributionShift,
+                                                    Date switchCompleteTime,
+                                                    int shiftCapacity,
+                                                    int remainingQty,
+                                                    String scheduleType) {
         int firstInspectionSequence = resolveNextFirstInspectionSequence(context, attributionShift);
         int firstInspectionQty = resolveEffectiveFirstInspectionQty(
                 context, attributionShift, shiftCapacity, remainingQty, scheduleType,
@@ -290,18 +427,22 @@ public final class FirstInspectionQtyUtil {
         recordFirstInspectionSequence(context, attributionShift);
         boolean singleControl = LhSingleControlMachineUtil.isSingleMouldMachine(result.getLhMachineCode());
         int rawFirstInspectionQty = resolveRawFirstInspectionQty(context, firstInspectionSequence);
+        boolean attributionDelayed = Objects.nonNull(switchCompleteTime)
+                && Objects.nonNull(attributionShift.getShiftStartDateTime())
+                && switchCompleteTime.before(attributionShift.getShiftStartDateTime());
         log.info("首检数量归属班次, scene: {}, batchNo: {}, materialCode: {}, machineCode: {}, "
                         + "是否单控: {}, 切换完成: {}, 归属日期: {}, 归属班次: {}, 当班首检顺序: {}, "
                         + "参数编码: {}, 参数原始首检数量: {}, 单控折半后首检数量: {}, "
                         + "扣除切换后的可生产量: {}, 加首检后的最终班次计划量: {}, 班产校验上限: {}, "
-                        + "剩余目标量校验上限: {}, 说明: 切换耗时已包含首检，首检只影响数量归属和班产占用",
+                        + "剩余目标量校验上限: {}, 归属是否后移: {}, 说明: 切换耗时已包含首检，首检只影响数量归属和班产占用",
                 resolveSceneName(scheduleType),
                 result.getBatchNo(), result.getMaterialCode(), result.getLhMachineCode(),
-                singleControl, LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime),
+                singleControl, LhScheduleTimeUtil.formatDateTime(switchCompleteTime),
                 LhScheduleTimeUtil.formatDate(attributionShift.getWorkDate()), attributionShift.getShiftIndex(),
                 firstInspectionSequence, resolveFirstInspectionParamCode(firstInspectionSequence),
                 rawFirstInspectionQty, firstInspectionQty, basePlanQty, mergedQty,
-                resolveShiftCapacityCap(context, attributionShift, shiftCapacity, scheduleType), remainingQty);
+                resolveShiftCapacityCap(context, attributionShift, shiftCapacity, scheduleType), remainingQty,
+                attributionDelayed ? 1 : 0);
         return firstInspectionQty;
     }
 
@@ -337,6 +478,38 @@ public final class FirstInspectionQtyUtil {
             return adjustedMap;
         }
         LhShiftConfigVO attributionShift = resolveAttributionShift(shifts, mouldChangeCompleteTime);
+        return applyFirstInspectionQtyToCapacityMap(
+                context, shifts, attributionShift, shiftCapacityMap, shiftCapacity, remainingQty, scheduleType,
+                machineCode);
+    }
+
+    /**
+     * 按指定首检归属班次调整班次产能图。
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     * @param attributionShift 首检归属班次
+     * @param shiftCapacityMap 正常生产产能图
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前剩余目标量
+     * @param scheduleType 排程类型
+     * @param machineCode 运行态机台编码，用于单控折半
+     * @return 调整后的产能图
+     */
+    public static Map<Integer, Integer> applyFirstInspectionQtyToCapacityMap(
+            LhScheduleContext context,
+            List<LhShiftConfigVO> shifts,
+            LhShiftConfigVO attributionShift,
+            Map<Integer, Integer> shiftCapacityMap,
+            int shiftCapacity,
+            int remainingQty,
+            String scheduleType,
+            String machineCode) {
+        Map<Integer, Integer> adjustedMap = new LinkedHashMap<Integer, Integer>(
+                CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
+        if (CollectionUtils.isEmpty(shifts)) {
+            return adjustedMap;
+        }
         int firstInspectionQty = resolvePreviewFirstInspectionQty(
                 context, attributionShift, shiftCapacity, remainingQty, scheduleType, machineCode);
         for (LhShiftConfigVO shift : shifts) {
@@ -441,6 +614,40 @@ public final class FirstInspectionQtyUtil {
         }
         return LhScheduleTimeUtil.formatDate(shift.getWorkDate())
                 + SHIFT_COUNTER_KEY_SEPARATOR + shift.getShiftIndex();
+    }
+
+    private static boolean isTrialMorningSwitchAttribution(SkuScheduleDTO sku,
+                                                           LhShiftConfigVO defaultShift,
+                                                           String scheduleType) {
+        if (Objects.isNull(sku) || Objects.isNull(defaultShift)) {
+            return false;
+        }
+        if (!Objects.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
+            return false;
+        }
+        if (!Objects.equals(ScheduleTypeEnum.NEW_SPEC.getCode(), scheduleType)
+                && !Objects.equals(ScheduleTypeEnum.TYPE_BLOCK.getCode(), scheduleType)) {
+            return false;
+        }
+        return defaultShift.isMorningShift();
+    }
+
+    private static LhShiftConfigVO resolveAfternoonShiftOnSameWorkDate(List<LhShiftConfigVO> shifts,
+                                                                       LhShiftConfigVO morningShift) {
+        if (CollectionUtils.isEmpty(shifts) || Objects.isNull(morningShift)
+                || Objects.isNull(morningShift.getWorkDate())) {
+            return null;
+        }
+        String morningWorkDate = LhScheduleTimeUtil.formatDate(morningShift.getWorkDate());
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate()) || !shift.isAfternoonShift()) {
+                continue;
+            }
+            if (Objects.equals(morningWorkDate, LhScheduleTimeUtil.formatDate(shift.getWorkDate()))) {
+                return shift;
+            }
+        }
+        return null;
     }
 
     private static String resolveSceneName(String scheduleType) {

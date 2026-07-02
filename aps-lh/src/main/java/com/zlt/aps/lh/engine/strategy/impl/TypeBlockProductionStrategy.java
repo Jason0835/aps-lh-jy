@@ -266,7 +266,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(
                         context, machine, typeBlockSku, machine.getEstimatedEndTime());
                 Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
-                        context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
+                        context, machine, typeBlockSku, machine.getEstimatedEndTime(),
+                        typeBlockSwitchStartTime, shifts);
                 int eligibleMachineCount = countEligibleTypeBlockMachines(context, typeBlockSku, activeMachines);
                 // 换活字块本阶段不主动扩多台；eligibleMachineCount 只用于单台目标量口径判断。
                 StringBuilder failureReason = new StringBuilder(128);
@@ -473,7 +474,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(
                 context, machine, specifySku, machine.getEstimatedEndTime());
         Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
-                context, machine, machine.getEstimatedEndTime(), typeBlockSwitchStartTime);
+                context, machine, specifySku, machine.getEstimatedEndTime(), typeBlockSwitchStartTime, shifts);
         int eligibleMachineCount = countEligibleTypeBlockMachines(context, specifySku, activeMachines);
         StringBuilder failureReason = new StringBuilder(128);
         boolean success = appendTypeBlockResultWithRollback(
@@ -1028,6 +1029,35 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
+     * 基于 SKU 施工阶段解析换活字块后的实际开产时间。
+     *
+     * <p>普通换活字块仍按切换完成班次开产；试制 SKU 若切换完成归属早班，
+     * 则生产开始时间后移到同业务日中班，真实换活字块开始/完成时间不挪动。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param sku SKU
+     * @param estimatedEndTime 预计收尾时间
+     * @param switchStartTime 换活字块开始时间
+     * @param shifts 排程窗口班次
+     * @return 开产时间
+     */
+    private Date resolveTypeBlockProductionStartTime(LhScheduleContext context,
+                                                     MachineScheduleDTO machine,
+                                                     SkuScheduleDTO sku,
+                                                     Date estimatedEndTime,
+                                                     Date switchStartTime,
+                                                     List<LhShiftConfigVO> shifts) {
+        Date defaultProductionStartTime = resolveTypeBlockProductionStartTime(
+                context, machine, estimatedEndTime, switchStartTime);
+        Date switchCompleteTime = resolveTypeBlockSwitchCompleteTime(
+                context, machine, switchStartTime, defaultProductionStartTime);
+        return FirstInspectionQtyUtil.resolveTrialProductionStartTime(
+                context, sku, shifts, switchCompleteTime, defaultProductionStartTime,
+                ScheduleTypeEnum.TYPE_BLOCK.getCode());
+    }
+
+    /**
      * 判断换活字块是否仍应沿用维保重叠专用切换口径。
      *
      * @param context 排程上下文
@@ -1198,7 +1228,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             log.info("换活字块结果班次量为0，跳过落地, machineCode: {}, materialCode: {}, startTime: {}, dailyPlanQty: {}",
                     machine.getMachineCode(), sku.getMaterialCode(),
                     LhScheduleTimeUtil.formatDateTime(startTime), dailyPlanQty);
-            rollbackTypeBlockFirstInspectionSequence(context, machine, switchStartTime, startTime, shifts);
+            rollbackTypeBlockFirstInspectionSequence(context, machine, sku, switchStartTime, startTime, shifts);
             sku.setTargetScheduleQty(originalTargetScheduleQty);
             sku.setRemainingScheduleQty(originalRemainingScheduleQty);
             sku.setStrictTargetQty(originalStrictTargetQty);
@@ -1219,7 +1249,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             log.info("换活字块实际完工时间为空，跳过落地, machineCode: {}, materialCode: {}, startTime: {}, dailyPlanQty: {}",
                     machine.getMachineCode(), sku.getMaterialCode(),
                     LhScheduleTimeUtil.formatDateTime(startTime), result.getDailyPlanQty());
-            rollbackTypeBlockFirstInspectionSequence(context, machine, switchStartTime, startTime, shifts);
+            rollbackTypeBlockFirstInspectionSequence(context, machine, sku, switchStartTime, startTime, shifts);
             return false;
         }
         result.setSpecEndTime(actualCompletionTime);
@@ -1233,7 +1263,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             recordTypeBlockAppendFailure(failureReason, "换活字块日计划账本回裁后为0");
             log.info("换活字块日计划账本回裁后为0, 跳过落地, machineCode: {}, materialCode: {}, 原排产量: {}",
                     machine.getMachineCode(), sku.getMaterialCode(), result.getDailyPlanQty());
-            rollbackTypeBlockFirstInspectionSequence(context, machine, switchStartTime, startTime, shifts);
+            rollbackTypeBlockFirstInspectionSequence(context, machine, sku, switchStartTime, startTime, shifts);
             sku.setTargetScheduleQty(originalTargetScheduleQty);
             sku.setRemainingScheduleQty(originalRemainingScheduleQty);
             sku.setStrictTargetQty(originalStrictTargetQty);
@@ -1311,19 +1341,22 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      *
      * @param context 排程上下文
      * @param machine 机台
+     * @param sku SKU
      * @param switchStartTime 换活字块开始时间
      * @param fallbackStartTime 开产时间兜底值
      * @param shifts 班次
      */
     private void rollbackTypeBlockFirstInspectionSequence(LhScheduleContext context,
                                                           MachineScheduleDTO machine,
+                                                          SkuScheduleDTO sku,
                                                           Date switchStartTime,
                                                           Date fallbackStartTime,
                                                           List<LhShiftConfigVO> shifts) {
         Date switchCompleteTime = resolveTypeBlockSwitchCompleteTime(
                 context, machine, switchStartTime, fallbackStartTime);
         FirstInspectionQtyUtil.rollbackFirstInspectionSequence(
-                context, FirstInspectionQtyUtil.resolveAttributionShift(shifts, switchCompleteTime));
+                context, FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                        context, sku, shifts, switchCompleteTime, ScheduleTypeEnum.TYPE_BLOCK.getCode()));
     }
 
     /**
@@ -1620,7 +1653,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (isTypeBlockCandidate(context, machine, specifySku)) {
             Date typeBlockSwitchStartTime = allocateTypeBlockSwitchStartTime(context, machine, specifySku, endingTime);
             Date typeBlockStartTime = resolveTypeBlockProductionStartTime(
-                    context, machine, endingTime, typeBlockSwitchStartTime);
+                    context, machine, specifySku, endingTime, typeBlockSwitchStartTime, shifts);
             if (typeBlockStartTime == null || typeBlockSwitchStartTime == null) {
                 return false;
             }
@@ -1719,16 +1752,31 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         Date inspectionTime = null;
         try {
             Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
+            Date firstInspectionAttributionTime = FirstInspectionQtyUtil.resolveFirstInspectionAttributionTime(
+                    context, specifySku, shifts, mouldChangeCompleteTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+            if (firstInspectionAttributionTime == null) {
+                log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 首检归属班次为空",
+                        machine.getMachineCode(), specifySku.getMaterialCode());
+                return false;
+            }
             inspectionTime = getFirstInspectionBalanceStrategy().allocateInspection(
-                    context, machine.getMachineCode(), mouldChangeCompleteTime);
+                    context, machine.getMachineCode(), firstInspectionAttributionTime);
             if (inspectionTime == null) {
                 log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 首检窗口分配失败",
                         machine.getMachineCode(), specifySku.getMaterialCode());
                 return false;
             }
-            Date productionStartTime = maintenanceOverlapSwitch
+            Date defaultProductionStartTime = maintenanceOverlapSwitch
                     ? LhScheduleTimeUtil.addHours(inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
-                    : inspectionTime;
+                    : mouldChangeCompleteTime;
+            Date productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
+                    context, specifySku, shifts, mouldChangeCompleteTime, defaultProductionStartTime,
+                    ScheduleTypeEnum.NEW_SPEC.getCode());
+            if (productionStartTime == null) {
+                log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 试制中班开产时间为空",
+                        machine.getMachineCode(), specifySku.getMaterialCode());
+                return false;
+            }
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
             int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
                     context, machine, specifySku.getShiftCapacity());
@@ -2447,10 +2495,12 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 context, machine.getMachineCode());
 
         Date switchCompleteTime = resolveTypeBlockSwitchCompleteTime(context, machine, switchStartTime, startTime);
-        // 按班次分配计划量，换活字块完成落班后需要统一计入首检数量。
+        LhShiftConfigVO firstInspectionAttributionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                context, sku, shifts, switchCompleteTime, ScheduleTypeEnum.TYPE_BLOCK.getCode());
+        // 按班次分配计划量，试制SKU早班换活字块后首检归中班，切换记录仍保留真实早班。
         distributeToShifts(context, result, shifts, startTime,
                 runtimeShiftCapacity, sku.getLhTimeSeconds(), mouldQty, refinedTargetQty, cleaningWindowList,
-                maintenanceWindowList, switchCompleteTime);
+                maintenanceWindowList, switchCompleteTime, firstInspectionAttributionShift);
 
         refreshResultSummary(context, result, shifts);
         result.setRealScheduleDate(context.getScheduleDate());
@@ -2473,6 +2523,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      * @param cleaningWindowList 清洗窗口
      * @param maintenanceWindowList 保养窗口
      * @param switchCompleteTime 换活字块完成时间，用于判定首检归属班次
+     * @param firstInspectionAttributionShift 首检归属班次
      * @return 未排剩余量
      */
     private int distributeToShifts(LhScheduleContext context,
@@ -2485,7 +2536,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                    int remaining,
                                    List<MachineCleaningWindowDTO> cleaningWindowList,
                                    List<MachineMaintenanceWindowDTO> maintenanceWindowList,
-                                   Date switchCompleteTime) {
+                                   Date switchCompleteTime,
+                                   LhShiftConfigVO firstInspectionAttributionShift) {
         if (lhTimeSeconds <= 0 || mouldQty <= 0 || remaining <= 0) {
             return remaining;
         }
@@ -2498,7 +2550,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         Map<Integer, Integer> dailyStandardShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
                 context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
                 cleaningWindowList, maintenanceWindowList);
-        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveAttributionShift(shifts, switchCompleteTime);
+        LhShiftConfigVO firstInspectionShift = firstInspectionAttributionShift;
         int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
                 || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
         int firstInspectionSequence = FirstInspectionQtyUtil.resolveNextFirstInspectionSequence(

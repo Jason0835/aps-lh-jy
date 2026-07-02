@@ -671,6 +671,12 @@ public class TargetScheduleQtyResolver {
             return 0;
         }
         int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+        Date mouldChangeCompleteTime = resolveMouldChangeCompleteTime(context, switchStartTime, scheduleType);
+        productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
+                context, sku, shifts, mouldChangeCompleteTime, productionStartTime, scheduleType);
+        if (Objects.isNull(productionStartTime)) {
+            return 0;
+        }
         Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
                 context,
                 machine.getMachineCode(),
@@ -692,9 +698,8 @@ public class TargetScheduleQtyResolver {
 
         Date cursorStartTime = firstProductionStartTime;
         int totalQty = 0;
-        Date mouldChangeCompleteTime = resolveMouldChangeCompleteTime(context, switchStartTime, scheduleType);
-        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveAttributionShift(
-                shifts, mouldChangeCompleteTime);
+        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                context, sku, shifts, mouldChangeCompleteTime, scheduleType);
         int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
                 || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
         int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
@@ -741,33 +746,38 @@ public class TargetScheduleQtyResolver {
             cursorStartTime = effectiveEndTime;
         }
             totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
-                context, shifts, mouldChangeCompleteTime, firstProductionStartTime,
+                context, shifts, firstInspectionShift, firstProductionStartTime,
                 shiftCapacity, totalQty, scheduleType, machine.getMachineCode());
         return Math.max(totalQty, 0);
     }
 
     private Date resolveMouldChangeCompleteTime(LhScheduleContext context, Date switchStartTime, String scheduleType) {
-        if (!StringUtils.equals(ScheduleTypeEnum.NEW_SPEC.getCode(), scheduleType) || Objects.isNull(switchStartTime)) {
+        if (Objects.isNull(switchStartTime)) {
             return null;
         }
-        return LhScheduleTimeUtil.addHours(switchStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+        if (StringUtils.equals(ScheduleTypeEnum.NEW_SPEC.getCode(), scheduleType)) {
+            return LhScheduleTimeUtil.addHours(switchStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+        }
+        if (StringUtils.equals(ScheduleTypeEnum.TYPE_BLOCK.getCode(), scheduleType)) {
+            return LhScheduleTimeUtil.addHours(switchStartTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+        }
+        return null;
     }
 
     private int resolveFirstInspectionCapacityOutsideProductionWindow(LhScheduleContext context,
                                                                        List<LhShiftConfigVO> shifts,
-                                                                       Date mouldChangeCompleteTime,
+                                                                       LhShiftConfigVO attributionShift,
                                                                        Date firstProductionStartTime,
                                                                        int shiftCapacity,
                                                                        int remainingQty,
                                                                        String scheduleType,
                                                                        String machineCode) {
-        LhShiftConfigVO attributionShift = FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime);
         if (Objects.isNull(attributionShift) || Objects.isNull(firstProductionStartTime)
                 || firstProductionStartTime.before(attributionShift.getShiftEndDateTime())) {
             return 0;
         }
         Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
-                context, shifts, mouldChangeCompleteTime, new LinkedHashMap<Integer, Integer>(0),
+                context, shifts, attributionShift, new LinkedHashMap<Integer, Integer>(0),
                 shiftCapacity, Math.max(remainingQty, shiftCapacity),
                 scheduleType, machineCode);
         Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());

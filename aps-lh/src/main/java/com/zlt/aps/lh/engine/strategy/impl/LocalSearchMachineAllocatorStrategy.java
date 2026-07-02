@@ -10,6 +10,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
@@ -426,6 +427,14 @@ public class LocalSearchMachineAllocatorStrategy {
         if (lhTimeSeconds <= 0 || remainingQty <= 0) {
             return LocalSearchCapacityEstimate.empty();
         }
+        Date mouldChangeCompleteTime = mouldChangeStartTime == null ? null
+                : LhScheduleTimeUtil.addHours(mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+        productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
+                context, sku, shifts, mouldChangeCompleteTime, productionStartTime,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+        if (productionStartTime == null) {
+            return LocalSearchCapacityEstimate.empty();
+        }
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
                 machine, mouldChangeStartTime, productionStartTime);
         int dryIceLossQty = context.getParamIntValue(
@@ -434,10 +443,8 @@ public class LocalSearchMachineAllocatorStrategy {
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
 
         Date cursorStartTime = productionStartTime;
-        Date mouldChangeCompleteTime = mouldChangeStartTime == null ? null
-                : LhScheduleTimeUtil.addHours(mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
-        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveAttributionShift(
-                shifts, mouldChangeCompleteTime);
+        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                context, sku, shifts, mouldChangeCompleteTime, ScheduleTypeEnum.NEW_SPEC.getCode());
         int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
                 || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
         int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
@@ -505,7 +512,7 @@ public class LocalSearchMachineAllocatorStrategy {
             cursorStartTime = effectiveEndTime;
         }
         totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
-                context, shifts, mouldChangeCompleteTime, productionStartTime, shiftCapacity, totalQty,
+                context, shifts, firstInspectionShift, productionStartTime, shiftCapacity, totalQty,
                 machine.getMachineCode());
 
         if (totalQty <= 0 || specEndTime == null) {
@@ -517,20 +524,19 @@ public class LocalSearchMachineAllocatorStrategy {
 
     private int resolveFirstInspectionCapacityOutsideProductionWindow(LhScheduleContext context,
                                                                        List<LhShiftConfigVO> shifts,
-                                                                       Date mouldChangeCompleteTime,
+                                                                       LhShiftConfigVO attributionShift,
                                                                        Date productionStartTime,
                                                                        int shiftCapacity,
                                                                        int remainingQty,
                                                                        String machineCode) {
-        LhShiftConfigVO attributionShift = FirstInspectionQtyUtil.resolveAttributionShift(shifts, mouldChangeCompleteTime);
         if (attributionShift == null || productionStartTime == null
                 || productionStartTime.before(attributionShift.getShiftEndDateTime())) {
             return 0;
         }
         Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
-                context, shifts, mouldChangeCompleteTime, new HashMap<Integer, Integer>(0),
+                context, shifts, attributionShift, new HashMap<Integer, Integer>(0),
                 shiftCapacity, Math.max(remainingQty, shiftCapacity),
-                null, machineCode);
+                ScheduleTypeEnum.NEW_SPEC.getCode(), machineCode);
         Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());
         return Math.max(0, Objects.isNull(firstInspectionQty) ? 0 : firstInspectionQty);
     }
