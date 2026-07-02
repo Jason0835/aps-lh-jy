@@ -293,6 +293,7 @@ class ContinuousProductionResultQtyRegressionTest {
         LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
         context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
         SkuScheduleDTO sku = buildMainSaleEndingSku("330200MAIN", "PCR-01", "01");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
         LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1901", "330200MAIN", 8);
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
@@ -306,20 +307,74 @@ class ContinuousProductionResultQtyRegressionTest {
     }
 
     @Test
-    void applyDailyStandardPlanQtyToContinuousResults_shouldKeepNormalEndingStrictTarget() {
+    void applyDailyStandardPlanQtyToContinuousResults_shouldFillRegularEndingAfterTwentyWhenEmbryoOnMachine() {
         LhScheduleContext context = newContext();
         LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
         LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
         context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
         SkuScheduleDTO sku = buildMainSaleEndingSku("330200NORMAL", "PCR-01", "02");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
         LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1902", "330200NORMAL", 8);
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
         ReflectionTestUtils.invokeMethod(strategy,
                 "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
 
-        assertEquals(8, result.getClass5PlanQty().intValue(), "普通收尾SKU不得补满中班");
-        assertNull(result.getClass6PlanQty(), "普通收尾SKU不得补满下一个晚班");
+        assertEquals(18, result.getClass5PlanQty().intValue(), "常规收尾SKU胎胚在机且20点后应补满当天中班");
+        assertEquals(18, result.getClass6PlanQty().intValue(), "常规收尾SKU胎胚在机且20点后应补满下一个晚班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldKeepOtherProductionTypeStrictTarget() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200OTHER", "PCR-01", "03");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1905", "330200OTHER", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(8, result.getClass5PlanQty().intValue(), "非01/02产品类型不得补满中班");
+        assertNull(result.getClass6PlanQty(), "非01/02产品类型不得补满下一个晚班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldNotFillWhenEmbryoEndingFlagIsNotOnMachine() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200EMBEND", "PCR-01", "01");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 1);
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1906", "330200EMBEND", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(8, result.getClass5PlanQty().intValue(), "胎胚收尾标识非0时不得补满中班");
+        assertNull(result.getClass6PlanQty(), "胎胚收尾标识非0时不得补满下一个晚班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldNotFillWhenEmbryoEndingFlagMissing() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200EMBMISSING", "PCR-01", "02");
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1907", "330200EMBMISSING", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(8, result.getClass5PlanQty().intValue(), "胎胚收尾标识缺失时不得补满中班");
+        assertNull(result.getClass6PlanQty(), "胎胚收尾标识缺失时不得补满下一个晚班");
     }
 
     @Test
@@ -329,6 +384,7 @@ class ContinuousProductionResultQtyRegressionTest {
         LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
         context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
         SkuScheduleDTO sku = buildMainSaleEndingSku("330200MAIN", "PCR-01", "01");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
         LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1903", "330200MAIN", 0);
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
@@ -347,6 +403,7 @@ class ContinuousProductionResultQtyRegressionTest {
         context.addStructurePlanMachineCount(businessDate, "PCR-01", 1);
         context.recordScheduledMachine(businessDate, "PCR-01", "330200OTHER", "K1801");
         SkuScheduleDTO sku = buildMainSaleEndingSku("330200MAIN", "PCR-01", "01");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
         LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1904", "330200MAIN", 8);
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
@@ -586,6 +643,7 @@ class ContinuousProductionResultQtyRegressionTest {
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode(materialCode);
         sku.setStructureName(structureName);
+        sku.setEmbryoCode("EMB-" + materialCode);
         sku.setSkuTag("02");
         sku.setProductionType(productionType);
         sku.setStrictTargetQty(true);
