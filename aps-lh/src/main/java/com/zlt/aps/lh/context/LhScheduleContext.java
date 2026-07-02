@@ -140,7 +140,7 @@ public class LhScheduleContext {
     private Map<String, LhMachineInfo> machineInfoMap = new LinkedHashMap<>();
     /** 模具清洗计划列表 */
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
-    /** 胎胚实时库存Map, key=embryoCode；S4.3 会按同胎胚 SKU 标准产能占比分摊到 SKU 维度 */
+    /** 胎胚实时库存Map, key=embryoCode；始终保存原始库存，内部排产额度分摊不得回写到该原始库存口径 */
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
     /** 胎胚收尾标识Map, key=embryoCode, value=1-收尾/0-非收尾；以胎胚维度合并硫化余量后按主销参与情况判定 */
     private Map<String, Integer> embryoEndingFlagMap = new HashMap<>();
@@ -216,6 +216,12 @@ public class LhScheduleContext {
     private Map<String, Integer> skuShiftFillOverQtyMap = new LinkedHashMap<>();
     /** SKU实际排产剩余账本，key=materialCode；dayN只做节奏判断，实际排产按该账本扣减 */
     private Map<String, Integer> skuProductionRemainingQtyMap = new LinkedHashMap<>();
+    /** 胎胚库存消费账本，key=embryoCode + "_" + T日业务日期；用于胎胚收尾T日硬目标扣减 */
+    private Map<String, EmbryoStockConsumeLedger> embryoStockConsumeLedgerMap = new LinkedHashMap<>();
+    /** 胎胚库存SKU级内部分摊额度，key=materialCode；只控制排产额度，不影响结果胎胚库存字段 */
+    private Map<String, Integer> embryoStockSkuQuotaMap = new LinkedHashMap<>();
+    /** 命中胎胚库存T日硬目标的物料集合，用于结果班次量按库存账本奇偶原样裁剪 */
+    private Set<String> embryoStockHardTargetMaterialSet = new LinkedHashSet<>();
     /** S4.5当前待排正规新增SKU数量，供选机阶段判断普通机台让位规则 */
     private int pendingFormalNewSpecSkuCount;
     /** S4.5当前待排试制新增SKU数量，供单控机台内部资源竞争判断 */

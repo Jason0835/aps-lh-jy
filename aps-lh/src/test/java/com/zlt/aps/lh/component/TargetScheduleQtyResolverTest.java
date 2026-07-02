@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.context.EmbryoStockConsumeLedger;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -101,6 +103,8 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldReallocateSharedEmbryoStockAfterCompletedSkuRemoved() {
         LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-01", 1);
         SkuScheduleDTO completedSku = buildEndingSku("3302002369", "EMB-01", 1, 30, 1);
         SkuScheduleDTO firstRemainingSku = buildEndingSku("3302002370", "EMB-01", 1, 30, 1);
         SkuScheduleDTO secondRemainingSku = buildEndingSku("3302002371", "EMB-01", 1, 30, 2);
@@ -112,8 +116,12 @@ public class TargetScheduleQtyResolverTest {
 
         Assertions.assertEquals(Arrays.asList("3302002370", "3302002371"),
                 context.getActiveEmbryoSkuMap().get("EMB-01"));
-        Assertions.assertEquals(33, firstRemainingSku.getEmbryoStock());
-        Assertions.assertEquals(67, secondRemainingSku.getEmbryoStock());
+        Assertions.assertEquals(100, firstRemainingSku.getEmbryoStock());
+        Assertions.assertEquals(100, secondRemainingSku.getEmbryoStock());
+        Assertions.assertEquals(Integer.valueOf(33),
+                context.getEmbryoStockSkuQuotaMap().get("3302002370"));
+        Assertions.assertEquals(Integer.valueOf(67),
+                context.getEmbryoStockSkuQuotaMap().get("3302002371"));
     }
 
     /**
@@ -176,8 +184,11 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldUseEmbryoStockEndingTargetWithoutMouldRounding() {
         LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
         context.getEmbryoEndingFlagMap().put("EMB-02", 1);
         SkuScheduleDTO sku = buildSku("3302002530", "EMB-02", 10, 3, 10);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(1);
         sku.setMouldQty(2);
 
         int targetQty = resolver.upsizeEndingTargetQty(context, sku);
@@ -191,23 +202,24 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
-     * 用例说明：成型胎胚库存收尾不是SKU收尾标签，非收尾SKU也必须直接按胎胚库存设置目标量。
+     * 用例说明：成型胎胚库存收尾必须同时满足SKU在T日收尾；非T日收尾不按库存硬目标排产。
      */
     @Test
-    public void shouldApplyEmbryoStockEndingTargetForNonEndingSku() {
+    public void shouldNotApplyEmbryoStockEndingTargetForNonTDayEndingSku() {
         LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
         context.getEmbryoEndingFlagMap().put("EMB-03", 1);
         SkuScheduleDTO sku = buildSku("3302003005", "EMB-03", 80, 5, 80);
         sku.setMouldQty(2);
 
         boolean applied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
 
-        Assertions.assertTrue(applied);
+        Assertions.assertFalse(applied);
         Assertions.assertNull(sku.getSkuTag());
-        Assertions.assertEquals(5, sku.resolveTargetScheduleQty());
-        Assertions.assertEquals(5, sku.getRemainingScheduleQty());
-        Assertions.assertEquals(Integer.valueOf(5),
-                context.getSkuProductionRemainingQtyMap().get("3302003005"));
+        Assertions.assertEquals(80, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(80, sku.getRemainingScheduleQty());
+        Assertions.assertFalse(context.getSkuProductionRemainingQtyMap().containsKey("3302003005"));
+        Assertions.assertTrue(context.getEmbryoStockConsumeLedgerMap().isEmpty());
     }
 
     /**
@@ -232,8 +244,11 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldSyncDailyQuotaWhenEmbryoStockEndingTargetExceedsQuota() {
         LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
         context.getEmbryoEndingFlagMap().put("EMB-05", 1);
         SkuScheduleDTO sku = buildSku("3302003007", "EMB-05", 2, 5, 2);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(1);
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
         quotaMap.put(LocalDate.of(2026, 6, 29), buildQuota(2, 2));
         sku.setDailyPlanQuotaMap(quotaMap);
@@ -255,8 +270,11 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldKeepDeductedLedgerWhenEmbryoStockEndingAppliedAgain() {
         LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
         context.getEmbryoEndingFlagMap().put("EMB-06", 1);
         SkuScheduleDTO sku = buildSku("3302003008", "EMB-06", 10, 5, 10);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(1);
 
         boolean firstApplied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "换活字块");
         int deductedQty = resolver.deductProductionRemainingQty(context, sku, 3, "换活字块", "K1105");
@@ -271,6 +289,10 @@ public class TargetScheduleQtyResolverTest {
         Assertions.assertEquals(2, sku.getRemainingScheduleQty());
         Assertions.assertEquals(Integer.valueOf(2),
                 context.getSkuProductionRemainingQtyMap().get("3302003008"));
+        EmbryoStockConsumeLedger ledger = context.getEmbryoStockConsumeLedgerMap().values().iterator().next();
+        Assertions.assertEquals(5, ledger.getTargetQty().intValue());
+        Assertions.assertEquals(3, ledger.getConsumedQty().intValue());
+        Assertions.assertEquals(2, ledger.getRemainQty().intValue());
     }
 
     /**
@@ -386,9 +408,13 @@ public class TargetScheduleQtyResolverTest {
     @Test
     public void shouldKeepOddQtyWhenEmbryoStockEndingAllocatesAndCapsResult() {
         LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
         context.getEmbryoEndingFlagMap().put("EMB-07", 1);
         SkuScheduleDTO sku = buildSku("3302003009", "EMB-07", 10, 3, 3);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(1);
         sku.setMouldQty(2);
+        resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
         int allocatedQty = resolver.resolveAllocatedShiftQty(context, sku, 3, 16, 2);
         LhScheduleResult result = new LhScheduleResult();
         result.setMaterialCode("3302003009");
@@ -408,6 +434,79 @@ public class TargetScheduleQtyResolverTest {
         Assertions.assertEquals(3, cappedQty);
         Assertions.assertEquals(Integer.valueOf(3), ShiftFieldUtil.getShiftPlanQty(result, 1));
         Assertions.assertEquals(Integer.valueOf(3), result.getDailyPlanQty());
+    }
+
+    /**
+     * 用例说明：单胎胚在T日胎胚收尾时，必须按原始胎胚库存建立独立账本并作为硬目标排产。
+     */
+    @Test
+    public void shouldCreateLedgerForSingleEmbryoTDayStockEnding() {
+        LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-08", 1);
+        SkuScheduleDTO sku = buildSku("3302003010", "EMB-08", 80, 5, 80);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(1);
+        sku.setMouldQty(2);
+
+        boolean applied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
+
+        Assertions.assertTrue(applied);
+        Assertions.assertEquals(5, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(5, sku.getRemainingScheduleQty());
+        Assertions.assertEquals(Integer.valueOf(5),
+                context.getSkuProductionRemainingQtyMap().get("3302003010"));
+        EmbryoStockConsumeLedger ledger = context.getEmbryoStockConsumeLedgerMap().values().iterator().next();
+        Assertions.assertEquals("EMB-08", ledger.getEmbryoCode());
+        Assertions.assertEquals(LocalDate.of(2026, 7, 2), ledger.getScheduleDate());
+        Assertions.assertEquals(5, ledger.getOriginalStockQty().intValue());
+        Assertions.assertEquals(5, ledger.getTargetQty().intValue());
+        Assertions.assertEquals(0, ledger.getConsumedQty().intValue());
+        Assertions.assertEquals(5, ledger.getRemainQty().intValue());
+    }
+
+    /**
+     * 用例说明：共用胎胚T日同日收尾时，库存落库值保留原始库存，内部按SKU额度和组级账本扣减。
+     */
+    @Test
+    public void shouldUseSharedEmbryoLedgerAndKeepOriginalStockOnSku() {
+        LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-09", 1);
+        context.getEmbryoRealtimeStockMap().put("EMB-09", 100);
+        SkuScheduleDTO firstSku = buildEndingSku("3302003011", "EMB-09", 1, 100, 1);
+        SkuScheduleDTO secondSku = buildEndingSku("3302003012", "EMB-09", 1, 100, 2);
+        context.setNewSpecSkuList(Arrays.asList(firstSku, secondSku));
+        resolver.refreshActiveEmbryoSkuMap(context);
+        LhShiftConfigVO firstShift = new LhShiftConfigVO();
+        firstShift.setShiftIndex(1);
+
+        resolver.refreshAllSharedEmbryoStockAllocations(context, "测试初始化");
+        LhScheduleResult firstResult = buildResult("3302003011", "EMB-09", "K1105", 80);
+        int firstCappedQty = resolver.capResultByProductionRemainingQty(
+                context, firstSku, firstResult, Collections.singletonList(firstShift), "新增排产");
+        int firstDeductedQty = resolver.deductProductionRemainingQty(
+                context, firstSku, firstCappedQty, "新增排产", "K1105");
+        LhScheduleResult secondResult = buildResult("3302003012", "EMB-09", "K1106", 90);
+        int secondCappedQty = resolver.capResultByProductionRemainingQty(
+                context, secondSku, secondResult, Collections.singletonList(firstShift), "新增排产");
+        int secondDeductedQty = resolver.deductProductionRemainingQty(
+                context, secondSku, secondCappedQty, "新增排产", "K1106");
+
+        Assertions.assertEquals(100, firstSku.getEmbryoStock());
+        Assertions.assertEquals(100, secondSku.getEmbryoStock());
+        Assertions.assertEquals(Integer.valueOf(33),
+                context.getEmbryoStockSkuQuotaMap().get("3302003011"));
+        Assertions.assertEquals(Integer.valueOf(67),
+                context.getEmbryoStockSkuQuotaMap().get("3302003012"));
+        Assertions.assertEquals(33, firstCappedQty);
+        Assertions.assertEquals(33, firstDeductedQty);
+        Assertions.assertEquals(67, secondCappedQty);
+        Assertions.assertEquals(67, secondDeductedQty);
+        EmbryoStockConsumeLedger ledger = context.getEmbryoStockConsumeLedgerMap().values().iterator().next();
+        Assertions.assertEquals(100, ledger.getTargetQty().intValue());
+        Assertions.assertEquals(100, ledger.getConsumedQty().intValue());
+        Assertions.assertEquals(0, ledger.getRemainQty().intValue());
     }
 
     /**
@@ -504,5 +603,23 @@ public class TargetScheduleQtyResolverTest {
         sku.setEndingDaysRemaining(endingDays);
         sku.setDailyCapacity(dailyCapacity);
         return sku;
+    }
+
+    private LhScheduleResult buildResult(String materialCode,
+                                         String embryoCode,
+                                         String machineCode,
+                                         int planQty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(materialCode);
+        result.setEmbryoCode(embryoCode);
+        result.setLhMachineCode(machineCode);
+        ShiftFieldUtil.setShiftPlanQty(result, 1, planQty, new Date(), null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        return result;
+    }
+
+    private void setScheduleDate(LhScheduleContext context) {
+        context.setScheduleDate(Date.from(LocalDate.of(2026, 7, 2)
+                .atStartOfDay(ZoneId.systemDefault()).toInstant()));
     }
 }

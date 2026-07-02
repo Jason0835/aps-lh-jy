@@ -49,6 +49,7 @@ public class ScheduleAdjustHandlerTest {
         secondPlan.setEmbryoCode("EMB-01");
         context.setMonthPlanList(Arrays.asList(firstPlan, secondPlan));
         context.getEmbryoRealtimeStockMap().put("EMB-01", 100);
+        context.getEmbryoEndingFlagMap().put("EMB-01", 1);
         context.getSkuLhCapacityMap().put("3302001575", buildCapacity(100));
         context.getSkuLhCapacityMap().put("3302001724", buildCapacity(100));
 
@@ -61,7 +62,7 @@ public class ScheduleAdjustHandlerTest {
     }
 
     /**
-     * 用例说明：不同 SKU 共用胎胚且同一天收尾时，按标准产能占比分摊，最后一个 SKU 承接尾差。
+     * 用例说明：不同 SKU 共用胎胚且T日同日收尾时，落库库存仍保留原始值，内部额度按标准产能占比分摊。
      *
      * @throws Exception 反射调用异常
      */
@@ -81,6 +82,7 @@ public class ScheduleAdjustHandlerTest {
         secondPlan.setDay1(80);
         context.setMonthPlanList(Arrays.asList(firstPlan, secondPlan));
         context.getEmbryoRealtimeStockMap().put("EMB-01", 100);
+        context.getEmbryoEndingFlagMap().put("EMB-01", 1);
 
         context.getSkuLhCapacityMap().put("3302001575", buildCapacity(1));
         context.getSkuLhCapacityMap().put("3302001724", buildCapacity(2));
@@ -89,8 +91,12 @@ public class ScheduleAdjustHandlerTest {
 
         SkuScheduleDTO firstSku = findNewSpecSku(context, "3302001575");
         SkuScheduleDTO secondSku = findNewSpecSku(context, "3302001724");
-        Assertions.assertEquals(33, firstSku.getEmbryoStock());
-        Assertions.assertEquals(67, secondSku.getEmbryoStock());
+        Assertions.assertEquals(100, firstSku.getEmbryoStock());
+        Assertions.assertEquals(100, secondSku.getEmbryoStock());
+        Assertions.assertEquals(Integer.valueOf(33),
+                context.getEmbryoStockSkuQuotaMap().get("3302001575"));
+        Assertions.assertEquals(Integer.valueOf(67),
+                context.getEmbryoStockSkuQuotaMap().get("3302001724"));
     }
 
     /**

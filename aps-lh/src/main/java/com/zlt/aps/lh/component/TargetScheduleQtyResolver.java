@@ -14,9 +14,11 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTargetModeEnum;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
+import com.zlt.aps.lh.context.EmbryoStockConsumeLedger;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
+import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
@@ -62,9 +64,18 @@ public class TargetScheduleQtyResolver {
 
     /** 成型胎胚库存收尾标识：是 */
     private static final int EMBRYO_STOCK_ENDING_YES = 1;
+    /** T日收尾剩余天数 */
+    private static final int T_DAY_ENDING_DAYS = 1;
+    /** 胎胚库存账本key分隔符 */
+    private static final String EMBRYO_STOCK_LEDGER_KEY_SEPARATOR = "_";
+    /** 未命中胎胚库存账本时的无限制标记 */
+    private static final int NO_EMBRYO_STOCK_LEDGER_LIMIT = -1;
 
     @Resource
     private IMachineMatchStrategy machineMatchStrategy;
+
+    @Resource
+    private IMouldChangeBalanceStrategy mouldChangeBalanceStrategy;
 
     /**
      * 解析 SKU 的初始目标排产量。
@@ -191,12 +202,10 @@ public class TargetScheduleQtyResolver {
      * @return true-按胎胚库存严格排产；false-沿用现有目标量逻辑
      */
     public boolean isEmbryoStockEnding(LhScheduleContext context, SkuScheduleDTO sku) {
-        if (Objects.isNull(context) || Objects.isNull(sku)
-                || StringUtils.isEmpty(sku.getEmbryoCode())
-                || CollectionUtils.isEmpty(context.getEmbryoEndingFlagMap())) {
+        if (Objects.isNull(context) || Objects.isNull(sku)) {
             return false;
         }
-        return EMBRYO_STOCK_ENDING_YES == context.getEmbryoEndingFlagMap().getOrDefault(sku.getEmbryoCode(), 0);
+        return isEmbryoStockEndingFlagYes(context, sku.getEmbryoCode()) && isTDayEndingSku(sku);
     }
 
     /**
@@ -208,16 +217,16 @@ public class TargetScheduleQtyResolver {
      */
     public boolean isEmbryoStockEnding(LhScheduleContext context, LhScheduleResult result) {
         if (Objects.isNull(context) || Objects.isNull(result)
-                || StringUtils.isEmpty(result.getEmbryoCode())
-                || CollectionUtils.isEmpty(context.getEmbryoEndingFlagMap())) {
+                || StringUtils.isEmpty(result.getMaterialCode())) {
             return false;
         }
-        return EMBRYO_STOCK_ENDING_YES == context.getEmbryoEndingFlagMap().getOrDefault(result.getEmbryoCode(), 0);
+        return context.getEmbryoStockHardTargetMaterialSet().contains(result.getMaterialCode());
     }
 
     /**
-     * 命中成型胎胚库存收尾时，直接按胎胚库存设置排产目标量。
-     * <p>该规则不依赖SKU收尾标记，不取MAX，不做模台数/奇偶修正；实际排产上限同步到SKU实际消费账本。</p>
+     * 命中成型胎胚库存T日收尾时，直接按胎胚库存内部额度设置排产目标量。
+     * <p>单胎胚额度等于原始胎胚库存；共用胎胚额度来自同胎胚组SKU级分摊和可行性修正。</p>
+     * <p>该规则不取MAX，不做模台数/奇偶修正；最终排产仍由SKU额度和组级胎胚库存账本共同硬控。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -231,46 +240,392 @@ public class TargetScheduleQtyResolver {
             return false;
         }
         int currentTargetQty = Math.max(0, sku.resolveTargetScheduleQty());
-        int embryoStock = Math.max(0, sku.getEmbryoStock());
+        int originalEmbryoStock = resolveOriginalEmbryoStock(context, sku);
+        EmbryoStockConsumeLedger ledger = getOrCreateEmbryoStockLedger(context, sku.getEmbryoCode(), originalEmbryoStock);
+        int targetQty = resolveEmbryoStockSkuQuota(context, sku, originalEmbryoStock, scene);
         int surplusQty = Math.max(0, sku.getSurplusQty());
         int windowRemainingPlanQty = Math.max(0, sku.getWindowRemainingPlanQty());
+        sku.setEmbryoStock(originalEmbryoStock);
         sku.setStrictTargetQty(true);
-        sku.setTargetScheduleQty(embryoStock);
-        syncEndingDailyQuotaToTargetQty(sku, embryoStock, windowRemainingPlanQty);
-        int remainingQty = syncEmbryoStockEndingProductionRemainingQty(context, sku, embryoStock);
-        sku.setRemainingScheduleQty(remainingQty);
-        String direction = embryoStock > currentTargetQty ? "上调" : embryoStock < currentTargetQty ? "下调" : "保持";
-        log.info("成型胎胚库存收尾目标量{}, scene: {}, materialCode: {}, 胎胚编码: {}, 原目标量: {}, "
-                        + "胎胚库存目标量: {}, 当前可排剩余: {}, 月计划余量: {}, 窗口日计划剩余: {}, "
-                        + "rule: 直接按胎胚库存且不做奇偶修正",
+        sku.setTargetScheduleQty(targetQty);
+        syncEndingDailyQuotaToTargetQty(sku, targetQty, windowRemainingPlanQty);
+        int remainingQty = syncEmbryoStockEndingProductionRemainingQty(context, sku, targetQty);
+        int ledgerRemainQty = Objects.isNull(ledger) ? NO_EMBRYO_STOCK_LEDGER_LIMIT : Math.max(0, ledger.getRemainQty());
+        sku.setRemainingScheduleQty(ledgerRemainQty < 0 ? remainingQty : Math.min(remainingQty, ledgerRemainQty));
+        String direction = targetQty > currentTargetQty ? "上调" : targetQty < currentTargetQty ? "下调" : "保持";
+        log.info("成型胎胚库存T日收尾目标量{}, scene: {}, materialCode: {}, 胎胚编码: {}, 原目标量: {}, "
+                        + "原始胎胚库存: {}, SKU内部额度: {}, 当前可排剩余: {}, 组级账本剩余: {}, "
+                        + "月计划余量: {}, 窗口日计划剩余: {}, rule: 胎胚库存账本硬控且不做奇偶修正",
                 direction, scene, sku.getMaterialCode(), sku.getEmbryoCode(), currentTargetQty,
-                embryoStock, remainingQty, surplusQty, windowRemainingPlanQty);
+                originalEmbryoStock, targetQty, sku.getRemainingScheduleQty(), ledgerRemainQty,
+                surplusQty, windowRemainingPlanQty);
         return true;
     }
 
     /**
-     * 同步成型胎胚库存收尾的实际消费账本。
-     * <p>首次命中按胎胚库存初始化；若前序入口已消费过账本，则只保留已扣减后的剩余额度，避免跨入口重复放大。</p>
+     * 同步成型胎胚库存T日收尾的SKU实际消费账本。
+     * <p>首次命中按SKU内部分摊额度初始化；若前序入口已消费过账本，则只保留已扣减后的剩余额度，避免跨入口重复放大。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
-     * @param embryoStock 胎胚库存目标量
+     * @param quotaQty SKU内部分摊额度
      * @return 当前实际可排剩余量
      */
     private int syncEmbryoStockEndingProductionRemainingQty(LhScheduleContext context,
                                                             SkuScheduleDTO sku,
-                                                            int embryoStock) {
-        int targetQty = Math.max(0, embryoStock);
+                                                            int quotaQty) {
+        int targetQty = Math.max(0, quotaQty);
         if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
             return targetQty;
         }
         Map<String, Integer> remainingQtyMap = context.getSkuProductionRemainingQtyMap();
         Integer oldQty = remainingQtyMap.get(sku.getMaterialCode());
-        int remainingQty = Objects.isNull(oldQty) ? targetQty : Math.min(Math.max(0, oldQty), targetQty);
+        EmbryoStockConsumeLedger ledger = resolveEmbryoStockLedgerByEmbryoCode(context, sku.getEmbryoCode());
+        boolean ledgerConsumed = Objects.nonNull(ledger)
+                && Objects.nonNull(ledger.getConsumedQty()) && ledger.getConsumedQty() > 0;
+        int remainingQty = Objects.isNull(oldQty) || !ledgerConsumed
+                ? targetQty : Math.min(Math.max(0, oldQty), targetQty);
         remainingQtyMap.put(sku.getMaterialCode(), remainingQty);
-        log.info("成型胎胚库存收尾实际消费账本同步, materialCode: {}, 胎胚库存目标量: {}, 原账本剩余: {}, 同步后剩余: {}",
-                sku.getMaterialCode(), targetQty, oldQty, remainingQty);
+        context.getEmbryoStockHardTargetMaterialSet().add(sku.getMaterialCode());
+        context.getEmbryoStockSkuQuotaMap().put(sku.getMaterialCode(), targetQty);
+        log.info("成型胎胚库存T日收尾SKU实际消费账本同步, materialCode: {}, SKU内部额度: {}, 原账本剩余: {}, "
+                        + "组级账本已消费: {}, 同步后剩余: {}",
+                sku.getMaterialCode(), targetQty, oldQty, ledgerConsumed, remainingQty);
         return remainingQty;
+    }
+
+    /**
+     * 判断胎胚是否配置为胎胚库存收尾。
+     *
+     * @param context 排程上下文
+     * @param embryoCode 胎胚代码
+     * @return true-胎胚库存收尾；false-普通胎胚
+     */
+    private boolean isEmbryoStockEndingFlagYes(LhScheduleContext context, String embryoCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(embryoCode)
+                || CollectionUtils.isEmpty(context.getEmbryoEndingFlagMap())) {
+            return false;
+        }
+        return EMBRYO_STOCK_ENDING_YES == context.getEmbryoEndingFlagMap().getOrDefault(embryoCode, 0);
+    }
+
+    /**
+     * 判断SKU是否为T日收尾。
+     *
+     * @param sku SKU
+     * @return true-T日收尾；false-非T日收尾
+     */
+    private boolean isTDayEndingSku(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return false;
+        }
+        return StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag())
+                && sku.getEndingDaysRemaining() == T_DAY_ENDING_DAYS;
+    }
+
+    /**
+     * 解析原始胎胚库存。
+     * <p>优先取上下文实时库存，确保共用胎胚分摊不会污染结果落库库存口径。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 原始胎胚库存
+     */
+    private int resolveOriginalEmbryoStock(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        if (Objects.nonNull(context) && StringUtils.isNotEmpty(sku.getEmbryoCode())
+                && !CollectionUtils.isEmpty(context.getEmbryoRealtimeStockMap())
+                && context.getEmbryoRealtimeStockMap().containsKey(sku.getEmbryoCode())) {
+            Integer stockQty = context.getEmbryoRealtimeStockMap().get(sku.getEmbryoCode());
+            return Math.max(0, Objects.isNull(stockQty) ? 0 : stockQty);
+        }
+        return Math.max(0, sku.getEmbryoStock());
+    }
+
+    /**
+     * 解析T日业务日期。
+     *
+     * @param context 排程上下文
+     * @return T日业务日期
+     */
+    private LocalDate resolveScheduleLocalDate(LhScheduleContext context) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleDate())) {
+            return null;
+        }
+        return toLocalDate(context.getScheduleDate());
+    }
+
+    /**
+     * 创建胎胚库存账本key。
+     *
+     * @param embryoCode 胎胚代码
+     * @param scheduleDate T日业务日期
+     * @return 账本key
+     */
+    private String buildEmbryoStockLedgerKey(String embryoCode, LocalDate scheduleDate) {
+        return embryoCode + EMBRYO_STOCK_LEDGER_KEY_SEPARATOR + scheduleDate;
+    }
+
+    /**
+     * 获取或创建胎胚库存消费账本。
+     *
+     * @param context 排程上下文
+     * @param embryoCode 胎胚代码
+     * @param originalStockQty 原始胎胚库存
+     * @return 胎胚库存消费账本
+     */
+    private EmbryoStockConsumeLedger getOrCreateEmbryoStockLedger(LhScheduleContext context,
+                                                                  String embryoCode,
+                                                                  int originalStockQty) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(embryoCode)) {
+            return null;
+        }
+        LocalDate scheduleDate = resolveScheduleLocalDate(context);
+        if (Objects.isNull(scheduleDate)) {
+            return null;
+        }
+        String ledgerKey = buildEmbryoStockLedgerKey(embryoCode, scheduleDate);
+        EmbryoStockConsumeLedger oldLedger = context.getEmbryoStockConsumeLedgerMap().get(ledgerKey);
+        if (Objects.nonNull(oldLedger)) {
+            return oldLedger;
+        }
+        int targetQty = Math.max(0, originalStockQty);
+        EmbryoStockConsumeLedger ledger = new EmbryoStockConsumeLedger();
+        ledger.setEmbryoCode(embryoCode);
+        ledger.setScheduleDate(scheduleDate);
+        ledger.setOriginalStockQty(targetQty);
+        ledger.setTargetQty(targetQty);
+        ledger.setConsumedQty(0);
+        ledger.setRemainQty(targetQty);
+        context.getEmbryoStockConsumeLedgerMap().put(ledgerKey, ledger);
+        log.info("胎胚库存消费账本创建, ledgerKey: {}, embryoCode: {}, scheduleDate: {}, 原始库存: {}, 目标量: {}",
+                ledgerKey, embryoCode, scheduleDate, targetQty, targetQty);
+        return ledger;
+    }
+
+    /**
+     * 解析当前SKU在胎胚库存账本中的内部额度。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param originalEmbryoStock 原始胎胚库存
+     * @param scene 调用场景
+     * @return SKU内部额度
+     */
+    private int resolveEmbryoStockSkuQuota(LhScheduleContext context,
+                                           SkuScheduleDTO sku,
+                                           int originalEmbryoStock,
+                                           String scene) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return Math.max(0, originalEmbryoStock);
+        }
+        Integer existingQuota = context.getEmbryoStockSkuQuotaMap().get(sku.getMaterialCode());
+        if (Objects.nonNull(existingQuota)) {
+            return Math.max(0, existingQuota);
+        }
+        ensureActiveEmbryoSkuMap(context, sku);
+        List<SkuScheduleDTO> activeSkuList = collectActiveSkusByEmbryo(context, sku.getEmbryoCode());
+        if (!CollectionUtils.isEmpty(activeSkuList) && activeSkuList.size() > 1
+                && Objects.nonNull(resolveSameEndingDay(context, activeSkuList))) {
+            allocateSharedEmbryoStockByCapacity(
+                    context, sku.getEmbryoCode(), originalEmbryoStock, activeSkuList,
+                    T_DAY_ENDING_DAYS, scene);
+            Integer allocatedQuota = context.getEmbryoStockSkuQuotaMap().get(sku.getMaterialCode());
+            return Math.max(0, Objects.isNull(allocatedQuota) ? 0 : allocatedQuota);
+        }
+        applyEmbryoStockSkuQuota(context, sku, originalEmbryoStock, originalEmbryoStock, "单胎胚T日收尾");
+        return Math.max(0, originalEmbryoStock);
+    }
+
+    /**
+     * 应用胎胚库存SKU内部额度。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param originalEmbryoStock 原始胎胚库存
+     * @param quotaQty SKU内部额度
+     * @param reason 应用原因
+     */
+    private void applyEmbryoStockSkuQuota(LhScheduleContext context,
+                                          SkuScheduleDTO sku,
+                                          int originalEmbryoStock,
+                                          int quotaQty,
+                                          String reason) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return;
+        }
+        int resolvedOriginalStock = Math.max(0, originalEmbryoStock);
+        int resolvedQuotaQty = Math.max(0, quotaQty);
+        getOrCreateEmbryoStockLedger(context, sku.getEmbryoCode(), resolvedOriginalStock);
+        sku.setEmbryoStock(resolvedOriginalStock);
+        sku.setStrictTargetQty(true);
+        sku.setTargetScheduleQty(resolvedQuotaQty);
+        syncEndingDailyQuotaToTargetQty(sku, resolvedQuotaQty, Math.max(0, sku.getWindowRemainingPlanQty()));
+        int remainingQty = syncEmbryoStockEndingProductionRemainingQty(context, sku, resolvedQuotaQty);
+        int ledgerRemainQty = resolveEmbryoStockLedgerRemainingQty(context, sku);
+        sku.setRemainingScheduleQty(ledgerRemainQty < 0 ? remainingQty : Math.min(remainingQty, ledgerRemainQty));
+        log.info("胎胚库存SKU内部额度应用, materialCode: {}, embryoCode: {}, 原始胎胚库存: {}, SKU额度: {}, "
+                        + "SKU剩余额度: {}, 胎胚账本剩余: {}, reason: {}",
+                sku.getMaterialCode(), sku.getEmbryoCode(), resolvedOriginalStock, resolvedQuotaQty,
+                sku.getRemainingScheduleQty(), ledgerRemainQty, reason);
+    }
+
+    /**
+     * 清理非T日同日收尾场景残留的胎胚库存SKU额度。
+     *
+     * @param context 排程上下文
+     * @param skuList SKU列表
+     */
+    private void clearEmbryoStockSkuQuota(LhScheduleContext context, List<SkuScheduleDTO> skuList) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(skuList)) {
+            return;
+        }
+        for (SkuScheduleDTO sku : skuList) {
+            if (Objects.nonNull(sku) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
+                context.getEmbryoStockSkuQuotaMap().remove(sku.getMaterialCode());
+                context.getEmbryoStockHardTargetMaterialSet().remove(sku.getMaterialCode());
+            }
+        }
+    }
+
+    /**
+     * 解析SKU有效排产剩余额度。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return SKU账本与胎胚组级账本共同约束后的剩余额度
+     */
+    private int resolveEffectiveProductionRemainingQty(LhScheduleContext context, SkuScheduleDTO sku) {
+        int skuRemainingQty = resolveProductionRemainingQty(context, sku);
+        int ledgerRemainingQty = resolveEmbryoStockLedgerRemainingQty(context, sku);
+        return ledgerRemainingQty < 0 ? skuRemainingQty : Math.min(skuRemainingQty, ledgerRemainingQty);
+    }
+
+    /**
+     * 解析胎胚库存组级账本剩余量。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 剩余量；-1表示当前SKU不受胎胚库存组级账本约束
+     */
+    private int resolveEmbryoStockLedgerRemainingQty(LhScheduleContext context, SkuScheduleDTO sku) {
+        EmbryoStockConsumeLedger ledger = resolveEmbryoStockLedger(context, sku);
+        if (Objects.isNull(ledger)) {
+            return NO_EMBRYO_STOCK_LEDGER_LIMIT;
+        }
+        return Math.max(0, ledger.getRemainQty() == null ? 0 : ledger.getRemainQty());
+    }
+
+    /**
+     * 解析SKU级胎胚库存额度上限。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return SKU额度上限；-1表示无限制
+     */
+    private int resolveEmbryoStockSkuQuotaLimit(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())
+                || !context.getEmbryoStockHardTargetMaterialSet().contains(sku.getMaterialCode())) {
+            return NO_EMBRYO_STOCK_LEDGER_LIMIT;
+        }
+        Integer quotaQty = context.getEmbryoStockSkuQuotaMap().get(sku.getMaterialCode());
+        return Math.max(0, Objects.isNull(quotaQty) ? 0 : quotaQty);
+    }
+
+    /**
+     * 解析胎胚库存组级账本。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return 胎胚库存消费账本
+     */
+    private EmbryoStockConsumeLedger resolveEmbryoStockLedger(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getEmbryoCode())
+                || StringUtils.isEmpty(sku.getMaterialCode())
+                || !context.getEmbryoStockHardTargetMaterialSet().contains(sku.getMaterialCode())) {
+            return null;
+        }
+        return resolveEmbryoStockLedgerByEmbryoCode(context, sku.getEmbryoCode());
+    }
+
+    /**
+     * 按胎胚代码解析T日胎胚库存组级账本。
+     *
+     * @param context 排程上下文
+     * @param embryoCode 胎胚代码
+     * @return 胎胚库存消费账本
+     */
+    private EmbryoStockConsumeLedger resolveEmbryoStockLedgerByEmbryoCode(LhScheduleContext context,
+                                                                          String embryoCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(embryoCode)) {
+            return null;
+        }
+        LocalDate scheduleDate = resolveScheduleLocalDate(context);
+        if (Objects.isNull(scheduleDate)) {
+            return null;
+        }
+        return context.getEmbryoStockConsumeLedgerMap().get(
+                buildEmbryoStockLedgerKey(embryoCode, scheduleDate));
+    }
+
+    /**
+     * 扣减胎胚库存组级账本。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param deductedQty 扣减量
+     * @param scene 排产场景
+     * @param machineCode 机台编码
+     */
+    private void deductEmbryoStockLedger(LhScheduleContext context,
+                                         SkuScheduleDTO sku,
+                                         int deductedQty,
+                                         String scene,
+                                         String machineCode) {
+        if (deductedQty <= 0) {
+            return;
+        }
+        EmbryoStockConsumeLedger ledger = resolveEmbryoStockLedger(context, sku);
+        if (Objects.isNull(ledger)) {
+            return;
+        }
+        int beforeRemainQty = Math.max(0, ledger.getRemainQty() == null ? 0 : ledger.getRemainQty());
+        int actualDeductedQty = ledger.consume(deductedQty);
+        log.info("胎胚库存组级账本扣减, scene: {}, materialCode: {}, machineCode: {}, embryoCode: {}, "
+                        + "本次计划量: {}, 扣减前剩余: {}, 实际扣减: {}, 扣减后剩余: {}, 已消费: {}",
+                scene, sku.getMaterialCode(), machineCode, sku.getEmbryoCode(), deductedQty,
+                beforeRemainQty, actualDeductedQty, ledger.getRemainQty(), ledger.getConsumedQty());
+    }
+
+    /**
+     * 恢复胎胚库存组级账本。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param restoredQty 恢复量
+     * @param reason 恢复原因
+     * @param machineCode 机台编码
+     */
+    private void restoreEmbryoStockLedger(LhScheduleContext context,
+                                          SkuScheduleDTO sku,
+                                          int restoredQty,
+                                          String reason,
+                                          String machineCode) {
+        if (restoredQty <= 0) {
+            return;
+        }
+        EmbryoStockConsumeLedger ledger = resolveEmbryoStockLedger(context, sku);
+        if (Objects.isNull(ledger)) {
+            return;
+        }
+        int beforeRemainQty = Math.max(0, ledger.getRemainQty() == null ? 0 : ledger.getRemainQty());
+        int afterRemainQty = ledger.restore(restoredQty);
+        log.info("胎胚库存组级账本恢复, materialCode: {}, machineCode: {}, embryoCode: {}, reason: {}, "
+                        + "恢复量: {}, 恢复前剩余: {}, 恢复后剩余: {}, 已消费: {}",
+                sku.getMaterialCode(), machineCode, sku.getEmbryoCode(), reason,
+                restoredQty, beforeRemainQty, afterRemainQty, ledger.getConsumedQty());
     }
 
     /**
@@ -295,15 +650,19 @@ public class TargetScheduleQtyResolver {
             return 0;
         }
         int currentRemainingQty = resolveProductionRemainingQty(context, sku);
-        int deductedQty = Math.min(currentRemainingQty, scheduledQty);
+        int ledgerRemainingQty = resolveEmbryoStockLedgerRemainingQty(context, sku);
+        int effectiveRemainingQty = ledgerRemainingQty < 0
+                ? currentRemainingQty : Math.min(currentRemainingQty, ledgerRemainingQty);
+        int deductedQty = Math.min(effectiveRemainingQty, scheduledQty);
         if (Objects.nonNull(context) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
             context.getSkuProductionRemainingQtyMap().put(
                     sku.getMaterialCode(), Math.max(0, currentRemainingQty - deductedQty));
         }
+        deductEmbryoStockLedger(context, sku, deductedQty, scene, machineCode);
         log.info("SKU实际消费账本扣减, scene: {}, materialCode: {}, machineCode: {}, 本次排产量: {}, "
-                        + "扣减前剩余: {}, 实际扣减: {}, 扣减后剩余: {}",
+                        + "SKU扣减前剩余: {}, 胎胚账本剩余: {}, 实际扣减: {}, SKU扣减后剩余: {}",
                 scene, sku.getMaterialCode(), machineCode, scheduledQty,
-                currentRemainingQty, deductedQty, Math.max(0, currentRemainingQty - deductedQty));
+                currentRemainingQty, ledgerRemainingQty, deductedQty, Math.max(0, currentRemainingQty - deductedQty));
         return deductedQty;
     }
 
@@ -330,7 +689,7 @@ public class TargetScheduleQtyResolver {
         if (!hasProductionLedgerBasis(context, sku)) {
             return resultQty;
         }
-        int remainingQty = resolveProductionRemainingQty(context, sku);
+        int remainingQty = resolveEffectiveProductionRemainingQty(context, sku);
         if (resultQty <= remainingQty) {
             return resultQty;
         }
@@ -365,7 +724,7 @@ public class TargetScheduleQtyResolver {
         }
         ShiftFieldUtil.syncDailyPlanQty(result);
         log.info("SKU实际消费账本裁剪结果, scene: {}, materialCode: {}, machineCode: {}, 原结果量: {}, "
-                        + "账本剩余: {}, 裁剪后结果量: {}",
+                        + "有效账本剩余: {}, 裁剪后结果量: {}",
                 scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty, actualRetainedQty);
         return actualRetainedQty;
     }
@@ -391,12 +750,18 @@ public class TargetScheduleQtyResolver {
         }
         int currentRemainingQty = resolveProductionRemainingQty(context, sku);
         int restoredRemainingQty = currentRemainingQty + restoredQty;
+        int quotaLimitQty = resolveEmbryoStockSkuQuotaLimit(context, sku);
+        if (quotaLimitQty >= 0) {
+            restoredRemainingQty = Math.min(restoredRemainingQty, quotaLimitQty);
+        }
         if (Objects.nonNull(context) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
             context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), restoredRemainingQty);
         }
+        restoreEmbryoStockLedger(context, sku, restoredQty, reason, machineCode);
         log.info("SKU实际消费账本恢复, materialCode: {}, machineCode: {}, reason: {}, 恢复量: {}, "
-                        + "恢复前剩余: {}, 恢复后剩余: {}",
-                sku.getMaterialCode(), machineCode, reason, restoredQty, currentRemainingQty, restoredRemainingQty);
+                        + "恢复前剩余: {}, SKU额度上限: {}, 恢复后剩余: {}",
+                sku.getMaterialCode(), machineCode, reason, restoredQty, currentRemainingQty,
+                quotaLimitQty, restoredRemainingQty);
         return restoredRemainingQty;
     }
 
@@ -1453,8 +1818,9 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
-     * 刷新全部活跃共用胎胚库存分摊。
-     * <p>只在不同SKU共用同一胎胚且同一天收尾时分摊；其它场景恢复为单SKU完整库存口径。</p>
+     * 刷新全部活跃共用胎胚库存内部分摊。
+     * <p>只在不同SKU共用同一胎胚且T日同日收尾时写入SKU内部额度；
+     * 其它场景只恢复SKU原始胎胚库存展示口径。</p>
      *
      * @param context 排程上下文
      * @param reason 刷新原因
@@ -1476,7 +1842,7 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
-     * 按当前活跃SKU集合刷新单个胎胚库存分摊。
+     * 按当前活跃SKU集合刷新单个胎胚库存内部分摊。
      *
      * @param context 排程上下文
      * @param embryoCode 胎胚编码
@@ -1498,16 +1864,20 @@ public class TargetScheduleQtyResolver {
         if (activeSkuList.size() == 1) {
             SkuScheduleDTO sku = activeSkuList.get(0);
             sku.setEmbryoStock(rawEmbryoStock);
+            if (isEmbryoStockEnding(context, sku)) {
+                applyEmbryoStockSkuQuota(context, sku, rawEmbryoStock, rawEmbryoStock, "动态单胎胚");
+            }
             log.info("共用胎胚动态转单胎胚库存口径, embryoCode: {}, embryoDesc: {}, 剩余SKU: {}, "
                             + "胎胚库存: {}, 原因: {}",
                     embryoCode, sku.getMainMaterialDesc(), sku.getMaterialCode(), rawEmbryoStock, reason);
             return;
         }
-        Integer endingDay = resolveSameEndingDay(activeSkuList);
+        Integer endingDay = resolveSameEndingDay(context, activeSkuList);
         if (Objects.isNull(endingDay)) {
             resetFullEmbryoStock(activeSkuList, rawEmbryoStock);
+            clearEmbryoStockSkuQuota(context, activeSkuList);
             log.info("共用胎胚库存不分摊, embryoCode: {}, embryoDesc: {}, 当前SKU列表: {}, "
-                            + "是否满足不同SKU同一天收尾: false, 胎胚库存: {}, 原因: {}",
+                            + "是否满足不同SKU T 日同日收尾: false, 胎胚库存: {}, 原因: {}",
                     embryoCode, resolveEmbryoDesc(activeSkuList), collectMaterialCodes(activeSkuList),
                     rawEmbryoStock, reason);
             return;
@@ -1531,11 +1901,10 @@ public class TargetScheduleQtyResolver {
         return activeSkuList;
     }
 
-    private Integer resolveSameEndingDay(List<SkuScheduleDTO> skuList) {
+    private Integer resolveSameEndingDay(LhScheduleContext context, List<SkuScheduleDTO> skuList) {
         Integer endingDay = null;
         for (SkuScheduleDTO sku : skuList) {
-            if (Objects.isNull(sku) || !StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag())
-                    || sku.getEndingDaysRemaining() <= 0) {
+            if (!isEmbryoStockEnding(context, sku)) {
                 return null;
             }
             if (Objects.isNull(endingDay)) {
@@ -1558,6 +1927,7 @@ public class TargetScheduleQtyResolver {
         if (rawEmbryoStock <= 0) {
             for (SkuScheduleDTO sku : skuList) {
                 sku.setEmbryoStock(0);
+                applyEmbryoStockSkuQuota(context, sku, 0, 0, "共用胎胚库存为0");
             }
             log.info("共用胎胚库存为0，分摊结果全部为0, embryoCode: {}, 当前SKU列表: {}, 原因: {}",
                     embryoCode, collectMaterialCodes(skuList), reason);
@@ -1567,6 +1937,7 @@ public class TargetScheduleQtyResolver {
         int totalWeight = sumAllocationWeight(weightMap);
         if (totalWeight <= 0) {
             resetFullEmbryoStock(skuList, rawEmbryoStock);
+            clearEmbryoStockSkuQuota(context, skuList);
             log.warn("共用胎胚库存分摊权重异常，按完整库存口径保留, embryoCode: {}, 当前SKU列表: {}, "
                             + "weightMap: {}, 胎胚库存: {}, 原因: {}",
                     embryoCode, collectMaterialCodes(skuList), weightMap, rawEmbryoStock, reason);
@@ -1584,14 +1955,221 @@ public class TargetScheduleQtyResolver {
                 allocatedStock = (int) (rawEmbryoStock * (long) weight / totalWeight);
                 allocatedSum += allocatedStock;
             }
-            sku.setEmbryoStock(Math.max(0, allocatedStock));
-            allocatedMap.put(sku.getMaterialCode(), sku.getEmbryoStock());
+            sku.setEmbryoStock(rawEmbryoStock);
+            allocatedMap.put(sku.getMaterialCode(), Math.max(0, allocatedStock));
+        }
+        Map<String, Integer> adjustedMap = adjustSharedEmbryoQuotaByFeasibility(
+                context, embryoCode, rawEmbryoStock, skuList, allocatedMap, reason);
+        for (SkuScheduleDTO sku : skuList) {
+            int quotaQty = Math.max(0, adjustedMap.getOrDefault(sku.getMaterialCode(), 0));
+            applyEmbryoStockSkuQuota(context, sku, rawEmbryoStock, quotaQty, "共用胎胚T日同日收尾");
         }
         log.info("共用胎胚库存按标准产能分摊完成, embryoCode: {}, embryoDesc: {}, 当前SKU列表: {}, "
                         + "是否满足不同SKU同一天收尾: true, 收尾天数: {}, 标准产能权重: {}, 总权重: {}, "
-                        + "胎胚库存: {}, 分摊结果: {}, 尾差处理后汇总: {}, 原因: {}",
+                        + "胎胚库存: {}, 初始分摊结果: {}, 可行性修正结果: {}, 修正后汇总: {}, 原因: {}",
                 embryoCode, resolveEmbryoDesc(skuList), collectMaterialCodes(skuList), endingDay,
-                weightMap, totalWeight, rawEmbryoStock, allocatedMap, sumAllocationWeight(allocatedMap), reason);
+                weightMap, totalWeight, rawEmbryoStock, allocatedMap, adjustedMap,
+                sumAllocationWeight(adjustedMap), reason);
+    }
+
+    /**
+     * 按换模可行性修正共用胎胚SKU内部额度。
+     * <p>该方法只读评估，不生成排程结果；不可合理消化的额度会转给同组更可行的SKU。</p>
+     *
+     * @param context 排程上下文
+     * @param embryoCode 胎胚代码
+     * @param rawEmbryoStock 原始胎胚库存
+     * @param skuList 同胎胚T日收尾SKU列表
+     * @param initialQuotaMap 初始分摊额度
+     * @param reason 调用原因
+     * @return 修正后的SKU额度
+     */
+    private Map<String, Integer> adjustSharedEmbryoQuotaByFeasibility(LhScheduleContext context,
+                                                                      String embryoCode,
+                                                                      int rawEmbryoStock,
+                                                                      List<SkuScheduleDTO> skuList,
+                                                                      Map<String, Integer> initialQuotaMap,
+                                                                      String reason) {
+        Map<String, Integer> adjustedQuotaMap = new LinkedHashMap<String, Integer>(initialQuotaMap);
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(skuList) || CollectionUtils.isEmpty(initialQuotaMap)) {
+            return adjustedQuotaMap;
+        }
+        Map<String, Integer> feasibleQtyMap = new LinkedHashMap<String, Integer>(skuList.size());
+        int transferQty = 0;
+        for (SkuScheduleDTO sku : skuList) {
+            int initialQuota = Math.max(0, initialQuotaMap.getOrDefault(sku.getMaterialCode(), 0));
+            int feasibleQty = resolveSharedEmbryoTDayFeasibleQty(context, sku, rawEmbryoStock);
+            feasibleQtyMap.put(sku.getMaterialCode(), feasibleQty);
+            int cappedQuota = Math.min(initialQuota, feasibleQty);
+            adjustedQuotaMap.put(sku.getMaterialCode(), cappedQuota);
+            transferQty += Math.max(0, initialQuota - cappedQuota);
+        }
+        if (transferQty <= 0) {
+            log.info("共用胎胚SKU额度可行性修正无需调整, embryoCode: {}, 初始额度: {}, 可行额度: {}, reason: {}",
+                    embryoCode, initialQuotaMap, feasibleQtyMap, reason);
+            return adjustedQuotaMap;
+        }
+        int remainingTransferQty = transferQty;
+        for (SkuScheduleDTO sku : skuList) {
+            if (remainingTransferQty <= 0) {
+                break;
+            }
+            int currentQuota = Math.max(0, adjustedQuotaMap.getOrDefault(sku.getMaterialCode(), 0));
+            int feasibleQty = Math.max(0, feasibleQtyMap.getOrDefault(sku.getMaterialCode(), 0));
+            int extraCapacityQty = Math.max(0, feasibleQty - currentQuota);
+            if (extraCapacityQty <= 0) {
+                continue;
+            }
+            int acceptedQty = Math.min(remainingTransferQty, extraCapacityQty);
+            adjustedQuotaMap.put(sku.getMaterialCode(), currentQuota + acceptedQty);
+            remainingTransferQty -= acceptedQty;
+        }
+        if (remainingTransferQty > 0) {
+            log.info("共用胎胚SKU额度存在未消化库存, embryoCode: {}, 未消化量: {}, 初始额度: {}, "
+                            + "可行额度: {}, 修正额度: {}, reason: {}",
+                    embryoCode, remainingTransferQty, initialQuotaMap, feasibleQtyMap, adjustedQuotaMap, reason);
+        } else {
+            log.info("共用胎胚SKU额度按换模可行性完成转移, embryoCode: {}, 转移量: {}, 初始额度: {}, "
+                            + "可行额度: {}, 修正额度: {}, reason: {}",
+                    embryoCode, transferQty, initialQuotaMap, feasibleQtyMap, adjustedQuotaMap, reason);
+        }
+        return adjustedQuotaMap;
+    }
+
+    /**
+     * 评估SKU在T日早班/中班可合理消化的胎胚库存额度。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param rawEmbryoStock 原始胎胚库存
+     * @return T日可合理消化量
+     */
+    private int resolveSharedEmbryoTDayFeasibleQty(LhScheduleContext context,
+                                                   SkuScheduleDTO sku,
+                                                   int rawEmbryoStock) {
+        int upperLimitQty = Math.max(0, rawEmbryoStock);
+        if (upperLimitQty <= 0 || Objects.isNull(context) || Objects.isNull(sku)) {
+            return 0;
+        }
+        IMachineMatchStrategy matchStrategy = getMachineMatchStrategy();
+        if (Objects.isNull(matchStrategy)) {
+            log.info("共用胎胚可行性修正跳过机台预评估, materialCode: {}, reason: 机台匹配策略未注入",
+                    sku.getMaterialCode());
+            return upperLimitQty;
+        }
+        List<LhShiftConfigVO> tDayChangeoverShifts = resolveTDayChangeoverFeasibleShifts(context);
+        if (CollectionUtils.isEmpty(tDayChangeoverShifts)) {
+            log.info("共用胎胚可行性修正跳过班次预评估, materialCode: {}, reason: 缺少T日早中班窗口",
+                    sku.getMaterialCode());
+            return upperLimitQty;
+        }
+        List<MachineScheduleDTO> candidates = matchStrategy.matchMachines(context, sku);
+        if (CollectionUtils.isEmpty(candidates)) {
+            log.info("共用胎胚可行性修正判定不可消化, materialCode: {}, embryoCode: {}, reason: 无候选机台",
+                    sku.getMaterialCode(), sku.getEmbryoCode());
+            return 0;
+        }
+        if (!hasTDayMouldChangeCapacity(context) && !hasSameMaterialCandidate(candidates, sku)) {
+            log.info("共用胎胚可行性修正判定不可消化, materialCode: {}, embryoCode: {}, reason: T日换模次数已达上限",
+                    sku.getMaterialCode(), sku.getEmbryoCode());
+            return 0;
+        }
+        int feasibleQty = 0;
+        for (MachineScheduleDTO machine : candidates) {
+            Date previewStartTime = resolveFeasibilityPreviewStartTime(machine, tDayChangeoverShifts);
+            int machineCapacity = calcMachineAvailableCapacityByStartTime(
+                    context, sku, machine, previewStartTime, previewStartTime,
+                    tDayChangeoverShifts, ScheduleTypeEnum.NEW_SPEC.getCode());
+            feasibleQty += Math.max(0, machineCapacity);
+            if (feasibleQty >= upperLimitQty) {
+                break;
+            }
+        }
+        int resolvedFeasibleQty = Math.min(upperLimitQty, Math.max(0, feasibleQty));
+        log.info("共用胎胚SKU换模可行性预评估, materialCode: {}, embryoCode: {}, 候选机台数: {}, "
+                        + "T日早中班可消化量: {}, 原始胎胚库存: {}",
+                sku.getMaterialCode(), sku.getEmbryoCode(), candidates.size(), resolvedFeasibleQty, upperLimitQty);
+        return resolvedFeasibleQty;
+    }
+
+    /**
+     * 解析T日允许换模/换活字块后继续生产的早班和中班。
+     *
+     * @param context 排程上下文
+     * @return T日早班、中班列表
+     */
+    private List<LhShiftConfigVO> resolveTDayChangeoverFeasibleShifts(LhScheduleContext context) {
+        List<LhShiftConfigVO> shifts = resolveScheduleShifts(context);
+        if (CollectionUtils.isEmpty(shifts)) {
+            return new ArrayList<LhShiftConfigVO>(0);
+        }
+        LocalDate scheduleDate = resolveScheduleLocalDate(context);
+        List<LhShiftConfigVO> tDayShifts = new ArrayList<LhShiftConfigVO>(2);
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift)) {
+                continue;
+            }
+            LocalDate workDate = toLocalDate(shift.getWorkDate());
+            ShiftEnum shiftType = shift.resolveShiftTypeEnum();
+            if (Objects.nonNull(scheduleDate) && !scheduleDate.equals(workDate)) {
+                continue;
+            }
+            if (shiftType == ShiftEnum.MORNING_SHIFT || shiftType == ShiftEnum.AFTERNOON_SHIFT) {
+                tDayShifts.add(shift);
+            }
+        }
+        return tDayShifts;
+    }
+
+    /**
+     * 判断T日是否仍有换模/换活字块承接容量。
+     *
+     * @param context 排程上下文
+     * @return true-仍有容量或策略未注入；false-换模次数已达上限
+     */
+    private boolean hasTDayMouldChangeCapacity(LhScheduleContext context) {
+        if (Objects.isNull(mouldChangeBalanceStrategy) || Objects.isNull(context)
+                || Objects.isNull(context.getScheduleDate())) {
+            return true;
+        }
+        return mouldChangeBalanceStrategy.getRemainingCapacity(context, context.getScheduleDate()) > 0;
+    }
+
+    /**
+     * 判断候选机台是否已有同物料续作承接。
+     *
+     * @param candidates 候选机台
+     * @param sku SKU
+     * @return true-存在同物料候选机台；false-需要换模或换活字块承接
+     */
+    private boolean hasSameMaterialCandidate(List<MachineScheduleDTO> candidates, SkuScheduleDTO sku) {
+        if (CollectionUtils.isEmpty(candidates) || Objects.isNull(sku)
+                || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return false;
+        }
+        for (MachineScheduleDTO machine : candidates) {
+            if (Objects.nonNull(machine)
+                    && StringUtils.equals(sku.getMaterialCode(), machine.getPreviousMaterialCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析可行性预评估起算时间。
+     *
+     * @param machine 机台
+     * @param shifts T日早中班
+     * @return 预评估起算时间
+     */
+    private Date resolveFeasibilityPreviewStartTime(MachineScheduleDTO machine, List<LhShiftConfigVO> shifts) {
+        Date firstShiftStartTime = shifts.get(0).getShiftStartDateTime();
+        if (Objects.isNull(machine) || Objects.isNull(machine.getEstimatedEndTime())) {
+            return firstShiftStartTime;
+        }
+        return machine.getEstimatedEndTime().after(firstShiftStartTime)
+                ? machine.getEstimatedEndTime() : firstShiftStartTime;
     }
 
     private Map<String, Integer> buildAllocationWeightMap(LhScheduleContext context, List<SkuScheduleDTO> skuList) {

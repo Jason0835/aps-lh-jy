@@ -17,13 +17,13 @@ public class LhMultiMachineDistributionUtil {
     }
 
     /**
-     * 对同一物料在多个机台上的排程结果，回写SKU已分配的完整胎胚库存。
-     * <p>硫化余量和胎胚库存都不按机台数二次分摊。</p>
+     * 对同一物料在多个机台上的排程结果，回写SKU原始胎胚库存。
+     * <p>硫化余量和胎胚库存都不按机台数二次分摊；共用胎胚内部额度只控制排产，不写入结果库存字段。</p>
      * <p>会直接修改每个结果的 {@code embryoStock} 字段。</p>
      * <p>调用方需保证传入的结果列表已按物料分组且排产量已最终确定。</p>
      *
      * @param materialResults  同一物料在多个机台上的排程结果列表（至少2条）
-     * @param embryoStock      该SKU经过共用胎胚规则分配后的完整胎胚库存
+     * @param embryoStock      该SKU所属胎胚的原始库存
      */
     public static void retainFullEmbryoStockForSingleMaterial(List<LhScheduleResult> materialResults,
                                                                int embryoStock) {
