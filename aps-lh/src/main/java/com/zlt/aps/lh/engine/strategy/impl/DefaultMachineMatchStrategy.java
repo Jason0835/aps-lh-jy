@@ -56,7 +56,7 @@ import java.util.stream.Collectors;
  *   <li>为新增排产、局部搜索和目标量评估提供候选硫化机台；</li>
  *   <li>先执行硬性过滤：定点不可作业、机台状态、寸口、特殊材料能力、模具占用和停机窗口；</li>
  *   <li>再执行单控/普通机台类型约束，区分试制、量试、小批量和正规 SKU；</li>
- *   <li>最后先锁定最早收尾后20分钟窗口，再按胎胚/规格/模壳/胶囊/英寸和既有兜底画像排序。</li>
+ *   <li>最后先锁定最早收尾后20分钟窗口，再按单控拆分/胎胚/规格/模壳/胶囊/英寸/机台编码排序。</li>
  * </ul>
  *
  * <p>注意：该策略不直接分配班次排量，只返回候选和排序；真正的换模、首检和产能落地在新增策略中执行。</p>
@@ -159,8 +159,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 该规则只处理候选集合，不在此消费机台；最终是否占用仍由 S4.5 换模、首检和产能结果决定。
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
-        // 5. 按多维度排序：排序只改变候选顺序，不改变候选集合中的业务可排性。
-        EndingWindowContext endingWindowContext = sortCandidates(context, candidates, sku, specialMaterialMatchResult);
+        // 5. 先筛最早收尾20分钟窗口，再按单控、胎胚、规格、模壳、胶囊、英寸和机台编码排序。
+        EndingWindowContext endingWindowContext = sortCandidates(context, candidates, sku);
         traceMachineCandidates(context, sku, specialMaterialMatchResult, candidates, trace, endingWindowContext);
 
         if (CollectionUtils.isEmpty(candidates)) {
@@ -945,48 +945,34 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param context 排程上下文
      * @param candidates 候选机台
      * @param sku 待排SKU
+     * @return 收尾窗口上下文
      */
     private EndingWindowContext sortCandidates(LhScheduleContext context,
                                                List<MachineScheduleDTO> candidates,
-                                               SkuScheduleDTO sku,
-                                               SpecialMaterialMatchResult matchResult) {
+                                               SkuScheduleDTO sku) {
         Map<String, CandidateWindowProfile> profileCache = new HashMap<>(16);
         EndingWindowContext endingWindowContext = filterByEarliestEndingWindow(context, candidates, sku, profileCache);
-        candidates.sort(buildMachineComparator(context, sku, matchResult, profileCache));
+        candidates.sort(buildMachineComparator(context, sku));
         return endingWindowContext;
     }
 
     /**
      * 构建机台优先级比较器。
+     * <p>硬性过滤和收尾20分钟窗口已在外层完成，本比较器只保留业务指定的排序层级。</p>
      *
      * @param context 排程上下文
      * @param sku 待排SKU
      * @return 比较器
      */
     private Comparator<MachineScheduleDTO> buildMachineComparator(LhScheduleContext context,
-                                                                  SkuScheduleDTO sku,
-                                                                  SpecialMaterialMatchResult matchResult) {
-        return buildMachineComparator(context, sku, matchResult, new HashMap<String, CandidateWindowProfile>(16));
-    }
-
-    /**
-     * 构建机台优先级比较器。
-     *
-     * @param context 排程上下文
-     * @param sku 待排SKU
-     * @param matchResult 特殊物料命中结果
-     * @param profileCache 候选机台窗口画像缓存
-     * @return 比较器
-     */
-    private Comparator<MachineScheduleDTO> buildMachineComparator(LhScheduleContext context,
-                                                                  SkuScheduleDTO sku,
-                                                                  SpecialMaterialMatchResult matchResult,
-                                                                  Map<String, CandidateWindowProfile> profileCache) {
+                                                                  SkuScheduleDTO sku) {
         return (left, right) -> {
-            CandidateWindowProfile leftProfile = resolveCandidateWindowProfile(context, sku, left, profileCache);
-            CandidateWindowProfile rightProfile = resolveCandidateWindowProfile(context, sku, right, profileCache);
+            int compareResult = compareSingleControlPriority(context, sku, left, right);
+            if (compareResult != 0) {
+                return compareResult;
+            }
 
-            int compareResult = compareEmbryoExactMatch(context, sku, left, right);
+            compareResult = compareEmbryoExactMatch(context, sku, left, right);
             if (compareResult != 0) {
                 return compareResult;
             }
@@ -1016,75 +1002,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 return compareResult;
             }
 
-            compareResult = compareLimitSpecifyPriority(context, sku, left, right);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareSingleControlPriority(context, sku, left, right);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareTodayIdlePriority(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareReleasedContinuousMachinePriority(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareOtherSkuOccupancy(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareEarliestProductionShift(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareContinuousSchedulableShifts(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareTotalSchedulableShifts(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareTailFragmentPriority(leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareNormalMachinePriority(matchResult, left, right);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareSpecialSupportCapabilityCount(matchResult, left, right);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareEndingTime(context, leftProfile, rightProfile);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = compareEmbryoShareCount(context, left, right);
-            if (compareResult != 0) {
-                return compareResult;
-            }
-
-            compareResult = Integer.compare(left.getMachineOrder(), right.getMachineOrder());
-            if (compareResult != 0) {
-                return compareResult;
-            }
             return Comparator.nullsLast(String::compareTo).compare(left.getMachineCode(), right.getMachineCode());
         };
     }
@@ -2103,11 +2020,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         if (!matchResult.isSpecial()) {
             PriorityTraceLogHelper.appendLine(detailBuilder,
-                    "候选说明: 普通SKU允许使用特殊机台，特殊机台仅后置排序，不做强制保留");
+                    "候选说明: 普通SKU允许使用特殊机台，特殊机台仅保留候选诊断，不作为新增选机排序层级");
         }
         if (!CollectionUtils.isEmpty(context.getReleasedContinuousMachineCodeSet())) {
             PriorityTraceLogHelper.appendLine(detailBuilder,
-                    "候选说明: 续作释放机台仅在新增选机排序中降优先级，不禁止生产");
+                    "候选说明: 续作释放机台保留候选诊断，不作为新增选机排序层级");
         }
 
         // TOP N 候选机台
@@ -2115,11 +2032,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         int topCount = Math.min(topN, PriorityTraceLogHelper.sizeOf(candidates));
         PriorityTraceLogHelper.appendLine(detailBuilder, "TOP" + topCount + "候选排序:");
         List<String> levelNames = java.util.Arrays.asList(
-                "L1_收尾窗口", "L2_同胎胚", "L3_同规格", "L4_同模壳", "L5_胶囊共用",
-                "L6_同英寸", "L7_相近英寸", "L8_定点机台", "L9_单控拆分", "L10_当天空闲优先",
-                "L11_续作释放降级", "L12_其他SKU占用", "L13_最早可开产班次", "L14_连续可生产班次",
-                "L15_可用总产能", "L16_尾部零散产能", "L17_普通机台优先", "L18_特殊支持能力数量",
-                "L19_收尾时间", "L20_胎胚共用数量");
+                "L1_单控拆分", "L2_同胎胚", "L3_同规格", "L4_同模壳",
+                "L5_胶囊共用", "L6_同英寸", "L7_相近英寸", "L8_机台编码");
         for (int i = 0; i < topCount; i++) {
             MachineScheduleDTO machine = candidates.get(i);
             CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, machine, profileCache);
@@ -2129,7 +2043,6 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             int specialSupportCapabilityCount = resolveSpecialSupportCapabilityCount(machine);
             boolean inEndingWindow = isInEndingWindow(profile.getReferenceTime(),
                     endingWindowContext.getWindowStartTime(), endingWindowContext.getWindowEndTime());
-            int endingWindowScore = inEndingWindow ? 0 : 1;
             int embryoMatchScore = resolveEmbryoMatchScore(context, sku, machine);
             int specMatchScore = resolveSpecMatchScore(sku, machine);
             int mouldShellMatchScore = resolveMouldShellMatchScore(context, sku, machine);
@@ -2137,6 +2050,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             double inchDistance = resolveInchDistance(sku, machine);
             int capsuleScore = resolveCapsuleAffinityScore(context, sku, machine);
             int embryoShareCount = resolveEmbryoShareCount(context, machine);
+            int machineCodeScore = StringUtils.isEmpty(machine.getMachineCode()) ? 1 : 0;
             boolean inchMatched = LhMachineHardMatchUtil.isInchInRange(
                     parseInch(sku.getProSize()), machine.getDimensionMinimum(), machine.getDimensionMaximum());
             boolean mouldSetMatched = mouldShellMatchScore == 0;
@@ -2146,50 +2060,25 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             boolean skuNeedScheduleOnFirstDay = isSkuNeedScheduleOnFirstDay(context, sku);
 
             List<String> sortKeyLevels = java.util.Arrays.asList(
-                    "L1_收尾窗口=" + (inEndingWindow ? 1 : 0),
-                    "L2_同胎胚=" + (embryoMatchScore == 0 ? 1 : 0),
-                    "L3_同规格=" + (specMatchScore == 0 ? 1 : 0),
-                    "L4_同模壳=" + (mouldShellMatchScore == 0 ? 1 : 0),
-                    "L5_胶囊共用=" + (capsuleScore == 0 ? 1 : 0),
-                    "L6_同英寸=" + (proSizeMatchScore == 0 ? 1 : 0),
+                    "L1_单控拆分=" + singleCtrlScore,
+                    "L2_同胎胚=" + embryoMatchScore,
+                    "L3_同规格=" + specMatchScore,
+                    "L4_同模壳=" + mouldShellMatchScore,
+                    "L5_胶囊共用=" + capsuleScore,
+                    "L6_同英寸=" + proSizeMatchScore,
                     "L7_相近英寸=" + formatInchDistance(inchDistance),
-                    "L8_定点机台=" + (specifyScore == 0 ? 1 : 0),
-                    "L9_单控拆分=" + (isSingleControlMachine(context, machine.getMachineCode()) ? 1 : 0),
-                    "L10_当天空闲优先=" + profile.getTodayIdleScore(),
-                    "L11_续作释放降级=" + profile.getReleasedContinuousMachineScore(),
-                    "L12_其他SKU占用=" + profile.getOtherSkuOccupiedScore(),
-                    "L13_最早可开产班次=" + profile.getFirstProductionShiftIndex(),
-                    "L14_连续可生产班次=" + profile.getContinuousSchedulableShiftCount(),
-                    "L15_可用总产能=" + profile.getAvailableCapacityQty(),
-                    "L16_尾部零散产能=" + profile.getTailFragmentScore(),
-                    "L17_普通机台优先=" + (normalMachineScore == 0 ? 1 : 0),
-                    "L18_特殊支持能力数量=" + specialSupportCapabilityCount,
-                    "L19_收尾时间=" + PriorityTraceLogHelper.formatDateTime(profile.getReferenceTime()),
-                    "L20_胎胚共用数量=" + embryoShareCount);
+                    "L8_机台编码=" + machine.getMachineCode());
             List<Integer> scores = java.util.Arrays.asList(
-                    endingWindowScore,
+                    singleCtrlScore,
                     embryoMatchScore,
                     specMatchScore,
                     mouldShellMatchScore,
                     capsuleScore,
                     proSizeMatchScore,
                     safeInchDistanceScore(inchDistance),
-                    specifyScore,
-                    singleCtrlScore,
-                    profile.getTodayIdleScore(),
-                    profile.getReleasedContinuousMachineScore(),
-                    profile.getOtherSkuOccupiedScore(),
-                    profile.getFirstProductionShiftIndex(),
-                    profile.getContinuousSchedulableShiftCount(),
-                    profile.getAvailableCapacityQty(),
-                    profile.getTailFragmentScore(),
-                    normalMachineScore,
-                    specialSupportCapabilityCount,
-                    resolveEndingTimeScore(machine),
-                    embryoShareCount);
-            List<Integer> defaultScores = java.util.Arrays.asList(0, 1, 1, 1, 1, 1, 0,
-                    1, SINGLE_CONTROL_NORMAL_MACHINE_SCORE, 1, 0, 0,
-                    LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1, 0, 0, 0, 1, 0, 0, 0);
+                    machineCodeScore);
+            List<Integer> defaultScores = java.util.Arrays.asList(
+                    SINGLE_CONTROL_NORMAL_MACHINE_SCORE, 1, 1, 1, 1, 1, 0, 0);
             String sortKey = PriorityTraceLogHelper.formatSortKey(sortKeyLevels);
             String hitLevel = PriorityTraceLogHelper.resolveHitLevel(levelNames, scores, defaultScores);
 
@@ -2251,7 +2140,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 最终选中机台
         if (!CollectionUtils.isEmpty(candidates)) {
             MachineScheduleDTO best = candidates.get(0);
-            String selectReason = resolveMachineSelectReason(context, sku, matchResult, best);
+            String selectReason = resolveMachineSelectReason(context, sku, best);
             PriorityTraceLogHelper.appendLine(detailBuilder,
                     "最终选中机台: " + best.getMachineCode()
                             + ", 选中原因: " + selectReason);
@@ -2466,22 +2355,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      *
      * @param context 排程上下文
      * @param sku 待排SKU
-     * @param matchResult 特殊物料命中结果
      * @param machine 选中机台
      * @return 选中原因
      */
     private String resolveMachineSelectReason(LhScheduleContext context, SkuScheduleDTO sku,
-                                              SpecialMaterialMatchResult matchResult,
                                               MachineScheduleDTO machine) {
-        CandidateWindowProfile profile = resolveCandidateWindowProfile(
-                context, sku, machine, new HashMap<String, CandidateWindowProfile>(4));
         List<String> reasons = new ArrayList<>(4);
-        if (resolveLimitSpecifyScore(context, sku, machine) == 0) {
-            reasons.add("定点机台优先");
-        }
-        if (isSingleControlMachine(context, machine.getMachineCode())
-                && shouldReserveSingleControlForTrialSku(sku)) {
-            reasons.add("单控机台优先");
+        if (resolveSingleControlScore(context, sku, machine) < SINGLE_CONTROL_NORMAL_MACHINE_SCORE) {
+            reasons.add("单控拆分优先");
         }
         if (resolveEmbryoMatchScore(context, sku, machine) == 0) {
             reasons.add("同胎胚");
@@ -2492,40 +2373,16 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (resolveMouldShellMatchScore(context, sku, machine) == 0) {
             reasons.add("同模壳");
         }
-        if (resolveProSizeMatchScore(sku, machine) == 0) {
-            reasons.add("同英寸");
-        }
         if (resolveCapsuleAffinityScore(context, sku, machine) == 0) {
             reasons.add("胶囊共用");
         }
-        if (profile.getOtherSkuOccupiedScore() == 0) {
-            reasons.add("未被其他SKU占用");
-        }
-        if (profile.getTodayIdleScore() == 0) {
-            reasons.add("当天空闲机台优先");
-        }
-        if (profile.getReleasedContinuousMachineScore() > 0) {
-            reasons.add("续作释放机台仅降优先级，不禁止生产");
-        }
-        if (profile.getContinuousSchedulableShiftCount() > 0) {
-            reasons.add("连续可生产班次更多");
-        }
-        if (profile.getTailFragmentScore() == 0) {
-            reasons.add("非尾部零散产能");
-        }
-        if (profile.isHitNoMouldChange()) {
-            reasons.add("规避晚班不能换模窗口");
-        }
-        if (Objects.nonNull(matchResult) && !matchResult.isSpecial()
-                && !LhMachineHardMatchUtil.isNormalMachine(machine)) {
-            reasons.add("普通SKU允许使用特殊机台，特殊机台仅后置排序，不做强制保留");
-            reasons.add("特殊支持能力更少优先");
-        }
-        if (machine.getEstimatedEndTime() != null) {
-            reasons.add("收尾时间最近");
+        if (resolveProSizeMatchScore(sku, machine) == 0) {
+            reasons.add("同英寸");
+        } else if (resolveInchDistance(sku, machine) < Double.MAX_VALUE) {
+            reasons.add("相近英寸");
         }
         if (reasons.isEmpty()) {
-            reasons.add("排序首位默认");
+            reasons.add("机台编码兜底");
         }
         return String.join("，", reasons);
     }

@@ -39,7 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DefaultMachineMatchStrategyRegressionTest {
 
     @Test
-    void matchMachines_shouldUseSpecifySpecCodeAsMaterialCodeForLimitPriority() {
+    void matchMachines_shouldKeepRestrictedSpecifyMachineButUseMachineCodeWhenListedLevelsTie() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSpecifyMachineRule(context);
@@ -48,7 +48,7 @@ class DefaultMachineMatchStrategyRegressionTest {
                 "SPEC-A", "22.5", "MAT-NORMAL");
         MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 10),
                 "SPEC-A", "22.5", "MAT-SPECIFY");
-        // 定点机台即使维护了特殊支持能力，也不能盖过限制作业优先级。
+        // 定点配置仍参与候选保留和诊断，但不再作为新增选机排序层级。
         specifyMachine.setSupport225WideBase("1");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
         context.getMachineScheduleMap().put(specifyMachine.getMachineCode(), specifyMachine);
@@ -59,9 +59,9 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals(2, candidates.size(), "定点机台只是优先，不应过滤普通候选机台");
-        assertEquals("M-SPECIFY", candidates.get(0).getMachineCode(),
-                "T_LH_SPECIFY_MACHINE.SPEC_CODE 应按物料编码匹配 SKU.materialCode");
+        assertEquals(2, candidates.size(), "限制作业机台不应过滤普通候选机台");
+        assertEquals("M-NORMAL", candidates.get(0).getMachineCode(),
+                "定点优先已不在新增选机排序调用链内，同层候选应按机台编码兜底");
     }
 
     @Test
@@ -148,25 +148,25 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldDeprioritizeReleasedContinuousMachine() {
+    void matchMachines_shouldKeepReleasedContinuousMachineAndUseMachineCodeWhenListedLevelsTie() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
-        context.getReleasedContinuousMachineCodeSet().add("M-RELEASED");
-        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("M-RELEASED");
+        context.getReleasedContinuousMachineCodeSet().add("A-RELEASED");
+        context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().add("A-RELEASED");
 
-        MachineScheduleDTO releasedMachine = machine("M-RELEASED", dateTime(2026, 4, 21, 7, 0),
+        MachineScheduleDTO releasedMachine = machine("A-RELEASED", dateTime(2026, 4, 21, 7, 0),
                 "SPEC-A", "22.5", "MAT-OLD");
-        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 7, 10),
+        MachineScheduleDTO normalMachine = machine("Z-NORMAL", dateTime(2026, 4, 21, 7, 10),
                 "SPEC-A", "22.5", "MAT-NORMAL");
         context.getMachineScheduleMap().put(releasedMachine.getMachineCode(), releasedMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-001", "SPEC-A", "22.5"));
 
-        assertEquals(2, candidates.size(), "续作释放机台只降优先级，不应从候选中移除");
-        assertEquals("M-NORMAL", candidates.get(0).getMachineCode(),
-                "存在普通候选时，续作释放机台应排在普通候选之后");
-        assertEquals("M-RELEASED", candidates.get(1).getMachineCode());
+        assertEquals(2, candidates.size(), "续作释放机台不应从候选中移除");
+        assertEquals("A-RELEASED", candidates.get(0).getMachineCode(),
+                "续作释放降级已不在新增选机排序调用链内，同层候选应按机台编码兜底");
+        assertEquals("Z-NORMAL", candidates.get(1).getMachineCode());
     }
 
     @Test
@@ -186,7 +186,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldTraceTodayIdlePriorityWhenIdleMachineWins() {
+    void matchMachines_shouldTraceTodayIdleAsDiagnosticWhenMachineCodeFallbackWins() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildTraceContext();
 
@@ -209,10 +209,11 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals("M-IDLE", candidates.get(0).getMachineCode(), "存在当天空闲机台时应排在占用机台前");
+        assertEquals("M-IDLE", candidates.get(0).getMachineCode(), "排序层级相同时应按机台编码兜底");
         assertEquals(1, context.getScheduleLogList().size());
         String logDetail = context.getScheduleLogList().get(0).getLogDetail();
-        assertTrue(logDetail.contains("L10_当天空闲优先"), "排序日志必须暴露当天空闲优先层级");
+        assertTrue(logDetail.contains("L8_机台编码"), "排序日志必须暴露机台编码兜底层级");
+        assertTrue(!logDetail.contains("L10_当天空闲优先"), "当天空闲不再作为新增选机排序层级");
         assertTrue(logDetail.contains("当天空闲=1"), "候选明细必须输出当天空闲标识");
         assertTrue(logDetail.contains("当天需排产=1"), "候选明细必须输出当天需排产标识");
     }
@@ -456,6 +457,32 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertEquals(2, candidates.size(), "有单控且有普通机台时，量试应保留普通候选作为单控不足后的回落机台");
         assertEquals("K1501L", candidates.get(0).getMachineCode(),
                 "量试命中单控机台时，单控候选必须排在普通机台前");
+    }
+
+    @Test
+    void matchMachines_shouldPreferSingleControlBeforeSameEmbryoInsideEndingWindow() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+
+        MachineScheduleDTO sameEmbryoMachine = machine("Z-SAME-EMBRYO", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-X", "22.5", "MAT-EMBRYO");
+        MachineScheduleDTO singleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 10),
+                "SPEC-X", "22.5", "MAT-SINGLE");
+        context.getMachineScheduleMap().put(sameEmbryoMachine.getMachineCode(), sameEmbryoMachine);
+        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+        material(context, "MAT-EMBRYO", "EMB-A", "胎胚-A");
+        material(context, "MAT-SINGLE", "EMB-B", "胎胚-B");
+        SkuScheduleDTO sku = sku("3302002637", "SPEC-A", "22.5");
+        sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        sku.setEmbryoCode("EMB-A");
+        sku.setMainMaterialDesc("胎胚-A");
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(2, candidates.size(), "20分钟窗口内应保留单控机台和同胎胚普通机台共同排序");
+        assertEquals("K1501L", candidates.get(0).getMachineCode(),
+                "单控拆分优先级必须高于同胎胚，量试SKU应先选单控机台");
     }
 
     @Test
@@ -707,7 +734,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldKeepSingleControlCandidatesForNormalSkuWhenExplicitlySpecified() {
+    void matchMachines_shouldKeepSpecifiedSingleControlCandidatesButPreferNormalForFormalSku() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlAndSpecifyMachineRule(context);
@@ -724,7 +751,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
         assertEquals(2, candidates.size(), "显式定点到单控机台时，应保留定点单控候选");
-        assertEquals("K1501R", candidates.get(0).getMachineCode());
+        assertEquals("K1111", candidates.get(0).getMachineCode(),
+                "定点优先已不在新增选机排序调用链内，正规SKU应按单控拆分得分先选普通机台");
     }
 
     @Test
@@ -833,7 +861,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldPreferMachineThatCanStartBeforeNoMouldChangeWindowBoundary() {
+    void matchMachines_shouldFallbackToMachineCodeWhenProductionWindowPriorityRemoved() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
 
@@ -847,12 +875,12 @@ class DefaultMachineMatchStrategyRegressionTest {
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
 
         assertEquals(2, candidates.size());
-        assertEquals("Z-SAME-DAY", candidates.get(0).getMachineCode(),
-                "20:00 禁换模边界内应优先仍可当天开产、连续班次更多的机台，而不是被容差掩盖后顺序回退");
+        assertEquals("A-NEXT-DAY", candidates.get(0).getMachineCode(),
+                "最早可开产和连续班次已不在新增选机排序调用链内，同层候选应按机台编码兜底");
     }
 
     @Test
-    void matchMachines_shouldPreferUnusedMachineOverOtherSkuOccupiedMachine() {
+    void matchMachines_shouldFallbackToMachineCodeWhenOtherSkuOccupancyPriorityRemoved() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
 
@@ -868,12 +896,12 @@ class DefaultMachineMatchStrategyRegressionTest {
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
 
         assertEquals(2, candidates.size());
-        assertEquals("Z-CLEAN", candidates.get(0).getMachineCode(),
-                "多机台扩机时应优先未被其他SKU占用的机台，其他SKU排剩的尾部机台只能兜底");
+        assertEquals("A-OCCUPIED", candidates.get(0).getMachineCode(),
+                "其他SKU占用已不在新增选机排序调用链内，同层候选应按机台编码兜底");
     }
 
     @Test
-    void matchMachines_shouldPreferUnusedEarlySpecialMachineOverOccupiedTailNormalMachine() {
+    void matchMachines_shouldFallbackToMachineCodeWhenOccupancyAndSpecialPriorityRemoved() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
 
@@ -890,8 +918,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
 
         assertEquals(2, candidates.size());
-        assertEquals("Z-SPECIAL-EARLY", candidates.get(0).getMachineCode(),
-                "普通机台已被其他SKU占用时，应让未占用且更早可开产的特殊机台前置");
+        assertEquals("A-NORMAL-TAIL", candidates.get(0).getMachineCode(),
+                "占用、尾部产能和特殊机台后置已不在新增选机排序调用链内，同层候选应按机台编码兜底");
     }
 
     @Test
@@ -1048,8 +1076,9 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertTrue(logDetail.contains("收尾窗口起点"), "排序日志必须输出本轮选机收尾窗口起点");
         assertTrue(logDetail.contains("收尾窗口截止"), "排序日志必须输出本轮选机收尾窗口截止");
         assertTrue(logDetail.contains("入收尾窗口=1"), "候选明细必须输出是否进入收尾窗口");
-        assertTrue(logDetail.contains("L1_收尾窗口"), "排序日志必须暴露收尾窗口层级");
+        assertTrue(logDetail.contains("L1_单控拆分"), "排序日志必须暴露单控拆分层级");
         assertTrue(logDetail.contains("L2_同胎胚"), "排序日志必须暴露同胎胚层级");
+        assertTrue(logDetail.contains("L8_机台编码"), "排序日志必须暴露机台编码兜底层级");
         assertTrue(logDetail.contains("同胎胚=1"), "候选明细必须输出同胎胚标识");
         assertTrue(logDetail.contains("同模壳"), "候选明细必须输出同模壳标识");
     }
@@ -1306,14 +1335,14 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldPreferNormalMachineForNonSpecialSku() {
+    void matchMachines_shouldFallbackToMachineCodeWhenNormalMachinePriorityRemoved() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
 
-        MachineScheduleDTO specialSupportMachine = machine("M-SPECIAL", dateTime(2026, 4, 21, 8, 0),
+        MachineScheduleDTO specialSupportMachine = machine("A-SPECIAL", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-SPECIAL");
         specialSupportMachine.setSupport195WideBase("1");
-        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 10),
+        MachineScheduleDTO normalMachine = machine("Z-NORMAL", dateTime(2026, 4, 21, 8, 10),
                 "SPEC-A", "22.5", "MAT-NORMAL");
         context.getMachineScheduleMap().put(specialSupportMachine.getMachineCode(), specialSupportMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
@@ -1321,20 +1350,20 @@ class DefaultMachineMatchStrategyRegressionTest {
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
 
         assertEquals(2, candidates.size());
-        assertEquals("M-NORMAL", candidates.get(0).getMachineCode(),
-                "非特殊材料应优先使用普通机台，普通机台不足时才使用特殊支持机台");
+        assertEquals("A-SPECIAL", candidates.get(0).getMachineCode(),
+                "普通机台优先已不在新增选机排序调用链内，同层候选应按机台编码兜底");
     }
 
     @Test
-    void matchMachines_shouldPreferSpecialMachineWithFewerSupportCapabilitiesForNonSpecialSku() {
+    void matchMachines_shouldFallbackToMachineCodeWhenSpecialSupportCountPriorityRemoved() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
 
-        MachineScheduleDTO supportTwoCapabilitiesMachine = machine("M-SPECIAL-2", dateTime(2026, 4, 21, 8, 0),
+        MachineScheduleDTO supportTwoCapabilitiesMachine = machine("A-SPECIAL-2", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-SPECIAL-2");
         supportTwoCapabilitiesMachine.setSupport195WideBase("1");
         supportTwoCapabilitiesMachine.setSupportChipTire("1");
-        MachineScheduleDTO supportOneCapabilityMachine = machine("M-SPECIAL-1", dateTime(2026, 4, 21, 8, 0),
+        MachineScheduleDTO supportOneCapabilityMachine = machine("Z-SPECIAL-1", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-SPECIAL-1");
         supportOneCapabilityMachine.setSupport195WideBase("1");
         context.getMachineScheduleMap().put(supportTwoCapabilitiesMachine.getMachineCode(), supportTwoCapabilitiesMachine);
@@ -1343,12 +1372,12 @@ class DefaultMachineMatchStrategyRegressionTest {
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
 
         assertEquals(2, candidates.size());
-        assertEquals("M-SPECIAL-1", candidates.get(0).getMachineCode(),
-                "普通SKU只能落到特殊支持机台时，应优先选择特殊支持能力更少的机台");
+        assertEquals("A-SPECIAL-2", candidates.get(0).getMachineCode(),
+                "特殊支持能力数量已不在新增选机排序调用链内，同层候选应按机台编码兜底");
     }
 
     @Test
-    void matchMachines_shouldTraceMachineTypeOrderingAndSpecialMachineFallbackReason() {
+    void matchMachines_shouldTraceMachineTypeDiagnosticAndSpecialMachineFallbackReason() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildTraceContext();
 
@@ -1367,7 +1396,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertTrue(processLog.getLogDetail().contains("普通机台=0"));
         assertTrue(processLog.getLogDetail().contains("特殊支持机台=1"));
         assertTrue(processLog.getLogDetail().contains("普通SKU允许使用特殊机台"));
-        assertTrue(processLog.getLogDetail().contains("特殊机台仅后置排序，不做强制保留"));
+        assertTrue(processLog.getLogDetail().contains("不作为新增选机排序层级"));
         assertTrue(processLog.getLogDetail().contains("特殊支持能力数量"));
     }
 
