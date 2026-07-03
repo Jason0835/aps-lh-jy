@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
@@ -20,6 +21,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
@@ -1416,8 +1418,9 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void scheduleReduceMould_shouldRemoveMachineWithSmallerCapsuleUsageFirst() {
+    public void scheduleReduceMould_shouldRemoveMachineWithSmallerCapsuleUsageFirst() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
         LhScheduleContext context = buildMultiMachineContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 3, 9, "K1101", "K1102");
 
@@ -1429,8 +1432,45 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void scheduleReduceMould_shouldRemoveLargerMachineCodeWhenCapsuleUsageTied() {
+    public void scheduleReduceMould_shouldRemoveMachineWithHigherMouldSharedSkuCountFirst() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
+        addMachineOnlineMould(context, "K1101", "M-SHARED");
+        addMachineOnlineMould(context, "K1102", "M-DEDICATED");
+        addSkuMouldRel(context, "MAT-MULTI", "M-SHARED");
+        addSkuMouldRel(context, "MAT-SHARED-A", "M-SHARED");
+        addSkuMouldRel(context, "MAT-SHARED-B", "M-SHARED");
+        addSkuMouldRel(context, "MAT-MULTI", "M-DEDICATED");
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        assertEquals("K1102", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "模具共用性更好的K1101应优先下机，即使胶囊最大使用次数更高");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldUseMaxRepairCapsuleUsageWhenMouldSharedCountTied() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 1, 8, "K1101", "K1102");
+        setCapsuleUsage(context, "K1101", 1, 12);
+        setCapsuleUsage(context, "K1102", 8, 8);
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        assertEquals("K1101", context.getScheduleResultList().get(0).getLhMachineCode(),
+                "胶囊使用次数应取LhRepairCapsule左右两侧最大值，K1101最大次数12应优先保留");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldRemoveLargerMachineCodeWhenCapsuleUsageTied() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
         LhScheduleContext context = buildMultiMachineContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 5, 5, "K1101", "K1102");
 
@@ -1454,8 +1494,9 @@ public class ContinuousProductionStrategyTest {
         String details = ReflectionTestUtils.invokeMethod(
                 strategy, "formatContinuationMachineDetails", context, results, capacityMap);
 
-        assertEquals("K1405(胶囊次数=10,日产能=48);K1702(胶囊次数=5,日产能=32)", details,
-                "日志明细必须同时包含机台、胶囊次数和日产能，便于直接判断K1702是否因降模下机");
+        assertEquals("K1405(在机模具=,模具共用性=0,胶囊最大使用次数=10,日产能=48);"
+                + "K1702(在机模具=,模具共用性=0,胶囊最大使用次数=5,日产能=32)", details,
+                "日志明细必须同时包含机台、模具共用性、胶囊最大使用次数和日产能，便于直接判断下机原因");
     }
 
     @Test
@@ -1697,6 +1738,7 @@ public class ContinuousProductionStrategyTest {
     @Test
     public void scheduleReduceMould_shouldUseDownMachineOnlyToFillFirstDayRemainingQty() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        ReflectionTestUtils.setField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
         LhScheduleContext context = buildExcelContinuationContext(
                 "3302001271", 154, 184, 184, 512, "1",
                 new String[]{"K2022", "K1205", "K1614", "K1906", "K1412"});
@@ -1705,16 +1747,38 @@ public class ContinuousProductionStrategyTest {
 
         LhScheduleResult downMachine = findResultByMachineCode(context, "K1412");
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachine, 1));
-        assertEquals(Integer.valueOf(10), ShiftFieldUtil.getShiftPlanQty(downMachine, 2));
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachine, 2));
         assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachine, 3));
-        assertEquals(42, downMachine.getDailyPlanQty().intValue(),
-                "下机机台补足day1剩余量后若中班结束进入不可换模晚班，应继续补满晚班");
+        assertEquals(48, downMachine.getDailyPlanQty().intValue(),
+                "下机机台补足day1剩余量后，释放点若紧接不可换模晚班，应补满当前中班与晚班后再释放");
         assertEquals(5, context.getScheduleResultList().size(), "第一天下机机台有排产量，不应被零计划收口移除");
+    }
+
+    @Test
+    public void scheduleReduceMould_shouldFillNightShiftWhenDownMachineReleasedAfterAfternoonWithoutRemainingDemand() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        ReflectionTestUtils.setField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildExcelContinuationContext(
+                "3302002046", 64, 96, 48, 800, "1",
+                new String[]{"K2012", "K2007"});
+
+        strategy.scheduleReduceMould(context);
+
+        LhScheduleResult downMachine = findResultByMachineCode(context, "K2007");
+        LhShiftConfigVO nightShift = context.getScheduleWindowShifts().get(5);
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(downMachine, 6),
+                "降模下机机台中班后遇到不可换模晚班时，即使当日无剩余需求也要补满晚班");
+        assertEquals(nightShift.getShiftEndDateTime(), downMachine.getSpecEndTime(),
+                "补满晚班后结果收尾时间应更新到晚班结束");
+        assertEquals(nightShift.getShiftEndDateTime(),
+                context.getMachineScheduleMap().get("K2007").getEstimatedEndTime(),
+                "补满晚班后运行态机台预计收尾时间必须同步更新");
     }
 
     @Test
     public void scheduleReduceMould_shouldReduceMachinesByDayForExcelThirdScenario() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        ReflectionTestUtils.setField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
         LhScheduleContext context = buildExcelContinuationContext(
                 "3302000465", 96, 96, 96, 288, "1",
                 new String[]{"K1601", "K1801", "K1505", "K1504", "K1213"});
@@ -1749,6 +1813,7 @@ public class ContinuousProductionStrategyTest {
     @Test
     public void scheduleReduceMould_shouldStartFromNextDayWhenFirstDayHasNoPlan() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        ReflectionTestUtils.setField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
         LhScheduleContext context = buildExcelContinuationContext(
                 "3302001075", 0, 32, 46, 78, "1", new String[]{"K1406", "K1712"});
 
@@ -2413,6 +2478,34 @@ public class ContinuousProductionStrategyTest {
         machine.setCapsuleUsageCount(capsuleUsageCount);
         context.getMachineScheduleMap().put(machineCode, machine);
         context.getInitialMachineScheduleMap().put(machineCode, machine);
+        setCapsuleUsage(context, machineCode, capsuleUsageCount, 0);
+    }
+
+    private void setCapsuleUsage(LhScheduleContext context,
+                                 String machineCode,
+                                 int replaceCapsuleCount,
+                                 int replaceCapsuleCount2) {
+        LhRepairCapsule capsule = new LhRepairCapsule();
+        capsule.setLhCode(machineCode);
+        capsule.setReplaceCapsuleCount(replaceCapsuleCount);
+        capsule.setReplaceCapsuleCount2(replaceCapsuleCount2);
+        context.getCapsuleUsageMap().put(machineCode, capsule);
+    }
+
+    private void addMachineOnlineMould(LhScheduleContext context, String machineCode, String mouldCode) {
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode(machineCode);
+        onlineInfo.setInMachineMouldCode(mouldCode);
+        context.getMachineOnlineInfoMap().put(machineCode, onlineInfo);
+    }
+
+    private void addSkuMouldRel(LhScheduleContext context, String materialCode, String mouldCode) {
+        MdmSkuMouldRel rel = new MdmSkuMouldRel();
+        rel.setMaterialCode(materialCode);
+        rel.setMouldCode(mouldCode);
+        context.getSkuMouldRelMap()
+                .computeIfAbsent(materialCode, key -> new ArrayList<MdmSkuMouldRel>(2))
+                .add(rel);
     }
 
     private SkuScheduleDTO buildContinuationSku(String materialCode,

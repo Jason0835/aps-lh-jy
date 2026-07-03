@@ -310,24 +310,7 @@ public class MouldResourceContext {
     }
 
     private static Map<String, Integer> buildMouldSharedSkuCountMap(LhScheduleContext context) {
-        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getSkuMouldRelMap())) {
-            return Collections.emptyMap();
-        }
-        Map<String, Set<String>> mouldSkuSetMap = new HashMap<String, Set<String>>(16);
-        for (Map.Entry<String, List<MdmSkuMouldRel>> entry : context.getSkuMouldRelMap().entrySet()) {
-            for (MdmSkuMouldRel rel : entry.getValue()) {
-                String mouldCode = Objects.isNull(rel) ? null : StringUtils.trim(rel.getMouldCode());
-                if (StringUtils.isEmpty(mouldCode)) {
-                    continue;
-                }
-                mouldSkuSetMap.computeIfAbsent(mouldCode, key -> new LinkedHashSet<String>(4)).add(entry.getKey());
-            }
-        }
-        Map<String, Integer> resultMap = new HashMap<String, Integer>(mouldSkuSetMap.size());
-        for (Map.Entry<String, Set<String>> entry : mouldSkuSetMap.entrySet()) {
-            resultMap.put(entry.getKey(), entry.getValue().size());
-        }
-        return resultMap;
+        return LhMouldCodeUtil.buildMouldSharedSkuCountMap(context);
     }
 
     private static void sortMouldCodesBySharedSkuCount(List<String> mouldCodeList,
