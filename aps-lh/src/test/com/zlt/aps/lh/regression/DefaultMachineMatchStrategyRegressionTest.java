@@ -987,6 +987,29 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void matchMachines_shouldPreferSameShellBeforeSameSpecInsideEndingWindow() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO sameShellMachine = machine("M-SAME-SHELL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-X", "22.5", "MAT-SHELL");
+        sameShellMachine.setShellStandard("SHELL-A");
+        MachineScheduleDTO sameSpecMachine = machine("M-SAME-SPEC", dateTime(2026, 4, 21, 8, 10),
+                "SPEC-A", "22.5", "MAT-SPEC");
+        sameSpecMachine.setShellStandard("SHELL-B");
+        context.getMachineScheduleMap().put(sameSpecMachine.getMachineCode(), sameSpecMachine);
+        context.getMachineScheduleMap().put(sameShellMachine.getMachineCode(), sameShellMachine);
+        context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-A")));
+        context.getModelInfoMap().put("MOULD-A", modelInfo("MOULD-A", "SHELL-A"));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size());
+        assertEquals("M-SAME-SHELL", candidates.get(0).getMachineCode(),
+                "20分钟窗口内同胎胚打平后，同模壳优先级必须高于同规格");
+    }
+
+    @Test
     void matchMachines_shouldPreferSameShellBeforeCapsuleInsideEndingWindow() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
@@ -1078,7 +1101,11 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertTrue(logDetail.contains("入收尾窗口=1"), "候选明细必须输出是否进入收尾窗口");
         assertTrue(logDetail.contains("L1_单控拆分"), "排序日志必须暴露单控拆分层级");
         assertTrue(logDetail.contains("L2_同胎胚"), "排序日志必须暴露同胎胚层级");
+        assertTrue(logDetail.contains("L3_同模壳"), "排序日志必须暴露同模壳层级");
+        assertTrue(logDetail.contains("L4_同规格"), "排序日志必须暴露同规格层级");
         assertTrue(logDetail.contains("L8_机台编码"), "排序日志必须暴露机台编码兜底层级");
+        assertTrue(logDetail.indexOf("L3_同模壳") < logDetail.indexOf("L4_同规格"),
+                "排序日志中同模壳层级必须展示在同规格之前");
         assertTrue(logDetail.contains("同胎胚=1"), "候选明细必须输出同胎胚标识");
         assertTrue(logDetail.contains("同模壳"), "候选明细必须输出同模壳标识");
     }
