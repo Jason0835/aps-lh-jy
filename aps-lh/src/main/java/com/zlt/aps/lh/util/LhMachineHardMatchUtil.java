@@ -111,6 +111,44 @@ public final class LhMachineHardMatchUtil {
     }
 
     /**
+     * 判断SKU模壳是否在选机排序中命中机台模套。
+     * <p>该方法用于新增排产选机优先级，不作为硬过滤。模具到货关系存在模具可用日期，
+     * 只代表新增模具可承接，不参与模壳降级；机台模套为空或通用时默认适配。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息
+     * @param machine 候选机台
+     * @return true-模壳匹配或无需降级，false-普通模具模壳未命中
+     */
+    public static boolean isMouldSetPriorityMatched(LhScheduleContext context,
+                                                    SkuScheduleDTO sku,
+                                                    MachineScheduleDTO machine) {
+        String machineMouldSetCode = normalizeToken(Objects.isNull(machine) ? null : machine.getShellStandard());
+        if (StringUtils.isEmpty(machineMouldSetCode)
+                || StringUtils.equals(machineMouldSetCode, UNIVERSAL_MOULD_SET_CODE)) {
+            return true;
+        }
+        Set<String> machineMouldSetSet = parseMachineMouldSetSet(machineMouldSetCode);
+        if (machineMouldSetSet.contains(UNIVERSAL_MOULD_SET_CODE)) {
+            return true;
+        }
+        if (CollectionUtils.isEmpty(machineMouldSetSet)) {
+            return false;
+        }
+        SkuShellStandardMatchResult matchResult = resolveSkuShellStandardMatchResult(context, sku);
+        if (CollectionUtils.isEmpty(matchResult.getShellStandardSet())) {
+            // 只有模具到货关系时不参与模壳降级；普通模具缺少模壳仍按未命中处理。
+            return matchResult.hasDeliveryMould() && !matchResult.hasOrdinaryMould();
+        }
+        for (String shellStandard : matchResult.getShellStandardSet()) {
+            if (machineMouldSetSet.contains(shellStandard)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 判断特殊物料分类是否被机台支持。
      *
      * @param matchResult 特殊物料命中结果
@@ -245,30 +283,61 @@ public final class LhMachineHardMatchUtil {
      * @return 模壳标准集合
      */
     private static Set<String> resolveSkuShellStandardSet(LhScheduleContext context, SkuScheduleDTO sku) {
+        return resolveSkuShellStandardMatchResult(context, sku).getShellStandardSet();
+    }
+
+    /**
+     * 解析SKU模壳匹配数据。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息
+     * @return 模壳集合和模具到货标识
+     */
+    private static SkuShellStandardMatchResult resolveSkuShellStandardMatchResult(LhScheduleContext context,
+                                                                                  SkuScheduleDTO sku) {
+        SkuShellStandardMatchResult result = new SkuShellStandardMatchResult();
         Set<String> shellStandardSet = new HashSet<>(4);
         String materialCode = normalizeToken(Objects.isNull(sku) ? null : sku.getMaterialCode());
         if (Objects.isNull(context) || StringUtils.isEmpty(materialCode)) {
-            return shellStandardSet;
+            result.setShellStandardSet(shellStandardSet);
+            return result;
         }
         Map<String, List<MdmSkuMouldRel>> skuMouldRelMap = context.getSkuMouldRelMap();
         if (CollectionUtils.isEmpty(skuMouldRelMap)) {
-            return shellStandardSet;
+            result.setShellStandardSet(shellStandardSet);
+            return result;
         }
         List<MdmSkuMouldRel> mouldRelList = skuMouldRelMap.get(materialCode);
         if (CollectionUtils.isEmpty(mouldRelList) || CollectionUtils.isEmpty(context.getModelInfoMap())) {
-            return shellStandardSet;
+            if (!CollectionUtils.isEmpty(mouldRelList)) {
+                for (MdmSkuMouldRel mouldRel : mouldRelList) {
+                    if (Objects.nonNull(mouldRel) && Objects.nonNull(mouldRel.getBoardingDate())) {
+                        result.setDeliveryMould(true);
+                    } else if (Objects.nonNull(mouldRel) && StringUtils.isNotEmpty(mouldRel.getMouldCode())) {
+                        result.setOrdinaryMould(true);
+                    }
+                }
+            }
+            result.setShellStandardSet(shellStandardSet);
+            return result;
         }
         for (MdmSkuMouldRel mouldRel : mouldRelList) {
             if (Objects.isNull(mouldRel) || StringUtils.isEmpty(mouldRel.getMouldCode())) {
                 continue;
             }
+            if (Objects.nonNull(mouldRel.getBoardingDate())) {
+                result.setDeliveryMould(true);
+                continue;
+            }
+            result.setOrdinaryMould(true);
             MdmModelInfo modelInfo = context.getModelInfoMap().get(mouldRel.getMouldCode());
             String shellStandard = normalizeToken(Objects.isNull(modelInfo) ? null : modelInfo.getShellStandard());
             if (StringUtils.isNotEmpty(shellStandard)) {
                 shellStandardSet.add(shellStandard);
             }
         }
-        return shellStandardSet;
+        result.setShellStandardSet(shellStandardSet);
+        return result;
     }
 
     /**
@@ -311,5 +380,41 @@ public final class LhMachineHardMatchUtil {
         }
         String trimValue = value.trim();
         return StringUtils.isEmpty(trimValue) ? null : trimValue;
+    }
+
+    /**
+     * SKU模壳匹配数据。
+     */
+    private static class SkuShellStandardMatchResult {
+        /** 普通模具模壳型号集合 */
+        private Set<String> shellStandardSet = new HashSet<>(4);
+        /** 是否存在模具到货关系 */
+        private boolean deliveryMould;
+        /** 是否存在普通模具关系 */
+        private boolean ordinaryMould;
+
+        private Set<String> getShellStandardSet() {
+            return shellStandardSet;
+        }
+
+        private void setShellStandardSet(Set<String> shellStandardSet) {
+            this.shellStandardSet = shellStandardSet;
+        }
+
+        private boolean hasDeliveryMould() {
+            return deliveryMould;
+        }
+
+        private void setDeliveryMould(boolean deliveryMould) {
+            this.deliveryMould = deliveryMould;
+        }
+
+        private boolean hasOrdinaryMould() {
+            return ordinaryMould;
+        }
+
+        private void setOrdinaryMould(boolean ordinaryMould) {
+            this.ordinaryMould = ordinaryMould;
+        }
     }
 }

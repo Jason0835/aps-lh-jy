@@ -46,8 +46,8 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-NORMAL");
-        MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 30),
-                "SPEC-X", "22.5", "MAT-SPECIFY");
+        MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 10),
+                "SPEC-A", "22.5", "MAT-SPECIFY");
         // 定点机台即使维护了特殊支持能力，也不能盖过限制作业优先级。
         specifyMachine.setSupport225WideBase("1");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
@@ -114,8 +114,8 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-NORMAL");
-        MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 30),
-                "SPEC-X", "22.5", "MAT-SPECIFY");
+        MachineScheduleDTO specifyMachine = machine("M-SPECIFY", dateTime(2026, 4, 21, 8, 10),
+                "SPEC-A", "22.5", "MAT-SPECIFY");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
         context.getMachineScheduleMap().put(specifyMachine.getMachineCode(), specifyMachine);
         context.getSpecifyMachineMap().put("MAT-001", Collections.singletonList(
@@ -134,7 +134,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO forbiddenMachine = machine("M-FORBIDDEN", dateTime(2026, 4, 21, 7, 0),
                 "SPEC-A", "22.5", "MAT-FORBIDDEN");
-        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 7, 10),
                 "SPEC-A", "22.5", "MAT-NORMAL");
         context.getMachineScheduleMap().put(forbiddenMachine.getMachineCode(), forbiddenMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
@@ -156,7 +156,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO releasedMachine = machine("M-RELEASED", dateTime(2026, 4, 21, 7, 0),
                 "SPEC-A", "22.5", "MAT-OLD");
-        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 0),
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 7, 10),
                 "SPEC-A", "22.5", "MAT-NORMAL");
         context.getMachineScheduleMap().put(releasedMachine.getMachineCode(), releasedMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
@@ -192,12 +192,12 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO idleMachine = machine("M-IDLE", dateTime(2026, 4, 20, 8, 0),
                 "SPEC-X", "22.5", "MAT-IDLE");
-        MachineScheduleDTO occupiedMachine = machine("M-OCCUPIED", dateTime(2026, 4, 21, 8, 0),
-                "SPEC-A", "22.5", "MAT-OLD");
+        MachineScheduleDTO occupiedMachine = machine("M-OCCUPIED", dateTime(2026, 4, 21, 6, 10),
+                "SPEC-X", "22.5", "MAT-OLD");
         context.getMachineScheduleMap().put(occupiedMachine.getMachineCode(), occupiedMachine);
         context.getMachineScheduleMap().put(idleMachine.getMachineCode(), idleMachine);
         context.getMachineAssignmentMap().put("M-OCCUPIED", Collections.singletonList(
-                assignedResult("M-OCCUPIED", "MAT-OLD", dateTime(2026, 4, 21, 14, 0))));
+                assignedResult("M-OCCUPIED", "MAT-OLD", dateTime(2026, 4, 21, 6, 10))));
 
         SkuScheduleDTO sku = sku("MAT-001", "SPEC-A", "22.5");
         LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
@@ -212,7 +212,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertEquals("M-IDLE", candidates.get(0).getMachineCode(), "存在当天空闲机台时应排在占用机台前");
         assertEquals(1, context.getScheduleLogList().size());
         String logDetail = context.getScheduleLogList().get(0).getLogDetail();
-        assertTrue(logDetail.contains("L3_当天空闲优先"), "排序日志必须暴露当天空闲优先层级");
+        assertTrue(logDetail.contains("L10_当天空闲优先"), "排序日志必须暴露当天空闲优先层级");
         assertTrue(logDetail.contains("当天空闲=1"), "候选明细必须输出当天空闲标识");
         assertTrue(logDetail.contains("当天需排产=1"), "候选明细必须输出当天需排产标识");
     }
@@ -443,7 +443,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO normalMachine = machine("K1111", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-NORMAL");
-        MachineScheduleDTO singleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 12, 0),
+        MachineScheduleDTO singleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 10),
                 "SPEC-A", "22.5", "MAT-SINGLE");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
@@ -466,7 +466,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO normalMachine = machine("K1111", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-NORMAL");
-        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 12, 0),
+        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 10),
                 "SPEC-A", "22.5", "MAT-SINGLE");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
@@ -488,7 +488,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO normalMachine = machine("K1111", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-NORMAL");
-        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 12, 0),
+        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 10),
                 "SPEC-A", "22.5", "MAT-SINGLE");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
@@ -529,7 +529,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO normalMachine = machine("K1111", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-NORMAL");
-        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 12, 0),
+        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 10),
                 "SPEC-A", "22.5", "MAT-SINGLE");
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
@@ -827,9 +827,9 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
-        assertEquals(2, candidates.size());
+        assertEquals(1, candidates.size(), "收尾时间超过20分钟窗口时，窗口外规格匹配机台不参与本轮排序");
         assertEquals("M-EARLY", candidates.get(0).getMachineCode(),
-                "收尾时间差超过阈值时，应优先更早收尾的机台，而不是先看规格");
+                "窗口外机台即使规格更匹配，也不能越过最早收尾窗口内的机台");
     }
 
     @Test
@@ -877,7 +877,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
 
-        MachineScheduleDTO occupiedTailNormalMachine = machine("A-NORMAL-TAIL", dateTime(2026, 4, 21, 20, 5),
+        MachineScheduleDTO occupiedTailNormalMachine = machine("A-NORMAL-TAIL", dateTime(2026, 4, 21, 8, 10),
                 "SPEC-A", "22.5", "MAT-OCC");
         MachineScheduleDTO cleanEarlySpecialMachine = machine("Z-SPECIAL-EARLY", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-CLEAN");
@@ -891,7 +891,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         assertEquals(2, candidates.size());
         assertEquals("Z-SPECIAL-EARLY", candidates.get(0).getMachineCode(),
-                "普通机台只剩尾部零散产能且被其他SKU占用时，应让未占用且更早可开产的特殊机台前置");
+                "普通机台已被其他SKU占用时，应让未占用且更早可开产的特殊机台前置");
     }
 
     @Test
@@ -913,6 +913,145 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertEquals(2, candidates.size());
         assertEquals("M-MATCHED", candidates.get(0).getMachineCode(),
                 "收尾时间在阈值内时，应进入规格优先比较");
+    }
+
+    @Test
+    void matchMachines_shouldFilterCandidatesByEarliestEndingTwentyMinuteWindow() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO earliestMachine = machine("M-EARLY", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-X", "20.0", "MAT-EARLY");
+        MachineScheduleDTO betterButOutsideWindowMachine = machine("M-BETTER-LATE", dateTime(2026, 4, 21, 8, 30),
+                "SPEC-A", "22.5", "MAT-LATE");
+        context.getMachineScheduleMap().put(earliestMachine.getMachineCode(), earliestMachine);
+        context.getMachineScheduleMap().put(betterButOutsideWindowMachine.getMachineCode(), betterButOutsideWindowMachine);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "新增选机必须先锁定最早收尾后20分钟窗口，窗口外机台不再参与本轮排序");
+        assertEquals("M-EARLY", candidates.get(0).getMachineCode(),
+                "窗口外机台即使规格和英寸更匹配，也不能越过最早收尾窗口内的机台");
+    }
+
+    @Test
+    void matchMachines_shouldPreferSameEmbryoBeforeSameSpecInsideEndingWindow() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO sameEmbryoMachine = machine("M-SAME-EMBRYO", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-X", "20.0", "MAT-EMBRYO");
+        MachineScheduleDTO sameSpecMachine = machine("M-SAME-SPEC", dateTime(2026, 4, 21, 8, 10),
+                "SPEC-A", "20.0", "MAT-SPEC");
+        context.getMachineScheduleMap().put(sameSpecMachine.getMachineCode(), sameSpecMachine);
+        context.getMachineScheduleMap().put(sameEmbryoMachine.getMachineCode(), sameEmbryoMachine);
+        material(context, "MAT-EMBRYO", "EMB-A", "胎胚-A");
+        material(context, "MAT-SPEC", "EMB-B", "胎胚-B");
+        SkuScheduleDTO sku = sku("MAT-1", "SPEC-A", "22.5");
+        sku.setEmbryoCode("EMB-A");
+        sku.setMainMaterialDesc("胎胚-A");
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(2, candidates.size());
+        assertEquals("M-SAME-EMBRYO", candidates.get(0).getMachineCode(),
+                "20分钟窗口内必须先比较同胎胚，同胎胚优先级高于同规格");
+    }
+
+    @Test
+    void matchMachines_shouldPreferSameShellBeforeCapsuleInsideEndingWindow() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        context.setCapsuleSpecPeerMap(new HashMap<String, String>() {{
+            put("SPEC-A", "GROUP-1");
+            put("SPEC-B", "GROUP-1");
+        }});
+
+        MachineScheduleDTO sameShellMachine = machine("M-SAME-SHELL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-X", "20.0", "MAT-SHELL");
+        sameShellMachine.setShellStandard("SHELL-A");
+        MachineScheduleDTO capsuleMachine = machine("M-CAPSULE", dateTime(2026, 4, 21, 8, 10),
+                "SPEC-B", "20.0", "MAT-CAPSULE");
+        capsuleMachine.setShellStandard("SHELL-B");
+        context.getMachineScheduleMap().put(capsuleMachine.getMachineCode(), capsuleMachine);
+        context.getMachineScheduleMap().put(sameShellMachine.getMachineCode(), sameShellMachine);
+        context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-A")));
+        context.getModelInfoMap().put("MOULD-A", modelInfo("MOULD-A", "SHELL-A"));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(2, candidates.size(), "模壳不匹配不应在候选初筛阶段直接剔除，应作为窗口内排序层级处理");
+        assertEquals("M-SAME-SHELL", candidates.get(0).getMachineCode(),
+                "20分钟窗口内必须先比较同模壳，同模壳优先级高于胶囊共用性");
+    }
+
+    @Test
+    void matchMachines_shouldTreatDeliveryMouldAsShellNeutral() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO machine = machine("M-DELIVERY", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        machine.setShellStandard("SHELL-A");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getSkuMouldRelMap().put("MAT-DELIVERY", Collections.singletonList(
+                deliveryMouldRel("MOULD-DELIVERY", dateTime(2026, 4, 21, 0, 0))));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-DELIVERY", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "模具到货关系不参与模壳判断，不能因缺少台账模壳而过滤或降级候选机台");
+        assertEquals("M-DELIVERY", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldTreatBlankMachineShellAsMatchAll() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+
+        MachineScheduleDTO blankShellMachine = machine("M-BLANK-SHELL", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        blankShellMachine.setShellStandard(" ");
+        context.getMachineScheduleMap().put(blankShellMachine.getMachineCode(), blankShellMachine);
+        context.getSkuMouldRelMap().put("MAT-1", Collections.singletonList(mouldRel("MOULD-A")));
+        context.getModelInfoMap().put("MOULD-A", modelInfo("MOULD-A", "SHELL-A"));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "机台模套型号为空时表示模壳不限，应默认适配所有SKU模壳");
+        assertEquals("M-BLANK-SHELL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldTraceEndingWindowAndNewHitLevels() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildTraceContext();
+
+        MachineScheduleDTO sameEmbryoMachine = machine("M-TRACE-EMBRYO", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-X", "20.0", "MAT-EMBRYO");
+        sameEmbryoMachine.setMachineName("同胎胚机台");
+        MachineScheduleDTO sameSpecMachine = machine("M-TRACE-SPEC", dateTime(2026, 4, 21, 8, 10),
+                "SPEC-A", "20.0", "MAT-SPEC");
+        sameSpecMachine.setMachineName("同规格机台");
+        context.getMachineScheduleMap().put(sameSpecMachine.getMachineCode(), sameSpecMachine);
+        context.getMachineScheduleMap().put(sameEmbryoMachine.getMachineCode(), sameEmbryoMachine);
+        material(context, "MAT-EMBRYO", "EMB-A", "胎胚-A");
+        material(context, "MAT-SPEC", "EMB-B", "胎胚-B");
+        SkuScheduleDTO sku = sku("MAT-TRACE", "SPEC-A", "22.5");
+        sku.setEmbryoCode("EMB-A");
+        sku.setMainMaterialDesc("胎胚-A");
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(2, candidates.size());
+        assertEquals(1, context.getScheduleLogList().size());
+        String logDetail = context.getScheduleLogList().get(0).getLogDetail();
+        assertTrue(logDetail.contains("收尾窗口起点"), "排序日志必须输出本轮选机收尾窗口起点");
+        assertTrue(logDetail.contains("收尾窗口截止"), "排序日志必须输出本轮选机收尾窗口截止");
+        assertTrue(logDetail.contains("入收尾窗口=1"), "候选明细必须输出是否进入收尾窗口");
+        assertTrue(logDetail.contains("L1_收尾窗口"), "排序日志必须暴露收尾窗口层级");
+        assertTrue(logDetail.contains("L2_同胎胚"), "排序日志必须暴露同胎胚层级");
+        assertTrue(logDetail.contains("同胎胚=1"), "候选明细必须输出同胎胚标识");
+        assertTrue(logDetail.contains("同模壳"), "候选明细必须输出同模壳标识");
     }
 
     @Test
@@ -1096,7 +1235,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO recoveredMachine = machine("M-RECOVERED", dateTime(2026, 4, 22, 12, 0),
                 "SPEC-A", "22.5", "MAT-A");
-        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 22, 13, 0),
+        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 22, 12, 10),
                 "SPEC-A", "22.5", "MAT-B");
         context.getMachineScheduleMap().put(recoveredMachine.getMachineCode(), recoveredMachine);
         context.getMachineScheduleMap().put(availableMachine.getMachineCode(), availableMachine);
@@ -1118,7 +1257,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         MachineScheduleDTO recoveredBeforeWindowMachine = machine("M-WINDOW-RECOVERED", dateTime(2026, 4, 20, 14, 0),
                 "SPEC-A", "22.5", "MAT-A");
-        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 21, 8, 0),
+        MachineScheduleDTO availableMachine = machine("M-OK", dateTime(2026, 4, 21, 6, 10),
                 "SPEC-A", "22.5", "MAT-B");
         context.getMachineScheduleMap().put(recoveredBeforeWindowMachine.getMachineCode(), recoveredBeforeWindowMachine);
         context.getMachineScheduleMap().put(availableMachine.getMachineCode(), availableMachine);
@@ -1174,8 +1313,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         MachineScheduleDTO specialSupportMachine = machine("M-SPECIAL", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-SPECIAL");
         specialSupportMachine.setSupport195WideBase("1");
-        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 9, 0),
-                "SPEC-X", "20.0", "MAT-NORMAL");
+        MachineScheduleDTO normalMachine = machine("M-NORMAL", dateTime(2026, 4, 21, 8, 10),
+                "SPEC-A", "22.5", "MAT-NORMAL");
         context.getMachineScheduleMap().put(specialSupportMachine.getMachineCode(), specialSupportMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
 
@@ -1330,7 +1469,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldExcludeMachineWhenMouldSetConfiguredButSkuShellStandardMissing() {
+    void matchMachines_shouldKeepMachineWhenMouldSetConfiguredButSkuShellStandardMissing() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
 
@@ -1343,7 +1482,8 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
 
-        assertTrue(candidates.isEmpty(), "机台指定模套型号时，SKU缺少SHELL_STANDARD不应通过模套硬匹配");
+        assertEquals(1, candidates.size(), "同模壳已改为窗口内排序层级，SKU缺少SHELL_STANDARD时不应被硬过滤");
+        assertEquals("M-SHELL", candidates.get(0).getMachineCode());
     }
 
     @Test
@@ -1389,6 +1529,12 @@ class DefaultMachineMatchStrategyRegressionTest {
     private MdmSkuMouldRel mouldRel(String mouldCode) {
         MdmSkuMouldRel rel = new MdmSkuMouldRel();
         rel.setMouldCode(mouldCode);
+        return rel;
+    }
+
+    private MdmSkuMouldRel deliveryMouldRel(String mouldCode, Date boardingDate) {
+        MdmSkuMouldRel rel = mouldRel(mouldCode);
+        rel.setBoardingDate(boardingDate);
         return rel;
     }
 
@@ -1505,6 +1651,14 @@ class DefaultMachineMatchStrategyRegressionTest {
     private void material(LhScheduleContext context, String materialCode, String embryoDesc) {
         MdmMaterialInfo materialInfo = new MdmMaterialInfo();
         materialInfo.setMaterialCode(materialCode);
+        materialInfo.setEmbryoDesc(embryoDesc);
+        context.getMaterialInfoMap().put(materialCode, materialInfo);
+    }
+
+    private void material(LhScheduleContext context, String materialCode, String embryoCode, String embryoDesc) {
+        MdmMaterialInfo materialInfo = new MdmMaterialInfo();
+        materialInfo.setMaterialCode(materialCode);
+        materialInfo.setEmbryoCode(embryoCode);
         materialInfo.setEmbryoDesc(embryoDesc);
         context.getMaterialInfoMap().put(materialCode, materialInfo);
     }
