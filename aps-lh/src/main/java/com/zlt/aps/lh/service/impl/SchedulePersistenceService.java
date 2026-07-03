@@ -66,6 +66,12 @@ public class SchedulePersistenceService {
 
     private static final String NO_FLAG = "0";
 
+    /** 胎胚收尾标识：1-收尾 */
+    private static final int EMBRYO_ENDING_FLAG_YES = 1;
+
+    /** 胎胚收尾班次原因分析备注 */
+    private static final String EMBRYO_ENDING_ANALYSIS = "胎胚收尾";
+
     @Resource
     private LhScheduleResultMapper scheduleResultMapper;
 
@@ -148,6 +154,8 @@ public class SchedulePersistenceService {
             // 为排程结果补齐审计字段和班次收尾标记；不改变已生成的班次计划量。
             fillScheduleResultAuditInfo(context, context.getScheduleResultList());
             fillClassEndFlags(context, context.getScheduleResultList());
+            // 胎胚收尾结果行的最后有计划量班次追加"胎胚收尾"备注
+            fillEmbryoEndingAnalysis(context, context.getScheduleResultList());
             fillDayNRange(context, context.getScheduleResultList());
             fillShortageQty(context, context.getScheduleResultList());
             // 回填 SKU 排序名次/描述（来源 sortByPriority 回写到 sourceSku）
@@ -302,6 +310,71 @@ public class SchedulePersistenceService {
                     oneZero(endingMachine), oneZero(currentMachineLastPlan), oneZero(windowEndShift),
                     lastPlannedShift > 0 ? lastPlannedShift : 0, ShiftFieldUtil.buildShiftIsEndSummary(result));
         }
+    }
+
+    /**
+     * 保存前回写胎胚收尾标识，并为胎胚收尾结果行的最后有计划量班次追加"胎胚收尾"备注。
+     *
+     * <p>判定依据：{@code embryoEndingFlagMap} 中该胎胚代码对应值为 1 表示胎胚收尾。
+     * 胎胚收尾时回写 {@code isEmbryoEnding} 为 '1'，并在结果行最后一个有计划量的班次的
+     * {@code classNAnalysis} 末尾追加"胎胚收尾"备注，不覆盖已有备注，已有该备注时跳过；
+     * 非胎胚收尾、embryoCode 为空或 map 为空时回写为 '0'，保证字段非空落库。</p>
+     *
+     * @param context 排程上下文
+     * @param scheduleResults 排程结果列表
+     */
+    private void fillEmbryoEndingAnalysis(LhScheduleContext context, List<LhScheduleResult> scheduleResults) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(scheduleResults)) {
+            return;
+        }
+        Map<String, Integer> embryoEndingFlagMap = context.getEmbryoEndingFlagMap();
+        boolean endingFlagMapEmpty = CollectionUtils.isEmpty(embryoEndingFlagMap);
+        for (LhScheduleResult result : scheduleResults) {
+            if (Objects.isNull(result)) {
+                continue;
+            }
+            // 默认非胎胚收尾
+            String embryoEndingFlag = NO_FLAG;
+            if (!endingFlagMapEmpty && StringUtils.isNotEmpty(result.getEmbryoCode())) {
+                Integer endingFlag = embryoEndingFlagMap.get(result.getEmbryoCode());
+                if (Integer.valueOf(EMBRYO_ENDING_FLAG_YES).equals(endingFlag)) {
+                    embryoEndingFlag = YES_FLAG;
+                    // 胎胚收尾：取最后有计划量的班次，在其原因分析末尾追加胎胚收尾备注
+                    int lastPlannedShiftIndex = ShiftFieldUtil.resolveLastPlannedShiftIndex(result);
+                    if (lastPlannedShiftIndex > 0) {
+                        appendEmbryoEndingAnalysis(result, lastPlannedShiftIndex);
+                    }
+                }
+            }
+            // 统一回写胎胚收尾标识，保证落库非空
+            result.setIsEmbryoEnding(embryoEndingFlag);
+        }
+    }
+
+    /**
+     * 在指定班次的原因分析末尾追加"胎胚收尾"备注。
+     * <p>已有备注为空时直接写入；已有备注且未包含该文案时以"；"分隔追加；已包含时跳过。</p>
+     *
+     * @param result 排程结果
+     * @param shiftIndex 班次索引
+     */
+    private void appendEmbryoEndingAnalysis(LhScheduleResult result, int shiftIndex) {
+        String oldAnalysis = ShiftFieldUtil.getShiftAnalysis(result, shiftIndex);
+        if (StringUtils.contains(oldAnalysis, EMBRYO_ENDING_ANALYSIS)) {
+            return;
+        }
+        String newAnalysis;
+        if (StringUtils.isEmpty(oldAnalysis)) {
+            newAnalysis = EMBRYO_ENDING_ANALYSIS;
+        } else {
+            newAnalysis = new StringBuilder(oldAnalysis.length() + EMBRYO_ENDING_ANALYSIS.length() + 1)
+                    .append(oldAnalysis).append('；').append(EMBRYO_ENDING_ANALYSIS).toString();
+        }
+        ShiftFieldUtil.setShiftAnalysis(result, shiftIndex, newAnalysis);
+        log.info("胎胚收尾班次备注追加, factoryCode: {}, scheduleDate: {}, materialCode: {}, "
+                        + "embryoCode: {}, machineCode: {}, shiftIndex: {}, analysis: {}",
+                result.getFactoryCode(), result.getScheduleDate(), result.getMaterialCode(),
+                result.getEmbryoCode(), result.getLhMachineCode(), shiftIndex, newAnalysis);
     }
 
     /**

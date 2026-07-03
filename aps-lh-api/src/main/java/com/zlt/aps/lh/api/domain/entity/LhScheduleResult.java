@@ -1057,6 +1057,16 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String isEarlyProduction;
 
     /**
+     * 胎胚收尾标识 0-否 1-是（默认 0）。
+     * <p>取值来源 {@code LhScheduleContext.embryoEndingFlagMap}（key=胎胚代码, value=1-收尾/0-非收尾），
+     * 由 S4.6 保存前 {@code SchedulePersistenceService.fillEmbryoEndingAnalysis} 统一回写。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.isEmbryoEnding", dictType = "biz_yes_no")
+    @ApiModelProperty(value = "胎胚收尾标识 0-否 1-是", name = "isEmbryoEnding")
+    @TableField(value = "IS_EMBRYO_ENDING")
+    private String isEmbryoEnding;
+
+    /**
      * SKU 排序名次。
      * <p>来源：{@code DefaultSkuPriorityStrategy.sortByPriority} 完成续作/新增统一排序后，
      * 回写到 {@code SkuScheduleDTO.scheduleOrder} 的 1~N 名次；
