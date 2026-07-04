@@ -588,8 +588,7 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * dayN 节奏已满足但业务目标仍有剩余时，新增排产不能直接移出SKU；
-     * 只要原候选列表里还有未尝试机台，就继续按现有候选顺序消费尾部产能。
+     * dayN 节奏已满足但业务目标仍有剩余时，仅续作收尾释放的机台尾部产能允许继续承接新增SKU。
      */
     @Test
     public void shouldContinueForTailCapacityWhenDailyRhythmSatisfiedButCandidateRemains() throws Exception {
@@ -598,6 +597,7 @@ public class SchedulingStrategyRegressionTest {
         SkuScheduleDTO sku = buildContinuousSku("3302002661", 16, 128, buildQuotaMap(8, 60, 60));
         MachineScheduleDTO firstMachine = buildNewSpecMachine("K1110");
         MachineScheduleDTO tailMachine = buildNewSpecMachine("K1614");
+        tailMachine.setEstimatedEndTime(context.getScheduleWindowShifts().get(1).getShiftStartDateTime());
         List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
         candidates.add(firstMachine);
         candidates.add(tailMachine);
@@ -612,6 +612,32 @@ public class SchedulingStrategyRegressionTest {
                 excludedMachineCodes, firstMachine.getMachineCode(), 64, 64, 128, false);
 
         Assertions.assertTrue(continueForTailCapacity);
+    }
+
+    /**
+     * dayN 节奏已满足后，普通整窗空闲机台不能再因为业务目标剩余被继续打开。
+     */
+    @Test
+    public void shouldStopWhenDailyRhythmSatisfiedAndOnlyIdleCandidateRemains() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        SkuScheduleDTO sku = buildContinuousSku("3302002176", 46, 682, buildQuotaMap(46, 46, 46));
+        MachineScheduleDTO firstMachine = buildNewSpecMachine("K2027");
+        MachineScheduleDTO idleMachine = buildNewSpecMachine("k1001");
+        List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
+        candidates.add(firstMachine);
+        candidates.add(idleMachine);
+        Set<String> excludedMachineCodes = new HashSet<String>(2);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "shouldContinueForTailCapacity",
+                LhScheduleContext.class, SkuScheduleDTO.class, List.class, Set.class,
+                String.class, int.class, int.class, int.class, boolean.class);
+        method.setAccessible(true);
+        boolean continueForTailCapacity = (Boolean) method.invoke(strategy, context, sku, candidates,
+                excludedMachineCodes, firstMachine.getMachineCode(), 46, 46, 682, false);
+
+        Assertions.assertFalse(continueForTailCapacity);
     }
 
     /**
