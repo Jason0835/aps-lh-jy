@@ -799,6 +799,71 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作现有机台数不满足后续 dayN 最小机台数时，必须生成续作增机台补偿SKU进入新增排产统一排序。
+     */
+    @Test
+    public void shouldAppendContinuationAddMachineCompensationWhenDayNNeedsMoreMachines() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 96, 128, 144);
+        for (SkuDailyPlanQuotaDTO quota : quotaMap.values()) {
+            quota.setRemainingQty(0);
+        }
+        SkuScheduleDTO sku = buildContinuousSku("3302001078", 16, 256, quotaMap);
+        sku.setScheduleDayFinishQty(32);
+        sku.setStrictTargetQty(true);
+        sku.setRemainingScheduleQty(0);
+        context.getContinuousSkuList().add(sku);
+        LhScheduleResult firstResult = buildContinuousResult("3302001078", "K1106", 16, shifts, "0");
+        LhScheduleResult secondResult = buildContinuousResult("3302001078", "K1609", 16, shifts, "0");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "appendContinuousCompensationSkuList", LhScheduleContext.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context);
+
+        Assertions.assertEquals(1, context.getNewSpecSkuList().size());
+        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
+        Assertions.assertTrue(compensationSku.isContinuousCompensationSku());
+        Assertions.assertEquals(ScheduleTypeEnum.NEW_SPEC.getCode(), compensationSku.getScheduleType());
+        Assertions.assertEquals(SkuScheduleSourceTypeEnum.CONTINUATION_ADD_MACHINE.getCode(),
+                compensationSku.getSourceType());
+        Assertions.assertSame(sku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap());
+        Assertions.assertTrue(compensationSku.resolveTargetScheduleQty() > 0);
+        Method getter = SkuScheduleDTO.class.getMethod("getFirstAddMachineProductionDate");
+        Assertions.assertEquals(resolveShiftWorkDate(shifts, 2), getter.invoke(compensationSku));
+    }
+
+    /**
+     * 续作增机台补偿SKU已进入新增统一排序，选机时不得再锁回原续作机台。
+     */
+    @Test
+    public void shouldNotLockContinuationAddMachineCompensationBackToOriginalMachine() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001078");
+        sku.setContinuousCompensationSku(true);
+        sku.setSourceType(SkuScheduleSourceTypeEnum.CONTINUATION_ADD_MACHINE.getCode());
+        sku.setPreferredContinuousMachineCode("K1106");
+        List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
+        candidates.add(buildNewSpecMachine("K1106"));
+        candidates.add(buildNewSpecMachine("K1609"));
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolvePreferredContinuousCompensationMachine", SkuScheduleDTO.class, List.class);
+        method.setAccessible(true);
+        MachineScheduleDTO selectedMachine = (MachineScheduleDTO) method.invoke(strategy, sku, candidates);
+
+        Assertions.assertNull(selectedMachine);
+    }
+
+    /**
      * 收尾续作即使左右单控来自不同运行态对象，也必须按同物料硫化余量严格控量。
      */
     @Test
@@ -1916,6 +1981,48 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals("M010,M011", mouldCode);
     }
 
+    /**
+     * 新增SKU候选为空且目标SKU所有模具都被已排结果占用时，未排原因应明确指向模具占用。
+     */
+    @Test
+    public void shouldUseMouldOccupiedReasonWhenTargetSkuMouldAllOccupied() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(80);
+        sku.setMaterialCode("3302001078");
+        sku.setProSize("R22.5");
+        putMouldRels(context, sku.getMaterialCode(), "M001", "M002");
+        appendAssignedResultWithMould(context, "K1106", sku.getMaterialCode(), "M001,M002");
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveNoCandidateMachineReason", LhScheduleContext.class, SkuScheduleDTO.class);
+        method.setAccessible(true);
+        String reason = (String) method.invoke(strategy, context, sku);
+
+        Assertions.assertEquals("目标 SKU 模具全部被占用", reason);
+    }
+
+    /**
+     * 新增SKU候选为空但仍有未占用模具时，仍保留通用无可用硫化机台原因。
+     */
+    @Test
+    public void shouldKeepGenericReasonWhenTargetSkuHasFreeMould() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildChangeoverBalanceContext();
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(80);
+        sku.setMaterialCode("3302001079");
+        sku.setProSize("R22.5");
+        putMouldRels(context, sku.getMaterialCode(), "M001", "M002");
+        appendAssignedResultWithMould(context, "K1106", sku.getMaterialCode(), "M001");
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveNoCandidateMachineReason", LhScheduleContext.class, SkuScheduleDTO.class);
+        method.setAccessible(true);
+        String reason = (String) method.invoke(strategy, context, sku);
+
+        Assertions.assertEquals("无可用硫化机台", reason);
+    }
+
     private SkuScheduleDTO buildSkuForTypeBlockExpansion() {
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode("3302002654");
@@ -2595,6 +2702,19 @@ public class SchedulingStrategyRegressionTest {
             relationList.add(relation);
         }
         context.getSkuMouldRelMap().put(materialCode, relationList);
+    }
+
+    private void appendAssignedResultWithMould(LhScheduleContext context, String machineCode,
+                                               String materialCode, String mouldCode) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(materialCode);
+        result.setLhMachineCode(machineCode);
+        result.setMouldCode(mouldCode);
+        result.setDailyPlanQty(80);
+        result.setSpecEndTime(dateTime(2026, 6, 3, 22, 0));
+        context.getMachineAssignmentMap()
+                .computeIfAbsent(machineCode, key -> new ArrayList<LhScheduleResult>(2))
+                .add(result);
     }
 
     private Date dateTime(int year, int month, int day, int hour, int minute) {

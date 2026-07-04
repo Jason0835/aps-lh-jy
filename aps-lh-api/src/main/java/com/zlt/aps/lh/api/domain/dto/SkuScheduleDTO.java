@@ -127,6 +127,16 @@ public class SkuScheduleDTO {
     /** 续作释放后转新增补偿时保留的原续作优先机台，仅供 S4.5 轮到该 SKU 选机时优先锁回 */
     @EqualsAndHashCode.Exclude
     private String preferredContinuousMachineCode;
+    /** 续作增机台补偿SKU首次允许新增机台生效的业务日期 */
+    private LocalDate firstAddMachineProductionDate;
+    /** 续作增机台补偿SKU生成时已有的续作机台数 */
+    private int continuationActiveMachineCount;
+    /** 续作增机台补偿SKU生成时 dayN 要求的最小机台数 */
+    private int continuationRequiredMachineCount;
+    /** 续作增机台补偿SKU生成时缺少的机台数 */
+    private int continuationShortageMachineCount;
+    /** 续作增机台补偿SKU首次增机日对应的 dayN 计划量 */
+    private int continuationAddMachineDayPlanQty;
     /** 续作机台上的模具号列表 */
     private List<String> mouldCodeList;
     /** 预计收尾时间 */

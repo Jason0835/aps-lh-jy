@@ -68,6 +68,7 @@ import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -121,6 +122,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             "共用胎胚且硫化余量为0";
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
             SmallEndingSurplusSkipRule.UNSCHEDULED_REASON;
+    private static final String TARGET_SKU_MOULD_ALL_OCCUPIED_UNSCHEDULED_REASON =
+            "目标 SKU 模具全部被占用";
     private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
     private static final Set<String> EMPTY_STRING_SET = Collections.emptySet();
@@ -712,7 +715,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
                 String machineCode = candidateMachine.getMachineCode();
                 LocalDate currentAddMachineProductionDate = resolveCurrentAddMachineProductionDate(
-                        addMachineProductionDateList, actualAllowedAddMachineCount);
+                        sku, addMachineProductionDateList, actualAllowedAddMachineCount);
                 if (StringUtils.isEmpty(machineCode)) {
                     log.warn("候选机台编码为空，跳过新增SKU排产, materialCode: {}, 目标量: {}",
                             sku.getMaterialCode(), sku.resolveTargetScheduleQty());
@@ -1928,7 +1931,79 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (isSpecialMaterialSupportBlocked(context, sku)) {
             return "特殊材料SKU无匹配特殊支持机台，无法排产";
         }
+        if (isTargetSkuMouldAllOccupied(context, sku)) {
+            return TARGET_SKU_MOULD_ALL_OCCUPIED_UNSCHEDULED_REASON;
+        }
         return "无可用硫化机台";
+    }
+
+    /**
+     * 判断目标SKU的模具是否已全部被当前排程结果占用。
+     * <p>候选机台硬过滤会在所有目标SKU模具均被占用时返回空候选，这里只复用相同运行态数据
+     * 细化未排原因，不改变新增排产候选筛选和排序规则。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @return true-目标SKU模具全部被占用；false-仍保留原无可用硫化机台原因
+     */
+    private boolean isTargetSkuMouldAllOccupied(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return false;
+        }
+        List<MdmSkuMouldRel> mouldRelList = context.getSkuMouldRelMap().get(sku.getMaterialCode());
+        if (CollectionUtils.isEmpty(mouldRelList)) {
+            return false;
+        }
+        Set<String> skuMouldCodeSet = new LinkedHashSet<String>(mouldRelList.size());
+        for (MdmSkuMouldRel mouldRel : mouldRelList) {
+            if (Objects.isNull(mouldRel) || StringUtils.isEmpty(mouldRel.getMouldCode())) {
+                continue;
+            }
+            skuMouldCodeSet.add(StringUtils.trim(mouldRel.getMouldCode()));
+        }
+        if (CollectionUtils.isEmpty(skuMouldCodeSet)) {
+            return false;
+        }
+        Set<String> occupiedMouldCodeSet = collectOccupiedMouldCodes(context);
+        return !CollectionUtils.isEmpty(occupiedMouldCodeSet)
+                && occupiedMouldCodeSet.containsAll(skuMouldCodeSet);
+    }
+
+    /**
+     * 汇总当前已排结果占用的模具号。
+     *
+     * @param context 排程上下文
+     * @return 已占用模具号集合
+     */
+    private Set<String> collectOccupiedMouldCodes(LhScheduleContext context) {
+        Set<String> occupiedMouldCodeSet = new HashSet<String>(16);
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getMachineAssignmentMap())) {
+            return occupiedMouldCodeSet;
+        }
+        for (List<LhScheduleResult> resultList : context.getMachineAssignmentMap().values()) {
+            if (CollectionUtils.isEmpty(resultList)) {
+                continue;
+            }
+            for (LhScheduleResult result : resultList) {
+                if (isReleasedFirstDayNoPlanPlaceholderResult(context, result)) {
+                    continue;
+                }
+                if (Objects.isNull(result) || StringUtils.isEmpty(result.getMouldCode())) {
+                    continue;
+                }
+                String[] mouldCodeArray = StringUtils.split(result.getMouldCode(), ",");
+                if (Objects.isNull(mouldCodeArray)) {
+                    continue;
+                }
+                for (String mouldCode : mouldCodeArray) {
+                    String normalizedMouldCode = StringUtils.trim(mouldCode);
+                    if (StringUtils.isNotEmpty(normalizedMouldCode)) {
+                        occupiedMouldCodeSet.add(normalizedMouldCode);
+                    }
+                }
+            }
+        }
+        return occupiedMouldCodeSet;
     }
 
     /**
@@ -2422,6 +2497,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (sku == null || !sku.isContinuousCompensationSku()
                 || StringUtils.isEmpty(sku.getPreferredContinuousMachineCode())
                 || CollectionUtils.isEmpty(scopedCandidates)) {
+            return null;
+        }
+        if (isContinuationAddMachineCandidate(sku)) {
+            // 续作增机台补偿已经进入新增统一排序，选机必须走普通新增候选排序，不锁回原续作机台。
             return null;
         }
         for (MachineScheduleDTO candidate : scopedCandidates) {
@@ -3588,8 +3667,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                        List<LhShiftConfigVO> shifts,
                                                        int totalScheduledQty,
                                                        LocalDate addMachineProductionDate) {
-        if (Objects.isNull(firstProductionStartTime) || totalScheduledQty <= 0
-                || Objects.isNull(addMachineProductionDate)) {
+        if (Objects.isNull(firstProductionStartTime) || Objects.isNull(addMachineProductionDate)) {
             return firstProductionStartTime;
         }
         Date addMachineStartTime = resolveFirstShiftStartTime(shifts, addMachineProductionDate);
@@ -3619,8 +3697,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                   List<LhShiftConfigVO> shifts,
                                                   int totalScheduledQty,
                                                   LocalDate addMachineProductionDate) {
-        if (Objects.isNull(switchReadyTime) || totalScheduledQty <= 0
-                || Objects.isNull(addMachineProductionDate)) {
+        if (Objects.isNull(switchReadyTime) || Objects.isNull(addMachineProductionDate)) {
             return switchReadyTime;
         }
         Date addMachineSwitchReadyTime = resolveFirstAllowMouldChangeShiftStartTime(shifts, addMachineProductionDate);
@@ -4770,9 +4847,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @return 当前候选作为新增机台时的生效日期；首台或未配置时返回null
      */
     private LocalDate resolveCurrentAddMachineProductionDate(
+            SkuScheduleDTO sku,
             List<LocalDate> addMachineProductionDateList,
             int scheduledMachineCount) {
-        if (scheduledMachineCount <= 0 || CollectionUtils.isEmpty(addMachineProductionDateList)) {
+        if (scheduledMachineCount <= 0) {
+            if (isContinuationAddMachineCandidate(sku)) {
+                return sku.getFirstAddMachineProductionDate();
+            }
+            return null;
+        }
+        if (CollectionUtils.isEmpty(addMachineProductionDateList)) {
             return null;
         }
         int addedMachineIndex = scheduledMachineCount - 1;
