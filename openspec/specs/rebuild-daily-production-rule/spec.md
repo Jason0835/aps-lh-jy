@@ -262,6 +262,7 @@ dayN 只判断是否需要加机台、是否具备排产资格；
 
 * 硫化余量为奇数，需要向上调整；
 * 主销产品 SKU 收尾补满；
+* 共用胎胚 SKU 收尾错峰后延；
 * 晚班不可换模导致的补满；
 * 其他 OpenSpec 中已定义的特殊收尾例外。
 
@@ -269,6 +270,7 @@ dayN 只判断是否需要加机台、是否具备排产资格；
 
 ```text
 openspec/specs/main-sale-ending-fill/spec.md
+openspec/specs/shared-embryo-ending-stagger/spec.md
 openspec/specs/sku-end-judgment-rule/spec.md
 openspec/specs/daily-standard-shift-plan/spec.md
 ```
@@ -369,6 +371,24 @@ openspec/specs/main-sale-ending-fill/spec.md
 * 如果 spec 中允许补满当天中班和下个晚班，则按 spec 执行；
 * 不得因硫化余量账本重构破坏主销/常规补满逻辑；
 * 超排边界、结构机台数约束、运行态共用胎胚、胎胚在机、20:00 后收尾等条件，以该 spec 为准。
+
+---
+
+## 八之一、共用胎胚 SKU 收尾错峰后延
+
+共用胎胚 SKU 收尾错峰后延规则，以以下 OpenSpec 为准：
+
+```text
+openspec/specs/shared-embryo-ending-stagger/spec.md
+```
+
+本次账本重构需要保证：
+
+* 共用胎胚 SKU 收尾错峰后延接在续作降模释放机台之后、日额度账本扣减和换模/换活字块机台选择之前；
+* 参与统计的机台包括 SKU 余量收尾机台和续作降模减机台导致的下机机台；
+* 被选中后延的机台可以超过原 SKU 收尾目标量补满下一班次，但必须带上下文标记；
+* 严格目标量收口、SKU 实际消费账本裁剪和结果校验必须识别该错峰后延允许超量；
+* 后延后必须刷新结果收尾时间和机台运行态，后续换模、换活字块、新增排产必须基于更新后的释放时间计算。
 
 ---
 
@@ -652,6 +672,7 @@ openspec/specs/sku-early-production/spec.md
 openspec/specs/daily-standard-shift-plan/spec.md
 openspec/specs/sku-early-production/spec.md
 openspec/specs/main-sale-ending-fill/spec.md
+openspec/specs/shared-embryo-ending-stagger/spec.md
 openspec/specs/sku-end-judgment-rule/spec.md
 ```
 
@@ -838,6 +859,7 @@ openspec/specs/
 openspec/specs/daily-standard-shift-plan/spec.md
 openspec/specs/sku-early-production/spec.md
 openspec/specs/main-sale-ending-fill/spec.md
+openspec/specs/shared-embryo-ending-stagger/spec.md
 openspec/specs/sku-end-judgment-rule/spec.md
 openspec/specs/ 下其他相关规则
 ```

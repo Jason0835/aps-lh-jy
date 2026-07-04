@@ -871,6 +871,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         // 日标准产量公式可能把收尾残班向上补足，扣账前必须复用严格收尾目标再次收口。
         capStrictEndingContinuationGroupsToTarget(
                 context, sourceSkuMap, skuResultMap, skuOrder, shifts);
+        // 共用胎胚 SKU 收尾错峰必须在日额度账本扣减和后续换活字块选机前完成，确保机台释放时间按后延后的运行态计算。
+        applySharedEmbryoEndingStaggerPostpone(context, shifts);
         // 日额度账本必须在最终结果收口后再同步，并以公式修正后的结果驱动零计划与机台状态。
         // 降模、同 SKU 尾量错峰和多机台分摊都会改变最终班次量，不能提前扣账。
         syncContinuousDailyPlanQuota(context, shifts);
@@ -2099,6 +2101,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         List<LhScheduleResult> keptResults = Collections.singletonList(keptResult);
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, skuResults, keptResults);
         for (LhScheduleResult result : removedResults) {
+            recordSharedEmbryoEndingStaggerReleaseCandidate(context, sourceSku, result);
             redistributeShiftQty(context, result, shifts, 0);
         }
         context.getSingleMachineReducedContinuationGroupKeySet().add(
@@ -2903,6 +2906,437 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 记录共用胎胚收尾错峰候选的降模释放快照。
+     * <p>降模释放会先把结果班次清零，后续错峰规则需要基于释放前的收尾班次统计和恢复产量，</p>
+     * <p>因此在清零前用结果对象身份保存原班次和原计划量，不改变未被选中机台的既有释放语义。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param result 待释放续作结果
+     */
+    private void recordSharedEmbryoEndingStaggerReleaseCandidate(LhScheduleContext context,
+                                                                 SkuScheduleDTO sourceSku,
+                                                                 LhScheduleResult result) {
+        if (Objects.isNull(context) || Objects.isNull(sourceSku) || Objects.isNull(result)) {
+            return;
+        }
+        int endingShiftIndex = resolveLastPlannedShiftIndex(result);
+        if (endingShiftIndex <= 0 || endingShiftIndex >= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT) {
+            return;
+        }
+        Integer endingShiftQty = ShiftFieldUtil.getShiftPlanQty(result, endingShiftIndex);
+        if (Objects.isNull(endingShiftQty) || endingShiftQty <= 0) {
+            return;
+        }
+        context.getSharedEmbryoEndingStaggerReleaseShiftIndexMap().put(result, endingShiftIndex);
+        context.getSharedEmbryoEndingStaggerReleaseShiftQtyMap().put(result, endingShiftQty);
+        context.getScheduleResultSourceSkuMap().putIfAbsent(result, sourceSku);
+        log.info("共用胎胚收尾错峰记录降模候选, scheduleDate: {}, materialCode: {}, machineCode: {}, "
+                        + "embryoCode: {}, 原收尾班次: {}, 原班次计划量: {}",
+                context.getScheduleDate(), sourceSku.getMaterialCode(), result.getLhMachineCode(),
+                sourceSku.getEmbryoCode(), endingShiftIndex, endingShiftQty);
+    }
+
+    /**
+     * 执行共用胎胚 SKU 收尾错峰后延。
+     * <p>规则接在续作降模释放之后、日计划账本扣减和换活字块选机之前，保证后续策略读取的是后延后的机台收尾时间。</p>
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     */
+    private void applySharedEmbryoEndingStaggerPostpone(LhScheduleContext context, List<LhShiftConfigVO> shifts) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(shifts)
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        Map<Integer, List<LhScheduleResult>> shiftCandidateMap =
+                collectSharedEmbryoEndingStaggerCandidates(context, shifts);
+        if (CollectionUtils.isEmpty(shiftCandidateMap)) {
+            return;
+        }
+        Map<String, Integer> mouldSharedSkuCountMap = LhMouldCodeUtil.buildMouldSharedSkuCountMap(context);
+        boolean hasPostponedResult = false;
+        for (int endingShiftIndex = 1; endingShiftIndex < LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; endingShiftIndex++) {
+            List<LhScheduleResult> candidates = shiftCandidateMap.get(endingShiftIndex);
+            if (CollectionUtils.isEmpty(candidates)) {
+                continue;
+            }
+            LhShiftConfigVO nextShift = findShiftByIndex(shifts, endingShiftIndex + 1);
+            if (Objects.isNull(nextShift)) {
+                continue;
+            }
+            Collections.sort(candidates, buildSharedEmbryoEndingStaggerComparator(context, mouldSharedSkuCountMap));
+            int postponeCount = candidates.size() / 2;
+            if (postponeCount <= 0) {
+                continue;
+            }
+            List<LhScheduleResult> postponedResults = new ArrayList<LhScheduleResult>(postponeCount);
+            for (LhScheduleResult result : candidates) {
+                if (postponedResults.size() >= postponeCount) {
+                    break;
+                }
+                // 候选在收集后仍可能被前序后延占用产能，因此这里按优先级顺延尝试，保证应后延数量尽量落地。
+                if (applySharedEmbryoEndingStaggerPostponeResult(
+                        context, result, endingShiftIndex, nextShift, shifts, mouldSharedSkuCountMap)) {
+                    postponedResults.add(result);
+                    hasPostponedResult = true;
+                }
+            }
+            log.info("共用胎胚收尾错峰班次统计, scheduleDate: {}, 原收尾班次: {}, 满足条件机台数: {}, "
+                            + "当前班次保留: {}, 后延到下一班次: {}, 后延机台: {}",
+                    context.getScheduleDate(), endingShiftIndex, candidates.size(),
+                    candidates.size() - postponedResults.size(), postponedResults.size(),
+                    joinMachineCodes(postponedResults));
+        }
+        if (hasPostponedResult) {
+            refreshSharedEmbryoEndingStaggerAllowedOverQtyBySourceSku(context);
+        }
+    }
+
+    /**
+     * 收集共用胎胚收尾错峰候选。
+     * <p>候选来源包括最终仍有计划量的收尾结果，以及已被续作降模清零但记录了释放快照的下机结果。</p>
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     * @return 按原收尾班次分组的候选结果
+     */
+    private Map<Integer, List<LhScheduleResult>> collectSharedEmbryoEndingStaggerCandidates(
+            LhScheduleContext context, List<LhShiftConfigVO> shifts) {
+        Map<Integer, List<LhScheduleResult>> shiftCandidateMap =
+                new LinkedHashMap<Integer, List<LhScheduleResult>>(LhScheduleConstant.MAX_SHIFT_SLOT_COUNT);
+        Set<LhScheduleResult> collectedResultSet =
+                Collections.newSetFromMap(new IdentityHashMap<LhScheduleResult, Boolean>());
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            collectSharedEmbryoEndingStaggerCandidate(context, shifts, result, shiftCandidateMap, collectedResultSet);
+        }
+        if (!CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerReleaseShiftIndexMap())) {
+            for (LhScheduleResult result : context.getSharedEmbryoEndingStaggerReleaseShiftIndexMap().keySet()) {
+                collectSharedEmbryoEndingStaggerCandidate(context, shifts, result, shiftCandidateMap, collectedResultSet);
+            }
+        }
+        return shiftCandidateMap;
+    }
+
+    /**
+     * 尝试将单条结果加入共用胎胚收尾错峰候选分组。
+     *
+     * @param context 排程上下文
+     * @param shifts 排程窗口班次
+     * @param result 排程结果
+     * @param shiftCandidateMap 班次候选分组
+     * @param collectedResultSet 已收集结果集合
+     */
+    private void collectSharedEmbryoEndingStaggerCandidate(LhScheduleContext context,
+                                                           List<LhShiftConfigVO> shifts,
+                                                           LhScheduleResult result,
+                                                           Map<Integer, List<LhScheduleResult>> shiftCandidateMap,
+                                                           Set<LhScheduleResult> collectedResultSet) {
+        if (Objects.isNull(result) || collectedResultSet.contains(result) || !isPureContinuousResult(result)) {
+            return;
+        }
+        SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+        int endingShiftIndex = resolveSharedEmbryoEndingStaggerCandidateShiftIndex(context, sourceSku, result, shifts);
+        if (endingShiftIndex <= 0) {
+            return;
+        }
+        shiftCandidateMap.computeIfAbsent(endingShiftIndex, key -> new ArrayList<LhScheduleResult>()).add(result);
+        collectedResultSet.add(result);
+    }
+
+    /**
+     * 解析结果是否满足共用胎胚收尾错峰候选条件。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param result 排程结果
+     * @param shifts 排程窗口班次
+     * @return 原收尾班次，返回 -1 表示不满足
+     */
+    private int resolveSharedEmbryoEndingStaggerCandidateShiftIndex(LhScheduleContext context,
+                                                                    SkuScheduleDTO sourceSku,
+                                                                    LhScheduleResult result,
+                                                                    List<LhShiftConfigVO> shifts) {
+        if (Objects.isNull(sourceSku) || Objects.isNull(result)
+                || !StringUtils.equals(SkuTagEnum.ENDING.getCode(), sourceSku.getSkuTag())
+                || !isEndingFillProductionType(sourceSku.getProductionType())
+                || !isRuntimeSharedEmbryoForEndingFill(context, sourceSku)
+                || !isEmbryoOnMachineForEndingFill(context, sourceSku)) {
+            return -1;
+        }
+        int endingShiftIndex = context.getSharedEmbryoEndingStaggerReleaseShiftIndexMap().getOrDefault(
+                result, resolveLastPlannedShiftIndex(result));
+        if (endingShiftIndex <= 0 || endingShiftIndex >= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT) {
+            return -1;
+        }
+        LhShiftConfigVO nextShift = findShiftByIndex(shifts, endingShiftIndex + 1);
+        if (Objects.isNull(nextShift)) {
+            return -1;
+        }
+        if (isMachineShiftOccupiedByOtherSku(context, sourceSku, result, nextShift)) {
+            log.info("共用胎胚收尾错峰跳过, scheduleDate: {}, materialCode: {}, machineCode: {}, "
+                            + "原收尾班次: {}, 下一班次: {}, 原因: 下一班次已被其他SKU占用",
+                    context.getScheduleDate(), sourceSku.getMaterialCode(), result.getLhMachineCode(),
+                    endingShiftIndex, nextShift.getShiftIndex());
+            return -1;
+        }
+        int nextShiftCapacity = calculateResultShiftCapacity(context, result, nextShift);
+        if (nextShiftCapacity <= 0) {
+            log.info("共用胎胚收尾错峰跳过, scheduleDate: {}, materialCode: {}, machineCode: {}, "
+                            + "原收尾班次: {}, 下一班次: {}, 原因: 下一班次无可排产能",
+                    context.getScheduleDate(), sourceSku.getMaterialCode(), result.getLhMachineCode(),
+                    endingShiftIndex, nextShift.getShiftIndex());
+            return -1;
+        }
+        return endingShiftIndex;
+    }
+
+    /**
+     * 构建共用胎胚收尾错峰后延排序器。
+     * <p>模具关联 SKU 数越少表示共用性越差，越优先后延；共用性相同再按胶囊使用次数少和机台编码稳定排序。</p>
+     *
+     * @param context 排程上下文
+     * @param mouldSharedSkuCountMap 模具号到关联 SKU 数量的映射
+     * @return 候选排序器
+     */
+    private Comparator<LhScheduleResult> buildSharedEmbryoEndingStaggerComparator(
+            LhScheduleContext context, Map<String, Integer> mouldSharedSkuCountMap) {
+        return Comparator
+                .comparingInt((LhScheduleResult result) ->
+                        resolveMachineMouldSharedSkuCount(context, result, mouldSharedSkuCountMap))
+                .thenComparingInt(result -> resolveCapsuleUsageCount(context, result))
+                .thenComparing(result -> StringUtils.defaultString(result.getLhMachineCode()));
+    }
+
+    /**
+     * 对选中的共用胎胚收尾机台执行后延补量。
+     *
+     * @param context 排程上下文
+     * @param result 后延结果
+     * @param endingShiftIndex 原收尾班次
+     * @param nextShift 下一班次
+     * @param shifts 排程窗口班次
+     * @param mouldSharedSkuCountMap 模具号到关联 SKU 数量的映射
+     * @return true-完成后延；false-未执行后延
+     */
+    private boolean applySharedEmbryoEndingStaggerPostponeResult(LhScheduleContext context,
+                                                                 LhScheduleResult result,
+                                                                 int endingShiftIndex,
+                                                                 LhShiftConfigVO nextShift,
+                                                                 List<LhShiftConfigVO> shifts,
+                                                                 Map<String, Integer> mouldSharedSkuCountMap) {
+        SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+        if (Objects.isNull(sourceSku) || Objects.isNull(nextShift)) {
+            return false;
+        }
+        int beforeQty = ShiftFieldUtil.resolveScheduledQty(result);
+        Integer originalEndingQty = ShiftFieldUtil.getShiftPlanQty(result, endingShiftIndex);
+        Date originalEndingStartTime = ShiftFieldUtil.getShiftStartTime(result, endingShiftIndex);
+        Date originalEndingEndTime = ShiftFieldUtil.getShiftEndTime(result, endingShiftIndex);
+        restoreSharedEmbryoEndingStaggerReleaseShift(context, result, endingShiftIndex, shifts);
+        int nextShiftCapacity = calculateResultShiftCapacity(context, result, nextShift);
+        if (nextShiftCapacity <= 0) {
+            // 降模释放候选可能需要先恢复原班次才能按当前机台状态计算下一班产能；失败时必须回滚，不改变原释放语义。
+            setShiftPlanQty(result, endingShiftIndex,
+                    Objects.isNull(originalEndingQty) ? 0 : originalEndingQty,
+                    originalEndingStartTime, originalEndingEndTime);
+            refreshResultSummary(context, result, shifts);
+            return false;
+        }
+        setShiftPlanQty(result, nextShift.getShiftIndex(), nextShiftCapacity,
+                nextShift.getShiftStartDateTime(), nextShift.getShiftEndDateTime());
+        result.setIsEnd("1");
+        refreshResultSummary(context, result, shifts);
+        syncMachineEstimatedEndTime(context, result);
+        int afterQty = ShiftFieldUtil.resolveScheduledQty(result);
+        int allowedOverQty = Math.max(0, afterQty - beforeQty);
+        if (allowedOverQty > 0) {
+            context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().merge(result, allowedOverQty, Integer::sum);
+        }
+        int mouldSharedSkuCount = resolveMachineMouldSharedSkuCount(context, result, mouldSharedSkuCountMap);
+        int capsuleUsageCount = resolveCapsuleUsageCount(context, result);
+        String detail = buildSharedEmbryoEndingStaggerProcessLogDetail(
+                context, sourceSku, result, endingShiftIndex, nextShift, allowedOverQty,
+                mouldSharedSkuCount, capsuleUsageCount);
+        PriorityTraceLogHelper.appendProcessLog(context, "共用胎胚收尾错峰后延", detail);
+        log.info("共用胎胚收尾错峰后延完成, {}", detail);
+        return true;
+    }
+
+    /**
+     * 按来源SKU重新计算错峰后延允许超量。
+     * <p>同一SKU可能同时存在“原班次保留机台”和“后延补量机台”。日计划账本按结果逐条扣减，</p>
+     * <p>如果只按单条结果的新增班次量打标，结果遍历顺序不同会导致后延机台或保留机台被误回裁。</p>
+     * <p>这里先让未后延结果优先占用SKU原目标量，剩余目标量再分配给后延结果；后延结果中超出该基础占用的部分</p>
+     * <p>全部作为“错峰后延允许超量”，后续严格收口、实际消费账本和校验均按该标记识别。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void refreshSharedEmbryoEndingStaggerAllowedOverQtyBySourceSku(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleResultList())
+                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            return;
+        }
+        Map<String, List<LhScheduleResult>> sourceSkuResultMap =
+                new LinkedHashMap<String, List<LhScheduleResult>>(8);
+        Map<String, SkuScheduleDTO> sourceSkuMap = new LinkedHashMap<String, SkuScheduleDTO>(8);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.isNull(result) || !isPureContinuousResult(result)
+                    || StringUtils.isEmpty(result.getMaterialCode())) {
+                continue;
+            }
+            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+            String groupKey = resolveSharedEmbryoEndingStaggerLedgerGroupKey(sourceSku, result);
+            if (StringUtils.isEmpty(groupKey)) {
+                continue;
+            }
+            sourceSkuMap.putIfAbsent(groupKey, sourceSku);
+            sourceSkuResultMap.computeIfAbsent(groupKey, key -> new ArrayList<LhScheduleResult>()).add(result);
+        }
+        Map<LhScheduleResult, Integer> refreshedAllowedOverQtyMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().size());
+        for (Map.Entry<String, List<LhScheduleResult>> entry : sourceSkuResultMap.entrySet()) {
+            refreshSharedEmbryoEndingStaggerAllowedOverQtyForSourceSku(
+                    context, sourceSkuMap.get(entry.getKey()), entry.getValue(), refreshedAllowedOverQtyMap);
+        }
+        context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().clear();
+        context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().putAll(refreshedAllowedOverQtyMap);
+    }
+
+    /**
+     * 解析共用胎胚错峰后延的账本分组键。
+     * <p>SKU 实际消费账本按物料编码扣减，因此允许超量也必须按同一物料编码归组，</p>
+     * <p>避免同物料不同 DTO 副本在逐条扣账时重新出现顺序依赖。</p>
+     *
+     * @param sourceSku 来源SKU
+     * @param result 排程结果
+     * @return 账本分组键
+     */
+    private String resolveSharedEmbryoEndingStaggerLedgerGroupKey(SkuScheduleDTO sourceSku, LhScheduleResult result) {
+        if (Objects.nonNull(sourceSku) && StringUtils.isNotEmpty(sourceSku.getMaterialCode())) {
+            return sourceSku.getMaterialCode();
+        }
+        if (Objects.nonNull(result) && StringUtils.isNotEmpty(result.getMaterialCode())) {
+            return result.getMaterialCode();
+        }
+        return "";
+    }
+
+    /**
+     * 计算单个来源SKU下每条后延结果的允许超量。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param sourceResults 同来源SKU续作结果
+     * @param refreshedAllowedOverQtyMap 重新计算后的允许超量映射
+     */
+    private void refreshSharedEmbryoEndingStaggerAllowedOverQtyForSourceSku(
+            LhScheduleContext context,
+            SkuScheduleDTO sourceSku,
+            List<LhScheduleResult> sourceResults,
+            Map<LhScheduleResult, Integer> refreshedAllowedOverQtyMap) {
+        if (Objects.isNull(sourceSku) || CollectionUtils.isEmpty(sourceResults)) {
+            return;
+        }
+        boolean hasPostponedResult = false;
+        int retainedQty = 0;
+        for (LhScheduleResult result : sourceResults) {
+            int resultQty = ShiftFieldUtil.resolveScheduledQty(result);
+            if (context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().containsKey(result)) {
+                hasPostponedResult = true;
+                continue;
+            }
+            retainedQty += Math.max(0, resultQty);
+        }
+        if (!hasPostponedResult) {
+            return;
+        }
+        int targetQty = Math.max(0, sourceSku.resolveTargetScheduleQty());
+        int remainingTargetQtyForPostponed = Math.max(0, targetQty - retainedQty);
+        for (LhScheduleResult result : sourceResults) {
+            if (!context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().containsKey(result)) {
+                continue;
+            }
+            int resultQty = Math.max(0, ShiftFieldUtil.resolveScheduledQty(result));
+            int normalTargetQty = Math.min(resultQty, remainingTargetQtyForPostponed);
+            remainingTargetQtyForPostponed -= normalTargetQty;
+            int allowedOverQty = Math.max(0, resultQty - normalTargetQty);
+            if (allowedOverQty <= 0) {
+                continue;
+            }
+            refreshedAllowedOverQtyMap.put(result, allowedOverQty);
+            log.info("共用胎胚收尾错峰允许超量重算, scheduleDate: {}, materialCode: {}, machineCode: {}, "
+                            + "SKU目标量: {}, 原班次保留量: {}, 后延结果量: {}, 结果基础占用量: {}, 允许超量: {}",
+                    context.getScheduleDate(), sourceSku.getMaterialCode(), result.getLhMachineCode(),
+                    targetQty, retainedQty, resultQty, normalTargetQty, allowedOverQty);
+        }
+    }
+
+    /**
+     * 对已被降模清零的候选恢复原收尾班次计划量。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param endingShiftIndex 原收尾班次
+     * @param shifts 排程窗口班次
+     */
+    private void restoreSharedEmbryoEndingStaggerReleaseShift(LhScheduleContext context,
+                                                              LhScheduleResult result,
+                                                              int endingShiftIndex,
+                                                              List<LhShiftConfigVO> shifts) {
+        Integer releaseShiftQty = context.getSharedEmbryoEndingStaggerReleaseShiftQtyMap().get(result);
+        if (Objects.isNull(releaseShiftQty) || releaseShiftQty <= 0) {
+            return;
+        }
+        Integer currentQty = ShiftFieldUtil.getShiftPlanQty(result, endingShiftIndex);
+        if (Objects.nonNull(currentQty) && currentQty > 0) {
+            return;
+        }
+        LhShiftConfigVO endingShift = findShiftByIndex(shifts, endingShiftIndex);
+        if (Objects.isNull(endingShift)) {
+            return;
+        }
+        setShiftPlanQty(result, endingShiftIndex, releaseShiftQty,
+                endingShift.getShiftStartDateTime(), endingShift.getShiftEndDateTime());
+    }
+
+    /**
+     * 构建共用胎胚收尾错峰后延过程日志明细。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param result 排程结果
+     * @param endingShiftIndex 原收尾班次
+     * @param nextShift 下一班次
+     * @param allowedOverQty 允许超目标补量
+     * @param mouldSharedSkuCount 模具关联 SKU 数量
+     * @param capsuleUsageCount 胶囊使用次数
+     * @return 过程日志明细
+     */
+    private String buildSharedEmbryoEndingStaggerProcessLogDetail(LhScheduleContext context,
+                                                                  SkuScheduleDTO sourceSku,
+                                                                  LhScheduleResult result,
+                                                                  int endingShiftIndex,
+                                                                  LhShiftConfigVO nextShift,
+                                                                  int allowedOverQty,
+                                                                  int mouldSharedSkuCount,
+                                                                  int capsuleUsageCount) {
+        StringBuilder detail = new StringBuilder(256);
+        detail.append("scheduleDate=").append(context.getScheduleDate())
+                .append(", materialCode=").append(sourceSku.getMaterialCode())
+                .append(", machineCode=").append(result.getLhMachineCode())
+                .append(", embryoCode=").append(sourceSku.getEmbryoCode())
+                .append(", productionType=").append(sourceSku.getProductionType())
+                .append(", 原收尾班次=").append(endingShiftIndex)
+                .append(", 后延班次=").append(nextShift.getShiftIndex())
+                .append(", 模具共用性数量=").append(mouldSharedSkuCount)
+                .append(", 胶囊使用次数=").append(capsuleUsageCount)
+                .append(", 新增班次补量=").append(allowedOverQty)
+                .append(", 新收尾时间=").append(result.getSpecEndTime());
+        return detail.toString();
+    }
+
+    /**
      * 按保留机台和目标规则重分配续作计划量。
      *
      * @param context 排程上下文
@@ -2944,6 +3378,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             boolean nightShiftProtected = applyNoMouldChangeNightFillBeforeRelease(
                     context, sourceSku, result, shifts, ending);
             if (!nightShiftProtected) {
+                recordSharedEmbryoEndingStaggerReleaseCandidate(context, sourceSku, result);
                 redistributeShiftQty(context, result, shifts, 0);
             }
         }
@@ -3007,7 +3442,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (!policy.isStrictUpperLimit()) {
             return;
         }
-        int targetQty = Math.max(0, sourceSku.resolveTargetScheduleQty());
+        int allowedOverQty = resolveSharedEmbryoEndingStaggerAllowedOverQty(context, skuResults);
+        int targetQty = Math.max(0, sourceSku.resolveTargetScheduleQty()) + allowedOverQty;
         int totalPlanQty = skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum();
         int overQty = totalPlanQty - targetQty;
         if (overQty <= 0) {
@@ -3027,11 +3463,34 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             capResultShiftQtyToTarget(context, result, shifts, nextQty);
             overQty -= currentQty - ShiftFieldUtil.resolveScheduledQty(result);
         }
-        log.info("续作严格收尾最终收口, materialCode: {}, 目标量: {}, 原总量: {}, "
+        log.info("续作严格收尾最终收口, materialCode: {}, 目标量: {}, 错峰后延允许超量: {}, 原总量: {}, "
                         + "收口后总量: {}, 机台列表: {}",
-                sourceSku.getMaterialCode(), targetQty, totalPlanQty,
+                sourceSku.getMaterialCode(), targetQty, allowedOverQty, totalPlanQty,
                 skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum(),
                 joinMachineCodes(skuResults));
+    }
+
+    /**
+     * 汇总同组结果的共用胎胚收尾错峰允许超量。
+     *
+     * @param context 排程上下文
+     * @param skuResults 同SKU续作结果
+     * @return 允许超目标量
+     */
+    private int resolveSharedEmbryoEndingStaggerAllowedOverQty(LhScheduleContext context,
+                                                               List<LhScheduleResult> skuResults) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(skuResults)
+                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            return 0;
+        }
+        int allowedOverQty = 0;
+        for (LhScheduleResult result : skuResults) {
+            Integer qty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+            if (Objects.nonNull(qty) && qty > 0) {
+                allowedOverQty += qty;
+            }
+        }
+        return allowedOverQty;
     }
 
     /**
@@ -3145,6 +3604,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (keptResults.contains(result) || supplementResults.contains(result)) {
                 continue;
             }
+            recordSharedEmbryoEndingStaggerReleaseCandidate(context, sourceSku, result);
             redistributeShiftQty(context, result, dayShifts, 0);
             clearContinuationShiftsAfterDate(
                     context, result, allShifts, productionDate, !recoverable);
@@ -3456,19 +3916,47 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                      SkuScheduleDTO sourceSku,
                                                      LhScheduleResult currentResult,
                                                      LhShiftConfigVO targetShift) {
-        if (context == null || sourceSku == null || currentResult == null || targetShift == null
+        if (Objects.isNull(context) || Objects.isNull(sourceSku) || Objects.isNull(currentResult)
+                || Objects.isNull(targetShift)
                 || StringUtils.isEmpty(currentResult.getLhMachineCode())
-                || targetShift.getShiftIndex() == null
-                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+                || Objects.isNull(targetShift.getShiftIndex())) {
             return false;
         }
-        for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (result == null || result == currentResult
+        // machineAssignmentMap 是机台维度的实时占用视图，续作降模、错峰后延和换活字块都会基于它判断机台是否可用。
+        if (!CollectionUtils.isEmpty(context.getMachineAssignmentMap())
+                && isMachineResultListShiftOccupiedByOtherSku(
+                context.getMachineAssignmentMap().get(currentResult.getLhMachineCode()),
+                sourceSku, currentResult, targetShift)) {
+            return true;
+        }
+        // scheduleResultList 仍作为全局结果视图兜住未同步到机台视图的本轮结果，避免同班次重复占用。
+        return isMachineResultListShiftOccupiedByOtherSku(
+                context.getScheduleResultList(), sourceSku, currentResult, targetShift);
+    }
+
+    /**
+     * 判断结果集合内目标班次是否已有其他SKU占用当前机台。
+     *
+     * @param resultList 结果集合
+     * @param sourceSku 当前SKU
+     * @param currentResult 当前结果
+     * @param targetShift 目标班次
+     * @return true-其他SKU已占用
+     */
+    private boolean isMachineResultListShiftOccupiedByOtherSku(List<LhScheduleResult> resultList,
+                                                               SkuScheduleDTO sourceSku,
+                                                               LhScheduleResult currentResult,
+                                                               LhShiftConfigVO targetShift) {
+        if (CollectionUtils.isEmpty(resultList)) {
+            return false;
+        }
+        for (LhScheduleResult result : resultList) {
+            if (Objects.isNull(result) || result == currentResult
                     || !StringUtils.equals(currentResult.getLhMachineCode(), result.getLhMachineCode())) {
                 continue;
             }
             Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, targetShift.getShiftIndex());
-            if (planQty == null || planQty <= 0) {
+            if (Objects.isNull(planQty) || planQty <= 0) {
                 continue;
             }
             if (!StringUtils.equals(sourceSku.getMaterialCode(), result.getMaterialCode())) {
@@ -6257,8 +6745,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (CollectionUtils.isEmpty(quotaMap)) {
             refreshResultSummary(context, result, shifts);
             int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+            int ledgerDeductQty = resolveContinuousLedgerDeductQtyForSharedEmbryoStagger(
+                    context, result, actualQty);
             getTargetScheduleQtyResolver().deductProductionRemainingQty(
-                    context, sku, actualQty, "续作排产", result.getLhMachineCode());
+                    context, sku, ledgerDeductQty, "续作排产", result.getLhMachineCode());
             return;
         }
         int totalShiftFillOverQty = 0;
@@ -6306,8 +6796,34 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         refreshResultSummary(context, result, shifts);
         int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
+        int ledgerDeductQty = resolveContinuousLedgerDeductQtyForSharedEmbryoStagger(
+                context, result, actualQty);
         getTargetScheduleQtyResolver().deductProductionRemainingQty(
-                context, sku, actualQty, "续作排产", result.getLhMachineCode());
+                context, sku, ledgerDeductQty, "续作排产", result.getLhMachineCode());
+    }
+
+    /**
+     * 解析续作结果实际消费账本扣减量。
+     * <p>共用胎胚收尾错峰后延允许后延机台补满下一班次，补量属于规则例外，不能继续消耗SKU普通目标量账本。</p>
+     * <p>因此账本只扣除“结果总量 - 错峰允许超量”，严格收口和结果校验仍可通过允许超量识别该部分不是普通超排。</p>
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param actualQty 结果当前排产量
+     * @return 实际消费账本扣减量
+     */
+    private int resolveContinuousLedgerDeductQtyForSharedEmbryoStagger(LhScheduleContext context,
+                                                                       LhScheduleResult result,
+                                                                       int actualQty) {
+        if (actualQty <= 0 || Objects.isNull(context) || Objects.isNull(result)
+                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            return Math.max(0, actualQty);
+        }
+        Integer allowedOverQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+        if (Objects.isNull(allowedOverQty) || allowedOverQty <= 0) {
+            return Math.max(0, actualQty);
+        }
+        return Math.max(0, actualQty - allowedOverQty);
     }
 
     /**

@@ -222,6 +222,15 @@ public class LhScheduleContext {
     private Map<String, Integer> embryoStockSkuQuotaMap = new LinkedHashMap<>();
     /** 命中胎胚库存T日硬目标的物料集合，用于结果班次量按库存账本奇偶原样裁剪 */
     private Set<String> embryoStockHardTargetMaterialSet = new LinkedHashSet<>();
+    /** 共用胎胚收尾错峰降模释放候选原收尾班次快照，使用对象身份避免结果行字段被清零后丢失释放来源 */
+    private Map<LhScheduleResult, Integer> sharedEmbryoEndingStaggerReleaseShiftIndexMap =
+            new IdentityHashMap<LhScheduleResult, Integer>();
+    /** 共用胎胚收尾错峰降模释放候选原班次计划量快照，用于选中后延时恢复原班次收尾产量 */
+    private Map<LhScheduleResult, Integer> sharedEmbryoEndingStaggerReleaseShiftQtyMap =
+            new IdentityHashMap<LhScheduleResult, Integer>();
+    /** 共用胎胚收尾错峰后延允许超目标量，供严格收口、账本裁剪和校验识别“错峰补量”例外 */
+    private Map<LhScheduleResult, Integer> sharedEmbryoEndingStaggerAllowedOverQtyMap =
+            new IdentityHashMap<LhScheduleResult, Integer>();
     /** S4.5当前待排正规新增SKU数量，供选机阶段判断普通机台让位规则 */
     private int pendingFormalNewSpecSkuCount;
     /** S4.5当前待排试制新增SKU数量，供单控机台内部资源竞争判断 */

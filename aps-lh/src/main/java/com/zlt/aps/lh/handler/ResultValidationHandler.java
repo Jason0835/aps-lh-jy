@@ -270,6 +270,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         }
         Map<SkuScheduleDTO, Integer> scheduledQtyMap = new IdentityHashMap<>();
         Map<SkuScheduleDTO, Integer> shiftCapacityMap = new IdentityHashMap<>();
+        Map<SkuScheduleDTO, Integer> sharedEmbryoEndingStaggerAllowedOverQtyMap = new IdentityHashMap<>();
         for (LhScheduleResult result : context.getScheduleResultList()) {
             SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
             if (Objects.isNull(sourceSku)) {
@@ -285,6 +286,10 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             }
             scheduledQtyMap.merge(validationSku, planQty, Integer::sum);
             shiftCapacityMap.put(validationSku, resolveValidationShiftCapacity(validationSku, result));
+            int allowedOverQty = resolveSharedEmbryoEndingStaggerAllowedOverQty(context, result);
+            if (allowedOverQty > 0) {
+                sharedEmbryoEndingStaggerAllowedOverQtyMap.merge(validationSku, allowedOverQty, Integer::sum);
+            }
         }
         for (Map.Entry<SkuScheduleDTO, Integer> entry : scheduledQtyMap.entrySet()) {
             SkuScheduleDTO sku = entry.getKey();
@@ -295,11 +300,30 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             }
             ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sku, sku.isStrictTargetQty());
             if (policy.isStrictUpperLimit()) {
-                validateStrictUpperLimit(context, sku, scheduledQty, targetQty);
+                int allowedOverQty = sharedEmbryoEndingStaggerAllowedOverQtyMap.getOrDefault(sku, 0);
+                validateStrictUpperLimit(context, sku, scheduledQty, targetQty + allowedOverQty);
                 continue;
             }
             validateFormalQuantityPolicy(context, sku, scheduledQty, targetQty, shiftCapacityMap.get(sku));
         }
+    }
+
+    /**
+     * 解析共用胎胚收尾错峰后延允许超量。
+     * <p>该补量有明确业务标记，启用严格目标量校验时应与目标量一起作为允许上限。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return 允许超目标量
+     */
+    private int resolveSharedEmbryoEndingStaggerAllowedOverQty(LhScheduleContext context,
+                                                               LhScheduleResult result) {
+        if (Objects.isNull(context) || Objects.isNull(result)
+                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            return 0;
+        }
+        Integer allowedOverQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+        return Objects.isNull(allowedOverQty) ? 0 : Math.max(0, allowedOverQty);
     }
 
     /**

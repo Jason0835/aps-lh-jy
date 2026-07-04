@@ -4,6 +4,8 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -13,6 +15,7 @@ import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -22,6 +25,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -620,6 +624,266 @@ class ContinuousProductionResultQtyRegressionTest {
         assertNull(retainedResult.getClass2PlanQty(), "同班次归集不应再把尾量顺延到下一班次");
     }
 
+    @Test
+    void scheduleReduceMould_shouldPostponeHalfSharedEmbryoEndingMachinesToNextShift() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        List<String> materialCodes = new ArrayList<>();
+        for (int index = 1; index <= 6; index++) {
+            String materialCode = "MAT-STAGGER-" + index;
+            String machineCode = "KST0" + index;
+            materialCodes.add(materialCode);
+            registerMachine(context, machineCode);
+            SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(materialCode, "EMB-STAGGER", "01");
+            LhScheduleResult result = buildSharedEmbryoStaggerResult(context, machineCode, sku, firstShift, 8);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+            context.getMachineAssignmentMap().put(machineCode, new ArrayList<LhScheduleResult>());
+            context.getMachineAssignmentMap().get(machineCode).add(result);
+        }
+        context.getActiveEmbryoSkuMap().put("EMB-STAGGER", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-STAGGER", 0);
+
+        strategy.scheduleReduceMould(context);
+
+        assertSharedEmbryoStaggerPostponed(context, "KST01", secondShift, 24);
+        assertSharedEmbryoStaggerPostponed(context, "KST02", secondShift, 24);
+        assertSharedEmbryoStaggerPostponed(context, "KST03", secondShift, 24);
+        assertSharedEmbryoStaggerKept(context, "KST04", 8);
+        assertSharedEmbryoStaggerKept(context, "KST05", 8);
+        assertSharedEmbryoStaggerKept(context, "KST06", 8);
+    }
+
+    @Test
+    void scheduleReduceMould_shouldSortSharedEmbryoEndingStaggerByMouldCommonalityAndCapsuleUsage() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        List<String> materialCodes = new ArrayList<>();
+        String[] machineCodes = {"KST11", "KST12", "KST13", "KST14"};
+        String[] mouldCodes = {"M-ST-A", "M-ST-B", "M-ST-C", "M-ST-D"};
+        int[] capsuleUsageCounts = {1, 20, 5, 1};
+        for (int index = 0; index < machineCodes.length; index++) {
+            String materialCode = "MAT-SORT-" + (index + 1);
+            materialCodes.add(materialCode);
+            registerMachine(context, machineCodes[index]);
+            registerMachineMould(context, machineCodes[index], mouldCodes[index]);
+            registerCapsuleUsage(context, machineCodes[index], capsuleUsageCounts[index]);
+            SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(materialCode, "EMB-SORT", "02");
+            LhScheduleResult result = buildSharedEmbryoStaggerResult(context, machineCodes[index], sku, firstShift, 8);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+        registerMouldRel(context, "MAT-SORT-A1", "M-ST-A");
+        registerMouldRel(context, "MAT-SORT-A2", "M-ST-A");
+        registerMouldRel(context, "MAT-SORT-A3", "M-ST-A");
+        registerMouldRel(context, "MAT-SORT-B1", "M-ST-B");
+        registerMouldRel(context, "MAT-SORT-C1", "M-ST-C");
+        registerMouldRel(context, "MAT-SORT-D1", "M-ST-D");
+        registerMouldRel(context, "MAT-SORT-D2", "M-ST-D");
+        context.getActiveEmbryoSkuMap().put("EMB-SORT", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-SORT", 0);
+
+        strategy.scheduleReduceMould(context);
+
+        assertSharedEmbryoStaggerPostponed(context, "KST13", secondShift, 24);
+        assertSharedEmbryoStaggerPostponed(context, "KST12", secondShift, 24);
+        assertSharedEmbryoStaggerKept(context, "KST11", 8);
+        assertSharedEmbryoStaggerKept(context, "KST14", 8);
+    }
+
+    @Test
+    void scheduleReduceMould_shouldSkipSharedEmbryoEndingStaggerOnLastShift() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO lastShift = context.getScheduleWindowShifts().get(7);
+        List<String> materialCodes = new ArrayList<>();
+        for (int index = 1; index <= 2; index++) {
+            String materialCode = "MAT-LAST-" + index;
+            String machineCode = "KLS0" + index;
+            materialCodes.add(materialCode);
+            registerMachine(context, machineCode);
+            SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(materialCode, "EMB-LAST", "01");
+            LhScheduleResult result = buildSharedEmbryoStaggerResult(context, machineCode, sku, lastShift, 8);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+        context.getActiveEmbryoSkuMap().put("EMB-LAST", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-LAST", 0);
+
+        strategy.scheduleReduceMould(context);
+
+        assertSharedEmbryoStaggerKept(context, "KLS01", 8);
+        assertSharedEmbryoStaggerKept(context, "KLS02", 8);
+    }
+
+    @Test
+    void allocateContinuationQtyForKeptMachines_shouldRecordReleasedMachineForSharedEmbryoEndingStagger() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        registerMachine(context, "KRD01");
+        registerMachine(context, "KRD02");
+        registerCapsuleUsage(context, "KRD01", 100);
+        registerCapsuleUsage(context, "KRD02", 1);
+        SkuScheduleDTO sku = buildSharedEmbryoStaggerSku("MAT-REDUCE", "EMB-REDUCE", "01");
+        List<String> activeMaterialCodes = new ArrayList<>();
+        activeMaterialCodes.add("MAT-REDUCE");
+        activeMaterialCodes.add("MAT-REDUCE-SHARED");
+        context.getActiveEmbryoSkuMap().put("EMB-REDUCE", activeMaterialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-REDUCE", 0);
+        LhScheduleResult keptResult = buildSharedEmbryoStaggerResult(context, "KRD01", sku, firstShift, 8);
+        LhScheduleResult releasedResult = buildSharedEmbryoStaggerResult(context, "KRD02", sku, firstShift, 8);
+        context.getScheduleResultList().add(keptResult);
+        context.getScheduleResultList().add(releasedResult);
+        context.getScheduleResultSourceSkuMap().put(keptResult, sku);
+        context.getScheduleResultSourceSkuMap().put(releasedResult, sku);
+        List<LhScheduleResult> skuResults = new ArrayList<>();
+        skuResults.add(keptResult);
+        skuResults.add(releasedResult);
+        Map<LhScheduleResult, Integer> capacityMap = new LinkedHashMap<>();
+        capacityMap.put(keptResult, 8);
+        capacityMap.put(releasedResult, 8);
+
+        ReflectionTestUtils.invokeMethod(strategy, "allocateContinuationQtyForKeptMachines",
+                context, sku, skuResults, Collections.singletonList(keptResult),
+                capacityMap, 8, context.getScheduleWindowShifts());
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostpone", context, context.getScheduleWindowShifts());
+
+        assertSharedEmbryoStaggerPostponed(context, "KRD02", secondShift, 24);
+        assertSharedEmbryoStaggerKept(context, "KRD01", 8);
+    }
+
+    @Test
+    void sharedEmbryoEndingStagger_shouldNotTrimRetainedMachineWhenPostponedResultProcessedFirst() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        registerMachine(context, "KOR01");
+        registerMachine(context, "KOR02");
+        registerCapsuleUsage(context, "KOR01", 1);
+        registerCapsuleUsage(context, "KOR02", 100);
+        SkuScheduleDTO postponedSku = buildSharedEmbryoStaggerSku("MAT-ORDER", "EMB-ORDER", "01");
+        SkuScheduleDTO retainedSku = buildSharedEmbryoStaggerSku("MAT-ORDER", "EMB-ORDER", "01");
+        List<String> activeMaterialCodes = new ArrayList<>();
+        activeMaterialCodes.add("MAT-ORDER");
+        activeMaterialCodes.add("MAT-ORDER-SHARED");
+        context.getActiveEmbryoSkuMap().put("EMB-ORDER", activeMaterialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-ORDER", 0);
+
+        // 刻意使用同物料不同DTO副本，并让优先后延机台排在结果列表前面，验证实际账本按物料扣减时不会误裁保留机台。
+        LhScheduleResult postponedResult = buildSharedEmbryoStaggerResult(context, "KOR01", postponedSku, firstShift, 8);
+        LhScheduleResult retainedResult = buildSharedEmbryoStaggerResult(context, "KOR02", retainedSku, firstShift, 8);
+        context.getScheduleResultList().add(postponedResult);
+        context.getScheduleResultList().add(retainedResult);
+        context.getScheduleResultSourceSkuMap().put(postponedResult, postponedSku);
+        context.getScheduleResultSourceSkuMap().put(retainedResult, retainedSku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostpone", context, context.getScheduleWindowShifts());
+        ReflectionTestUtils.invokeMethod(strategy,
+                "syncContinuousDailyPlanQuota", context, context.getScheduleWindowShifts());
+
+        assertSharedEmbryoStaggerPostponed(context, "KOR01", secondShift, 24);
+        assertSharedEmbryoStaggerKept(context, "KOR02", 8);
+        assertEquals(Integer.valueOf(0), context.getSkuProductionRemainingQtyMap().get("MAT-ORDER"),
+                "保留机台应优先占用SKU目标量，后延补量只作为错峰例外保留");
+    }
+
+    @Test
+    void scheduleReduceMould_shouldSkipSharedEmbryoEndingStaggerWhenMachineAssignmentOccupied() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        registerMachine(context, "KOC01");
+        registerMachine(context, "KOC02");
+        List<String> materialCodes = new ArrayList<>();
+        materialCodes.add("MAT-OCCUPY-1");
+        materialCodes.add("MAT-OCCUPY-2");
+        context.getActiveEmbryoSkuMap().put("EMB-OCCUPY", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-OCCUPY", 0);
+
+        SkuScheduleDTO firstSku = buildSharedEmbryoStaggerSku("MAT-OCCUPY-1", "EMB-OCCUPY", "01");
+        SkuScheduleDTO secondSku = buildSharedEmbryoStaggerSku("MAT-OCCUPY-2", "EMB-OCCUPY", "01");
+        LhScheduleResult firstResult = buildSharedEmbryoStaggerResult(context, "KOC01", firstSku, firstShift, 8);
+        LhScheduleResult secondResult = buildSharedEmbryoStaggerResult(context, "KOC02", secondSku, firstShift, 8);
+        LhScheduleResult occupiedResult = buildSharedEmbryoStaggerResult(
+                context, "KOC01", buildSharedEmbryoStaggerSku("MAT-OTHER", "EMB-OTHER", "01"), secondShift, 16);
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, firstSku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, secondSku);
+        context.getMachineAssignmentMap().put("KOC01", new ArrayList<LhScheduleResult>());
+        context.getMachineAssignmentMap().get("KOC01").add(firstResult);
+        context.getMachineAssignmentMap().get("KOC01").add(occupiedResult);
+
+        strategy.scheduleReduceMould(context);
+
+        assertSharedEmbryoStaggerKept(context, "KOC01", 8);
+        assertSharedEmbryoStaggerKept(context, "KOC02", 8);
+    }
+
+    @Test
+    void scheduleReduceMould_shouldSkipSharedEmbryoEndingStaggerWhenScheduleResultOccupied() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        registerMachine(context, "KSC01");
+        registerMachine(context, "KSC02");
+        List<String> materialCodes = new ArrayList<>();
+        materialCodes.add("MAT-SCHEDULE-OCCUPY-1");
+        materialCodes.add("MAT-SCHEDULE-OCCUPY-2");
+        context.getActiveEmbryoSkuMap().put("EMB-SCHEDULE-OCCUPY", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-SCHEDULE-OCCUPY", 0);
+
+        SkuScheduleDTO firstSku = buildSharedEmbryoStaggerSku("MAT-SCHEDULE-OCCUPY-1", "EMB-SCHEDULE-OCCUPY", "01");
+        SkuScheduleDTO secondSku = buildSharedEmbryoStaggerSku("MAT-SCHEDULE-OCCUPY-2", "EMB-SCHEDULE-OCCUPY", "01");
+        LhScheduleResult firstResult = buildSharedEmbryoStaggerResult(context, "KSC01", firstSku, firstShift, 8);
+        LhScheduleResult secondResult = buildSharedEmbryoStaggerResult(context, "KSC02", secondSku, firstShift, 8);
+        LhScheduleResult occupiedResult = buildSharedEmbryoStaggerResult(
+                context, "KSC01", buildSharedEmbryoStaggerSku("MAT-SCHEDULE-OTHER", "EMB-SCHEDULE-OTHER", "01"),
+                secondShift, 16);
+        occupiedResult.setScheduleType("03");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultList().add(occupiedResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, firstSku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, secondSku);
+
+        strategy.scheduleReduceMould(context);
+
+        assertSharedEmbryoStaggerKept(context, "KSC01", 8);
+        assertSharedEmbryoStaggerKept(context, "KSC02", 8);
+    }
+
+    @Test
+    void sharedEmbryoEndingStagger_shouldRollbackReleasedCandidateWhenApplyFails() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        registerMachine(context, "KRB01");
+        SkuScheduleDTO sku = buildSharedEmbryoStaggerSku("MAT-ROLLBACK", "EMB-ROLLBACK", "01");
+        LhScheduleResult result = buildSharedEmbryoStaggerResult(context, "KRB01", sku, firstShift, 8);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+        ReflectionTestUtils.invokeMethod(strategy,
+                "recordSharedEmbryoEndingStaggerReleaseCandidate", context, sku, result);
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 0, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setSingleMouldShiftQty(0);
+
+        Boolean applied = ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostponeResult", context, result, firstShift.getShiftIndex(),
+                secondShift, context.getScheduleWindowShifts(), new LinkedHashMap<String, Integer>());
+
+        assertEquals(Boolean.FALSE, applied, "下一班次无产能时不应完成后延");
+        assertEquals(0, result.getDailyPlanQty().intValue(), "后延失败后应保持降模释放后的零计划状态");
+        assertEquals(0, ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()) == null
+                ? 0 : ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()).intValue(),
+                "后延失败后不应恢复原收尾班次计划量");
+    }
+
     private LhScheduleContext newContext() {
         LhScheduleContext context = new LhScheduleContext();
         context.setFactoryCode("116");
@@ -663,6 +927,110 @@ class ContinuousProductionResultQtyRegressionTest {
         result.setSpecEndTime(shift.getShiftEndDateTime());
         result.setTdaySpecEndTime(shift.getShiftEndDateTime());
         return result;
+    }
+
+    private void registerMachine(LhScheduleContext context, String machineCode) {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setMachineName(machineCode);
+        machine.setMaxMoldNum(1);
+        context.getMachineScheduleMap().put(machineCode, machine);
+        context.getInitialMachineScheduleMap().put(machineCode, machine);
+    }
+
+    private void registerMachineMould(LhScheduleContext context, String machineCode, String mouldCode) {
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode(machineCode);
+        onlineInfo.setInMachineMouldCode(mouldCode);
+        context.getMachineOnlineInfoMap().put(machineCode, onlineInfo);
+    }
+
+    private void registerCapsuleUsage(LhScheduleContext context, String machineCode, int usageCount) {
+        LhRepairCapsule capsule = new LhRepairCapsule();
+        capsule.setReplaceCapsuleCount(usageCount);
+        context.getCapsuleUsageMap().put(machineCode, capsule);
+    }
+
+    private void registerMouldRel(LhScheduleContext context, String materialCode, String mouldCode) {
+        MdmSkuMouldRel rel = new MdmSkuMouldRel();
+        rel.setMaterialCode(materialCode);
+        rel.setMouldCode(mouldCode);
+        context.getSkuMouldRelMap().computeIfAbsent(materialCode, key -> new ArrayList<MdmSkuMouldRel>()).add(rel);
+    }
+
+    private SkuScheduleDTO buildSharedEmbryoStaggerSku(String materialCode, String embryoCode, String productionType) {
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode(materialCode);
+        sku.setMaterialDesc(materialCode + "-DESC");
+        sku.setStructureName("PCR-STAGGER");
+        sku.setSpecCode("SPEC-" + materialCode);
+        sku.setEmbryoCode(embryoCode);
+        sku.setSkuTag("02");
+        sku.setProductionType(productionType);
+        sku.setStrictTargetQty(true);
+        sku.setTargetScheduleQty(8);
+        sku.setPendingQty(8);
+        sku.setSurplusQty(8);
+        sku.setShiftCapacity(16);
+        sku.setLhTimeSeconds(3600);
+        sku.setMouldQty(1);
+        sku.setScheduleType("01");
+        return sku;
+    }
+
+    private LhScheduleResult buildSharedEmbryoStaggerResult(LhScheduleContext context,
+                                                            String machineCode,
+                                                            SkuScheduleDTO sku,
+                                                            LhShiftConfigVO shift,
+                                                            int qty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setScheduleType("01");
+        result.setIsTypeBlock("0");
+        result.setMaterialCode(sku.getMaterialCode());
+        result.setMaterialDesc(sku.getMaterialDesc());
+        result.setStructureName(sku.getStructureName());
+        result.setLhMachineCode(machineCode);
+        result.setLhMachineName(machineCode);
+        result.setEmbryoCode(sku.getEmbryoCode());
+        result.setMouldSurplusQty(sku.getSurplusQty());
+        result.setEmbryoStock(0);
+        result.setLhTime(sku.getLhTimeSeconds());
+        result.setMouldQty(1);
+        result.setSingleMouldShiftQty(16);
+        result.setIsEnd("1");
+        ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), qty,
+                shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setSpecEndTime(shift.getShiftEndDateTime());
+        result.setTdaySpecEndTime(shift.getShiftEndDateTime());
+        context.getContinuousSkuList().add(sku);
+        return result;
+    }
+
+    private void assertSharedEmbryoStaggerPostponed(LhScheduleContext context,
+                                                    String machineCode,
+                                                    LhShiftConfigVO nextShift,
+                                                    int dailyPlanQty) {
+        LhScheduleResult result = findResultByMachine(context, machineCode);
+        assertEquals(dailyPlanQty, result.getDailyPlanQty().intValue(), "后延机台应保留原班次并补满下一班次");
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(result, nextShift.getShiftIndex()),
+                "后延机台下一班次应补满可排产能");
+        assertEquals(nextShift.getShiftEndDateTime(), result.getSpecEndTime(), "后延后收尾时间必须推到下一班次");
+    }
+
+    private void assertSharedEmbryoStaggerKept(LhScheduleContext context, String machineCode, int dailyPlanQty) {
+        LhScheduleResult result = findResultByMachine(context, machineCode);
+        assertEquals(dailyPlanQty, result.getDailyPlanQty().intValue(), "保留收尾机台不应新增下一班次补量");
+        Integer nextShiftPlanQty = result.getClass2PlanQty();
+        assertEquals(0, nextShiftPlanQty == null ? 0 : nextShiftPlanQty.intValue(),
+                "保留收尾机台不应被后延到下一班次");
+    }
+
+    private LhScheduleResult findResultByMachine(LhScheduleContext context, String machineCode) {
+        return context.getScheduleResultList().stream()
+                .filter(result -> machineCode.equals(result.getLhMachineCode()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("未找到机台结果: " + machineCode));
     }
 
     private SkuScheduleDTO buildMainSaleEndingSku(String materialCode, String structureName, String productionType) {

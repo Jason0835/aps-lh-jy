@@ -690,16 +690,18 @@ public class TargetScheduleQtyResolver {
             return resultQty;
         }
         int remainingQty = resolveEffectiveProductionRemainingQty(context, sku);
-        if (resultQty <= remainingQty) {
+        int allowedOverQty = resolveSharedEmbryoEndingStaggerAllowedOverQty(context, result);
+        int retainedLimitQty = remainingQty + allowedOverQty;
+        if (resultQty <= retainedLimitQty) {
             return resultQty;
         }
         if (CollectionUtils.isEmpty(shifts)) {
             log.warn("SKU实际消费账本裁剪缺少班次窗口，跳过结果裁剪, scene: {}, materialCode: {}, machineCode: {}, "
-                            + "结果量: {}, 账本剩余: {}",
-                    scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty);
+                            + "结果量: {}, 账本剩余: {}, 错峰后延允许超量: {}",
+                    scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty, allowedOverQty);
             return resultQty;
         }
-        int retainedQty = Math.max(0, remainingQty);
+        int retainedQty = Math.max(0, retainedLimitQty);
         int remainingRetainQty = retainedQty;
         int actualRetainedQty = 0;
         int mouldQty = Objects.nonNull(result.getMouldQty()) ? result.getMouldQty() : 0;
@@ -724,9 +726,28 @@ public class TargetScheduleQtyResolver {
         }
         ShiftFieldUtil.syncDailyPlanQty(result);
         log.info("SKU实际消费账本裁剪结果, scene: {}, materialCode: {}, machineCode: {}, 原结果量: {}, "
-                        + "有效账本剩余: {}, 裁剪后结果量: {}",
-                scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty, actualRetainedQty);
+                        + "有效账本剩余: {}, 错峰后延允许超量: {}, 裁剪后结果量: {}",
+                scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty,
+                allowedOverQty, actualRetainedQty);
         return actualRetainedQty;
+    }
+
+    /**
+     * 解析共用胎胚收尾错峰后延允许超量。
+     * <p>该超量属于错峰换模补满场景，不能被 SKU 实际消费账本当作普通超排回裁。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return 允许保留的错峰后延补量
+     */
+    private int resolveSharedEmbryoEndingStaggerAllowedOverQty(LhScheduleContext context,
+                                                               LhScheduleResult result) {
+        if (Objects.isNull(context) || Objects.isNull(result)
+                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            return 0;
+        }
+        Integer allowedOverQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+        return Objects.isNull(allowedOverQty) ? 0 : Math.max(0, allowedOverQty);
     }
 
     /**
