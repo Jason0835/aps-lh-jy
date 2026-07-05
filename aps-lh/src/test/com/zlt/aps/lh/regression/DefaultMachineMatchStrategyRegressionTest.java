@@ -687,7 +687,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001418", "SPEC-A", "22.5"));
 
-        assertEquals(2, candidates.size(), "待排小批量SKU未完成时，正规SKU仍应保留单控候选作为回落");
+        assertEquals(2, candidates.size(), "正规SKU应保留单控候选作为普通机台不足时的回落");
         assertEquals("K1401", candidates.get(0).getMachineCode(),
                 "正规SKU应优先选择非单控机台");
         assertEquals("K1501L", candidates.get(1).getMachineCode(),

@@ -1683,7 +1683,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 初始化新增待排SKU类型计数，供选机阶段日志与特殊机台保护规则复用。
+     * 初始化新增待排SKU类型计数，供选机阶段日志和规则排查复用。
      *
      * @param context 排程上下文
      */
@@ -1701,8 +1701,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 刷新新增待排SKU类型计数。
-     * <p>小批量单控保留只统计“当前窗口内仍有dayN剩余额度”的小批量SKU，
-     * 避免窗口额度已为0的小批量继续冻结单控机台。</p>
+     * <p>小批量已并入正规组排序；这里仍保留独立计数，只用于日志和规则排查。</p>
      *
      * @param context 排程上下文
      */
@@ -1739,7 +1738,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 判断小批量SKU在当前窗口内是否仍有待排日计划额度。
-     * <p>只要窗口内 dayN 全为0，即使SKU类型上属于小批量，也不再继续占用单控保留名额。</p>
+     * <p>只要窗口内 dayN 全为0，即使SKU类型上属于小批量，也不再计入待排小批量统计。</p>
      *
      * @param sku SKU
      * @return true-窗口内仍有待排额度
@@ -1928,13 +1927,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         if (isTypeRuleBlocked(context, sku) && isTrialConstructionStage(sku)) {
             return "试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产";
-        }
-        if (isTypeRuleBlocked(context, sku)
-                && !isTrialConstructionStage(sku)
-                && !isMassTrialSku(sku)
-                && context != null
-                && context.getPendingSmallBatchNewSpecSkuCount() > 0) {
-            return "待排小批量SKU未完成，单控机台优先保留给小批量SKU，当前正规SKU无法使用单控机台";
         }
         if (isSpecialMaterialSupportBlocked(context, sku)) {
             return "特殊材料SKU无匹配特殊支持机台，无法排产";
@@ -2442,7 +2434,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return preferredContinuousMachine;
         }
         if (preferredTrialMachine != null && containsMachine(scopedCandidates, preferredTrialMachine.getMachineCode())) {
-            log.info("新增排产优先尝试试制/小批量预选机台, materialCode: {}, machineCode: {}",
+            log.info("新增排产优先尝试试制/量试/小批量预选机台, materialCode: {}, machineCode: {}",
                     sku.getMaterialCode(), preferredTrialMachine.getMachineCode());
             return preferredTrialMachine;
         }

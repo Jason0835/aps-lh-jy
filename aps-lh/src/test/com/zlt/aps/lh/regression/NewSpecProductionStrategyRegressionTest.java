@@ -2407,7 +2407,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldReserveSingleControlForPendingSmallBatchBeforeFormalSku() throws Exception {
+    void scheduleNewSpecs_shouldNotUseSmallBatchReserveReasonForFormalSku() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
         injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
@@ -2433,9 +2433,12 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals("待排小批量SKU未完成，单控机台优先保留给小批量SKU，当前正规SKU无法使用单控机台",
-                findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001513").getUnscheduledReason(),
-                "正规SKU前面命中唯一单控时，应先把单控资源保留给后续待排小批量SKU");
+        assertNotNull(findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001513"),
+                "测试夹具未配置可用模具时，正规SKU仍可能因后续资源约束进入未排");
+        assertFalse(StringUtils.equals("待排小批量SKU未完成，单控机台优先保留给小批量SKU，当前正规SKU无法使用单控机台",
+                        findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001513")
+                                .getUnscheduledReason()),
+                "小批量已归入正规组排序，不能再生成小批量保留单控导致的未排原因");
     }
 
     @Test

@@ -1075,6 +1075,33 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作降模释放后的机台已经没有有效续作结果时，不能继续沿用初始化前批次收尾时间。
+     */
+    @Test
+    public void shouldResetReleasedContinuousMachineEndTimeToWindowStartWhenNoEffectiveResult() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        MachineScheduleDTO machine = buildNewSpecMachine("K1502R");
+        machine.setCurrentMaterialCode("3202000565");
+        machine.setEstimatedEndTime(dateTime(2026, 6, 12, 21, 0));
+        MachineScheduleDTO initialMachine = buildNewSpecMachine("K1502R");
+        initialMachine.setCurrentMaterialCode("3202000565");
+        initialMachine.setEstimatedEndTime(dateTime(2026, 6, 12, 21, 0));
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getInitialMachineScheduleMap().put(machine.getMachineCode(), initialMachine);
+        context.getReleasedContinuousMachineCodeSet().add(machine.getMachineCode());
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "syncMachineStateAfterContinuousAdjust", LhScheduleContext.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context);
+
+        Assertions.assertEquals(context.getScheduleWindowShifts().get(0).getShiftStartDateTime(),
+                machine.getEstimatedEndTime());
+        Assertions.assertFalse(machine.isEnding());
+    }
+
+    /**
      * 续作已按硫化余量建立严格收尾目标后，再次准备欠产账本不能用历史欠产抬高目标量。
      */
     @Test

@@ -278,12 +278,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             retainedCandidates.addAll(normalCandidates);
             return retainedCandidates;
         }
-        if (context != null && context.getPendingSmallBatchNewSpecSkuCount() > 0) {
-            // 待排小批量SKU未完成前，正规SKU仍保留单控候选，但单控只能作为普通机台后的回落。
-            return retainNormalThenSingleCandidates(singleControlCandidates, normalCandidates);
-        }
         if (!CollectionUtils.isEmpty(normalCandidates)) {
-            // 小批量已全部排完后，正规SKU优先普通机台，但仍可保留单控候选作为回落机台。
+            // 正规SKU优先普通机台，但仍可保留单控候选作为普通机台不足时的回落机台。
             // 单控放在普通机台之后，避免正规 SKU 抢占后续特殊 SKU 可能需要的单控资源。
             return retainNormalThenSingleCandidates(singleControlCandidates, normalCandidates);
         }
@@ -358,16 +354,13 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return "小批量SKU优先使用单控机台，单控候选不足时允许普通机台";
         }
         if (isFormalSku(sku) && singleControlMachine) {
-            if (context != null && context.getPendingSmallBatchNewSpecSkuCount() > 0) {
-                return "待排小批量SKU未完成，正规SKU单控候选降为普通机台后的回落候选";
-            }
             return "正规SKU优先使用普通机台";
         }
         return "SKU类型机台约束";
     }
 
     /**
-     * 输出单控机台候选诊断日志，便于排查小批量/正规SKU单控回落链路。
+     * 输出单控机台候选诊断日志，便于排查不同类型SKU的单控/普通机台回落链路。
      *
      * @param context 排程上下文
      * @param sku SKU

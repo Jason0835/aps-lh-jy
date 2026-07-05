@@ -10,6 +10,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
@@ -1004,13 +1005,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                                                                        int year,
                                                                        int month) {
         String locationText = formatFactoryYearMonth(context.getFactoryDisplayName(), year, month);
-        String monthPlanVersion = resolveMonthPlanVersion(context, year, month);
-        if (StringUtils.isEmpty(monthPlanVersion)) {
-            log.error("月生产计划加载失败，需求版本为空, factoryCode: {}, year: {}, month: {}",
-                    factoryCode, year, month);
-            interruptByDataIncomplete(context, String.format("%s 的定稿需求版本为空", locationText));
-            return new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
-        }
         String productionVersion = resolveProductionVersion(context, year, month);
         if (StringUtils.isEmpty(productionVersion)) {
             log.error("月生产计划加载失败，排产版本为空, factoryCode: {}, year: {}, month: {}",
@@ -1018,15 +1012,67 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             interruptByDataIncomplete(context, String.format("%s 的定稿排产版本为空", locationText));
             return new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
         }
+        // 同一排产版本下可能同时存在原始需求版本和调整需求版本，不能用 MONTH_PLAN_VERSION 过滤。
         LambdaQueryWrapper<FactoryMonthPlanProductionFinalResult> wrapper = new LambdaQueryWrapper<FactoryMonthPlanProductionFinalResult>()
                 .eq(FactoryMonthPlanProductionFinalResult::getFactoryCode, factoryCode)
                 .eq(FactoryMonthPlanProductionFinalResult::getYear, year)
                 .eq(FactoryMonthPlanProductionFinalResult::getMonth, month)
-                .eq(FactoryMonthPlanProductionFinalResult::getMonthPlanVersion, monthPlanVersion)
                 .eq(FactoryMonthPlanProductionFinalResult::getProductionVersion, productionVersion)
                 .eq(FactoryMonthPlanProductionFinalResult::getIsDelete, DeleteFlagEnum.NORMAL.getCode());
         List<FactoryMonthPlanProductionFinalResult> monthPlanList = monthPlanMapper.selectList(wrapper);
-        return monthPlanList != null ? monthPlanList : new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
+        List<FactoryMonthPlanProductionFinalResult> resultList = monthPlanList != null
+                ? monthPlanList : new ArrayList<FactoryMonthPlanProductionFinalResult>(0);
+        traceMonthPlanQuerySummary(factoryCode, year, month, productionVersion, resultList);
+        return resultList;
+    }
+
+    /**
+     * 输出月计划查询版本口径和施工阶段统计。
+     *
+     * @param factoryCode 工厂编码
+     * @param year 年份
+     * @param month 月份
+     * @param productionVersion 排产版本
+     * @param monthPlanList 月计划列表
+     */
+    private void traceMonthPlanQuerySummary(String factoryCode,
+                                            int year,
+                                            int month,
+                                            String productionVersion,
+                                            List<FactoryMonthPlanProductionFinalResult> monthPlanList) {
+        int trialCount = 0;
+        int massTrialCount = 0;
+        int formalCount = 0;
+        int otherCount = 0;
+        Set<String> demandVersionSet = new LinkedHashSet<String>(4);
+        if (!CollectionUtils.isEmpty(monthPlanList)) {
+            for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
+                if (Objects.isNull(plan)) {
+                    continue;
+                }
+                if (StringUtils.isNotEmpty(plan.getMonthPlanVersion())) {
+                    demandVersionSet.add(plan.getMonthPlanVersion());
+                }
+                if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), plan.getConstructionStage())) {
+                    trialCount++;
+                    continue;
+                }
+                if (StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), plan.getConstructionStage())) {
+                    massTrialCount++;
+                    continue;
+                }
+                if (StringUtils.equals(ConstructionStageEnum.FORMAL.getCode(), plan.getConstructionStage())) {
+                    formalCount++;
+                    continue;
+                }
+                otherCount++;
+            }
+        }
+        log.info("月生产计划按排产版本加载完成, factoryCode: {}, year: {}, month: {}, productionVersion: {}, "
+                        + "需求版本集合: {}, loadedCount: {}, 试制行数: {}, 量试行数: {}, 正式行数: {}, 其他行数: {}",
+                factoryCode, year, month, productionVersion, demandVersionSet,
+                CollectionUtils.isEmpty(monthPlanList) ? 0 : monthPlanList.size(),
+                trialCount, massTrialCount, formalCount, otherCount);
     }
 
     /**

@@ -39,7 +39,7 @@ import java.util.Objects;
  * <ul>
  *   <li>同时服务 S4.4 续作和 S4.5 新增排产的 SKU 顺序整理；</li>
  *   <li>主排序优先考虑交期锁定、延误天数、结构全收尾、供应链优先级等全局因素；</li>
- *   <li>试制、量试、小批量只在新增 SKU 的同层级 tie-break 中体现，不直接越过交期、延误和结构收尾主排序；</li>
+ *   <li>试制、量试按新增 SKU 类型分组优先；小批量并入正规组，不再天然排在正规 SKU 之前；</li>
  *   <li>排序完成后回写 {@code scheduleOrder}，供最终结果展示和日志追踪。</li>
  * </ul>
  *
@@ -74,7 +74,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         Comparator<SkuScheduleDTO> tailComparator = buildTailComparator(context);
         Comparator<SkuScheduleDTO> comparator = priorityComparator.thenComparing(tailComparator)
                 .thenComparing(SkuScheduleDTO::getMaterialCode, Comparator.nullsLast(String::compareTo));
-        // 新增规格有试制/量试/小批量 tie-break，因此使用专用比较器；续作沿用主比较器。
+        // 新增规格按试制、量试、正规组分层；小批量作为正规组 SKU 继续走通用排序。
         Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(
                 context, structurePriorityMap, structureEndingDaysMap, tailComparator);
         sortSkuList(context.getContinuousSkuList(), comparator);
@@ -164,7 +164,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
     /**
      * 构建新增SKU比较器。
-     * <p>试制、量试、小批量不参与主排序越级，仅在新增SKU主排序和供应链数量完全一致时作为补充排序。</p>
+     * <p>试制、量试先于正规组；小批量并入正规组，继续复用正规新增排序。</p>
      *
      * @param context 排程上下文
      * @param priorityComparator 锁交期/延期/结构优先比较器
@@ -185,7 +185,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
                                   Comparator<SkuScheduleDTO> tailComparator,
                                   SkuScheduleDTO left,
                                   SkuScheduleDTO right) {
-        // 新增SKU先按施工阶段分组：试制、量试、小批量/正规分层；分组内再走各自规则。
+        // 新增SKU先按施工阶段分组：试制、量试、正规组分层；小批量归入正规组。
         // 续作欠产转入新增的补偿SKU不再享有同组内置顶优先权，统一按现有新增排序规则参与排序。
         int compareResult = Integer.compare(resolveNewSpecGroupScore(left), resolveNewSpecGroupScore(right));
         if (compareResult != 0) {
@@ -224,8 +224,7 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
     /**
      * 解析新增SKU类型补充排序分。
-     * <p>仅在新增SKU前置排序条件完全一致时参与比较：
-     * 试制 -> 量试 -> 小批量 -> 正规。</p>
+     * <p>试制 -> 量试 -> 正规组；小批量归入正规组，不再单独给排序分。</p>
      *
      * @param sku SKU
      * @return 排序分，值越小越优先

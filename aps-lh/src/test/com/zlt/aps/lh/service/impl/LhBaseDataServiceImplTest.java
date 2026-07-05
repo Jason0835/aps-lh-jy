@@ -348,12 +348,12 @@ public class LhBaseDataServiceImplTest {
     }
 
     /**
-     * 用例说明：跨月加载必须按各自然月定稿记录中的需求版本和排产版本查询月计划、结构统计与周程调整。
+     * 用例说明：跨月加载必须按各自然月定稿记录中的排产版本查询月计划，并保留需求版本供结构统计等链路使用。
      *
      * @throws Exception 反射注入异常
      */
     @Test
-    public void loadAllBaseDataShouldUseYearMonthSpecificMonthPlanVersionAcrossQueries() throws Exception {
+    public void loadAllBaseDataShouldUseYearMonthSpecificProductionVersionAcrossQueries() throws Exception {
         LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
         injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
         LhScheduleContext context = buildContext();
@@ -419,6 +419,46 @@ public class LhBaseDataServiceImplTest {
         Assertions.assertEquals("PV-06", context.getProductionVersionByYearMonthMap().get("2026_6"));
         Assertions.assertEquals("PV-07", context.getProductionVersionByYearMonthMap().get("2026_7"));
         Assertions.assertEquals(2, context.getLoadedMonthPlanList().size(), "跨月应加载两个自然月的月计划");
+    }
+
+    /**
+     * 用例说明：月计划查询只能按排产版本取数，不能再按需求版本过滤，否则会漏掉同排产版本下的调整版本试制/量试行。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void queryMonthPlanShouldUseProductionVersionOnlyAndKeepAdjustedDemandRows() throws Exception {
+        LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
+        LhScheduleContext context = buildContext();
+        context.setProductionVersion("I20260624154810");
+        context.setMonthPlanVersion(null);
+        AtomicBoolean monthPlanQueried = new AtomicBoolean(false);
+
+        FactoryMonthPlanProductionFinalResult formalPlan = monthPlan(
+                "3302000001", 2026, 7, "REQ20260619003", "I20260624154810");
+        formalPlan.setConstructionStage("03");
+        FactoryMonthPlanProductionFinalResult trialPlan = monthPlan(
+                "3302002468", 2026, 7, "ADJ20260630001", "I20260624154810");
+        trialPlan.setConstructionStage("01");
+
+        FactoryMonthPlanProductionFinalResultMapper monthPlanMapper =
+                mockMapper(FactoryMonthPlanProductionFinalResultMapper.class);
+        Mockito.when(monthPlanMapper.selectList(ArgumentMatchers.any())).thenAnswer(invocation -> {
+            monthPlanQueried.set(true);
+            return Arrays.asList(formalPlan, trialPlan);
+        });
+        injectField(service, "monthPlanMapper", monthPlanMapper);
+
+        List<FactoryMonthPlanProductionFinalResult> resultList = ReflectionTestUtils.invokeMethod(service,
+                "queryMonthPlan", context, "116", 2026, 7);
+
+        Assertions.assertTrue(monthPlanQueried.get(),
+                "月计划查询不能再依赖需求版本，需求版本为空时仍应按排产版本查数");
+        Assertions.assertFalse(context.isInterrupted(), "需求版本为空不能中断月计划查询");
+        Assertions.assertEquals(2, resultList.size(), "同一排产版本下的原始需求行和调整需求行都应被加载");
+        Assertions.assertTrue(resultList.stream()
+                        .anyMatch(plan -> "3302002468".equals(plan.getMaterialCode())),
+                "调整版本试制SKU应进入月计划结果集");
     }
 
     /**

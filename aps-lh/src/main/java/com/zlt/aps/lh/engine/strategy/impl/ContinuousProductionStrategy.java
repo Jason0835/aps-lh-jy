@@ -7014,6 +7014,35 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         machine.setPreviousProSize(initialMachine.getPreviousProSize());
         machine.setEstimatedEndTime(initialMachine.getEstimatedEndTime());
         machine.setEnding(initialMachine.isEnding());
+        if (context.getReleasedContinuousMachineCodeSet().contains(machineCode)) {
+            Date releaseTime = resolveReleasedContinuousMachineAvailableTime(context);
+            // 续作降模或零计划移除后，机台已释放给换活字块/新增链路，不能继续沿用前批次收尾时间占用窗口。
+            machine.setEstimatedEndTime(releaseTime);
+            machine.setEnding(false);
+            log.info("续作释放机台状态回写完成, machineCode: {}, initialEndTime: {}, releaseTime: {}, "
+                            + "effect: S4.4/S4.5按释放后时间重新选机",
+                    machineCode, LhScheduleTimeUtil.formatDateTime(initialMachine.getEstimatedEndTime()),
+                    LhScheduleTimeUtil.formatDateTime(releaseTime));
+        }
+    }
+
+    /**
+     * 解析续作释放机台可重新参与排产的时间。
+     *
+     * @param context 排程上下文
+     * @return 释放后可用时间
+     */
+    private Date resolveReleasedContinuousMachineAvailableTime(LhScheduleContext context) {
+        if (Objects.isNull(context)) {
+            return null;
+        }
+        if (!CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+            if (Objects.nonNull(firstShift) && Objects.nonNull(firstShift.getShiftStartDateTime())) {
+                return firstShift.getShiftStartDateTime();
+            }
+        }
+        return context.getScheduleDate();
     }
 
     /**
