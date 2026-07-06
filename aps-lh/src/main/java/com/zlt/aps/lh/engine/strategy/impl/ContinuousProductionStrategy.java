@@ -3443,7 +3443,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (!policy.isStrictUpperLimit()) {
             return;
         }
-        int allowedOverQty = resolveSharedEmbryoEndingStaggerAllowedOverQty(context, skuResults);
+        int allowedOverQty = resolveEndingAllowedOverQty(context, skuResults);
         int targetQty = Math.max(0, sourceSku.resolveTargetScheduleQty()) + allowedOverQty;
         int totalPlanQty = skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum();
         int overQty = totalPlanQty - targetQty;
@@ -3464,7 +3464,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             capResultShiftQtyToTarget(context, result, shifts, nextQty);
             overQty -= currentQty - ShiftFieldUtil.resolveScheduledQty(result);
         }
-        log.info("续作严格收尾最终收口, materialCode: {}, 目标量: {}, 错峰后延允许超量: {}, 原总量: {}, "
+        log.info("续作严格收尾最终收口, materialCode: {}, 目标量: {}, 收尾规则允许超量: {}, 原总量: {}, "
                         + "收口后总量: {}, 机台列表: {}",
                 sourceSku.getMaterialCode(), targetQty, allowedOverQty, totalPlanQty,
                 skuResults.stream().mapToInt(ShiftFieldUtil::resolveScheduledQty).sum(),
@@ -3472,23 +3472,46 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 汇总同组结果的共用胎胚收尾错峰允许超量。
+     * 汇总同组结果的收尾规则允许超量。
      *
      * @param context 排程上下文
      * @param skuResults 同SKU续作结果
      * @return 允许超目标量
      */
-    private int resolveSharedEmbryoEndingStaggerAllowedOverQty(LhScheduleContext context,
-                                                               List<LhScheduleResult> skuResults) {
-        if (Objects.isNull(context) || CollectionUtils.isEmpty(skuResults)
-                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+    private int resolveEndingAllowedOverQty(LhScheduleContext context, List<LhScheduleResult> skuResults) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(skuResults)) {
             return 0;
         }
         int allowedOverQty = 0;
         for (LhScheduleResult result : skuResults) {
-            Integer qty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
-            if (Objects.nonNull(qty) && qty > 0) {
-                allowedOverQty += qty;
+            allowedOverQty += resolveEndingAllowedOverQty(context, result);
+        }
+        return allowedOverQty;
+    }
+
+    /**
+     * 解析单条结果的收尾规则允许超量。
+     * <p>允许超量统一承接共用胎胚错峰后延和主销/常规收尾补满，后续严格收口与账本扣减共用同一口径。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return 允许超目标量
+     */
+    private int resolveEndingAllowedOverQty(LhScheduleContext context, LhScheduleResult result) {
+        if (Objects.isNull(context) || Objects.isNull(result)) {
+            return 0;
+        }
+        int allowedOverQty = 0;
+        if (!CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            Integer staggerQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+            if (Objects.nonNull(staggerQty) && staggerQty > 0) {
+                allowedOverQty += staggerQty;
+            }
+        }
+        if (!CollectionUtils.isEmpty(context.getEndingFillAllowedOverQtyMap())) {
+            Integer endingFillQty = context.getEndingFillAllowedOverQtyMap().get(result);
+            if (Objects.nonNull(endingFillQty) && endingFillQty > 0) {
+                allowedOverQty += endingFillQty;
             }
         }
         return allowedOverQty;
@@ -5212,20 +5235,45 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     result.getMaterialCode(), result.getLhMachineCode(), businessDate, nextShift.getShiftIndex());
             return;
         }
-        if (!fillEndingShifts(context, result, currentShift, nextShift)) {
-            return;
-        }
+        context.getEndingFillAllowedOverQtyMap().remove(result);
+        int filledQty = fillEndingShifts(context, result, currentShift, nextShift);
         context.recordScheduledMachine(businessDate, sku.getStructureName(), sku.getMaterialCode(),
                 result.getLhMachineCode());
         refreshResultSummary(context, result, shifts);
+        int allowedOverQty = recordEndingFillAllowedOverQty(context, result, sku);
+        if (filledQty <= 0 && allowedOverQty <= 0) {
+            return;
+        }
         log.info("SKU收尾补满完成, materialCode: {}, machineCode: {}, productionType: {}, embryoCode: {}, "
                         + "businessDate: {}, structureName: {}, "
                         + "planMachineCount: {}, scheduledMachineCountBefore: {}, scheduledMachineCountAfter: {}, "
-                        + "endingTime: {}",
+                        + "endingTime: {}, 本次补量: {}, 允许超量: {}",
                 result.getMaterialCode(), result.getLhMachineCode(), sku.getProductionType(), sku.getEmbryoCode(),
                 businessDate, sku.getStructureName(), planMachineCount, scheduledMachineCount,
                 context.getStructureScheduledMachineCount(businessDate, sku.getStructureName()),
-                LhScheduleTimeUtil.formatDateTime(endingTime));
+                LhScheduleTimeUtil.formatDateTime(endingTime), filledQty, allowedOverQty);
+    }
+
+    /**
+     * 登记SKU收尾补满允许超目标量。
+     * <p>允许超量必须按最终结果量覆盖计算，不能按本次补量累加；同一结果重复收敛时旧值会先被清理，避免账本少扣。</p>
+     *
+     * @param context 排程上下文
+     * @param result 续作结果
+     * @param sku 来源SKU
+     * @return 本次登记的允许超目标量
+     */
+    private int recordEndingFillAllowedOverQty(LhScheduleContext context, LhScheduleResult result, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(result) || Objects.isNull(sku)) {
+            return 0;
+        }
+        int allowedOverQty = Math.max(0, ShiftFieldUtil.resolveScheduledQty(result) - sku.resolveTargetScheduleQty());
+        if (allowedOverQty <= 0) {
+            context.getEndingFillAllowedOverQtyMap().remove(result);
+            return 0;
+        }
+        context.getEndingFillAllowedOverQtyMap().put(result, allowedOverQty);
+        return allowedOverQty;
     }
 
     /**
@@ -5358,35 +5406,35 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param result 续作结果
      * @param currentShift 当前中班
      * @param nextShift 下一晚班
-     * @return true-发生补满；false-无可补产能
+     * @return 本次补满新增计划量；0-无可补产能
      */
-    private boolean fillEndingShifts(LhScheduleContext context,
-                                     LhScheduleResult result,
-                                     LhShiftConfigVO currentShift,
-                                     LhShiftConfigVO nextShift) {
+    private int fillEndingShifts(LhScheduleContext context,
+                                 LhScheduleResult result,
+                                 LhShiftConfigVO currentShift,
+                                 LhShiftConfigVO nextShift) {
         int currentBeforeQty = resolveShiftPlanQty(result, currentShift.getShiftIndex());
         int currentShiftCapacity = calculateResultShiftCapacity(context, result, currentShift);
         int nextBeforeQty = resolveShiftPlanQty(result, nextShift.getShiftIndex());
         int nextShiftCapacity = calculateResultShiftCapacity(context, result, nextShift);
-        boolean filled = false;
+        int filledQty = 0;
         if (currentShiftCapacity > currentBeforeQty) {
             Date currentStartTime = ShiftFieldUtil.getShiftStartTime(result, currentShift.getShiftIndex());
             setShiftPlanQty(result, currentShift.getShiftIndex(), currentShiftCapacity,
                     Objects.isNull(currentStartTime) ? currentShift.getShiftStartDateTime() : currentStartTime,
                     currentShift.getShiftEndDateTime());
-            filled = true;
+            filledQty += currentShiftCapacity - currentBeforeQty;
         }
         if (nextShiftCapacity > nextBeforeQty) {
             setShiftPlanQty(result, nextShift.getShiftIndex(), nextShiftCapacity,
                     nextShift.getShiftStartDateTime(), nextShift.getShiftEndDateTime());
-            filled = true;
+            filledQty += nextShiftCapacity - nextBeforeQty;
         }
         log.info("SKU收尾补满判断, materialCode: {}, machineCode: {}, currentShift: {}, nextShift: {}, "
-                        + "currentBeforeQty: {}, currentCapacity: {}, nextBeforeQty: {}, nextCapacity: {}, filled: {}",
+                        + "currentBeforeQty: {}, currentCapacity: {}, nextBeforeQty: {}, nextCapacity: {}, 本次补量: {}",
                 result.getMaterialCode(), result.getLhMachineCode(), currentShift.getShiftIndex(),
                 nextShift.getShiftIndex(), currentBeforeQty, currentShiftCapacity, nextBeforeQty,
-                nextShiftCapacity, filled);
-        return filled;
+                nextShiftCapacity, filledQty);
+        return filledQty;
     }
 
     /**
@@ -6825,7 +6873,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (CollectionUtils.isEmpty(quotaMap)) {
             refreshResultSummary(context, result, shifts);
             int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
-            int ledgerDeductQty = resolveContinuousLedgerDeductQtyForSharedEmbryoStagger(
+            int ledgerDeductQty = resolveContinuousLedgerDeductQtyForEndingAllowedOverQty(
                     context, result, actualQty);
             getTargetScheduleQtyResolver().deductProductionRemainingQty(
                     context, sku, ledgerDeductQty, "续作排产", result.getLhMachineCode());
@@ -6876,7 +6924,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         refreshResultSummary(context, result, shifts);
         int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;
-        int ledgerDeductQty = resolveContinuousLedgerDeductQtyForSharedEmbryoStagger(
+        int ledgerDeductQty = resolveContinuousLedgerDeductQtyForEndingAllowedOverQty(
                 context, result, actualQty);
         getTargetScheduleQtyResolver().deductProductionRemainingQty(
                 context, sku, ledgerDeductQty, "续作排产", result.getLhMachineCode());
@@ -6884,23 +6932,22 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * 解析续作结果实际消费账本扣减量。
-     * <p>共用胎胚收尾错峰后延允许后延机台补满下一班次，补量属于规则例外，不能继续消耗SKU普通目标量账本。</p>
-     * <p>因此账本只扣除“结果总量 - 错峰允许超量”，严格收口和结果校验仍可通过允许超量识别该部分不是普通超排。</p>
+     * <p>共用胎胚错峰后延和主销/常规收尾补满都属于收尾规则例外，补量不能继续消耗SKU普通目标量账本。</p>
+     * <p>因此账本只扣除“结果总量 - 收尾规则允许超量”，严格收口和结果校验仍可通过允许超量识别该部分不是普通超排。</p>
      *
      * @param context 排程上下文
      * @param result 续作结果
      * @param actualQty 结果当前排产量
      * @return 实际消费账本扣减量
      */
-    private int resolveContinuousLedgerDeductQtyForSharedEmbryoStagger(LhScheduleContext context,
-                                                                       LhScheduleResult result,
-                                                                       int actualQty) {
-        if (actualQty <= 0 || Objects.isNull(context) || Objects.isNull(result)
-                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+    private int resolveContinuousLedgerDeductQtyForEndingAllowedOverQty(LhScheduleContext context,
+                                                                        LhScheduleResult result,
+                                                                        int actualQty) {
+        if (actualQty <= 0 || Objects.isNull(context) || Objects.isNull(result)) {
             return Math.max(0, actualQty);
         }
-        Integer allowedOverQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
-        if (Objects.isNull(allowedOverQty) || allowedOverQty <= 0) {
+        int allowedOverQty = resolveEndingAllowedOverQty(context, result);
+        if (allowedOverQty <= 0) {
             return Math.max(0, actualQty);
         }
         return Math.max(0, actualQty - allowedOverQty);

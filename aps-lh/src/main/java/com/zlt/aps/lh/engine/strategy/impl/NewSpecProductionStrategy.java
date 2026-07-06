@@ -9933,6 +9933,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         unscheduled.setDataSource(AUTO_DATA_SOURCE);
         unscheduled.setIsDelete(0);
         context.getUnscheduledResultList().add(unscheduled);
+        // 命中胎胚库存硬目标的新增SKU进入未排后，必须退出运行态有效集合，触发同胎胚剩余SKU二次分摊。
+        if (getTargetScheduleQtyResolver().isEmbryoStockEnding(context, sku)) {
+            getTargetScheduleQtyResolver().removeActiveEmbryoSku(context, sku, reason);
+        }
         log.debug("新增SKU未排产, SKU: {}, 未排数量: {}, 原因: {}",
                 sku.getMaterialCode(), Math.max(0, unscheduledQty), reason);
     }

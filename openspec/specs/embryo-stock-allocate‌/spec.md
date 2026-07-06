@@ -33,6 +33,15 @@
 - **THEN** SKU 收尾目标量仍为 `MAX(胎胚库存, 硫化余量)`
 - **AND** SKU 非收尾目标量仍为硫化余量
 
+#### Scenario: 共用胎胚分摊前基于实际余量刷新收尾天数
+
+- **WHEN** 系统进入共用胎胚库存分摊逻辑
+- **AND** SKU 的 `endingDaysRemaining` 由 `markEndingSkus` 阶段以窗口计划量计算
+- **AND** 实际硫化余量远小于窗口计划量
+- **THEN** 系统 MUST 基于实际硫化余量（`surplusQty`）和班产（`shiftCapacity`）重新计算 `endingDaysRemaining`
+- **AND** 计算公式为 `ceil(ceil(surplusQty / shiftCapacity) / DEFAULT_SHIFTS_PER_DAY)`
+- **AND** 刷新后的 `endingDaysRemaining` 用于 T 日收尾硬目标准入判断，确保余量较少的 SKU 不因窗口计划量偏差被错误排除
+
 ### Requirement: 胎胚库存消费账本
 
 系统必须（MUST）使用运行态对象 `EmbryoStockConsumeLedger` 控制胎胚库存消费。
@@ -128,12 +137,21 @@ embryoCode + "_" + scheduleDate
 - **WHEN** 共用胎胚 SKU 已收尾完成、目标量为 0 或写入未排
 - **THEN** 后续必须从该胎胚有效 SKU 集合中剔除
 - **AND** 重新判断剩余 SKU 是否仍满足共用胎胚 T 日同日收尾
+- **AND** 若该 SKU 命中胎胚库存 T 日硬目标，必须清理该 SKU 的内部库存额度和硬目标标记
+- **AND** 必须立即刷新同胎胚剩余有效 SKU 的库存分摊，使未消费额度回流给仍可排产的 SKU
 
 #### Scenario: 动态转单胎胚
 
 - **WHEN** 剔除后只剩一个 SKU 使用该胎胚
 - **THEN** 后续必须按单胎胚 T 日胎胚收尾账本处理
 - **AND** 该 SKU 的胎胚库存展示和结果落库仍保存原始胎胚库存
+
+#### Scenario: 新增排产未排后的二次分摊
+
+- **WHEN** 共用胎胚 T 日同日收尾 SKU 在新增排产中因首检失败、候选为空、换模不可行或其他业务原因写入未排
+- **THEN** 系统 MUST 通过统一未排入口从运行态有效 SKU 集合剔除该 SKU
+- **AND** 系统 MUST 将其未消费的 SKU 内部额度重新分摊给同胎胚剩余有效 SKU
+- **AND** 若剩余有效 SKU 仍无法消化组级胎胚库存，系统 MUST 保留明确的未排或过程日志原因，不得静默丢失库存额度
 
 ## Verification
 

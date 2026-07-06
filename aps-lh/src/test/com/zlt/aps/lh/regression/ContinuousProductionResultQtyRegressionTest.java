@@ -12,6 +12,8 @@ import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
+import com.zlt.aps.lh.exception.ScheduleException;
+import com.zlt.aps.lh.handler.ResultValidationHandler;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
@@ -33,8 +35,10 @@ import java.util.Map;
 import java.time.LocalDate;
 import java.time.ZoneId;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
@@ -328,6 +332,82 @@ class ContinuousProductionResultQtyRegressionTest {
 
         assertEquals(18, result.getClass5PlanQty().intValue(), "常规收尾SKU胎胚在机且20点后应补满当天中班");
         assertEquals(18, result.getClass6PlanQty().intValue(), "常规收尾SKU胎胚在机且20点后应补满下一个晚班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldKeepEndingFillWhenStrictTargetCappedAgain() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200NORMAL", "PCR-01", "02");
+        sku.setTargetScheduleQty(8);
+        sku.setRemainingScheduleQty(8);
+        markRuntimeSharedEmbryo(context, sku, "330200NORMAL-SHARED");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1909", "330200NORMAL", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+        ReflectionTestUtils.invokeMethod(strategy, "capStrictEndingContinuationGroupToTarget",
+                context, sku, Collections.singletonList(result), context.getScheduleWindowShifts());
+
+        assertEquals(18, result.getClass5PlanQty().intValue(), "常规收尾补满中班不应被严格目标复核回裁");
+        assertEquals(18, result.getClass6PlanQty().intValue(), "常规收尾补满夜班不应被严格目标复核回裁");
+        assertEquals(36, ShiftFieldUtil.resolveScheduledQty(result), "补满允许超量应纳入最终严格收口上限");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldRecordOnlyFinalOverTargetQtyAsEndingFillAllowedOverQty() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200NORMAL", "PCR-01", "02");
+        sku.setTargetScheduleQty(30);
+        sku.setRemainingScheduleQty(30);
+        markRuntimeSharedEmbryo(context, sku, "330200NORMAL-SHARED");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
+        LhScheduleResult result = buildMainSaleEndingResult(context, afternoonShift, "K1910", "330200NORMAL", 8);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(36, ShiftFieldUtil.resolveScheduledQty(result), "收尾补满后结果量应保持两班满班");
+        assertEquals(Integer.valueOf(6), context.getEndingFillAllowedOverQtyMap().get(result),
+                "允许超量只能按最终结果量超出SKU目标量部分覆盖登记，不能按本次补量累加");
+    }
+
+    @Test
+    void resultValidation_shouldUseEndingFillAllowedOverQtyForStrictEndingLimit() {
+        LhScheduleContext context = newContext();
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200NORMAL", "PCR-01", "02");
+        sku.setTargetScheduleQty(8);
+        sku.setRemainingScheduleQty(8);
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("330200NORMAL");
+        result.setLhMachineCode("K1911");
+        result.setMouldQty(2);
+        result.setSingleMouldShiftQty(18);
+        ShiftFieldUtil.setShiftPlanQty(result, 5, 18, new Date(), null);
+        ShiftFieldUtil.setShiftPlanQty(result, 6, 18, new Date(), null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+        context.getEndingFillAllowedOverQtyMap().put(result, 28);
+        ResultValidationHandler handler = new ResultValidationHandler();
+
+        assertDoesNotThrow(() -> ReflectionTestUtils.invokeMethod(handler,
+                "validateProductionQuantityPolicy", context), "目标量加允许超量内的收尾补满结果应通过最终校验");
+
+        ShiftFieldUtil.setShiftPlanQty(result, 6, 20, new Date(), null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        assertThrows(ScheduleException.class, () -> ReflectionTestUtils.invokeMethod(handler,
+                "validateProductionQuantityPolicy", context), "超过目标量加允许超量后仍必须被最终校验拦截");
     }
 
     @Test

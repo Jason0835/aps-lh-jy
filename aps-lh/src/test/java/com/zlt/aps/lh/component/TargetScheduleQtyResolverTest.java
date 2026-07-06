@@ -375,6 +375,34 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
+     * 用例说明：收尾补满允许超量只放宽已登记的补满部分，普通超排仍必须按实际消费账本回裁。
+     */
+    @Test
+    public void shouldRetainEndingFillAllowedOverQtyWhenCappingProductionLedger() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = buildSku("3302003008", "EMB-11", 8, 0, 8);
+        sku.setSkuTag("02");
+        sku.setStrictTargetQty(true);
+        context.getSkuProductionRemainingQtyMap().put("3302003008", 8);
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302003008");
+        result.setLhMachineCode("K1109");
+        result.setMouldQty(2);
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 40, new Date(), null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        context.getEndingFillAllowedOverQtyMap().put(result, 28);
+        LhShiftConfigVO firstShift = new LhShiftConfigVO();
+        firstShift.setShiftIndex(1);
+
+        int cappedQty = resolver.capResultByProductionRemainingQty(
+                context, sku, result, Collections.singletonList(firstShift), "续作排产");
+
+        Assertions.assertEquals(36, cappedQty);
+        Assertions.assertEquals(Integer.valueOf(36), ShiftFieldUtil.getShiftPlanQty(result, 1));
+        Assertions.assertEquals(Integer.valueOf(36), result.getDailyPlanQty());
+    }
+
+    /**
      * 用例说明：双模结果按实际消费账本回裁时，班次量不能被裁成奇数或非模数倍。
      */
     @Test
@@ -558,6 +586,38 @@ public class TargetScheduleQtyResolverTest {
         Assertions.assertEquals("3302002370", context.getNewSpecSkuList().get(0).getMaterialCode());
     }
 
+    /**
+     * 用例说明：命中胎胚库存账本的新增 SKU 写入未排时，必须退出胎胚有效集合并触发剩余 SKU 重新分摊。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldRefreshSharedEmbryoAllocationWhenEmbryoStockEndingSkuUnscheduled() throws Exception {
+        LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-10", 1);
+        context.getEmbryoRealtimeStockMap().put("EMB-10", 35);
+        SkuScheduleDTO failedSku = buildEndingSku("3302002655", "EMB-10", 1, 35, 1);
+        SkuScheduleDTO firstRemainingSku = buildEndingSku("3302002654", "EMB-10", 1, 35, 1);
+        SkuScheduleDTO secondRemainingSku = buildEndingSku("3302002177", "EMB-10", 1, 35, 1);
+        context.setNewSpecSkuList(new ArrayList<SkuScheduleDTO>(
+                Arrays.asList(failedSku, firstRemainingSku, secondRemainingSku)));
+        resolver.refreshAllSharedEmbryoStockAllocations(context, "测试初始化");
+        Assertions.assertEquals(Integer.valueOf(11), context.getEmbryoStockSkuQuotaMap().get("3302002655"));
+        Assertions.assertEquals(Integer.valueOf(13), context.getEmbryoStockSkuQuotaMap().get("3302002177"));
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectTargetScheduleQtyResolver(strategy);
+
+        invokeAddUnscheduledResult(strategy, context, failedSku, 11, "首检班次分配失败");
+
+        Assertions.assertEquals(Arrays.asList("3302002654", "3302002177"),
+                context.getActiveEmbryoSkuMap().get("EMB-10"));
+        Assertions.assertFalse(context.getEmbryoStockSkuQuotaMap().containsKey("3302002655"));
+        Assertions.assertFalse(context.getEmbryoStockHardTargetMaterialSet().contains("3302002655"));
+        Assertions.assertEquals(Integer.valueOf(17), context.getEmbryoStockSkuQuotaMap().get("3302002654"));
+        Assertions.assertEquals(Integer.valueOf(18), context.getEmbryoStockSkuQuotaMap().get("3302002177"));
+    }
+
     private boolean invokeHandleSharedEmbryoZeroSurplusEnding(NewSpecProductionStrategy strategy,
                                                               LhScheduleContext context,
                                                               Iterator<SkuScheduleDTO> iterator,
@@ -569,6 +629,23 @@ public class TargetScheduleQtyResolverTest {
                 LhScheduleContext.class, Iterator.class, SkuScheduleDTO.class, boolean.class, Map.class);
         method.setAccessible(true);
         return (Boolean) method.invoke(strategy, context, iterator, sku, sharedEmbryoZeroSurplusEnding, reasonCountMap);
+    }
+
+    private void invokeAddUnscheduledResult(NewSpecProductionStrategy strategy,
+                                            LhScheduleContext context,
+                                            SkuScheduleDTO sku,
+                                            int unscheduledQty,
+                                            String reason) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "addUnscheduledResult", LhScheduleContext.class, SkuScheduleDTO.class, int.class, String.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, sku, unscheduledQty, reason);
+    }
+
+    private void injectTargetScheduleQtyResolver(NewSpecProductionStrategy strategy) throws Exception {
+        java.lang.reflect.Field field = NewSpecProductionStrategy.class.getDeclaredField("targetScheduleQtyResolver");
+        field.setAccessible(true);
+        field.set(strategy, resolver);
     }
 
     private SkuScheduleDTO buildSku(String materialCode,

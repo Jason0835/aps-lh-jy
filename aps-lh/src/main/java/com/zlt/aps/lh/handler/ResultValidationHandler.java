@@ -270,7 +270,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         }
         Map<SkuScheduleDTO, Integer> scheduledQtyMap = new IdentityHashMap<>();
         Map<SkuScheduleDTO, Integer> shiftCapacityMap = new IdentityHashMap<>();
-        Map<SkuScheduleDTO, Integer> sharedEmbryoEndingStaggerAllowedOverQtyMap = new IdentityHashMap<>();
+        Map<SkuScheduleDTO, Integer> endingAllowedOverQtyMap = new IdentityHashMap<>();
         for (LhScheduleResult result : context.getScheduleResultList()) {
             SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
             if (Objects.isNull(sourceSku)) {
@@ -286,9 +286,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             }
             scheduledQtyMap.merge(validationSku, planQty, Integer::sum);
             shiftCapacityMap.put(validationSku, resolveValidationShiftCapacity(validationSku, result));
-            int allowedOverQty = resolveSharedEmbryoEndingStaggerAllowedOverQty(context, result);
+            int allowedOverQty = resolveEndingAllowedOverQty(context, result);
             if (allowedOverQty > 0) {
-                sharedEmbryoEndingStaggerAllowedOverQtyMap.merge(validationSku, allowedOverQty, Integer::sum);
+                endingAllowedOverQtyMap.merge(validationSku, allowedOverQty, Integer::sum);
             }
         }
         for (Map.Entry<SkuScheduleDTO, Integer> entry : scheduledQtyMap.entrySet()) {
@@ -300,7 +300,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             }
             ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sku, sku.isStrictTargetQty());
             if (policy.isStrictUpperLimit()) {
-                int allowedOverQty = sharedEmbryoEndingStaggerAllowedOverQtyMap.getOrDefault(sku, 0);
+                int allowedOverQty = endingAllowedOverQtyMap.getOrDefault(sku, 0);
                 validateStrictUpperLimit(context, sku, scheduledQty, targetQty + allowedOverQty);
                 continue;
             }
@@ -309,21 +309,31 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 解析共用胎胚收尾错峰后延允许超量。
-     * <p>该补量有明确业务标记，启用严格目标量校验时应与目标量一起作为允许上限。</p>
+     * 解析收尾规则允许超量。
+     * <p>共用胎胚错峰后延和主销/常规收尾补满都有明确业务标记，启用严格目标量校验时应与目标量一起作为允许上限。</p>
      *
      * @param context 排程上下文
      * @param result 排程结果
      * @return 允许超目标量
      */
-    private int resolveSharedEmbryoEndingStaggerAllowedOverQty(LhScheduleContext context,
-                                                               LhScheduleResult result) {
-        if (Objects.isNull(context) || Objects.isNull(result)
-                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+    private int resolveEndingAllowedOverQty(LhScheduleContext context, LhScheduleResult result) {
+        if (Objects.isNull(context) || Objects.isNull(result)) {
             return 0;
         }
-        Integer allowedOverQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
-        return Objects.isNull(allowedOverQty) ? 0 : Math.max(0, allowedOverQty);
+        int allowedOverQty = 0;
+        if (!CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            Integer staggerQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+            if (Objects.nonNull(staggerQty) && staggerQty > 0) {
+                allowedOverQty += staggerQty;
+            }
+        }
+        if (!CollectionUtils.isEmpty(context.getEndingFillAllowedOverQtyMap())) {
+            Integer endingFillQty = context.getEndingFillAllowedOverQtyMap().get(result);
+            if (Objects.nonNull(endingFillQty) && endingFillQty > 0) {
+                allowedOverQty += endingFillQty;
+            }
+        }
+        return allowedOverQty;
     }
 
     /**

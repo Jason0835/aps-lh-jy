@@ -231,6 +231,9 @@ public class LhScheduleContext {
     /** 共用胎胚收尾错峰后延允许超目标量，供严格收口、账本裁剪和校验识别“错峰补量”例外 */
     private Map<LhScheduleResult, Integer> sharedEmbryoEndingStaggerAllowedOverQtyMap =
             new IdentityHashMap<LhScheduleResult, Integer>();
+    /** 主销/常规SKU收尾补满允许超目标量，供严格收口、账本裁剪和校验识别“补满夜班”例外 */
+    private Map<LhScheduleResult, Integer> endingFillAllowedOverQtyMap =
+            new IdentityHashMap<LhScheduleResult, Integer>();
     /** S4.5当前待排正规新增SKU数量，供选机阶段判断普通机台让位规则 */
     private int pendingFormalNewSpecSkuCount;
     /** S4.5当前待排试制新增SKU数量，供单控机台内部资源竞争判断 */

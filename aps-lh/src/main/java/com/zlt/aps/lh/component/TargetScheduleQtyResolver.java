@@ -324,6 +324,32 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 基于实际硫化余量重新计算收尾剩余天数。
+     * <p>markEndingSkus阶段以窗口计划量计算endingDaysRemaining，
+     * 但实际硫化余量可能远小于窗口计划量，导致T日收尾判断偏差。
+     * 共用胎胚T日收尾分摊前需基于实际余量刷新。</p>
+     *
+     * @param sku 当前SKU
+     */
+    private void refreshEndingDaysRemainingBySurplus(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return;
+        }
+        int shiftCapacity = sku.getShiftCapacity();
+        // 班产缺失时保持原值，不覆盖
+        if (shiftCapacity <= 0) {
+            return;
+        }
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int shifts = surplusQty <= 0 ? 0 : (int) Math.ceil((double) surplusQty / shiftCapacity);
+        int endingDays = shifts <= 0 ? 0 : (int) Math.ceil((double) shifts / LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY);
+        if (endingDays < 0) {
+            endingDays = 1;
+        }
+        sku.setEndingDaysRemaining(endingDays);
+    }
+
+    /**
      * 解析原始胎胚库存。
      * <p>优先取上下文实时库存，确保共用胎胚分摊不会污染结果落库库存口径。</p>
      *
@@ -690,14 +716,14 @@ public class TargetScheduleQtyResolver {
             return resultQty;
         }
         int remainingQty = resolveEffectiveProductionRemainingQty(context, sku);
-        int allowedOverQty = resolveSharedEmbryoEndingStaggerAllowedOverQty(context, result);
+        int allowedOverQty = resolveEndingAllowedOverQty(context, result);
         int retainedLimitQty = remainingQty + allowedOverQty;
         if (resultQty <= retainedLimitQty) {
             return resultQty;
         }
         if (CollectionUtils.isEmpty(shifts)) {
             log.warn("SKU实际消费账本裁剪缺少班次窗口，跳过结果裁剪, scene: {}, materialCode: {}, machineCode: {}, "
-                            + "结果量: {}, 账本剩余: {}, 错峰后延允许超量: {}",
+                            + "结果量: {}, 账本剩余: {}, 收尾规则允许超量: {}",
                     scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty, allowedOverQty);
             return resultQty;
         }
@@ -726,28 +752,38 @@ public class TargetScheduleQtyResolver {
         }
         ShiftFieldUtil.syncDailyPlanQty(result);
         log.info("SKU实际消费账本裁剪结果, scene: {}, materialCode: {}, machineCode: {}, 原结果量: {}, "
-                        + "有效账本剩余: {}, 错峰后延允许超量: {}, 裁剪后结果量: {}",
+                        + "有效账本剩余: {}, 收尾规则允许超量: {}, 裁剪后结果量: {}",
                 scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty,
                 allowedOverQty, actualRetainedQty);
         return actualRetainedQty;
     }
 
     /**
-     * 解析共用胎胚收尾错峰后延允许超量。
-     * <p>该超量属于错峰换模补满场景，不能被 SKU 实际消费账本当作普通超排回裁。</p>
+     * 解析收尾规则允许超量。
+     * <p>共用胎胚错峰后延和主销/常规收尾补满都有明确业务标记，不能被 SKU 实际消费账本当作普通超排回裁。</p>
      *
      * @param context 排程上下文
      * @param result 排程结果
-     * @return 允许保留的错峰后延补量
+     * @return 允许保留的收尾规则补量
      */
-    private int resolveSharedEmbryoEndingStaggerAllowedOverQty(LhScheduleContext context,
-                                                               LhScheduleResult result) {
-        if (Objects.isNull(context) || Objects.isNull(result)
-                || CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+    private int resolveEndingAllowedOverQty(LhScheduleContext context, LhScheduleResult result) {
+        if (Objects.isNull(context) || Objects.isNull(result)) {
             return 0;
         }
-        Integer allowedOverQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
-        return Objects.isNull(allowedOverQty) ? 0 : Math.max(0, allowedOverQty);
+        int allowedOverQty = 0;
+        if (!CollectionUtils.isEmpty(context.getSharedEmbryoEndingStaggerAllowedOverQtyMap())) {
+            Integer staggerQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+            if (Objects.nonNull(staggerQty) && staggerQty > 0) {
+                allowedOverQty += staggerQty;
+            }
+        }
+        if (!CollectionUtils.isEmpty(context.getEndingFillAllowedOverQtyMap())) {
+            Integer endingFillQty = context.getEndingFillAllowedOverQtyMap().get(result);
+            if (Objects.nonNull(endingFillQty) && endingFillQty > 0) {
+                allowedOverQty += endingFillQty;
+            }
+        }
+        return allowedOverQty;
     }
 
     /**
@@ -1828,6 +1864,9 @@ public class TargetScheduleQtyResolver {
         if (CollectionUtils.isEmpty(activeSkuList)) {
             return;
         }
+        // SKU进入未排或已完成后，不再占用胎胚库存内部分摊额度，剩余额度立即回流给同胎胚有效SKU。
+        context.getEmbryoStockSkuQuotaMap().remove(sku.getMaterialCode());
+        context.getEmbryoStockHardTargetMaterialSet().remove(sku.getMaterialCode());
         activeSkuList.remove(sku.getMaterialCode());
         if (activeSkuList.isEmpty()) {
             context.getActiveEmbryoSkuMap().remove(sku.getEmbryoCode());
@@ -1881,6 +1920,10 @@ public class TargetScheduleQtyResolver {
         List<SkuScheduleDTO> activeSkuList = collectActiveSkusByEmbryo(context, embryoCode);
         if (CollectionUtils.isEmpty(activeSkuList)) {
             return;
+        }
+        // 基于实际硫化余量刷新T日收尾天数，确保分摊判断基于真实余量而非窗口计划量
+        for (SkuScheduleDTO activeSku : activeSkuList) {
+            refreshEndingDaysRemainingBySurplus(activeSku);
         }
         if (activeSkuList.size() == 1) {
             SkuScheduleDTO sku = activeSkuList.get(0);
