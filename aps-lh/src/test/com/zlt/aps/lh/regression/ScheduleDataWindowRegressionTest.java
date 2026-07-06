@@ -16,6 +16,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
+import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhMachineInfoMapper;
@@ -150,7 +151,7 @@ class ScheduleDataWindowRegressionTest {
     }
 
     @Test
-    void loadAllBaseData_shouldExtendCalendarAndShutWindowButKeepCleaningScheduleWindow() {
+    void loadAllBaseData_shouldKeepNormalShutWindowAndLoadFutureCleaningCandidates() {
         String factoryCode = "FC01";
         Date target = LhScheduleTimeUtil.clearTime(date(2026, 4, 4));
         int offsetDays = Math.max(0, LhScheduleConstant.SCHEDULE_DAYS - 1);
@@ -169,17 +170,19 @@ class ScheduleDataWindowRegressionTest {
 
         lhBaseDataService.loadAllBaseData(context);
 
-        // 喷砂可前移一天，因此工作日历与设备停机需要覆盖 T-1；清洗计划仍只加载当前排程窗口。
+        // 普通设备停机仍只覆盖 T-1～窗口结束；清洗候选单独加载 T 日之后，支持未来计划提前清洗。
         LambdaQueryWrapper<MdmWorkCalendar> workCalendarWrapper = captureWorkCalendarWrapper();
-        LambdaQueryWrapper<MdmDevicePlanShut> devicePlanShutWrapper = captureDevicePlanShutWrapper();
-        LambdaQueryWrapper<LhMouldCleanPlan> cleaningPlanWrapper = captureCleaningPlanWrapper();
+        List<LambdaQueryWrapper<MdmDevicePlanShut>> devicePlanShutWrappers = captureDevicePlanShutWrappers();
+        LambdaQueryWrapper<MdmDevicePlanShut> normalDevicePlanShutWrapper = devicePlanShutWrappers.get(0);
+        LambdaQueryWrapper<MdmDevicePlanShut> cleaningDevicePlanShutWrapper = devicePlanShutWrappers.get(1);
         assertWrapperContainsDate(workCalendarWrapper, controlStartDate);
         assertWrapperContainsDate(workCalendarWrapper, endDate);
-        assertWrapperContainsDate(devicePlanShutWrapper, controlStartDate);
-        assertWrapperContainsDate(devicePlanShutWrapper, endDate);
-        assertWrapperContainsDate(cleaningPlanWrapper, startDate);
-        assertWrapperContainsDate(cleaningPlanWrapper, endDate);
-        assertWrapperNotContainsDate(cleaningPlanWrapper, controlStartDate);
+        assertWrapperContainsDate(normalDevicePlanShutWrapper, controlStartDate);
+        assertWrapperContainsDate(normalDevicePlanShutWrapper, endDate);
+        assertWrapperContainsDate(cleaningDevicePlanShutWrapper, startDate);
+        assertWrapperNotContainsDate(cleaningDevicePlanShutWrapper, endDate);
+        assertWrapperContainsValue(cleaningDevicePlanShutWrapper, MachineStopTypeEnum.DRY_ICE_CLEANING.getCode());
+        assertWrapperContainsValue(cleaningDevicePlanShutWrapper, MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode());
         verify(lhScheduleResultMapper, times(2)).selectList(any());
     }
 
@@ -607,14 +610,14 @@ class ScheduleDataWindowRegressionTest {
     /**
      * 抓取设备停机计划查询条件。
      *
-     * @return 设备停机计划查询 wrapper
+     * @return 按调用顺序捕获到的设备停机计划查询 wrapper 列表
      */
     @SuppressWarnings("unchecked")
-    private LambdaQueryWrapper<MdmDevicePlanShut> captureDevicePlanShutWrapper() {
+    private List<LambdaQueryWrapper<MdmDevicePlanShut>> captureDevicePlanShutWrappers() {
         initializeTableInfo(MdmDevicePlanShut.class);
         ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
-        verify(devicePlanShutMapper).selectList(captor.capture());
-        return (LambdaQueryWrapper<MdmDevicePlanShut>) captor.getValue();
+        verify(devicePlanShutMapper, times(2)).selectList(captor.capture());
+        return (List<LambdaQueryWrapper<MdmDevicePlanShut>>) (List<?>) captor.getAllValues();
     }
 
     /**
@@ -727,6 +730,20 @@ class ScheduleDataWindowRegressionTest {
     private void assertWrapperNotContainsDate(LambdaQueryWrapper<?> wrapper, Date unexpectedDate) {
         wrapper.getSqlSegment();
         assertFalse(paramMapContainsDate(wrapper.getParamNameValuePairs(), unexpectedDate));
+    }
+
+    /**
+     * 校验查询条件包含指定参数值。
+     *
+     * @param wrapper 查询条件
+     * @param expectedValue 预期参数值
+     */
+    private void assertWrapperContainsValue(LambdaQueryWrapper<?> wrapper, Object expectedValue) {
+        wrapper.getSqlSegment();
+        assertTrue(wrapper.getParamNameValuePairs().values().stream()
+                .anyMatch(value -> expectedValue.equals(value)
+                        || (value instanceof java.util.Collection
+                        && ((java.util.Collection<?>) value).contains(expectedValue))));
     }
 
     /**

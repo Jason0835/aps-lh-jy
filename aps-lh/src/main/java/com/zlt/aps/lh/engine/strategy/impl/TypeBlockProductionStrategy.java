@@ -29,6 +29,7 @@ import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
+import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
@@ -2735,6 +2736,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
 
     /**
      * 解析换活字块完成时间。
+     * <p>清洗与换活字块允许并行处理，完成时间取换活字块和清洗的最晚结束时间；
+     * 未重叠时仍保持原换活字块完成时间，不影响正常换活字块链路。</p>
      *
      * @param context 排程上下文
      * @param machine 机台
@@ -2751,7 +2754,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         int switchDurationHours = resolveTypeBlockSwitchDurationHours(
                 context, machine, Objects.isNull(machine) ? null : machine.getEstimatedEndTime(), switchStartTime);
-        return LhScheduleTimeUtil.addHours(switchStartTime, switchDurationHours);
+        Date switchCompleteTime = LhScheduleTimeUtil.addHours(switchStartTime, switchDurationHours);
+        // 调用清洗重叠解析，确保喷砂清洗+换活字块按 10 小时、干冰清洗+换活字块按 8 小时口径落首检和备注。
+        return resolveCleaningOverlapProductionStartTime(machine, switchStartTime, switchCompleteTime);
     }
 
     /**
@@ -3220,8 +3225,30 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveMachineCleaningWindowList(
                 context, result.getLhMachineCode());
+        if (CleaningScheduleRuleUtil.shouldSkipCleaningByResultEnding(result)) {
+            return new ArrayList<>(0);
+        }
+        Date switchEndTime = resolveCleaningSwitchEndTime(context, result, firstProductionStartTime);
         return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(
-                cleaningWindowList, result.getMouldChangeStartTime(), firstProductionStartTime));
+                cleaningWindowList, result.getMouldChangeStartTime(), switchEndTime));
+    }
+
+    /**
+     * 解析清洗与换活字块重叠过滤使用的切换结束时间。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param firstProductionStartTime 首个有计划量班次开始时间
+     * @return 清洗重叠过滤使用的切换结束时间
+     */
+    private Date resolveCleaningSwitchEndTime(LhScheduleContext context,
+                                              LhScheduleResult result,
+                                              Date firstProductionStartTime) {
+        if (Objects.nonNull(result) && Objects.nonNull(result.getMouldChangeStartTime())) {
+            return LhScheduleTimeUtil.addHours(result.getMouldChangeStartTime(),
+                    LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+        }
+        return firstProductionStartTime;
     }
 
     /**

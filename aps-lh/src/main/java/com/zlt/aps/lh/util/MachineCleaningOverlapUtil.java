@@ -153,8 +153,7 @@ public final class MachineCleaningOverlapUtil {
             return false;
         }
         // 严格相交才算重叠：仅端点相接不视为命中。
-        return switchStartTime.before(cleanEndTime)
-                && switchEndTime.after(cleaningWindow.getCleanStartTime());
+        return isWindowOverlap(cleaningWindow.getCleanStartTime(), cleanEndTime, switchStartTime, switchEndTime);
     }
 
     /**
@@ -206,51 +205,6 @@ public final class MachineCleaningOverlapUtil {
     }
 
     /**
-     * 顺延与喷砂清洗重叠的切换开始时间。
-     * <p>喷砂清洗命中重叠时，切换必须等待喷砂完整结束后才能开始。</p>
-     *
-     * @param cleaningWindowList 清洗窗口列表
-     * @param switchStartTime 候选切换开始时间
-     * @param switchEndTime 候选切换结束时间
-     * @return 顺延后的切换开始时间
-     */
-    public static Date resolveDelayedSwitchStartBySandBlast(List<MachineCleaningWindowDTO> cleaningWindowList,
-                                                            Date switchStartTime,
-                                                            Date switchEndTime) {
-        if (CollectionUtils.isEmpty(cleaningWindowList)
-                || Objects.isNull(switchStartTime)
-                || Objects.isNull(switchEndTime)
-                || !switchStartTime.before(switchEndTime)) {
-            return switchStartTime;
-        }
-        long switchDurationMillis = switchEndTime.getTime() - switchStartTime.getTime();
-        Date adjustedStartTime = switchStartTime;
-        Date adjustedEndTime = switchEndTime;
-        int maxAttempts = Math.max(cleaningWindowList.size() + 1, 4);
-        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-            Date latestOverlapEndTime = null;
-            for (MachineCleaningWindowDTO cleaningWindow : cleaningWindowList) {
-                if (!isSandBlastCleaning(cleaningWindow)
-                        || Objects.isNull(cleaningWindow.getCleanStartTime())
-                        || Objects.isNull(cleaningWindow.getCleanEndTime())
-                        || !cleaningWindow.getCleanStartTime().before(cleaningWindow.getCleanEndTime())) {
-                    continue;
-                }
-                if (adjustedStartTime.before(cleaningWindow.getCleanEndTime())
-                        && adjustedEndTime.after(cleaningWindow.getCleanStartTime())) {
-                    latestOverlapEndTime = later(latestOverlapEndTime, cleaningWindow.getCleanEndTime());
-                }
-            }
-            if (latestOverlapEndTime == null || !latestOverlapEndTime.after(adjustedStartTime)) {
-                return adjustedStartTime;
-            }
-            adjustedStartTime = latestOverlapEndTime;
-            adjustedEndTime = new Date(adjustedStartTime.getTime() + switchDurationMillis);
-        }
-        return adjustedStartTime;
-    }
-
-    /**
      * 过滤掉与切换窗口严格相交的清洗窗口。
      *
      * @param cleaningWindowList 清洗窗口列表
@@ -270,8 +224,32 @@ public final class MachineCleaningOverlapUtil {
             return cleaningWindowList;
         }
         return cleaningWindowList.stream()
-                .filter(cleaningWindow -> !isOverlap(cleaningWindow, switchStartTime, switchEndTime))
+                .filter(cleaningWindow -> !isSwitchOverlap(cleaningWindow, switchStartTime, switchEndTime))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * 判断清洗窗口是否与换模/换活字块窗口重叠。
+     *
+     * <p>实际清洗时间用于产能扣减；来源设备停机计划时间只用于识别“清洗+换模”特殊场景。
+     * 因此这里同时检查两套时间：任一时间窗口重叠，都应从产能扣减清洗列表中剔除。</p>
+     *
+     * @param cleaningWindow 清洗窗口
+     * @param switchStartTime 切换开始时间
+     * @param switchEndTime 切换结束时间
+     * @return true-清洗与切换窗口存在重叠；false-不存在重叠
+     */
+    public static boolean isSwitchOverlap(MachineCleaningWindowDTO cleaningWindow,
+                                          Date switchStartTime,
+                                          Date switchEndTime) {
+        if (isOverlap(cleaningWindow, switchStartTime, switchEndTime)) {
+            return true;
+        }
+        if (Objects.isNull(cleaningWindow)) {
+            return false;
+        }
+        return isWindowOverlap(cleaningWindow.getSourcePlanStartTime(), cleaningWindow.getSourcePlanEndTime(),
+                switchStartTime, switchEndTime);
     }
 
     public static boolean isDryIceCleaning(MachineCleaningWindowDTO cleaningWindow) {
@@ -282,6 +260,48 @@ public final class MachineCleaningOverlapUtil {
     public static boolean isSandBlastCleaning(MachineCleaningWindowDTO cleaningWindow) {
         return Objects.nonNull(cleaningWindow)
                 && CleaningTypeEnum.SAND_BLAST.getCode().equals(cleaningWindow.getCleanType());
+    }
+
+    /**
+     * 解析用于换模重叠备注的清洗开始时间。
+     *
+     * @param cleaningWindow 清洗窗口
+     * @return 来源计划开始时间优先；无来源计划时返回实际清洗开始时间
+     */
+    public static Date resolveMouldChangeAnalysisStartTime(MachineCleaningWindowDTO cleaningWindow) {
+        if (Objects.isNull(cleaningWindow)) {
+            return null;
+        }
+        return Objects.nonNull(cleaningWindow.getSourcePlanStartTime())
+                ? cleaningWindow.getSourcePlanStartTime() : cleaningWindow.getCleanStartTime();
+    }
+
+    /**
+     * 解析用于换模重叠备注的清洗结束时间。
+     *
+     * @param cleaningWindow 清洗窗口
+     * @return 来源计划结束时间优先；无来源计划时返回实际清洗结束时间
+     */
+    public static Date resolveMouldChangeAnalysisEndTime(MachineCleaningWindowDTO cleaningWindow) {
+        if (Objects.isNull(cleaningWindow)) {
+            return null;
+        }
+        return Objects.nonNull(cleaningWindow.getSourcePlanEndTime())
+                ? cleaningWindow.getSourcePlanEndTime() : cleaningWindow.getCleanEndTime();
+    }
+
+    private static boolean isWindowOverlap(Date leftStartTime,
+                                           Date leftEndTime,
+                                           Date rightStartTime,
+                                           Date rightEndTime) {
+        return Objects.nonNull(leftStartTime)
+                && Objects.nonNull(leftEndTime)
+                && Objects.nonNull(rightStartTime)
+                && Objects.nonNull(rightEndTime)
+                && leftEndTime.after(leftStartTime)
+                && rightEndTime.after(rightStartTime)
+                && leftStartTime.before(rightEndTime)
+                && leftEndTime.after(rightStartTime);
     }
 
     private static Date later(Date current, Date candidate) {

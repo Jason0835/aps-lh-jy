@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
+import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
@@ -1452,7 +1453,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载设备停机计划
+     * 加载设备停机计划。
+     * <p>普通维修、精度等停机仍按排程窗口交集加载；干冰/喷砂清洗需要额外按计划开始时间加载
+     * T 日及之后的未来候选，后续由清洗排程服务按班次和每日上限重新安排实际执行时间。</p>
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
@@ -1460,14 +1463,89 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param endDate     结束日期
      */
     private void loadDevicePlanShut(LhScheduleContext context, String factoryCode, Date startDate, Date endDate) {
-        List<MdmDevicePlanShut> devicePlanShutList = devicePlanShutMapper.selectList(
+        // 普通设备停机只加载与排程窗口相交的数据，避免扩大维修、精度等正常停机扣减范围。
+        List<MdmDevicePlanShut> normalDevicePlanShutList = devicePlanShutMapper.selectList(
                 new LambdaQueryWrapper<MdmDevicePlanShut>()
                         .eq(MdmDevicePlanShut::getFactoryCode, factoryCode)
                         .le(MdmDevicePlanShut::getBeginDate, endDate)
                         .ge(MdmDevicePlanShut::getEndDate, startDate)
                         .eq(MdmDevicePlanShut::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
-        context.setDevicePlanShutList(devicePlanShutList != null ? devicePlanShutList : context.getDevicePlanShutList());
+        Date cleaningCandidateStartDate = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
+        // 清洗候选按 T 日及之后的计划开始时间单独加载，允许候选来源超出 T～T+2 排程窗口。
+        // 注意：本方法入参 startDate 是普通停机使用的 T-1 覆盖起点，清洗候选必须回到 T 日口径。
+        List<MdmDevicePlanShut> futureCleaningPlanList = devicePlanShutMapper.selectList(
+                new LambdaQueryWrapper<MdmDevicePlanShut>()
+                        .eq(MdmDevicePlanShut::getFactoryCode, factoryCode)
+                        .ge(MdmDevicePlanShut::getBeginDate, cleaningCandidateStartDate)
+                        .in(MdmDevicePlanShut::getMachineStopType, resolveCleaningStopTypeList())
+                        .eq(MdmDevicePlanShut::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
+        List<MdmDevicePlanShut> devicePlanShutList = mergeDevicePlanShutList(
+                normalDevicePlanShutList, futureCleaningPlanList);
+        context.setDevicePlanShutList(devicePlanShutList);
         log.debug("设备停机计划加载完成, 数量: {}", context.getDevicePlanShutList().size());
+    }
+
+    /**
+     * 解析设备停机计划中的清洗停机类型集合。
+     *
+     * @return 干冰清洗、喷砂清洗停机类型
+     */
+    private List<String> resolveCleaningStopTypeList() {
+        List<String> cleaningStopTypeList = new ArrayList<>(2);
+        cleaningStopTypeList.add(MachineStopTypeEnum.DRY_ICE_CLEANING.getCode());
+        cleaningStopTypeList.add(MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode());
+        return cleaningStopTypeList;
+    }
+
+    /**
+     * 合并普通停机和未来清洗候选，避免窗口内清洗记录被重复加入上下文。
+     *
+     * @param normalDevicePlanShutList 普通窗口停机计划
+     * @param futureCleaningPlanList T 日及之后的清洗候选
+     * @return 去重后的设备停机计划
+     */
+    private List<MdmDevicePlanShut> mergeDevicePlanShutList(List<MdmDevicePlanShut> normalDevicePlanShutList,
+                                                            List<MdmDevicePlanShut> futureCleaningPlanList) {
+        int normalSize = CollectionUtils.isEmpty(normalDevicePlanShutList) ? 0 : normalDevicePlanShutList.size();
+        int cleaningSize = CollectionUtils.isEmpty(futureCleaningPlanList) ? 0 : futureCleaningPlanList.size();
+        Map<String, MdmDevicePlanShut> mergedPlanMap = new LinkedHashMap<>(Math.max(16, normalSize + cleaningSize));
+        appendDevicePlanShut(mergedPlanMap, normalDevicePlanShutList);
+        appendDevicePlanShut(mergedPlanMap, futureCleaningPlanList);
+        return new ArrayList<>(mergedPlanMap.values());
+    }
+
+    /**
+     * 将设备停机计划按业务关键字段追加到去重 Map。
+     *
+     * @param mergedPlanMap 已合并的停机计划 Map
+     * @param devicePlanShutList 待追加停机计划
+     */
+    private void appendDevicePlanShut(Map<String, MdmDevicePlanShut> mergedPlanMap,
+                                      List<MdmDevicePlanShut> devicePlanShutList) {
+        if (CollectionUtils.isEmpty(devicePlanShutList)) {
+            return;
+        }
+        for (MdmDevicePlanShut planShut : devicePlanShutList) {
+            if (Objects.isNull(planShut)) {
+                continue;
+            }
+            mergedPlanMap.putIfAbsent(buildDevicePlanShutKey(planShut), planShut);
+        }
+    }
+
+    /**
+     * 构建设备停机计划去重键。
+     *
+     * @param planShut 设备停机计划
+     * @return 去重键
+     */
+    private String buildDevicePlanShutKey(MdmDevicePlanShut planShut) {
+        StringBuilder keyBuilder = new StringBuilder(96);
+        keyBuilder.append(planShut.getMachineCode()).append('|')
+                .append(planShut.getMachineStopType()).append('|')
+                .append(Objects.nonNull(planShut.getBeginDate()) ? planShut.getBeginDate().getTime() : 0L).append('|')
+                .append(Objects.nonNull(planShut.getEndDate()) ? planShut.getEndDate().getTime() : 0L);
+        return keyBuilder.toString();
     }
 
     /**

@@ -34,6 +34,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyMachineShortageQuotaPlan;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.engine.strategy.support.SmallEndingSurplusSkipRule;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
+import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.LhMouldCodeUtil;
@@ -7690,8 +7691,30 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveMachineCleaningWindowList(
                 context, result.getLhMachineCode());
+        if (CleaningScheduleRuleUtil.shouldSkipCleaningByResultEnding(result)) {
+            return new ArrayList<>(0);
+        }
+        Date switchEndTime = resolveCleaningSwitchEndTime(context, result, firstProductionStartTime);
         return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(
-                cleaningWindowList, result.getMouldChangeStartTime(), firstProductionStartTime));
+                cleaningWindowList, result.getMouldChangeStartTime(), switchEndTime));
+    }
+
+    /**
+     * 解析清洗与切换重叠过滤使用的切换结束时间。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param firstProductionStartTime 首个有计划量班次开始时间
+     * @return 清洗重叠过滤使用的切换结束时间
+     */
+    private Date resolveCleaningSwitchEndTime(LhScheduleContext context,
+                                              LhScheduleResult result,
+                                              Date firstProductionStartTime) {
+        if (Objects.nonNull(result) && Objects.nonNull(result.getMouldChangeStartTime())) {
+            return LhScheduleTimeUtil.addHours(result.getMouldChangeStartTime(),
+                    LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+        }
+        return firstProductionStartTime;
     }
 
     private String resolveMachineEmbryoCode(LhScheduleContext context, MachineScheduleDTO machine) {

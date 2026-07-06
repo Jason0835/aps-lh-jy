@@ -26,6 +26,10 @@ public class MachineCleaningWindowDTO {
     private Date cleanEndTime;
     /** 清洗结束后机台再次可开产时间 */
     private Date readyTime;
+    /** 来源设备停机计划的计划开始时间；只用于清洗与换模原始计划重叠判定，不作为实际清洗开始时间 */
+    private Date sourcePlanStartTime;
+    /** 来源设备停机计划的计划结束时间；只用于清洗与换模原始计划重叠判定，不作为实际清洗结束时间 */
+    private Date sourcePlanEndTime;
     /** 数据来源 */
     private String dataSource;
     /** 清洗备注 */

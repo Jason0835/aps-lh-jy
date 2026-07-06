@@ -49,6 +49,7 @@ import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.engine.strategy.support.SmallEndingSurplusSkipRule;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
+import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
@@ -822,9 +823,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
                                     context, sku, shifts, mouldChangeCompleteTime, defaultProductionStartTime,
                                     ScheduleTypeEnum.NEW_SPEC.getCode());
-                            // 清洗与换模实际重叠时，开产时间取换模完成与清洗结束的最晚时间；未重叠不改变原开产时间。
-                            productionStartTime = resolveCleaningOverlapProductionStartTime(
-                                    candidateMachine, mouldChangeStartTime, productionStartTime);
+                            // 清洗与普通换模重叠时只执行换模，开产时间仍按换模/首检规则计算；清洗原因由结果备注单独记录。
                         }
                     }
                 }
@@ -3092,8 +3091,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 || CollectionUtils.isEmpty(shifts)) {
             return shiftCapacityMap;
         }
+        // 计算班次上限时同步清洗专用规则，避免3天内可收尾SKU仍扣干冰/喷砂清洗产能。
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
-                context, machine.getMachineCode(), mouldChangeStartTime, firstProductionStartTime);
+                context, machine.getMachineCode(), sku, mouldChangeStartTime, firstProductionStartTime);
         List<MachineMaintenanceWindowDTO> maintenanceWindowList = resolveMachineMaintenanceWindowList(
                 context, machine.getMachineCode());
         Date cursorStartTime = firstProductionStartTime;
@@ -3243,9 +3243,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         int lhTimeSeconds = Objects.isNull(result.getLhTime()) ? 0 : Math.max(0, result.getLhTime());
         int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(
                 Objects.isNull(result.getMouldQty()) ? 0 : result.getMouldQty());
+        // 结果后置修正也必须复用同一清洗过滤口径，避免日标准产量回裁时重新扣除已跳过的清洗。
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
-                context, result.getLhMachineCode(), result.getMouldChangeStartTime(),
-                resolveFirstPlannedShiftStartTime(result));
+                context, result, resolveFirstPlannedShiftStartTime(result));
         List<MachineMaintenanceWindowDTO> maintenanceWindowList = resolveMachineMaintenanceWindowList(
                 context, result.getLhMachineCode());
         for (LhShiftConfigVO shift : shifts) {
@@ -5494,8 +5494,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
                 context, sku, shifts, mouldChangeCompleteTime, productionStartTime,
                 ScheduleTypeEnum.NEW_SPEC.getCode());
-        // dayN 模拟必须同步清洗重叠后的最晚开产时间，避免模拟产能高于真实排产。
-        productionStartTime = resolveCleaningOverlapProductionStartTime(candidate, mouldChangeStartTime, productionStartTime);
         if (productionStartTime == null) {
             return capacityMap;
         }
@@ -5532,42 +5530,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     context, simulationSegment, productionDate));
         }
         return capacityMap;
-    }
-
-    /**
-     * 清洗与新增换模实际重叠时，开产时间取两者最晚结束时间。
-     *
-     * @param machine 机台
-     * @param mouldChangeStartTime 换模开始时间
-     * @param productionStartTime 换模/首检规则解析出的原开产时间
-     * @return 合并清洗重叠后的开产时间
-     */
-    private Date resolveCleaningOverlapProductionStartTime(MachineScheduleDTO machine,
-                                                           Date mouldChangeStartTime,
-                                                           Date productionStartTime) {
-        if (Objects.isNull(machine)
-                || CollectionUtils.isEmpty(machine.getCleaningWindowList())
-                || Objects.isNull(mouldChangeStartTime)
-                || Objects.isNull(productionStartTime)
-                || !mouldChangeStartTime.before(productionStartTime)) {
-            return productionStartTime;
-        }
-        Date resolvedStartTime = productionStartTime;
-        for (MachineCleaningWindowDTO cleaningWindow : machine.getCleaningWindowList()) {
-            if (Objects.isNull(cleaningWindow)
-                    || Objects.isNull(cleaningWindow.getCleanStartTime())
-                    || Objects.isNull(cleaningWindow.getCleanEndTime())
-                    || !cleaningWindow.getCleanStartTime().before(cleaningWindow.getCleanEndTime())) {
-                continue;
-            }
-            // 仅当清洗与换模窗口实际相交时进入特殊分支，避免影响正常新增换模开产时间。
-            if (cleaningWindow.getCleanStartTime().before(productionStartTime)
-                    && cleaningWindow.getCleanEndTime().after(mouldChangeStartTime)
-                    && cleaningWindow.getCleanEndTime().after(resolvedStartTime)) {
-                resolvedStartTime = cleaningWindow.getCleanEndTime();
-            }
-        }
-        return resolvedStartTime;
     }
 
     /**
@@ -7003,8 +6965,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
         // 按班次分配计划量；试制SKU早班换模后首检归中班，8小时换模耗时不再额外增加。
         int pendingQty = sku.resolveTargetScheduleQty();
+        // 构建结果分班前过滤清洗窗口：清洗+换模不额外扣产能，3天内可收尾SKU不安排清洗。
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
-                context, result.getLhMachineCode(), mouldChangeStartTime, startTime);
+                context, result.getLhMachineCode(), sku, mouldChangeStartTime, startTime);
         List<MachineMaintenanceWindowDTO> maintenanceWindowList = resolveMachineMaintenanceWindowList(
                 context, result.getLhMachineCode());
         distributeToShifts(context, result, shifts, startTime,
@@ -9095,8 +9058,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 return shift.getShiftEndDateTime();
             }
             long secondsNeeded = (long) Math.ceil((double) planQty / mouldQty) * lhTimeSeconds;
+            // 完工时间重算沿用结果级清洗过滤，避免被已跳过的清洗窗口再次顺延。
             List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
-                    context, result.getLhMachineCode(), result.getMouldChangeStartTime(), resolveFirstPlannedShiftStartTime(result));
+                    context, result, resolveFirstPlannedShiftStartTime(result));
             return ShiftCapacityResolverUtil.resolveCompletionTimeWithDowntimes(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
@@ -9205,9 +9169,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
                 result,
                 resolveMachineMaintenanceWindowList(context, result.getLhMachineCode()),
-                resolveEffectiveCleaningWindowList(
-                        context, result.getLhMachineCode(), result.getMouldChangeStartTime(), firstPlannedShiftStartTime),
+                resolveEffectiveCleaningWindowList(context, result, firstPlannedShiftStartTime),
                 resolveMachineShutdownWindowList(context, result.getLhMachineCode()));
+        Date mouldChangeCompleteTime = Objects.nonNull(result.getMouldChangeStartTime())
+                ? LhScheduleTimeUtil.addHours(result.getMouldChangeStartTime(),
+                LhScheduleTimeUtil.getMouldChangeTotalHours(context)) : firstPlannedShiftStartTime;
+        // 新增换模与清洗重叠时清洗不额外占用时间，但必须用原始清洗窗口按真实换模 8 小时窗口补充“清洗+换模”原因备注。
+        ResultDowntimeSummaryUtil.appendCleaningMouldChangeAnalysis(
+                result,
+                resolveMachineCleaningWindowList(context, result.getLhMachineCode()),
+                result.getMouldChangeStartTime(),
+                mouldChangeCompleteTime);
     }
 
     /**
@@ -9221,11 +9193,60 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      */
     private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(LhScheduleContext context,
                                                                               String machineCode,
+                                                                              SkuScheduleDTO sku,
                                                                               Date switchStartTime,
                                                                               Date firstProductionStartTime) {
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveMachineCleaningWindowList(context, machineCode);
+        if (CleaningScheduleRuleUtil.shouldSkipCleaningBySkuEnding(context, sku)) {
+            return new ArrayList<>(0);
+        }
         return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(
                 cleaningWindowList, switchStartTime, firstProductionStartTime));
+    }
+
+    /**
+     * 解析新增结果在排产阶段需要生效的清洗窗口。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param firstProductionStartTime 首个可排产开始时间
+     * @return 有效清洗窗口列表
+     */
+    private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(LhScheduleContext context,
+                                                                              LhScheduleResult result,
+                                                                              Date firstProductionStartTime) {
+        if (Objects.isNull(result)) {
+            return new ArrayList<>(0);
+        }
+        List<MachineCleaningWindowDTO> cleaningWindowList = resolveMachineCleaningWindowList(
+                context, result.getLhMachineCode());
+        if (CleaningScheduleRuleUtil.shouldSkipCleaningByResultEnding(result)) {
+            return new ArrayList<>(0);
+        }
+        Date switchEndTime = resolveCleaningSwitchEndTime(context, result, firstProductionStartTime);
+        return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(
+                cleaningWindowList, result.getMouldChangeStartTime(), switchEndTime));
+    }
+
+    /**
+     * 解析清洗与切换重叠过滤使用的切换结束时间。
+     *
+     * <p>新增换模首检可能落在换模开始班次，导致首个有计划量班次早于真实换模完成时间；
+     * 清洗+换模只能按真实 8 小时换模窗口判断，不能用首检班次开始时间截断。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param firstProductionStartTime 首个有计划量班次开始时间
+     * @return 清洗重叠过滤使用的切换结束时间
+     */
+    private Date resolveCleaningSwitchEndTime(LhScheduleContext context,
+                                              LhScheduleResult result,
+                                              Date firstProductionStartTime) {
+        if (Objects.nonNull(result) && Objects.nonNull(result.getMouldChangeStartTime())) {
+            return LhScheduleTimeUtil.addHours(result.getMouldChangeStartTime(),
+                    LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+        }
+        return firstProductionStartTime;
     }
 
     /**

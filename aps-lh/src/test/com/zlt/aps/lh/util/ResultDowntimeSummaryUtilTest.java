@@ -3,6 +3,7 @@ package com.zlt.aps.lh.util;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.junit.jupiter.api.Test;
 
@@ -13,6 +14,7 @@ import java.util.Date;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link ResultDowntimeSummaryUtil} 结果停机摘要回填测试。
@@ -55,6 +57,78 @@ class ResultDowntimeSummaryUtilTest {
         assertEquals(dateTime(2026, 5, 21, 13, 0), result.getCleaningEndTime());
         assertEquals(dateTime(2026, 5, 21, 9, 0), result.getShutdownStartTime());
         assertEquals(dateTime(2026, 5, 21, 17, 0), result.getShutdownEndTime());
+    }
+
+    /**
+     * 清洗与普通换模重叠时，清洗不再额外顺延换模，但必须在实际重叠班次写入固定原因备注。
+     */
+    @Test
+    void fillDowntimeSummary_shouldAppendCleaningMouldChangeAnalysisWhenCleaningOverlapsMouldChange() {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMouldChangeStartTime(dateTime(2026, 5, 21, 6, 0));
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 16, dateTime(2026, 5, 21, 14, 0), dateTime(2026, 5, 21, 22, 0));
+        result.setSpecEndTime(dateTime(2026, 5, 21, 22, 0));
+
+        MachineCleaningWindowDTO dryIceWindow = new MachineCleaningWindowDTO();
+        dryIceWindow.setCleanType(CleaningTypeEnum.DRY_ICE.getCode());
+        dryIceWindow.setCleanStartTime(dateTime(2026, 5, 21, 6, 0));
+        dryIceWindow.setCleanEndTime(dateTime(2026, 5, 21, 9, 0));
+        MachineCleaningWindowDTO sandBlastWindow = new MachineCleaningWindowDTO();
+        sandBlastWindow.setCleanType(CleaningTypeEnum.SAND_BLAST.getCode());
+        sandBlastWindow.setCleanStartTime(dateTime(2026, 5, 21, 6, 0));
+        sandBlastWindow.setCleanEndTime(dateTime(2026, 5, 21, 16, 0));
+
+        ResultDowntimeSummaryUtil.fillDowntimeSummary(
+                result, Collections.emptyList(), Arrays.asList(dryIceWindow, sandBlastWindow), Collections.emptyList());
+
+        assertEquals("干冰清洗+换模,喷砂清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, 1));
+    }
+
+    /**
+     * 单独清洗没有与换模、精度、维修重叠时，应在实际开始清洗的班次写入简洁原因。
+     */
+    @Test
+    void fillDowntimeSummary_shouldAppendStandaloneCleaningAnalysisAtCleaningStartShift() {
+        LhScheduleResult result = new LhScheduleResult();
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 16, dateTime(2026, 5, 21, 6, 0), dateTime(2026, 5, 21, 14, 0));
+        result.setSpecEndTime(dateTime(2026, 5, 21, 14, 0));
+
+        MachineCleaningWindowDTO dryIceWindow = new MachineCleaningWindowDTO();
+        dryIceWindow.setCleanType(CleaningTypeEnum.DRY_ICE.getCode());
+        dryIceWindow.setCleanStartTime(dateTime(2026, 5, 21, 6, 0));
+        dryIceWindow.setCleanEndTime(dateTime(2026, 5, 21, 9, 0));
+
+        ResultDowntimeSummaryUtil.fillDowntimeSummary(
+                result, Collections.emptyList(), Collections.singletonList(dryIceWindow), Collections.emptyList());
+
+        assertEquals("干冰清洗", ShiftFieldUtil.getShiftAnalysis(result, 1));
+    }
+
+    /**
+     * 设备停机计划来源清洗若原始计划窗口与换模重叠，应按“清洗+换模”备注，并从产能扣减清洗列表剔除。
+     */
+    @Test
+    void sourcePlanOverlap_shouldAppendMouldChangeAnalysisAndExcludeCapacityCleaningWindow() {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMouldChangeStartTime(dateTime(2026, 5, 21, 6, 0));
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 16, dateTime(2026, 5, 21, 14, 0), dateTime(2026, 5, 21, 22, 0));
+        result.setSpecEndTime(dateTime(2026, 5, 21, 22, 0));
+
+        MachineCleaningWindowDTO sandBlastWindow = new MachineCleaningWindowDTO();
+        sandBlastWindow.setCleanType(CleaningTypeEnum.SAND_BLAST.getCode());
+        sandBlastWindow.setCleanStartTime(dateTime(2026, 5, 21, 14, 0));
+        sandBlastWindow.setCleanEndTime(dateTime(2026, 5, 22, 0, 0));
+        sandBlastWindow.setSourcePlanStartTime(dateTime(2026, 5, 21, 10, 0));
+        sandBlastWindow.setSourcePlanEndTime(dateTime(2026, 5, 21, 19, 0));
+
+        assertTrue(MachineCleaningOverlapUtil.excludeOverlapWindows(Collections.singletonList(sandBlastWindow),
+                dateTime(2026, 5, 21, 6, 0), dateTime(2026, 5, 21, 14, 0)).isEmpty(),
+                "来源计划窗口与换模重叠时，不再把该清洗窗口纳入产能扣减");
+
+        ResultDowntimeSummaryUtil.fillDowntimeSummary(
+                result, Collections.emptyList(), Collections.singletonList(sandBlastWindow), Collections.emptyList());
+
+        assertEquals("喷砂清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, 1));
     }
 
     @Test

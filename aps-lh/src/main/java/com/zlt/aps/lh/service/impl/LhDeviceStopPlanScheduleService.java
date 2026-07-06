@@ -39,10 +39,12 @@ public class LhDeviceStopPlanScheduleService {
     private static final String VALUE_SEPARATOR = ",";
 
     /**
-     * 从排程窗口内的设备停机计划中过滤干冰/喷砂清洗记录，并按计划开始时间升序返回。
+     * 从设备停机计划中过滤干冰/喷砂清洗候选，并按计划开始时间、机台编码升序返回。
+     * <p>清洗计划加载口径与普通设备停机不同：计划开始时间只用于判断候选顺序和是否晚于 T 日，
+     * 不要求落在 T～T+2 排程窗口内，实际清洗开始/结束时间由清洗排程服务重新安排。</p>
      *
      * @param context 排程上下文
-     * @return 排程窗口内清洗类设备停机计划
+     * @return T 日及之后的清洗类设备停机候选
      */
     public List<MdmDevicePlanShut> queryCleaningStopPlans(LhScheduleContext context) {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getDevicePlanShutList())) {
@@ -53,7 +55,7 @@ public class LhDeviceStopPlanScheduleService {
             if (!isValidStopPlan(planShut) || !isCleaningStopType(planShut.getMachineStopType())) {
                 continue;
             }
-            if (!isPlanBeginInScheduleWindow(context, planShut.getBeginDate())) {
+            if (!isPlanBeginOnOrAfterScheduleDate(context, planShut.getBeginDate())) {
                 continue;
             }
             cleaningStopPlans.add(planShut);
@@ -240,8 +242,19 @@ public class LhDeviceStopPlanScheduleService {
         return Objects.nonNull(startTime) && LhScheduleTimeUtil.isAfternoonShift(context, startTime);
     }
 
-    private boolean isPlanBeginInScheduleWindow(LhScheduleContext context, Date planBeginTime) {
-        return isInScheduleWindow(context, planBeginTime);
+    /**
+     * 判断设备停机计划开始时间是否属于本次清洗候选范围。
+     *
+     * @param context 排程上下文
+     * @param planBeginTime 设备停机计划开始时间
+     * @return true-计划开始时间不早于 T 日零点
+     */
+    private boolean isPlanBeginOnOrAfterScheduleDate(LhScheduleContext context, Date planBeginTime) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleDate()) || Objects.isNull(planBeginTime)) {
+            return true;
+        }
+        Date scheduleStartTime = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
+        return !planBeginTime.before(scheduleStartTime);
     }
 
     private boolean isValidStopPlan(MdmDevicePlanShut planShut) {

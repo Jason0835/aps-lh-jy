@@ -16,6 +16,7 @@ import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
+import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
@@ -435,8 +436,9 @@ public class LocalSearchMachineAllocatorStrategy {
         if (productionStartTime == null) {
             return LocalSearchCapacityEstimate.empty();
         }
+        // 局部搜索估产也必须同步清洗规则：3天内可收尾的SKU不再扣干冰/喷砂清洗产能。
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
-                machine, mouldChangeStartTime, productionStartTime);
+                context, machine, sku, mouldChangeStartTime, productionStartTime);
         int dryIceLossQty = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
@@ -544,15 +546,22 @@ public class LocalSearchMachineAllocatorStrategy {
     /**
      * 解析局部搜索估产时需要生效的清洗窗口。
      *
+     * @param context 排程上下文
      * @param machine 候选机台
+     * @param sku 待排 SKU
      * @param switchStartTime 换模开始时间
      * @param firstProductionStartTime 首个可排产开始时间
      * @return 有效清洗窗口列表
      */
-    private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(MachineScheduleDTO machine,
+    private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(LhScheduleContext context,
+                                                                              MachineScheduleDTO machine,
+                                                                              SkuScheduleDTO sku,
                                                                               Date switchStartTime,
                                                                               Date firstProductionStartTime) {
         if (machine == null || CollectionUtils.isEmpty(machine.getCleaningWindowList())) {
+            return new ArrayList<>(0);
+        }
+        if (CleaningScheduleRuleUtil.shouldSkipCleaningBySkuEnding(context, sku)) {
             return new ArrayList<>(0);
         }
         return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(
@@ -570,11 +579,8 @@ public class LocalSearchMachineAllocatorStrategy {
     private Date resolveDelayedSwitchStartTime(MachineScheduleDTO machine,
                                                Date switchStartTime,
                                                Date productionStartTime) {
-        if (machine == null) {
-            return switchStartTime;
-        }
-        return MachineCleaningOverlapUtil.resolveDelayedSwitchStartBySandBlast(
-                machine.getCleaningWindowList(), switchStartTime, productionStartTime);
+        // 清洗与普通换模重叠时只执行换模，不再因为喷砂清洗顺延换模开始时间。
+        return switchStartTime;
     }
 
     /**

@@ -19,8 +19,9 @@ import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
-import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -1110,8 +1111,9 @@ public class TargetScheduleQtyResolver {
         if (firstProductionStartTime == null) {
             return 0;
         }
+        // 收尾SKU若3天内可完成，不再把清洗作为产能约束参与目标量估算。
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
-                machine, switchStartTime, firstProductionStartTime);
+                context, machine, sku, switchStartTime, firstProductionStartTime);
         int dryIceLossQty = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
@@ -1209,15 +1211,22 @@ public class TargetScheduleQtyResolver {
     /**
      * 解析用于排产估算的清洗窗口。
      *
+     * @param context 排程上下文
      * @param machine 机台
+     * @param sku SKU 排程数据
      * @param switchStartTime 切换开始时间
      * @param firstProductionStartTime 首个可排产开始时间
      * @return 有效清洗窗口列表
      */
-    private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(MachineScheduleDTO machine,
+    private List<MachineCleaningWindowDTO> resolveEffectiveCleaningWindowList(LhScheduleContext context,
+                                                                              MachineScheduleDTO machine,
+                                                                              SkuScheduleDTO sku,
                                                                               Date switchStartTime,
                                                                               Date firstProductionStartTime) {
         if (Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getCleaningWindowList())) {
+            return new ArrayList<>(0);
+        }
+        if (CleaningScheduleRuleUtil.shouldSkipCleaningBySkuEnding(context, sku)) {
             return new ArrayList<>(0);
         }
         return new ArrayList<>(MachineCleaningOverlapUtil.excludeOverlapWindows(

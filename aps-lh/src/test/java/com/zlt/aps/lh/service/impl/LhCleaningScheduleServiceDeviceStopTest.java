@@ -33,6 +33,7 @@ public class LhCleaningScheduleServiceDeviceStopTest {
 
     /**
      * 用例说明：设备停机表中的干冰/喷砂记录应转换为清洗窗口，旧模具清洗计划列表为空也要生效。
+     * <p>设备停机计划的计划开始/结束时间只用于候选来源，实际清洗时间由排程窗口班次重新安排。</p>
      */
     @Test
     public void shouldBuildCleaningWindowsFromDeviceStopPlans() {
@@ -49,12 +50,18 @@ public class LhCleaningScheduleServiceDeviceStopTest {
         Assertions.assertTrue(context.getCleaningPlanList().isEmpty(), "本用例不依赖旧模具清洗计划表");
         Assertions.assertEquals(CleaningTypeEnum.DRY_ICE.getCode(), windowMap.get("K1301").get(0).getCleanType());
         Assertions.assertEquals(CleaningTypeEnum.SAND_BLAST.getCode(), windowMap.get("K1302").get(0).getCleanType());
-        Assertions.assertEquals(toDate(2026, 4, 20, 8, 0, 0), windowMap.get("K1301").get(0).getCleanStartTime());
-        Assertions.assertEquals(toDate(2026, 4, 20, 11, 0, 0), windowMap.get("K1301").get(0).getCleanEndTime());
+        Assertions.assertEquals(toDate(2026, 4, 20, 6, 0, 0), windowMap.get("K1301").get(0).getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 20, 9, 0, 0), windowMap.get("K1301").get(0).getCleanEndTime());
+        Assertions.assertEquals(toDate(2026, 4, 20, 14, 0, 0), windowMap.get("K1302").get(0).getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 21, 0, 0, 0), windowMap.get("K1302").get(0).getCleanEndTime());
+        Assertions.assertEquals(toDate(2026, 4, 20, 14, 0, 0), windowMap.get("K1302").get(0).getSourcePlanStartTime(),
+                "来源计划开始时间只用于换模重叠判定，不作为实际清洗开始时间");
+        Assertions.assertEquals(toDate(2026, 4, 20, 16, 0, 0), windowMap.get("K1302").get(0).getSourcePlanEndTime(),
+                "来源计划结束时间只用于换模重叠判定，不作为实际清洗结束时间");
     }
 
     /**
-     * 用例说明：喷砂清洗计划不在中班时，应向后顺延到后续第一个可用中班，且保持原计划时长。
+     * 用例说明：喷砂清洗计划不在中班时，实际清洗仍按本次窗口内可用中班安排，耗时复用喷砂清洗参数。
      */
     @Test
     public void shouldDelaySandBlastToNextAvailableAfternoonShift() {
@@ -67,11 +74,11 @@ public class LhCleaningScheduleServiceDeviceStopTest {
                 .buildScheduledCleaningWindowMap(context).get("K1301").get(0);
 
         Assertions.assertEquals(toDate(2026, 4, 20, 14, 0, 0), window.getCleanStartTime());
-        Assertions.assertEquals(toDate(2026, 4, 20, 16, 0, 0), window.getCleanEndTime());
+        Assertions.assertEquals(toDate(2026, 4, 21, 0, 0, 0), window.getCleanEndTime());
     }
 
     /**
-     * 用例说明：喷砂顺延后的中班若命中周日或喷砂机维保日，应继续向后寻找下一天中班。
+     * 用例说明：喷砂实际安排日若命中周日或喷砂机维保日，应继续向后寻找下一天中班。
      */
     @Test
     public void shouldContinueDelaySandBlastWhenSundayAndMaintenanceDateMatched() {
@@ -85,7 +92,74 @@ public class LhCleaningScheduleServiceDeviceStopTest {
                 .buildScheduledCleaningWindowMap(context).get("K1301").get(0);
 
         Assertions.assertEquals(toDate(2026, 4, 21, 14, 0, 0), window.getCleanStartTime());
-        Assertions.assertEquals(toDate(2026, 4, 21, 16, 0, 0), window.getCleanEndTime());
+        Assertions.assertEquals(toDate(2026, 4, 22, 0, 0, 0), window.getCleanEndTime());
+    }
+
+    /**
+     * 用例说明：清洗候选可来自 T+3 之后的设备停机计划，但实际清洗必须提前安排到本次排程窗口内。
+     * <p>同一计划开始时间下按机台编码升序加载，先加载的候选优先占用早班/中班名额。</p>
+     */
+    @Test
+    public void shouldLoadFutureCleaningCandidatesAndScheduleInsideCurrentWindowByPlanOrder() {
+        LhScheduleContext context = buildContext(toDate(2026, 4, 20, 0, 0, 0));
+        context.setDevicePlanShutList(Arrays.asList(
+                buildDeviceStop("K1303", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 25, 8, 0, 0), toDate(2026, 4, 25, 11, 0, 0)),
+                buildDeviceStop("K1302", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 23, 8, 0, 0), toDate(2026, 4, 23, 11, 0, 0)),
+                buildDeviceStop("K1301", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 23, 8, 0, 0), toDate(2026, 4, 23, 11, 0, 0))));
+
+        Map<String, List<MachineCleaningWindowDTO>> windowMap =
+                new LhCleaningScheduleService().buildScheduledCleaningWindowMap(context);
+
+        Assertions.assertEquals(toDate(2026, 4, 20, 6, 0, 0), windowMap.get("K1301").get(0).getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 20, 6, 0, 0), windowMap.get("K1302").get(0).getCleanStartTime());
+        Assertions.assertEquals(toDate(2026, 4, 20, 14, 0, 0), windowMap.get("K1303").get(0).getCleanStartTime());
+    }
+
+    /**
+     * 用例说明：清洗加载总量按“每日上限 * 排程窗口天数”控制，未来候选超量时只保留排序靠前的数据。
+     */
+    @Test
+    public void shouldLimitLoadedCleaningCandidatesByDailyLimitAndScheduleDays() {
+        LhScheduleContext context = buildContext(toDate(2026, 4, 20, 0, 0, 0));
+        context.setDevicePlanShutList(Arrays.asList(
+                buildDeviceStop("D01", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 23, 8, 0, 0), toDate(2026, 4, 23, 11, 0, 0)),
+                buildDeviceStop("D02", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 24, 8, 0, 0), toDate(2026, 4, 24, 11, 0, 0)),
+                buildDeviceStop("D03", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 25, 8, 0, 0), toDate(2026, 4, 25, 11, 0, 0)),
+                buildDeviceStop("D04", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 26, 8, 0, 0), toDate(2026, 4, 26, 11, 0, 0)),
+                buildDeviceStop("D05", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 27, 8, 0, 0), toDate(2026, 4, 27, 11, 0, 0)),
+                buildDeviceStop("D06", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 28, 8, 0, 0), toDate(2026, 4, 28, 11, 0, 0)),
+                buildDeviceStop("D07", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 29, 8, 0, 0), toDate(2026, 4, 29, 11, 0, 0)),
+                buildDeviceStop("D08", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 30, 8, 0, 0), toDate(2026, 4, 30, 11, 0, 0)),
+                buildDeviceStop("D09", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 5, 1, 8, 0, 0), toDate(2026, 5, 1, 11, 0, 0)),
+                buildDeviceStop("D10", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 5, 2, 8, 0, 0), toDate(2026, 5, 2, 11, 0, 0)),
+                buildDeviceStop("S01", MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode(),
+                        toDate(2026, 4, 23, 8, 0, 0), toDate(2026, 4, 23, 18, 0, 0)),
+                buildDeviceStop("S02", MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode(),
+                        toDate(2026, 4, 24, 8, 0, 0), toDate(2026, 4, 24, 18, 0, 0)),
+                buildDeviceStop("S03", MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode(),
+                        toDate(2026, 4, 25, 8, 0, 0), toDate(2026, 4, 25, 18, 0, 0)),
+                buildDeviceStop("S04", MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode(),
+                        toDate(2026, 4, 26, 8, 0, 0), toDate(2026, 4, 26, 18, 0, 0))));
+
+        Map<String, List<MachineCleaningWindowDTO>> windowMap =
+                new LhCleaningScheduleService().buildScheduledCleaningWindowMap(context);
+
+        Assertions.assertEquals(12, windowMap.values().stream().mapToInt(List::size).sum());
+        Assertions.assertFalse(windowMap.containsKey("D10"), "干冰本次最多纳入 3 台/天 * 3 天 = 9 台");
+        Assertions.assertFalse(windowMap.containsKey("S04"), "喷砂本次最多纳入 1 台/天 * 3 天 = 3 台");
     }
 
     /**
