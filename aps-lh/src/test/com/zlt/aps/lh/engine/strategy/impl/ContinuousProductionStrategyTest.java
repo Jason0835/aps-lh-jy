@@ -46,6 +46,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -1839,8 +1840,11 @@ public class ContinuousProductionStrategyTest {
                 "day1无计划导致零计划续作结果移除时，应记录释放机台供新增选机降优先级使用");
     }
 
+    /**
+     * 续作SKU首日无计划但仍有硫化余量时，应从T日首个可排班次开始排产，不释放原续作机台。
+     */
     @Test
-    public void scheduleContinuousEnding_shouldReleaseSingleMachineWhenFirstDayHasNoPlan()
+    public void scheduleContinuousEnding_shouldStartFromFirstDayWhenFirstDayNoPlanButSurplusExists()
             throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
@@ -1851,16 +1855,25 @@ public class ContinuousProductionStrategyTest {
 
         strategy.scheduleContinuousEnding(context);
 
-        assertEquals(0, context.getScheduleResultList().size(),
-                "day1无计划但后续仍有计划时，原续作机台不应继续从day2起排续作");
-        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1501L"),
-                "续作首日无计划时，应记录原续作机台，供换活字块和新增排产消费");
-        assertTrue(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains("K1501L"),
-                "首日无计划但后续有计划的释放机台应写入稳定识别集合");
+        // 续作仍有硫化余量时从T日起排，不释放机台，不等待后续有日计划量的日期
+        assertEquals(1, context.getScheduleResultList().size(),
+                "续作仍有硫化余量时，day1无计划也应从T日起排，不应释放机台");
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals("K1501L", result.getLhMachineCode(),
+                "续作结果应保留在原续作机台K1501L上");
+        assertTrue(ShiftFieldUtil.getShiftPlanQty(result, 1) > 0,
+                "续作应从T日首个班次(C1)开始排产，dayN为0不阻塞续作起排");
+        assertFalse(context.getReleasedContinuousMachineCodeSet().contains("K1501L"),
+                "续作仍有硫化余量时不应释放原续作机台");
+        assertFalse(context.getFirstDayNoPlanReleasedContinuousMachineCodeSet().contains("K1501L"),
+                "续作仍有硫化余量时不应写入首日无计划释放集合");
     }
 
+    /**
+     * 续作SKU首日无计划但仍有硫化余量时，机台应保持占用状态并产出续作结果。
+     */
     @Test
-    public void scheduleContinuousEnding_shouldKeepMachineStateReleasedWhenFirstDayHasNoPlan()
+    public void scheduleContinuousEnding_shouldKeepMachineOccupiedWhenFirstDayNoPlanButSurplusExists()
             throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
@@ -1875,26 +1888,35 @@ public class ContinuousProductionStrategyTest {
 
         strategy.scheduleContinuousEnding(context);
 
-        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1501L"),
-                "首日无计划的续作机台应进入释放集合");
-        assertNull(machine.getEstimatedEndTime(),
-                "首日无计划但后续仍有计划时，S4.4 收口后不应把续作结果终态继续占在机台运行态上");
+        // 续作仍有硫化余量时机台保持占用，不释放，不等待后续日计划
+        assertEquals(1, context.getScheduleResultList().size(),
+                "续作仍有硫化余量时应产出续作结果，不应释放机台");
+        assertFalse(context.getReleasedContinuousMachineCodeSet().contains("K1501L"),
+                "续作仍有硫化余量时不应释放原续作机台");
+        // 非收尾续作不更新机台estimatedEndTime（仅收尾/挤量场景才回写），但机台已有排产结果分配
+        List<LhScheduleResult> assignedResults = context.getMachineAssignmentMap().get("K1501L");
+        assertNotNull(assignedResults, "续作产出结果后机台应有排产结果分配");
+        assertFalse(assignedResults.isEmpty(), "续作产出结果后机台应有排产结果分配");
     }
 
+    /**
+     * 续作SKU首日无计划但仍有硫化余量时，不应预登记释放机台，应从T日继续排产。
+     */
     @Test
-    public void scheduleContinuousEnding_shouldPreRegisterFirstDayNoPlanMachineBeforeProcessingOtherContinuousSku()
+    public void scheduleContinuousEnding_shouldNotPreRegisterFirstDayNoPlanMachineWhenSurplusExists()
             throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
         injectField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
-        injectField(strategy, "endingJudgmentStrategy", new AssertReleasedMachineRegisteredBeforeFirstSkuStrategy());
+        injectField(strategy, "endingJudgmentStrategy", new AssertNotReleasedMachineBeforeFirstSkuStrategy());
 
         LhScheduleContext context = buildPreRegisterReleasedMachineContext();
 
         strategy.scheduleContinuousEnding(context);
 
-        assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
-                "首日无计划释放机台应在续作主循环开始前完成预登记，供S4.4内新增预判选机降优先级");
+        // 续作仍有硫化余量时，首日无计划机台不应被预登记释放
+        assertFalse(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
+                "续作仍有硫化余量时，首日无计划机台不应被释放，应从T日继续排产");
     }
 
     @Test
@@ -2055,8 +2077,11 @@ public class ContinuousProductionStrategyTest {
                 "动态收尾必须跨多个班次排产，不能只保留C1");
     }
 
+    /**
+     * 续作SKU首日无计划但仍有硫化余量时，不应转入新增排产补偿，应保留续作结果从T日起排。
+     */
     @Test
-    public void scheduleReduceMould_shouldAppendCompensationAfterFirstDayNoPlanRelease()
+    public void scheduleReduceMould_shouldNotAppendCompensationWhenFirstDayNoPlanButSurplusExists()
             throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectField(strategy, "orderNoGenerator", new OrderNoGenerator());
@@ -2068,20 +2093,11 @@ public class ContinuousProductionStrategyTest {
         strategy.scheduleContinuousEnding(context);
         strategy.scheduleReduceMould(context);
 
-        assertEquals(0, context.getScheduleResultList().size(),
-                "首日无计划释放后不应残留原续作排产结果");
-        assertEquals(1, context.getNewSpecSkuList().size(),
-                "day2/day3仍有计划量时，原续作SKU应转入新增排产补偿");
-        SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
-        SkuScheduleDTO sourceSku = context.getContinuousSkuList().get(0);
-        assertEquals("3302001075", compensationSku.getMaterialCode());
-        assertSame(sourceSku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap(),
-                "补偿SKU必须共享原续作SKU日计划账本，避免day2/day3计划量丢失");
-        assertNull(compensationSku.getContinuousMachineCode(),
-                "补偿SKU应交由新增换模链路重新选机");
-        assertEquals("K1501L",
-                ReflectionTestUtils.getField(compensationSku, "preferredContinuousMachineCode"),
-                "补偿SKU应保留原续作机台，供新增阶段轮到自己时优先识别");
+        // 续作仍有硫化余量时从T日起排，不释放机台，不转入新增补偿
+        assertEquals(1, context.getScheduleResultList().size(),
+                "续作仍有硫化余量时应保留续作结果，不应释放后转入新增补偿");
+        assertEquals(0, context.getNewSpecSkuList().size(),
+                "续作仍有硫化余量时不应生成新增补偿SKU");
     }
 
     @Test
@@ -2966,15 +2982,15 @@ public class ContinuousProductionStrategyTest {
     }
 
     /**
-     * 校验续作主循环处理首条SKU前，后续首日无计划机台已完成释放预登记。
+     * 校验续作主循环处理首条SKU前，后续首日无计划机台不应被预登记释放。
      */
-    private static class AssertReleasedMachineRegisteredBeforeFirstSkuStrategy extends StubEndingJudgmentStrategy {
+    private static class AssertNotReleasedMachineBeforeFirstSkuStrategy extends StubEndingJudgmentStrategy {
 
         @Override
         public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {
             if (sku != null && StringUtils.equals("MAT-FIRST", sku.getMaterialCode())) {
-                assertTrue(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
-                        "处理其他续作SKU前，应先登记K1105为首日无计划释放机台");
+                assertFalse(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
+                        "续作仍有硫化余量时，处理其他续作SKU前不应登记K1105为首日无计划释放机台");
             }
             return false;
         }

@@ -229,7 +229,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             boolean isSingleMachine = continuationGroupMachineCountMap
                     .getOrDefault(buildContinuationGroupKey(sku), 0) == 1;
 
-            // 续作按原始dayN定位起排日；若机台已被占用，则沿用机台真实可用时间。
+            // 续作仍有硫化余量时从T日首个可排班次起排，dayN不阻塞；若机台已被占用，则沿用机台真实可用时间。
             Date startTime = resolveContinuousStartTime(context, sku, machine, shifts, isEnding);
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine, shortageQuotaPlan);
@@ -357,7 +357,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
      /**
      * 解析续作起排时间。
-     * <p>续作按原始dayN定位起排日；滚动衔接或机台已占用时沿用机台真实可用时间。</p>
+     * <p>续作仍有硫化余量时从T日首个可排班次起排，dayN不阻塞；
+     * 滚动衔接或机台已占用时沿用机台真实可用时间。</p>
      */
     private Date resolveContinuousStartTime(LhScheduleContext context,
                                             SkuScheduleDTO sku,
@@ -382,15 +383,19 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 解析首个有原始日计划的续作起排班次。
-     * <p>续作不需要换模/换活字块，dayN 只判断从哪天起排；排产量由硫化余量控制，
-     * 不能用运行态剩余额度扣完后的结果跳过 T 日班次。</p>
+     * 解析续作起排班次。
+     * <p>续作不需要换模/换活字块；只要仍有硫化余量，从T日第一个可排班次开始排产，
+     * 月计划dayN不作为续作是否可在T日继续生产的限制。</p>
+     * <p>dayN仍用于加机台、降模减机台、节奏判断、提前生产判断、新增排产最早上机判断等逻辑，
+     * 但不阻塞续作机台继续生产。排产量由硫化余量控制，不能用运行态剩余额度扣完后的结果跳过T日班次。</p>
+     * <p>续作排产仍需扣除清洗、停机、维修、精度、换活字块等不可生产时段，
+     * 并遵守收尾目标量、班产、日标准产量修正等现有规则。</p>
      *
      * @param context 排程上下文
      * @param sku 续作SKU
      * @param shifts 排程窗口班次
      * @param isEnding 是否收尾
-     * @return 首个可排班次开始时间；无可识别额度时返回窗口首班开始时间
+     * @return T日首个可排班次开始时间；硫化余量为0时回退到首个有原始日计划的班次
      */
     private Date resolveFirstPositiveDailyPlanStartTime(LhScheduleContext context,
                                                         SkuScheduleDTO sku,
@@ -398,6 +403,15 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                         boolean isEnding) {
         Date defaultStartTime = CollectionUtils.isEmpty(shifts) ? new Date() : shifts.get(0).getShiftStartDateTime();
         if (sku == null || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap()) || CollectionUtils.isEmpty(shifts)) {
+            return defaultStartTime;
+        }
+        // 续作SKU只要仍有硫化余量，从T日第一个可排班次开始排产，dayN不阻塞续作机台继续生产。
+        // dayN仍可用于加机台、降模减机台、节奏判断等逻辑，但不限制续作起排日期。
+        if (Math.max(0, sku.getSurplusQty()) > 0) {
+            log.info("续作仍有硫化余量，从T日首个可排班次开始排产, materialCode: {}, machineCode: {}, "
+                            + "surplusQty: {}, isEnding: {}, dayN: {}",
+                    sku.getMaterialCode(), sku.getContinuousMachineCode(),
+                    Math.max(0, sku.getSurplusQty()), isEnding, formatDailyPlanQuotaSummary(sku));
             return defaultStartTime;
         }
         if (hasFirstWindowDateDailyPlan(context, sku, shifts)) {
@@ -467,14 +481,15 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * 判断首日无计划但后续仍有计划的续作SKU是否应释放原机台。
-     * <p>MES 在机同物料后续窗口仍有正日计划时，必须保留续作身份，
-     * 由续作起排时间推进到首个正日计划班次，避免同物料被释放后按新增换模上机。</p>
+     * <p>续作SKU只要仍有硫化余量，就从T日第一个可排班次开始排产，始终保留续作身份，
+     * 不因day1日计划为0而释放原续作机台或等待后续有计划量的日期再起排。</p>
+     * <p>dayN仍用于加机台、降模减机台、节奏判断等逻辑，但不阻塞续作机台继续生产。</p>
      *
      * @param context 排程上下文
      * @param sku 续作SKU
      * @param shifts 排程窗口班次
      * @param shortageQuotaPlan 欠产账本准备结果
-     * @return true-释放原续作机台
+     * @return 始终返回false，续作仍有硫化余量时保留续作身份
      */
     private boolean shouldReleaseFirstDayNoPlanContinuousSku(LhScheduleContext context,
                                                              SkuScheduleDTO sku,

@@ -1228,8 +1228,11 @@ class ContinuousProductionTypeBlockRegressionTest {
         assertEquals("MAT-T1", context.getScheduleResultList().get(0).getMaterialCode());
     }
 
+    /**
+     * 续作SKU首日无计划但仍有硫化余量时，不应释放机台给换活字块接管，应从T日继续排产。
+     */
     @Test
-    void scheduleTypeBlockChange_shouldUseFirstDayNoPlanReleasedMachineAndKeepSkuOrder() {
+    void scheduleTypeBlockChange_shouldNotTakeOverMachineWhenFirstDayNoPlanButSurplusExists() {
         LhScheduleContext context = newContext();
         context.setScheduleDate(date(2026, 6, 3));
         context.setScheduleTargetDate(date(2026, 6, 5));
@@ -1266,18 +1269,17 @@ class ContinuousProductionTypeBlockRegressionTest {
         strategy.scheduleContinuousEnding(context);
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
+        // 续作仍有硫化余量时从T日起排，不释放K1105，换活字块不应接管
+        assertFalse(context.getReleasedContinuousMachineCodeSet().contains("K1105"),
+                "续作仍有硫化余量时不应释放原续作机台给换活字块接管");
         assertEquals(1, context.getScheduleResultList().size(),
-                "day1无计划释放机台不应残留原续作结果，只应生成换活字块接管结果");
-        LhScheduleResult typeBlockResult = context.getScheduleResultList().get(0);
-        assertEquals("3302001513", typeBlockResult.getMaterialCode(),
-                "多个候选都满足换活字块时，应沿用新增SKU已有排序选择首位");
-        assertEquals("K1105", typeBlockResult.getLhMachineCode());
-        assertEquals("03", typeBlockResult.getScheduleType());
-        assertEquals("1", typeBlockResult.getIsTypeBlock());
-        assertEquals("3302001512", context.getNewSpecSkuList().get(0).getMaterialCode(),
-                "排序靠后的候选不应优先占用K1105");
-        assertEquals("3302002601", context.getNewSpecSkuList().get(1).getMaterialCode(),
-                "排序靠后的候选应继续保留在新增待排队列");
+                "续作仍有硫化余量时应保留续作结果，换活字块不应接管");
+        LhScheduleResult continuousResult = context.getScheduleResultList().get(0);
+        assertEquals("3302002546", continuousResult.getMaterialCode(),
+                "续作结果应保留在原续作SKU上，不应被换活字块接管");
+        assertEquals("K1105", continuousResult.getLhMachineCode());
+        assertEquals("01", continuousResult.getScheduleType(),
+                "续作结果应保持续作排产类型，不应变为换活字块类型");
     }
 
     @Test
