@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.springframework.util.CollectionUtils;
 
@@ -19,6 +20,11 @@ import java.util.Objects;
  * @author APS
  */
 public final class ResultDowntimeSummaryUtil {
+
+    /** 喷砂与精度保养重叠时写入班次分析的固定原因 */
+    private static final String SAND_BLAST_PRECISION_ANALYSIS = "喷砂清洗+精度";
+    /** 喷砂与设备停机计划重叠时写入班次分析的固定原因 */
+    private static final String SAND_BLAST_SHUTDOWN_ANALYSIS = "喷砂清洗+维修(设备停机计划)";
 
     private ResultDowntimeSummaryUtil() {
     }
@@ -48,6 +54,8 @@ public final class ResultDowntimeSummaryUtil {
         fillMaintenanceSummary(result, maintenanceWindowList, productionStartTime, productionEndTime);
         fillCleaningSummary(result, cleaningWindowList, productionStartTime, productionEndTime);
         fillShutdownSummary(result, devicePlanShutList, productionStartTime, productionEndTime);
+        // 喷砂清洗与精度/维修实际重叠时，才在对应的最后一个重叠班次追加固定原因。
+        appendSandBlastDowntimeAnalysis(result, cleaningWindowList, maintenanceWindowList, devicePlanShutList);
     }
 
     /**
@@ -137,6 +145,141 @@ public final class ResultDowntimeSummaryUtil {
         }
         result.setShutdownStartTime(earliestStartTime);
         result.setShutdownEndTime(latestEndTime);
+    }
+
+    /**
+     * 追加喷砂清洗与精度/维修重叠原因。
+     *
+     * @param result 排程结果
+     * @param cleaningWindowList 清洗窗口
+     * @param maintenanceWindowList 精度保养窗口
+     * @param devicePlanShutList 设备停机窗口
+     */
+    private static void appendSandBlastDowntimeAnalysis(LhScheduleResult result,
+                                                        List<MachineCleaningWindowDTO> cleaningWindowList,
+                                                        List<MachineMaintenanceWindowDTO> maintenanceWindowList,
+                                                        List<MdmDevicePlanShut> devicePlanShutList) {
+        if (Objects.isNull(result) || CollectionUtils.isEmpty(cleaningWindowList)) {
+            return;
+        }
+        for (MachineCleaningWindowDTO cleaningWindow : cleaningWindowList) {
+            if (!isSandBlastWindow(cleaningWindow)) {
+                continue;
+            }
+            // 喷砂与精度保养窗口实际相交时，产能扣减走并行取最大，原因写入最后一个重叠班次。
+            appendSandBlastMaintenanceAnalysis(result, cleaningWindow, maintenanceWindowList);
+            // 喷砂与普通设备停机计划实际相交时，写入设备停机计划组合原因。
+            appendSandBlastShutdownAnalysis(result, cleaningWindow, devicePlanShutList);
+        }
+    }
+
+    /**
+     * 追加喷砂清洗与精度保养重叠原因。
+     *
+     * @param result 排程结果
+     * @param cleaningWindow 喷砂清洗窗口
+     * @param maintenanceWindowList 精度保养窗口
+     */
+    private static void appendSandBlastMaintenanceAnalysis(LhScheduleResult result,
+                                                           MachineCleaningWindowDTO cleaningWindow,
+                                                           List<MachineMaintenanceWindowDTO> maintenanceWindowList) {
+        if (CollectionUtils.isEmpty(maintenanceWindowList)) {
+            return;
+        }
+        for (MachineMaintenanceWindowDTO maintenanceWindow : maintenanceWindowList) {
+            if (Objects.isNull(maintenanceWindow)) {
+                continue;
+            }
+            appendOverlapAnalysis(result, cleaningWindow.getCleanStartTime(), cleaningWindow.getCleanEndTime(),
+                    maintenanceWindow.getMaintenanceStartTime(), maintenanceWindow.getMaintenanceEndTime(),
+                    SAND_BLAST_PRECISION_ANALYSIS);
+        }
+    }
+
+    /**
+     * 追加喷砂清洗与设备停机计划重叠原因。
+     *
+     * @param result 排程结果
+     * @param cleaningWindow 喷砂清洗窗口
+     * @param devicePlanShutList 设备停机窗口
+     */
+    private static void appendSandBlastShutdownAnalysis(LhScheduleResult result,
+                                                        MachineCleaningWindowDTO cleaningWindow,
+                                                        List<MdmDevicePlanShut> devicePlanShutList) {
+        if (CollectionUtils.isEmpty(devicePlanShutList)) {
+            return;
+        }
+        for (MdmDevicePlanShut planShut : devicePlanShutList) {
+            if (Objects.isNull(planShut)) {
+                continue;
+            }
+            appendOverlapAnalysis(result, cleaningWindow.getCleanStartTime(), cleaningWindow.getCleanEndTime(),
+                    planShut.getBeginDate(), planShut.getEndDate(), SAND_BLAST_SHUTDOWN_ANALYSIS);
+        }
+    }
+
+    /**
+     * 按两个窗口的真实交集追加班次原因。
+     *
+     * @param result 排程结果
+     * @param leftStartTime 左窗口开始时间
+     * @param leftEndTime 左窗口结束时间
+     * @param rightStartTime 右窗口开始时间
+     * @param rightEndTime 右窗口结束时间
+     * @param analysis 固定原因
+     */
+    private static void appendOverlapAnalysis(LhScheduleResult result,
+                                              Date leftStartTime,
+                                              Date leftEndTime,
+                                              Date rightStartTime,
+                                              Date rightEndTime,
+                                              String analysis) {
+        if (!isWindowOverlap(leftStartTime, leftEndTime, rightStartTime, rightEndTime)) {
+            return;
+        }
+        Date overlapStartTime = later(leftStartTime, rightStartTime);
+        Date overlapEndTime = earlier(leftEndTime, rightEndTime);
+        int shiftIndex = resolveLastOverlapShiftIndex(result, overlapStartTime, overlapEndTime);
+        if (shiftIndex <= 0) {
+            return;
+        }
+        ShiftFieldUtil.appendShiftAnalysis(result, shiftIndex, analysis);
+    }
+
+    /**
+     * 判断是否为有效喷砂清洗窗口。
+     *
+     * @param cleaningWindow 清洗窗口
+     * @return true-喷砂清洗窗口
+     */
+    private static boolean isSandBlastWindow(MachineCleaningWindowDTO cleaningWindow) {
+        return Objects.nonNull(cleaningWindow)
+                && CleaningTypeEnum.SAND_BLAST.getCode().equals(cleaningWindow.getCleanType())
+                && Objects.nonNull(cleaningWindow.getCleanStartTime())
+                && Objects.nonNull(cleaningWindow.getCleanEndTime())
+                && cleaningWindow.getCleanStartTime().before(cleaningWindow.getCleanEndTime());
+    }
+
+    /**
+     * 解析指定重叠区间对应的最后一个结果班次。
+     *
+     * @param result 排程结果
+     * @param overlapStartTime 重叠开始时间
+     * @param overlapEndTime 重叠结束时间
+     * @return 最后一个重叠班次索引；未命中返回 -1
+     */
+    private static int resolveLastOverlapShiftIndex(LhScheduleResult result,
+                                                    Date overlapStartTime,
+                                                    Date overlapEndTime) {
+        int lastShiftIndex = -1;
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+            Date shiftEndTime = ShiftFieldUtil.getShiftEndTime(result, shiftIndex);
+            if (isWindowOverlap(shiftStartTime, shiftEndTime, overlapStartTime, overlapEndTime)) {
+                lastShiftIndex = shiftIndex;
+            }
+        }
+        return lastShiftIndex;
     }
 
     private static Date resolveFirstPlannedShiftStartTime(LhScheduleResult result) {

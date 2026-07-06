@@ -21,7 +21,10 @@ public enum MachineStopTypeEnum {
     PREDICTIVE_MAINTENANCE("03", "预见性维护"),
     PREVENTIVE_MAINTENANCE("04", "预防性维护"),
     PLANNED_REPAIR("05", "计划性维修"),
-    TEMPORARY_FAULT("06", "临时性故障");
+    TEMPORARY_FAULT("06", "临时性故障"),
+    DRY_ICE_CLEANING("07", "干冰清洗"),
+    SANDBLASTING_CLEANING("08", "喷砂清洗"),
+    TAKE_STOCK("09", "盘点");
 
     /** 类型编码 */
     private final String code;

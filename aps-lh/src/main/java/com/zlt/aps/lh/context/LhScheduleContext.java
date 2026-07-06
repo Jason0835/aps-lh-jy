@@ -138,7 +138,7 @@ public class LhScheduleContext {
     private Map<String, MdmModelInfo> modelInfoMap = new HashMap<>();
     /** 硫化机台信息Map, key=machineCode */
     private Map<String, LhMachineInfo> machineInfoMap = new LinkedHashMap<>();
-    /** 模具清洗计划列表 */
+    /** 旧模具清洗计划兼容列表；干冰/喷砂清洗排程不再使用该列表作为来源 */
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
     /** 胎胚实时库存Map, key=embryoCode；始终保存原始库存，内部排产额度分摊不得回写到该原始库存口径 */
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();

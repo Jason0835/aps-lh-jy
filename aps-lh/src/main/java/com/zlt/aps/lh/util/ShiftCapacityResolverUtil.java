@@ -1022,24 +1022,36 @@ public final class ShiftCapacityResolverUtil {
                                                        long shiftDurationSeconds,
                                                        int dryIceLossQty,
                                                        int dryIceDurationHours) {
-        long stopAdjustedSeconds = resolveNetAvailableSeconds(
-                devicePlanShutList, machineCode, windowStartTime, windowEndTime);
+        if (Objects.isNull(windowStartTime) || Objects.isNull(windowEndTime) || !windowStartTime.before(windowEndTime)) {
+            return 0;
+        }
+        long availableSeconds = Math.max(0L, (windowEndTime.getTime() - windowStartTime.getTime()) / 1000L);
         List<Date[]> stopIntervals = collectMergedPlannedStopIntervals(
                 devicePlanShutList, machineCode, windowStartTime, windowEndTime);
+        List<Date[]> baseDowntimeIntervals = new ArrayList<>(stopIntervals);
+        // 保养/精度与维修类设备停机属于基础不可生产时间，先合并成并集，避免两类停机重叠时重复扣减。
+        baseDowntimeIntervals.addAll(collectMergedMaintenanceIntervals(
+                maintenanceWindowList, windowStartTime, windowEndTime));
+        baseDowntimeIntervals = mergeIntervals(baseDowntimeIntervals);
+        long baseAdjustedSeconds = Math.max(availableSeconds - resolveIntervalDurationSeconds(baseDowntimeIntervals), 0L);
+        // 干冰清洗只扣基础停机并集之外的占用时间；若与保养/维修重叠，产能扣减自然按最大占用时间计算。
         long dryIceAdjustedSeconds = resolveDryIceAdjustedAvailableSeconds(
-                cleaningWindowList, stopIntervals, windowStartTime, windowEndTime, stopAdjustedSeconds);
-        long maintenanceAdjustedSeconds = resolveMaintenanceAdjustedAvailableSeconds(
-                maintenanceWindowList, stopIntervals, windowStartTime, windowEndTime, dryIceAdjustedSeconds);
+                cleaningWindowList, baseDowntimeIntervals, windowStartTime, windowEndTime, baseAdjustedSeconds);
         int stopAdjustedQty = resolveShiftCapacity(
-                shiftCapacity, lhTimeSeconds, mouldQty, shiftDurationSeconds, maintenanceAdjustedSeconds);
+                shiftCapacity, lhTimeSeconds, mouldQty, shiftDurationSeconds, dryIceAdjustedSeconds);
         if (stopAdjustedQty <= 0) {
             return 0;
         }
+        List<Date[]> cleaningOccupiedIntervals = new ArrayList<>(baseDowntimeIntervals);
+        cleaningOccupiedIntervals.addAll(collectMergedCleaningIntervals(
+                cleaningWindowList, CleaningTypeEnum.DRY_ICE.getCode(), windowStartTime, windowEndTime));
+        cleaningOccupiedIntervals = mergeIntervals(cleaningOccupiedIntervals);
+        // 喷砂按剩余未覆盖时长折算损失量；与精度、维修、干冰清洗重叠时只扣未被前序区间覆盖的部分。
         int cleaningLossQty = resolveCleaningLossQty(
-                cleaningWindowList, stopIntervals, windowStartTime, windowEndTime,
+                cleaningWindowList, cleaningOccupiedIntervals, windowStartTime, windowEndTime,
                 shiftCapacity, lhTimeSeconds, mouldQty, shiftDurationSeconds);
         int finalQty = Math.max(stopAdjustedQty - cleaningLossQty, 0);
-        boolean shouldNormalizeResidual = (shiftDurationSeconds > 0 && maintenanceAdjustedSeconds < shiftDurationSeconds)
+        boolean shouldNormalizeResidual = (shiftDurationSeconds > 0 && dryIceAdjustedSeconds < shiftDurationSeconds)
                 || cleaningLossQty > 0;
         return normalizeQtyToMouldMultiple(finalQty, mouldQty, shouldNormalizeResidual);
     }

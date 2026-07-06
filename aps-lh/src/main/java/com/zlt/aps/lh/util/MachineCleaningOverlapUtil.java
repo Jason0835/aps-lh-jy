@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.util;
 
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import org.springframework.util.CollectionUtils;
 
@@ -10,7 +11,7 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
- * 模具清洗窗口与换模/换活字块窗口重叠判定工具。
+ * 清洗窗口与换模/换活字块窗口重叠判定工具。
  *
  * @author APS
  */
@@ -68,6 +69,64 @@ public final class MachineCleaningOverlapUtil {
             }
         }
         return false;
+    }
+
+    /**
+     * 判断指定清洗类型是否与目标窗口存在阻塞重叠。
+     *
+     * @param cleaningWindowList 清洗窗口列表
+     * @param cleanType 清洗类型
+     * @param switchStartTime 切换开始时间
+     * @param switchEndTime 切换结束时间
+     * @return true-存在指定清洗类型的重叠；false-不存在
+     */
+    public static boolean hasCleaningTypeBlockingOverlap(List<MachineCleaningWindowDTO> cleaningWindowList,
+                                                         String cleanType,
+                                                         Date switchStartTime,
+                                                         Date switchEndTime) {
+        if (CollectionUtils.isEmpty(cleaningWindowList)) {
+            return false;
+        }
+        for (MachineCleaningWindowDTO cleaningWindow : cleaningWindowList) {
+            if (Objects.nonNull(cleaningWindow)
+                    && Objects.equals(cleanType, cleaningWindow.getCleanType())
+                    && isBlockingOverlap(cleaningWindow, switchStartTime, switchEndTime)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析重叠窗口归属的最后一个班次索引。
+     *
+     * @param shifts 排程窗口班次
+     * @param overlapStartTime 重叠开始时间
+     * @param overlapEndTime 重叠结束时间
+     * @return 最后一个重叠班次索引；未命中返回 -1
+     */
+    public static int resolveLastOverlapShiftIndex(List<LhShiftConfigVO> shifts,
+                                                   Date overlapStartTime,
+                                                   Date overlapEndTime) {
+        if (CollectionUtils.isEmpty(shifts)
+                || Objects.isNull(overlapStartTime)
+                || Objects.isNull(overlapEndTime)
+                || !overlapStartTime.before(overlapEndTime)) {
+            return -1;
+        }
+        int lastShiftIndex = -1;
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift)
+                    || Objects.isNull(shift.getShiftStartDateTime())
+                    || Objects.isNull(shift.getShiftEndDateTime())) {
+                continue;
+            }
+            if (shift.getShiftStartDateTime().before(overlapEndTime)
+                    && shift.getShiftEndDateTime().after(overlapStartTime)) {
+                lastShiftIndex = shift.getShiftIndex();
+            }
+        }
+        return lastShiftIndex;
     }
 
     /**
@@ -215,7 +274,12 @@ public final class MachineCleaningOverlapUtil {
                 .collect(Collectors.toList());
     }
 
-    private static boolean isSandBlastCleaning(MachineCleaningWindowDTO cleaningWindow) {
+    public static boolean isDryIceCleaning(MachineCleaningWindowDTO cleaningWindow) {
+        return Objects.nonNull(cleaningWindow)
+                && CleaningTypeEnum.DRY_ICE.getCode().equals(cleaningWindow.getCleanType());
+    }
+
+    public static boolean isSandBlastCleaning(MachineCleaningWindowDTO cleaningWindow) {
         return Objects.nonNull(cleaningWindow)
                 && CleaningTypeEnum.SAND_BLAST.getCode().equals(cleaningWindow.getCleanType());
     }

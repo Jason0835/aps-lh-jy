@@ -17,6 +17,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Comparator;
@@ -28,7 +29,7 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
- * 模具清洗计划运行态排程服务。
+ * 设备停机来源清洗计划运行态排程服务。
  *
  * @author APS
  */
@@ -36,6 +37,12 @@ import java.util.stream.Collectors;
 @Component
 public class LhCleaningScheduleService {
 
+    /** 设备停机计划数据来源标识 */
+    private static final String DEVICE_STOP_PLAN_DATA_SOURCE = "DEVICE_STOP_PLAN";
+    /** SKU 从清洗时间点开始 3 天内可收尾时跳过清洗 */
+    private static final int CLEANING_SKIP_ENDING_DAYS = 3;
+    /** 喷砂清洗每日最多安排 1 台 */
+    private static final int SAND_BLAST_DAILY_LIMIT = 1;
     /** 干冰清洗早班额度 */
     private static final String DRY_ICE_SHIFT_MORNING = "MORNING";
     /** 干冰清洗中班额度 */
@@ -56,37 +63,246 @@ public class LhCleaningScheduleService {
     /** 清洗可用日期最大搜索天数 */
     private static final int CLEANING_SEARCH_MAX_DAYS = 60;
 
+    @Resource
+    private LhDeviceStopPlanScheduleService deviceStopPlanScheduleService;
+
     /**
      * 按清洗约束生成本次排程实际生效的清洗窗口。
+     * <p>最终口径：干冰清洗、喷砂清洗统一从设备停机计划读取，旧模具清洗计划列表不再作为排程来源。</p>
      *
      * @param context 排程上下文
      * @return 机台清洗窗口Map
      */
     public Map<String, List<MachineCleaningWindowDTO>> buildScheduledCleaningWindowMap(LhScheduleContext context) {
         Map<String, List<MachineCleaningWindowDTO>> cleaningWindowMap = new HashMap<>(16);
-        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getCleaningPlanList())) {
+        if (Objects.isNull(context)) {
             return cleaningWindowMap;
         }
-        log.info("清洗计划约束采用运行态调度处理, 原始清洗计划数: {}", context.getCleaningPlanList().size());
-        List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>(context.getCleaningPlanList());
-        cleaningPlanList.sort(Comparator
-                .comparing(this::resolveCleaningPlanSortTime, Comparator.nullsLast(Date::compareTo))
-                .thenComparing(LhMouldCleanPlan::getLhCode, Comparator.nullsLast(String::compareTo)));
-        Map<String, Integer> totalDailyCountMap = new HashMap<>(16);
+        List<MdmDevicePlanShut> cleaningPlanList = getDeviceStopPlanScheduleService().queryCleaningStopPlans(context);
+        log.info("清洗计划约束采用设备停机计划运行态调度处理, 原始清洗停机计划数: {}", cleaningPlanList.size());
         Map<String, Integer> dryIceDailyCountMap = new HashMap<>(16);
         Map<String, Integer> dryIceMorningCountMap = new HashMap<>(16);
         Map<String, Integer> dryIceAfternoonCountMap = new HashMap<>(16);
         Map<String, Integer> sandBlastDailyCountMap = new HashMap<>(16);
-        for (LhMouldCleanPlan cleaningPlan : cleaningPlanList) {
-            MachineCleaningWindowDTO cleaningWindow = scheduleCleaningWindow(context, cleaningPlan,
-                    totalDailyCountMap, dryIceDailyCountMap, dryIceMorningCountMap,
-                    dryIceAfternoonCountMap, sandBlastDailyCountMap);
+        for (MdmDevicePlanShut cleaningPlan : cleaningPlanList) {
+            // 按计划清洗时间升序逐条纳入，确保同日上限优先给更早计划。
+            MachineCleaningWindowDTO cleaningWindow = scheduleDeviceStopCleaningWindow(context, cleaningPlan,
+                    dryIceDailyCountMap, dryIceMorningCountMap, dryIceAfternoonCountMap, sandBlastDailyCountMap);
             if (Objects.isNull(cleaningWindow)) {
                 continue;
             }
             cleaningWindowMap.computeIfAbsent(cleaningWindow.getLhCode(), key -> new ArrayList<>()).add(cleaningWindow);
         }
+        // 清洗类停机已转换为运行态清洗窗口；剥离后普通停机产能扣减只处理维修、精度等真实设备停机。
+        context.setDevicePlanShutList(getDeviceStopPlanScheduleService()
+                .filterNonCleaningStopPlans(context.getDevicePlanShutList()));
         return cleaningWindowMap;
+    }
+
+    /**
+     * 调度单条设备停机清洗计划。
+     *
+     * @param context 排程上下文
+     * @param cleaningPlan 设备停机清洗计划
+     * @param dryIceDailyCountMap 干冰每日已安排台数
+     * @param dryIceMorningCountMap 干冰早班已安排台数
+     * @param dryIceAfternoonCountMap 干冰中班已安排台数
+     * @param sandBlastDailyCountMap 喷砂每日已安排台数
+     * @return 生效清洗窗口；不满足规则时返回 null
+     */
+    private MachineCleaningWindowDTO scheduleDeviceStopCleaningWindow(LhScheduleContext context,
+                                                                      MdmDevicePlanShut cleaningPlan,
+                                                                      Map<String, Integer> dryIceDailyCountMap,
+                                                                      Map<String, Integer> dryIceMorningCountMap,
+                                                                      Map<String, Integer> dryIceAfternoonCountMap,
+                                                                      Map<String, Integer> sandBlastDailyCountMap) {
+        String cleanType = getDeviceStopPlanScheduleService().resolveCleaningType(cleaningPlan);
+        if (StringUtils.isEmpty(cleanType)) {
+            return null;
+        }
+        long cleanDurationMillis = getDeviceStopPlanScheduleService().resolvePlanDurationMillis(cleaningPlan);
+        if (cleanDurationMillis <= 0L) {
+            log.warn("设备停机清洗计划时间非法，跳过清洗, 机台: {}, 停机类型: {}, 开始: {}, 结束: {}",
+                    cleaningPlan.getMachineCode(), cleaningPlan.getMachineStopType(),
+                    LhScheduleTimeUtil.formatDateTime(cleaningPlan.getBeginDate()),
+                    LhScheduleTimeUtil.formatDateTime(cleaningPlan.getEndDate()));
+            return null;
+        }
+        Date cleanStartTime = resolveDeviceStopCleaningStartTime(context, cleanType, cleaningPlan.getBeginDate());
+        if (Objects.isNull(cleanStartTime) || !getDeviceStopPlanScheduleService().isInScheduleWindow(context, cleanStartTime)) {
+            log.info("清洗窗口调整到排程窗口外，本次不计入清洗占用, 机台: {}, 类型: {}, 原时间: {}, 调整后: {}",
+                    cleaningPlan.getMachineCode(), cleanType,
+                    LhScheduleTimeUtil.formatDateTime(cleaningPlan.getBeginDate()),
+                    LhScheduleTimeUtil.formatDateTime(cleanStartTime));
+            return null;
+        }
+        String machineMaterial = resolveMachineMaterial(context, cleaningPlan.getMachineCode());
+        // 清洗执行前先判断当前 SKU 是否 3 天内可收尾；命中时不再占用干冰/喷砂清洗名额。
+        if (isMachineEndingWithinThreeDays(context, cleaningPlan.getMachineCode(), cleanStartTime, machineMaterial)) {
+            log.info("机台当前物料3天内可收尾，跳过清洗, 机台: {}, 物料: {}, 清洗类型: {}, 清洗时间: {}",
+                    cleaningPlan.getMachineCode(),
+                    StringUtils.isEmpty(machineMaterial) ? "N/A" : machineMaterial,
+                    cleanType, LhScheduleTimeUtil.formatDateTime(cleanStartTime));
+            return null;
+        }
+        if (!canScheduleDeviceStopCleaning(context, dryIceDailyCountMap, dryIceMorningCountMap,
+                dryIceAfternoonCountMap, sandBlastDailyCountMap, cleanType, cleanStartTime)) {
+            log.info("清洗计划超过每日/班次上限，本次排程窗口不纳入, 机台: {}, 类型: {}, 清洗时间: {}",
+                    cleaningPlan.getMachineCode(), cleanType, LhScheduleTimeUtil.formatDateTime(cleanStartTime));
+            return null;
+        }
+        increaseDeviceStopCleaningUsage(context, dryIceDailyCountMap, dryIceMorningCountMap,
+                dryIceAfternoonCountMap, sandBlastDailyCountMap, cleanType, cleanStartTime);
+        return buildCleaningWindow(context, cleaningPlan, cleanType, cleanStartTime, cleanDurationMillis);
+    }
+
+    /**
+     * 根据清洗类型解析设备停机计划的实际清洗开始时间。
+     *
+     * @param context 排程上下文
+     * @param cleanType 清洗类型
+     * @param planBeginTime 计划开始时间
+     * @return 实际清洗开始时间
+     */
+    private Date resolveDeviceStopCleaningStartTime(LhScheduleContext context, String cleanType, Date planBeginTime) {
+        if (CleaningTypeEnum.SAND_BLAST.getCode().equals(cleanType)) {
+            return getDeviceStopPlanScheduleService().resolveSandBlastExecutableStartTime(context, planBeginTime);
+        }
+        if (CleaningTypeEnum.DRY_ICE.getCode().equals(cleanType)) {
+            return getDeviceStopPlanScheduleService().resolveDryIceExecutableStartTime(context, planBeginTime);
+        }
+        return planBeginTime;
+    }
+
+    /**
+     * 构建设备停机来源的清洗窗口。
+     *
+     * @param context 排程上下文
+     * @param cleaningPlan 设备停机清洗计划
+     * @param cleanType 清洗类型
+     * @param cleanStartTime 实际清洗开始时间
+     * @param cleanDurationMillis 清洗持续时长
+     * @return 清洗窗口
+     */
+    private MachineCleaningWindowDTO buildCleaningWindow(LhScheduleContext context,
+                                                         MdmDevicePlanShut cleaningPlan,
+                                                         String cleanType,
+                                                         Date cleanStartTime,
+                                                         long cleanDurationMillis) {
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setLhCode(cleaningPlan.getMachineCode());
+        cleaningWindow.setCleanType(cleanType);
+        cleaningWindow.setLeftRightMould(LhScheduleConstant.LEFT_RIGHT_MOULD);
+        cleaningWindow.setMouldCode(resolveCleaningMouldCode(context, cleaningPlan.getMachineCode()));
+        cleaningWindow.setCleanStartTime(cleanStartTime);
+        Date cleanEndTime = new Date(cleanStartTime.getTime() + cleanDurationMillis);
+        cleaningWindow.setCleanEndTime(cleanEndTime);
+        cleaningWindow.setReadyTime(cleanEndTime);
+        cleaningWindow.setDataSource(DEVICE_STOP_PLAN_DATA_SOURCE);
+        cleaningWindow.setRemark(cleaningPlan.getRemark());
+        return cleaningWindow;
+    }
+
+    /**
+     * 判断设备停机来源清洗是否可纳入本次排程。
+     *
+     * @param context 排程上下文
+     * @param dryIceDailyCountMap 干冰每日已安排台数
+     * @param dryIceMorningCountMap 干冰早班已安排台数
+     * @param dryIceAfternoonCountMap 干冰中班已安排台数
+     * @param sandBlastDailyCountMap 喷砂每日已安排台数
+     * @param cleanType 清洗类型
+     * @param cleanStartTime 实际清洗开始时间
+     * @return true-允许纳入；false-超过上限或班次不合法
+     */
+    private boolean canScheduleDeviceStopCleaning(LhScheduleContext context,
+                                                  Map<String, Integer> dryIceDailyCountMap,
+                                                  Map<String, Integer> dryIceMorningCountMap,
+                                                  Map<String, Integer> dryIceAfternoonCountMap,
+                                                  Map<String, Integer> sandBlastDailyCountMap,
+                                                  String cleanType,
+                                                  Date cleanStartTime) {
+        String dateKey = LhScheduleTimeUtil.formatDate(cleanStartTime);
+        if (CleaningTypeEnum.SAND_BLAST.getCode().equals(cleanType)) {
+            return sandBlastDailyCountMap.getOrDefault(dateKey, 0) < SAND_BLAST_DAILY_LIMIT
+                    && getDeviceStopPlanScheduleService().isAfternoonShift(context, cleanStartTime);
+        }
+        if (!CleaningTypeEnum.DRY_ICE.getCode().equals(cleanType)) {
+            return false;
+        }
+        int dryIceDailyLimit = context.getParamIntValue(
+                LhScheduleParamConstant.DRY_ICE_DAILY_LIMIT, LhScheduleConstant.DRY_ICE_DAILY_LIMIT);
+        if (dryIceDailyCountMap.getOrDefault(dateKey, 0) >= dryIceDailyLimit) {
+            return false;
+        }
+        if (getDeviceStopPlanScheduleService().isMorningShift(context, cleanStartTime)) {
+            int morningLimit = (dryIceDailyLimit + 1) / 2;
+            return dryIceMorningCountMap.getOrDefault(dateKey, 0) < morningLimit;
+        }
+        if (getDeviceStopPlanScheduleService().isAfternoonShift(context, cleanStartTime)) {
+            int afternoonLimit = dryIceDailyLimit - ((dryIceDailyLimit + 1) / 2);
+            return dryIceAfternoonCountMap.getOrDefault(dateKey, 0) < afternoonLimit;
+        }
+        return false;
+    }
+
+    /**
+     * 登记设备停机来源清洗占用的每日/班次名额。
+     *
+     * @param context 排程上下文
+     * @param dryIceDailyCountMap 干冰每日已安排台数
+     * @param dryIceMorningCountMap 干冰早班已安排台数
+     * @param dryIceAfternoonCountMap 干冰中班已安排台数
+     * @param sandBlastDailyCountMap 喷砂每日已安排台数
+     * @param cleanType 清洗类型
+     * @param cleanStartTime 实际清洗开始时间
+     */
+    private void increaseDeviceStopCleaningUsage(LhScheduleContext context,
+                                                 Map<String, Integer> dryIceDailyCountMap,
+                                                 Map<String, Integer> dryIceMorningCountMap,
+                                                 Map<String, Integer> dryIceAfternoonCountMap,
+                                                 Map<String, Integer> sandBlastDailyCountMap,
+                                                 String cleanType,
+                                                 Date cleanStartTime) {
+        String dateKey = LhScheduleTimeUtil.formatDate(cleanStartTime);
+        if (CleaningTypeEnum.SAND_BLAST.getCode().equals(cleanType)) {
+            increaseCount(sandBlastDailyCountMap, dateKey);
+            return;
+        }
+        if (CleaningTypeEnum.DRY_ICE.getCode().equals(cleanType)) {
+            increaseCount(dryIceDailyCountMap, dateKey);
+            if (getDeviceStopPlanScheduleService().isMorningShift(context, cleanStartTime)) {
+                increaseCount(dryIceMorningCountMap, dateKey);
+            } else if (getDeviceStopPlanScheduleService().isAfternoonShift(context, cleanStartTime)) {
+                increaseCount(dryIceAfternoonCountMap, dateKey);
+            }
+        }
+    }
+
+    /**
+     * 判断机台当前在机物料是否 3 天内可收尾。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param cleanStartTime 清洗开始时间
+     * @param machineMaterial 机台当前在机物料
+     * @return true-应跳过清洗；false-允许继续判断清洗纳入
+     */
+    private boolean isMachineEndingWithinThreeDays(LhScheduleContext context,
+                                                   String machineCode,
+                                                   Date cleanStartTime,
+                                                   String machineMaterial) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)
+                || Objects.isNull(cleanStartTime) || StringUtils.isEmpty(machineMaterial)) {
+            return false;
+        }
+        int remainingDays = resolveEndingRemainingDays(context, machineMaterial);
+        return remainingDays >= 0 && remainingDays <= CLEANING_SKIP_ENDING_DAYS;
+    }
+
+    private LhDeviceStopPlanScheduleService getDeviceStopPlanScheduleService() {
+        return Objects.nonNull(deviceStopPlanScheduleService)
+                ? deviceStopPlanScheduleService : new LhDeviceStopPlanScheduleService();
     }
 
     private Date resolveCleaningPlanSortTime(LhMouldCleanPlan cleaningPlan) {

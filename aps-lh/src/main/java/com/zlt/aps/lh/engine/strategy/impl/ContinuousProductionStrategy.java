@@ -109,6 +109,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             "当前排程窗口内无日计划量，等待后续滚动窗口排产";
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
             SmallEndingSurplusSkipRule.UNSCHEDULED_REASON;
+    private static final String DRY_ICE_ENDING_ANALYSIS = "干冰清洗+收尾";
     private static final String SINGLE_MACHINE_REDUCED_CONTINUATION_KEY_SUFFIX = "#SINGLE_MACHINE_REDUCED";
     private static final int TYPE_BLOCK_SWITCH_MAX_ATTEMPTS = 16;
     private static final String MAIN_SALE_PRODUCTION_TYPE = "01";
@@ -4786,10 +4787,89 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 maintenanceWindowList);
 
         refreshResultSummary(context, result, shifts);
+        // 清洗与收尾重叠原因必须在班次分配完成后判断，此时结果已具备真实排产起止时间。
+        applyDryIceCleaningEndingAnalysis(result, shifts, machine.getCleaningWindowList(), isEnding);
         result.setRealScheduleDate(context.getScheduleDate());
         result.setProductionStatus("0");
 
         return result;
+    }
+
+    /**
+     * 干冰清洗与续作收尾重叠时，写入最后一个重叠班次原因。
+     *
+     * @param result 续作排程结果
+     * @param shifts 排程窗口班次
+     * @param cleaningWindowList 机台清洗窗口
+     * @param isEnding 是否收尾
+     */
+    private void applyDryIceCleaningEndingAnalysis(LhScheduleResult result,
+                                                   List<LhShiftConfigVO> shifts,
+                                                   List<MachineCleaningWindowDTO> cleaningWindowList,
+                                                   boolean isEnding) {
+        if (!isEnding || Objects.isNull(result) || CollectionUtils.isEmpty(cleaningWindowList)) {
+            return;
+        }
+        Date productionStartTime = resolveFirstPlannedShiftStartTime(result);
+        Date productionEndTime = result.getSpecEndTime();
+        if (Objects.isNull(productionStartTime)
+                || Objects.isNull(productionEndTime)
+                || !productionStartTime.before(productionEndTime)) {
+            return;
+        }
+        for (MachineCleaningWindowDTO cleaningWindow : cleaningWindowList) {
+            if (!MachineCleaningOverlapUtil.isDryIceCleaning(cleaningWindow)
+                    || Objects.isNull(cleaningWindow.getCleanStartTime())
+                    || Objects.isNull(cleaningWindow.getCleanEndTime())
+                    || !cleaningWindow.getCleanStartTime().before(cleaningWindow.getCleanEndTime())) {
+                continue;
+            }
+            Date overlapStartTime = later(cleaningWindow.getCleanStartTime(), productionStartTime);
+            Date overlapEndTime = earlier(cleaningWindow.getCleanEndTime(), productionEndTime);
+            if (!overlapStartTime.before(overlapEndTime)) {
+                continue;
+            }
+            int shiftIndex = MachineCleaningOverlapUtil.resolveLastOverlapShiftIndex(
+                    shifts, overlapStartTime, overlapEndTime);
+            if (shiftIndex <= 0) {
+                continue;
+            }
+            ShiftFieldUtil.appendShiftAnalysis(result, shiftIndex, DRY_ICE_ENDING_ANALYSIS);
+        }
+    }
+
+    /**
+     * 取两个时间中的较晚值。
+     *
+     * @param left 左侧时间
+     * @param right 右侧时间
+     * @return 较晚时间
+     */
+    private Date later(Date left, Date right) {
+        if (Objects.isNull(left)) {
+            return right;
+        }
+        if (Objects.isNull(right)) {
+            return left;
+        }
+        return left.after(right) ? left : right;
+    }
+
+    /**
+     * 取两个时间中的较早值。
+     *
+     * @param left 左侧时间
+     * @param right 右侧时间
+     * @return 较早时间
+     */
+    private Date earlier(Date left, Date right) {
+        if (Objects.isNull(left)) {
+            return right;
+        }
+        if (Objects.isNull(right)) {
+            return left;
+        }
+        return left.before(right) ? left : right;
     }
 
     /**

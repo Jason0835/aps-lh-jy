@@ -16,6 +16,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -90,7 +91,8 @@ import java.util.stream.Collectors;
 public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy {
 
     private static final String CONTINUOUS_SCHEDULE_TYPE = ScheduleTypeEnum.CONTINUOUS.getCode();
-    private static final String TYPE_BLOCK_CLEANING_ANALYSIS = "模具清洗+换活字块";
+    private static final String TYPE_BLOCK_DRY_ICE_CLEANING_ANALYSIS = "干冰清洗+换活字块";
+    private static final String TYPE_BLOCK_SAND_BLAST_CLEANING_ANALYSIS = "喷砂清洗+换活字块";
     private static final String TYPE_BLOCK_TRIGGER_ENDING = "收尾触发";
     private static final String TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE =
             "续作首日无计划释放触发";
@@ -1021,11 +1023,49 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (isTypeBlockMaintenanceOverlapSwitch(context, machine, estimatedEndTime, switchStartTime)) {
             Date inspectionStartTime = LhScheduleTimeUtil.addHours(
                     switchStartTime, LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context));
-            return LhScheduleTimeUtil.addHours(
+            Date productionStartTime = LhScheduleTimeUtil.addHours(
                     inspectionStartTime, LhScheduleTimeUtil.getFirstInspectionHours(context));
+            return resolveCleaningOverlapProductionStartTime(machine, switchStartTime, productionStartTime);
         }
-        return LhScheduleTimeUtil.addHours(switchStartTime,
+        Date productionStartTime = LhScheduleTimeUtil.addHours(switchStartTime,
                 LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+        return resolveCleaningOverlapProductionStartTime(machine, switchStartTime, productionStartTime);
+    }
+
+    /**
+     * 清洗与换活字块实际重叠时，开产时间取两者最晚结束时间。
+     *
+     * @param machine 机台
+     * @param switchStartTime 换活字块开始时间
+     * @param productionStartTime 原换活字块完成后的开产时间
+     * @return 合并清洗重叠后的开产时间
+     */
+    private Date resolveCleaningOverlapProductionStartTime(MachineScheduleDTO machine,
+                                                           Date switchStartTime,
+                                                           Date productionStartTime) {
+        if (Objects.isNull(machine)
+                || CollectionUtils.isEmpty(machine.getCleaningWindowList())
+                || Objects.isNull(switchStartTime)
+                || Objects.isNull(productionStartTime)
+                || !switchStartTime.before(productionStartTime)) {
+            return productionStartTime;
+        }
+        Date resolvedStartTime = productionStartTime;
+        for (MachineCleaningWindowDTO cleaningWindow : machine.getCleaningWindowList()) {
+            if (Objects.isNull(cleaningWindow)
+                    || Objects.isNull(cleaningWindow.getCleanStartTime())
+                    || Objects.isNull(cleaningWindow.getCleanEndTime())
+                    || !cleaningWindow.getCleanStartTime().before(cleaningWindow.getCleanEndTime())) {
+                continue;
+            }
+            // 只有清洗与换活字块实际相交时才并行取最大结束时间，未重叠场景不改变原开产时间。
+            if (cleaningWindow.getCleanStartTime().before(productionStartTime)
+                    && cleaningWindow.getCleanEndTime().after(switchStartTime)
+                    && cleaningWindow.getCleanEndTime().after(resolvedStartTime)) {
+                resolvedStartTime = cleaningWindow.getCleanEndTime();
+            }
+        }
+        return resolvedStartTime;
     }
 
     /**
@@ -3017,7 +3057,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
-     * 命中"模具清洗+换活字块"组合场景时，写入班次原因分析。
+     * 命中清洗与换活字块组合场景时，写入最后一个重叠班次的原因分析。
      *
      * @param context 排程上下文
      * @param result 排程结果
@@ -3040,10 +3080,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         List<MachineCleaningWindowDTO> cleaningWindowList =
                 resolveMachineCleaningWindowList(context, result.getLhMachineCode());
-        if (!MachineCleaningOverlapUtil.hasBlockingOverlap(cleaningWindowList, switchStartTime, productionStartTime)) {
-            return;
+        int analysisShiftIndex = MachineCleaningOverlapUtil.resolveLastOverlapShiftIndex(
+                shifts, switchStartTime, productionStartTime);
+        if (analysisShiftIndex <= 0) {
+            analysisShiftIndex = firstPlannedShiftIndex;
         }
-        ShiftFieldUtil.setShiftAnalysis(result, firstPlannedShiftIndex, TYPE_BLOCK_CLEANING_ANALYSIS);
+        // 换活字块调用处只写清洗固定枚举原因，不再沿用旧“模具清洗+换活字块”泛化文案。
+        if (MachineCleaningOverlapUtil.hasCleaningTypeBlockingOverlap(
+                cleaningWindowList, CleaningTypeEnum.DRY_ICE.getCode(), switchStartTime, productionStartTime)) {
+            ShiftFieldUtil.appendShiftAnalysis(result, analysisShiftIndex, TYPE_BLOCK_DRY_ICE_CLEANING_ANALYSIS);
+        }
+        if (MachineCleaningOverlapUtil.hasCleaningTypeBlockingOverlap(
+                cleaningWindowList, CleaningTypeEnum.SAND_BLAST.getCode(), switchStartTime, productionStartTime)) {
+            ShiftFieldUtil.appendShiftAnalysis(result, analysisShiftIndex, TYPE_BLOCK_SAND_BLAST_CLEANING_ANALYSIS);
+        }
     }
 
     /**

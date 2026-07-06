@@ -124,7 +124,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             SmallEndingSurplusSkipRule.UNSCHEDULED_REASON;
     private static final String TARGET_SKU_MOULD_ALL_OCCUPIED_UNSCHEDULED_REASON =
             "目标 SKU 模具全部被占用";
-    private static final String NEW_SPEC_CLEANING_ANALYSIS = "模具清洗+换模";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
     private static final Set<String> EMPTY_STRING_SET = Collections.emptySet();
     private static final Map<String, String> EMPTY_STRING_MAP = Collections.emptyMap();
@@ -823,6 +822,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
                                     context, sku, shifts, mouldChangeCompleteTime, defaultProductionStartTime,
                                     ScheduleTypeEnum.NEW_SPEC.getCode());
+                            // 清洗与换模实际重叠时，开产时间取换模完成与清洗结束的最晚时间；未重叠不改变原开产时间。
+                            productionStartTime = resolveCleaningOverlapProductionStartTime(
+                                    candidateMachine, mouldChangeStartTime, productionStartTime);
                         }
                     }
                 }
@@ -5492,6 +5494,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
                 context, sku, shifts, mouldChangeCompleteTime, productionStartTime,
                 ScheduleTypeEnum.NEW_SPEC.getCode());
+        // dayN 模拟必须同步清洗重叠后的最晚开产时间，避免模拟产能高于真实排产。
+        productionStartTime = resolveCleaningOverlapProductionStartTime(candidate, mouldChangeStartTime, productionStartTime);
         if (productionStartTime == null) {
             return capacityMap;
         }
@@ -5528,6 +5532,42 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     context, simulationSegment, productionDate));
         }
         return capacityMap;
+    }
+
+    /**
+     * 清洗与新增换模实际重叠时，开产时间取两者最晚结束时间。
+     *
+     * @param machine 机台
+     * @param mouldChangeStartTime 换模开始时间
+     * @param productionStartTime 换模/首检规则解析出的原开产时间
+     * @return 合并清洗重叠后的开产时间
+     */
+    private Date resolveCleaningOverlapProductionStartTime(MachineScheduleDTO machine,
+                                                           Date mouldChangeStartTime,
+                                                           Date productionStartTime) {
+        if (Objects.isNull(machine)
+                || CollectionUtils.isEmpty(machine.getCleaningWindowList())
+                || Objects.isNull(mouldChangeStartTime)
+                || Objects.isNull(productionStartTime)
+                || !mouldChangeStartTime.before(productionStartTime)) {
+            return productionStartTime;
+        }
+        Date resolvedStartTime = productionStartTime;
+        for (MachineCleaningWindowDTO cleaningWindow : machine.getCleaningWindowList()) {
+            if (Objects.isNull(cleaningWindow)
+                    || Objects.isNull(cleaningWindow.getCleanStartTime())
+                    || Objects.isNull(cleaningWindow.getCleanEndTime())
+                    || !cleaningWindow.getCleanStartTime().before(cleaningWindow.getCleanEndTime())) {
+                continue;
+            }
+            // 仅当清洗与换模窗口实际相交时进入特殊分支，避免影响正常新增换模开产时间。
+            if (cleaningWindow.getCleanStartTime().before(productionStartTime)
+                    && cleaningWindow.getCleanEndTime().after(mouldChangeStartTime)
+                    && cleaningWindow.getCleanEndTime().after(resolvedStartTime)) {
+                resolvedStartTime = cleaningWindow.getCleanEndTime();
+            }
+        }
+        return resolvedStartTime;
     }
 
     /**
@@ -6972,36 +7012,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 maintenanceWindowList, sku, isEnding, mouldChangeEndTime, shiftPlanCapacityMap,
                 firstInspectionAttributionShift);
         refreshResultSummary(context, result);
-        applyCleaningMouldChangeAnalysis(context, result);
         return result;
-    }
-
-    /**
-     * 命中"模具清洗+换模"组合场景时，写入首个排产班次原因分析。
-     *
-     * @param context 排程上下文
-     * @param result 新增换模结果
-     */
-    private void applyCleaningMouldChangeAnalysis(LhScheduleContext context,
-                                                  LhScheduleResult result) {
-        Date firstPlannedShiftStartTime = resolveFirstPlannedShiftStartTime(result);
-        if (context == null
-                || result == null
-                || result.getMouldChangeStartTime() == null
-                || firstPlannedShiftStartTime == null) {
-            return;
-        }
-        int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
-        if (firstPlannedShiftIndex <= 0) {
-            return;
-        }
-        MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
-        if (machine == null
-                || !MachineCleaningOverlapUtil.hasBlockingOverlap(
-                machine.getCleaningWindowList(), result.getMouldChangeStartTime(), firstPlannedShiftStartTime)) {
-            return;
-        }
-        ShiftFieldUtil.setShiftAnalysis(result, firstPlannedShiftIndex, NEW_SPEC_CLEANING_ANALYSIS);
     }
 
     /**

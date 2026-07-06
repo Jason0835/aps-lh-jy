@@ -6,7 +6,6 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
-import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.api.domain.entity.LhSpecialMaterialBom;
@@ -21,7 +20,6 @@ import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhScheFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhMachineInfoMapper;
-import com.zlt.aps.lh.mapper.LhMouldCleanPlanMapper;
 import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
 import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
 import com.zlt.aps.lh.mapper.LhSpecifyMachineMapper;
@@ -158,9 +156,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     private LhMachineInfoMapper lhMachineInfoMapper;
 
     @Resource
-    private LhMouldCleanPlanMapper lhMouldCleanPlanMapper;
-
-    @Resource
     private LhDayFinishQtyMapper lhDayFinishQtyMapper;
 
     @Resource
@@ -228,7 +223,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         // SKU提前生产需要从窗口结束日继续向后观察N个自然日，月计划和结构机台数按真实年月批量加载。
         Date earlyProductionLookupEndDate = LhScheduleTimeUtil.addDays(endDate, earlyProductionDaysThreshold);
         Map<String, LocalDate> requiredMonthMap = resolveRequiredMonthMap(startDate, earlyProductionLookupEndDate);
-        // 喷砂时间允许前移一天，工作日历与设备停机需覆盖 T-1；清洗计划仍按当前排程窗口加载。
+        // 设备停机、工作日历沿用 T-1 覆盖范围，保证滚动继承和跨日停机判断可复用同一窗口。
         Date calendarControlStartDate = LhScheduleTimeUtil.addDays(startDate, -1);
 
         // 获取年月信息（按排程目标日取月计划所属年月）
@@ -255,7 +250,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
         // 2. 创建异步任务并建立任务间的依赖关系：
         //    - 月生产计划（monthPlanFuture）是特殊物料清单和胎胚库存的前置依赖，后者通过 thenCompose 串联。
-        //    - 硫化机台信息（machineInfoFuture）是模具清洗计划的前置依赖，清洗计划需要根据已加载的机台列表过滤查询条件。
+        //    - 干冰/喷砂清洗已统一并入设备停机计划，不再加载旧模具清洗表。
         //    - 机台信息与月计划无依赖关系，两者可并发加载。
         CompletableFuture<Void> monthPlanFuture = runDataInitTaskAsync("月生产计划",
                 () -> loadMonthPlan(context, factoryCode, requiredMonthMap),
@@ -283,10 +278,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         CompletableFuture<Void> machineInfoFuture = runDataInitTaskAsync("硫化机台信息",
                 () -> loadMachineInfo(context, factoryCode),
                 () -> sizeOf(context.getMachineInfoMap()));
-        CompletableFuture<Void> cleaningPlanFuture = runAfterDataInitTask(machineInfoFuture, "模具清洗计划",
-                () -> loadCleaningPlan(context, factoryCode, startDate, endDate),
-                () -> sizeOf(context.getCleaningPlanList()));
-
         // 3. 等待所有无依赖的并行任务完成（含已通过 thenCompose 串联的依赖链）。
         //    使用 CompletableFuture.allOf().join() 实现屏障同步：
         //    - 任一任务抛出异常，join() 会透传 CompletionException，由 waitForDataInitTasks 统一解包。
@@ -309,7 +300,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 skuMouldRelFuture,
                 modelInfoFuture,
                 machineInfoFuture,
-                cleaningPlanFuture,
                 runDataInitTaskAsync("前日物料日完成量",
                         () -> loadDayFinishQty(context, factoryCode, previousDataDate),
                         () -> sizeOf(context.getMaterialDayFinishedQtyMap())),
@@ -1638,36 +1628,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         context.setMachineInfoMap(machineInfoMap);
         log.debug("硫化机台信息加载完成, 数量: {}", machineInfoMap.size());
     }
-
-    /**
-     * 加载模具清洗计划
-     *
-     * @param context     排程上下文
-     * @param factoryCode 分厂编号
-     * @param startDate   开始日期
-     * @param endDate     结束日期
-     */
-    private void loadCleaningPlan(LhScheduleContext context, String factoryCode, Date startDate, Date endDate) {
-        List<String> machineCodes = new ArrayList<>(context.getMachineInfoMap().keySet());
-        List<LhMouldCleanPlan> cleaningPlanList;
-        if (machineCodes.isEmpty()) {
-            cleaningPlanList = Collections.emptyList();
-        } else {
-            cleaningPlanList = lhMouldCleanPlanMapper.selectList(
-                    new LambdaQueryWrapper<LhMouldCleanPlan>()
-                            .eq(LhMouldCleanPlan::getFactoryCode, factoryCode)
-                            .in(LhMouldCleanPlan::getLhCode, machineCodes)
-                            .ge(LhMouldCleanPlan::getCleanTime, startDate)
-                            .lt(LhMouldCleanPlan::getCleanTime, endDate)
-                            .and(w -> w.eq(LhMouldCleanPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
-                                    .or()
-                                    .isNull(LhMouldCleanPlan::getIsDelete))
-                            .orderByAsc(LhMouldCleanPlan::getCleanTime));
-        }
-        context.setCleaningPlanList(cleaningPlanList != null ? cleaningPlanList : context.getCleaningPlanList());
-        log.debug("模具清洗计划加载完成, 数量: {}", context.getCleaningPlanList().size());
-    }
-
 
     /**
      * 加载指定日期的物料日完成量，按"物料+示方类型+完成日期"建立Map。

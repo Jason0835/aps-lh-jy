@@ -153,18 +153,18 @@ public class DataInitHandler extends AbsScheduleStepHandler {
     /**
      * 从数据库加载所有排程所需基础数据
      * <p>包括排产版本、月生产计划、工作日历、SKU日硫化产能、设备停机计划、SKU与模具关系、
-     * 硫化机台信息、模具清洗计划、月底计划余量、各班次完成量、物料信息、
+     * 硫化机台信息、月底计划余量、各班次完成量、物料信息、
      * MES硫化在机信息、硫化定点机台、硫化机胶囊已使用次数、设备保养计划、前日硫化排程结果</p>
      *
      * @param context 排程上下文
      */
     private void loadBaseData(LhScheduleContext context) {
         baseDataService.loadAllBaseData(context);
-        log.info("基础数据加载完成, 月计划: {}, 机台: {}, SKU产能: {}, SKU模具关系: {}, MES在机: {}, 前批次结果: {}, 停机计划: {}, 清洗计划: {}",
+        log.info("基础数据加载完成, 月计划: {}, 机台: {}, SKU产能: {}, SKU模具关系: {}, MES在机: {}, 前批次结果: {}, 停机计划: {}",
                 context.getMonthPlanList().size(), context.getMachineInfoMap().size(),
                 context.getSkuLhCapacityMap().size(), context.getSkuMouldRelMap().size(),
                 context.getMachineOnlineInfoMap().size(), context.getPreviousScheduleResultList().size(),
-                context.getDevicePlanShutList().size(), context.getCleaningPlanList().size());
+                context.getDevicePlanShutList().size());
     }
 
     /**
@@ -172,13 +172,15 @@ public class DataInitHandler extends AbsScheduleStepHandler {
      * <p>
      * 为每台硫化机台初始化 {@link MachineScheduleDTO}，包含：
      * 机台基本信息、在产规格（从MES在机信息获取）、
-     * 设备停机信息、清洗计划、保养/维修计划、胶囊使用次数等
+         * 设备停机信息、设备停机来源清洗窗口、保养/维修计划、胶囊使用次数等
      * </p>
      *
      * @param context 排程上下文
      */
     private void buildStandardDataObjects(LhScheduleContext context) {
         Map<String, MachineScheduleDTO> machineScheduleMap = new LinkedHashMap<>(context.getMachineInfoMap().size());
+        // 先从设备停机计划中过滤干冰/喷砂清洗并生成运行态清洗窗口；
+        // 方法内部会把清洗类停机从普通停机列表剥离，避免未纳入清洗上限的记录仍按维修停机扣产能。
         Map<String, List<MachineCleaningWindowDTO>> scheduledCleaningWindowMap =
                 getCleaningScheduleService().buildScheduledCleaningWindowMap(context);
 
@@ -238,7 +240,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
 
             // 初始化仅保留精度保养计划基础数据，实际保养窗口在排程触发点动态挂载。
 
-            // 初始化清洗计划
+            // 挂载设备停机计划转换后的清洗窗口，后续班次产能扣减和重叠备注都基于该运行态窗口判断。
             attachCleaningPlanInfo(context, machineCode, dto, scheduledCleaningWindowMap.get(machineCode));
 
             // 初始化胶囊使用次数
@@ -500,7 +502,7 @@ public class DataInitHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 挂载机台清洗计划明细，并回填兼容摘要字段。
+     * 挂载设备停机来源清洗窗口明细，并回填兼容摘要字段。
      *
      * @param context 排程上下文
      * @param machineCode 机台编号
