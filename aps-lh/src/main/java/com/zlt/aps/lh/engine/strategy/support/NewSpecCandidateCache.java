@@ -30,6 +30,8 @@ public class NewSpecCandidateCache {
     private final List<MachineScheduleDTO> normalCandidates;
     /** 候选机台窗口可用产能缓存，key=machineCode */
     private final Map<String, Integer> candidateWindowCapacityMap;
+    /** 反向匹配推荐机台编码，由单控机台反向匹配链路设置，优先于排序选择 */
+    private String preferredMachineCode;
 
     private NewSpecCandidateCache(List<MachineScheduleDTO> singleControlCandidates,
                                   List<MachineScheduleDTO> normalCandidates,
@@ -105,6 +107,26 @@ public class NewSpecCandidateCache {
      */
     public List<MachineScheduleDTO> getNormalCandidates() {
         return normalCandidates;
+    }
+
+    /**
+     * 获取反向匹配推荐机台编码。
+     *
+     * @return 推荐机台编码；未设置时返回null
+     */
+    public String getPreferredMachineCode() {
+        return preferredMachineCode;
+    }
+
+    /**
+     * 设置反向匹配推荐机台编码。
+     * <p>单控机台反向匹配链路在试制/量试/小批量SKU排上一侧后,
+     * 为配对侧查找匹配SKU时设置,使该SKU在选机时优先选择配对侧。</p>
+     *
+     * @param preferredMachineCode 推荐机台编码
+     */
+    public void setPreferredMachineCode(String preferredMachineCode) {
+        this.preferredMachineCode = preferredMachineCode;
     }
 
     /**

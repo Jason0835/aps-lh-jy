@@ -837,10 +837,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 月计划模具变化信息只在 S4.5 窗口无日计划历史欠产补排时用于判断计划使用模数。
         dto.setMouldChangeInfo(targetMonthPlan.getMouldChangeInfo());
         dto.setTrial(isTrialStage(targetMonthPlan.getConstructionStage()));
-        // 正规SKU余量小于阈值时标记为小批量，供选机阶段在单控/普通机台之间应用类型约束
+        // 正规SKU余量小于等于阈值时标记为小批量，供单控机台按单边粒度处理，数量等于100也不能按整机正规SKU占用。
         int smallBatchThreshold = resolveSmallBatchSkuThreshold(context);
         boolean isSmallBatch = !dto.isTrial()
-                && dto.getSurplusQty() < smallBatchThreshold;
+                && dto.getSurplusQty() <= smallBatchThreshold;
         dto.setSmallBatchValidation(isSmallBatch);
         if (isSmallBatch) {
             log.info("小批量SKU判定命中, 物料编码: {}, 施工阶段: {}, 余量: {}, 阈值: {}",

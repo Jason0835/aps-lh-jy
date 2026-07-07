@@ -423,6 +423,31 @@ public class ScheduleAdjustHandlerTest {
         Assertions.assertEquals("K1115", copy.getContinuousMachineCode());
     }
 
+    /**
+     * 用例说明：单控机台动态粒度以“小批量数量 <= 阈值”为边界，
+     * 数量刚好等于默认 100 时应标记为小批量，后续选机才能按单边机台处理。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldMarkSmallBatchWhenSurplusEqualsThreshold() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 1)));
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD, "100")));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(100, sku.getSurplusQty());
+        Assertions.assertTrue(sku.isSmallBatchValidation(), "硫化余量等于小批量阈值时应按小批量单边粒度处理");
+    }
+
     private void invokeAdjustPreviousSchedule(ScheduleAdjustHandler handler,
                                               LhScheduleContext context) throws Exception {
         Method method = ScheduleAdjustHandler.class.getDeclaredMethod(

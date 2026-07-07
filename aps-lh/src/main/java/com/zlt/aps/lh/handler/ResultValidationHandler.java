@@ -26,6 +26,7 @@ import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -194,12 +195,107 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                 throwValidationFailure(context, result, "换模结果 mouldCode 缺失");
             }
         }
+        validateWholeSingleControlMachineResults(context);
 
 //        TODO 这两个校验当前保持历史关闭状态。后续如需打开，应先用真实批次验证同胎胚换模和多机台补满结果。
 //        validateGreenTireChangeoverShift(context);
 //        validateProductionQuantityPolicy(context);
 
         log.info("排程后置校验完成");
+    }
+
+    /**
+     * 校验正规 SKU 单控整机结果完整性。
+     * <p>试制、量试、小批量 SKU 允许单边使用单控机台；正规 SKU 只要落到配置生效的 L/R 单控机台，
+     * 就必须同时存在配对侧结果，且物料、生产开始时间、生产结束时间、各班次计划量完全一致。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void validateWholeSingleControlMachineResults(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!shouldValidateWholeSingleControlResult(context, result)) {
+                continue;
+            }
+            LhScheduleResult pairResult = findPairSingleControlResult(context, result);
+            if (Objects.isNull(pairResult)) {
+                throwValidationFailure(context, result, "正规SKU使用单控机台必须同时生成L/R两侧排产结果");
+            }
+            if (!isWholeSingleControlPairResultConsistent(result, pairResult)) {
+                throwValidationFailure(context, result, "正规SKU单控机台L/R两侧物料、时间或班次计划量不一致");
+            }
+        }
+    }
+
+    /**
+     * 判断当前结果是否需要执行正规 SKU 单控整机校验。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @return true-需要校验
+     */
+    private boolean shouldValidateWholeSingleControlResult(LhScheduleContext context, LhScheduleResult result) {
+        if (Objects.isNull(result)
+                || resolveResultPlanQty(result) <= 0
+                || !LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, result.getLhMachineCode())) {
+            return false;
+        }
+        SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
+        return Objects.nonNull(sourceSku)
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sourceSku);
+    }
+
+    /**
+     * 查找正规 SKU 单控结果的配对侧结果。
+     *
+     * @param context 排程上下文
+     * @param result 当前结果
+     * @return 配对侧结果；不存在时返回 null
+     */
+    private LhScheduleResult findPairSingleControlResult(LhScheduleContext context, LhScheduleResult result) {
+        String pairMachineCode = LhSingleControlMachineUtil.resolvePairMachineCode(result.getLhMachineCode());
+        if (StringUtils.isEmpty(pairMachineCode)) {
+            return null;
+        }
+        for (LhScheduleResult candidate : context.getScheduleResultList()) {
+            if (candidate == result || Objects.isNull(candidate)) {
+                continue;
+            }
+            if (StringUtils.equals(pairMachineCode, candidate.getLhMachineCode())
+                    && StringUtils.equals(result.getMaterialCode(), candidate.getMaterialCode())
+                    && resolveResultPlanQty(candidate) > 0) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 判断单控 L/R 两侧结果是否满足整机一致性。
+     *
+     * @param leftResult 当前侧结果
+     * @param rightResult 配对侧结果
+     * @return true-一致
+     */
+    private boolean isWholeSingleControlPairResultConsistent(LhScheduleResult leftResult,
+                                                             LhScheduleResult rightResult) {
+        if (!StringUtils.equals(leftResult.getMaterialCode(), rightResult.getMaterialCode())) {
+            return false;
+        }
+        if (!Objects.equals(resolveProductionStartTime(leftResult), resolveProductionStartTime(rightResult))
+                || !Objects.equals(leftResult.getSpecEndTime(), rightResult.getSpecEndTime())) {
+            return false;
+        }
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer leftQty = ShiftFieldUtil.getShiftPlanQty(leftResult, shiftIndex);
+            Integer rightQty = ShiftFieldUtil.getShiftPlanQty(rightResult, shiftIndex);
+            if (!Objects.equals(leftQty, rightQty)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

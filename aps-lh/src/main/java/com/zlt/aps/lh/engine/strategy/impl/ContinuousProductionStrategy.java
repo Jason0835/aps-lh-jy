@@ -70,6 +70,7 @@ import java.util.Comparator;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -117,6 +118,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private static final String REGULAR_PRODUCTION_TYPE = "02";
     private static final int EMBRYO_ON_MACHINE_ENDING_FLAG = 0;
     private static final LocalTime ENDING_FILL_THRESHOLD_TIME = LocalTime.of(20, 0);
+    private static final String WHOLE_SINGLE_CONTROL_CONTINUATION_UNSCHEDULED_REASON =
+            "正规SKU单控机台L/R整机续作条件不满足，禁止单边续作";
 
     @Resource
     private OrderNoGenerator orderNoGenerator;
@@ -167,6 +170,15 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (machine == null) {
                 log.warn("续作SKU未匹配到机台状态，跳过续作排产, materialCode: {}, 续作机台: {}, 目标量: {}",
                         sku.getMaterialCode(), machineCode, sku.resolveTargetScheduleQty());
+                continue;
+            }
+            if (shouldSkipInvalidWholeSingleControlContinuation(context, sku, machineCode)) {
+                appendInvalidWholeSingleControlContinuationUnscheduledResult(context, sku, machineCode);
+                PriorityTraceLogHelper.appendProcessLog(context, "正规SKU单控续作阻断",
+                        "正规SKU单控续作必须L/R两侧同物料同步续作，当前机台不满足整机续作条件, materialCode: "
+                                + sku.getMaterialCode() + ", machineCode: " + machineCode);
+                log.warn("正规SKU单控续作整机条件不满足，跳过单边续作, materialCode: {}, machineCode: {}",
+                        sku.getMaterialCode(), machineCode);
                 continue;
             }
             // 动态收尾目标量需要先按真实机台模数归整，保证目标量、运行态账本和最终落库口径一致。
@@ -1650,6 +1662,80 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 判断正规 SKU 单控续作是否因缺少配对侧而必须跳过。
+     * <p>正规 SKU 在 K1501L/R、K1502L/R 上续作时，必须左右两侧同物料同步续作；
+     * 如果当前续作队列中不存在配对侧，或配对侧物料不同，继续生成单边结果会破坏整机占用规则。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前续作SKU
+     * @param machineCode 当前续作机台
+     * @return true-整机条件不满足，需要跳过
+     */
+    private boolean shouldSkipInvalidWholeSingleControlContinuation(LhScheduleContext context,
+                                                                   SkuScheduleDTO sku,
+                                                                   String machineCode) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(machineCode)
+                || !LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)
+                || !LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, machineCode)) {
+            return false;
+        }
+        String pairMachineCode = LhSingleControlMachineUtil.resolvePairMachineCode(machineCode);
+        if (StringUtils.isEmpty(pairMachineCode)) {
+            return true;
+        }
+        for (SkuScheduleDTO candidate : context.getContinuousSkuList()) {
+            if (Objects.isNull(candidate) || StringUtils.isEmpty(candidate.getContinuousMachineCode())) {
+                continue;
+            }
+            if (StringUtils.equals(pairMachineCode, candidate.getContinuousMachineCode())
+                    && StringUtils.equals(sku.getMaterialCode(), candidate.getMaterialCode())
+                    && LhSingleControlMachineUtil.isWholeMachineGranularitySku(candidate)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 写入正规 SKU 单控整机续作条件不满足的未排结果。
+     *
+     * @param context 排程上下文
+     * @param sku 续作SKU
+     * @param machineCode 当前续作机台
+     */
+    private void appendInvalidWholeSingleControlContinuationUnscheduledResult(LhScheduleContext context,
+                                                                             SkuScheduleDTO sku,
+                                                                             String machineCode) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
+            return;
+        }
+        LhUnscheduledResult existing = findUnscheduledResultByMaterial(context, sku.getMaterialCode());
+        if (Objects.nonNull(existing)) {
+            existing.setUnscheduledReason(WHOLE_SINGLE_CONTROL_CONTINUATION_UNSCHEDULED_REASON);
+            existing.setUnscheduledQty(Math.max(0, sku.getSurplusQty()));
+            return;
+        }
+        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+        unscheduled.setFactoryCode(context.getFactoryCode());
+        unscheduled.setBatchNo(context.getBatchNo());
+        unscheduled.setScheduleDate(context.getScheduleTargetDate());
+        unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setMaterialDesc(sku.getMaterialDesc());
+        unscheduled.setStructureName(sku.getStructureName());
+        unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
+        unscheduled.setSpecCode(sku.getSpecCode());
+        unscheduled.setEmbryoCode(sku.getEmbryoCode());
+        unscheduled.setMouldQty(sku.getMouldQty());
+        unscheduled.setUnscheduledQty(Math.max(0, sku.getSurplusQty()));
+        unscheduled.setUnscheduledReason(WHOLE_SINGLE_CONTROL_CONTINUATION_UNSCHEDULED_REASON);
+        unscheduled.setDataSource(AUTO_DATA_SOURCE);
+        unscheduled.setIsDelete(0);
+        context.getUnscheduledResultList().add(unscheduled);
+        log.info("正规SKU单控整机续作未排, materialCode: {}, machineCode: {}, reason: {}",
+                sku.getMaterialCode(), machineCode, WHOLE_SINGLE_CONTROL_CONTINUATION_UNSCHEDULED_REASON);
+    }
+
+    /**
      * 写入续作收尾小余量未排结果。
      *
      * @param context 排程上下文
@@ -2074,6 +2160,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return false;
         }
         if (CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
+            return false;
+        }
+        // 正规SKU单控整机降模必须L/R同步,不进入单机降模链路(单机降模只保留一侧会破坏整机占用)
+        if (!resolveWholeSingleControlMachineCodes(context, skuResults).isEmpty()) {
+            log.info("正规SKU单控整机跳过单机降模, materialCode: {}, 机台: {}, 原因: L/R必须同步保留或释放",
+                    sourceSku.getMaterialCode(), joinMachineCodes(skuResults));
             return false;
         }
         if (!isSingleMachineReductionEndingCandidate(sourceSku, skuResults)) {
@@ -2538,14 +2630,27 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                                        int demandQty) {
         List<LhScheduleResult> sortedResults = new ArrayList<LhScheduleResult>(skuResults);
         sortedResults.sort(buildContinuationKeepComparator(context));
+        // 正规SKU单控整机降模时L/R必须同步保留,不允许只保留单边;先识别整机机台编码并构建机台->结果索引
+        Set<String> wholeSingleControlMachineCodes = resolveWholeSingleControlMachineCodes(context, sortedResults);
+        Map<String, LhScheduleResult> machineCodeResultMap = buildMachineCodeResultMap(sortedResults);
         List<LhScheduleResult> keptResults = new ArrayList<LhScheduleResult>(sortedResults.size());
         int accumulatedCapacity = 0;
         for (LhScheduleResult result : sortedResults) {
             if (accumulatedCapacity >= demandQty) {
                 break;
             }
+            if (keptResults.contains(result)) {
+                continue;
+            }
             keptResults.add(result);
             accumulatedCapacity += Math.max(0, capacityMap.getOrDefault(result, 0));
+            // 正规SKU单控整机降模:配对侧必须同步保留,避免只保留L或R单边
+            LhScheduleResult pairResult = resolvePairSingleControlResultInList(
+                    result, wholeSingleControlMachineCodes, machineCodeResultMap);
+            if (pairResult != null && !keptResults.contains(pairResult)) {
+                keptResults.add(pairResult);
+                accumulatedCapacity += Math.max(0, capacityMap.getOrDefault(pairResult, 0));
+            }
         }
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(context, skuResults, keptResults);
         log.info("续作多机台降模排序, 保留排序: {}, 下机排序: {}, 保留排序明细: {}, 下机排序明细: {}",
@@ -2589,10 +2694,22 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     sourceSku.getMaterialCode(), productionDate, joinMachineCodes(sortedResults));
             return new ArrayList<LhScheduleResult>(0);
         }
+        // 正规SKU单控整机降模时L/R必须同步保留,先识别整机机台编码并构建机台->结果索引
+        Set<String> wholeSingleControlMachineCodes = resolveWholeSingleControlMachineCodes(context, sortedResults);
+        Map<String, LhScheduleResult> machineCodeResultMap = buildMachineCodeResultMap(sortedResults);
         List<LhScheduleResult> keptResults = new ArrayList<LhScheduleResult>(sortedResults.size());
         int cumulativeCapacity = 0;
         for (LhScheduleResult result : sortedResults) {
+            if (keptResults.contains(result)) {
+                continue;
+            }
             keptResults.add(result);
+            // 正规SKU单控整机降模:配对侧必须同步保留,避免只保留L或R单边
+            LhScheduleResult pairResult = resolvePairSingleControlResultInList(
+                    result, wholeSingleControlMachineCodes, machineCodeResultMap);
+            if (pairResult != null && !keptResults.contains(pairResult)) {
+                keptResults.add(pairResult);
+            }
             cumulativeCapacity = calculateContinuationFutureCapacity(
                     context, keptResults, shiftMapByDate, productionDate, shortageLookAheadDays);
             log.debug("续作多机台降模追补模拟, materialCode: {}, 日期: {}, 尝试保留机台: {}, "
@@ -2865,6 +2982,86 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 .thenComparing(Comparator.comparing(
                         (LhScheduleResult result) -> StringUtils.defaultString(result.getLhMachineCode())).reversed()));
         return removedResults;
+    }
+
+    /**
+     * 识别续作结果列表中属于正规SKU单控整机的机台编码集合。
+     * <p>正规SKU单控整机降模时L/R必须同步保留或释放;该方法提前扫描结果列表,
+     * 通过结果机台编码和sourceSku判断哪些机台属于正规SKU单控整机,供后续降模绑定使用。</p>
+     *
+     * @param context 排程上下文
+     * @param skuResults 同组续作结果列表
+     * @return 正规SKU单控整机机台编码集合
+     */
+    private Set<String> resolveWholeSingleControlMachineCodes(LhScheduleContext context,
+                                                              List<LhScheduleResult> skuResults) {
+        Set<String> machineCodes = new HashSet<String>(4);
+        if (context == null || CollectionUtils.isEmpty(skuResults)) {
+            return machineCodes;
+        }
+        for (LhScheduleResult result : skuResults) {
+            if (result == null || StringUtils.isEmpty(result.getLhMachineCode())) {
+                continue;
+            }
+            if (!LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, result.getLhMachineCode())) {
+                continue;
+            }
+            // 通过结果反查sourceSku,判断是否为正规SKU整机粒度
+            SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+            if (sourceSku != null && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sourceSku)) {
+                machineCodes.add(result.getLhMachineCode());
+            }
+        }
+        return machineCodes;
+    }
+
+    /**
+     * 构建机台编码到续作结果的索引,用于快速查找配对侧结果。
+     *
+     * @param skuResults 续作结果列表
+     * @return 机台编码->结果映射
+     */
+    private Map<String, LhScheduleResult> buildMachineCodeResultMap(List<LhScheduleResult> skuResults) {
+        Map<String, LhScheduleResult> map = new HashMap<String, LhScheduleResult>(
+                skuResults == null ? 4 : skuResults.size());
+        if (CollectionUtils.isEmpty(skuResults)) {
+            return map;
+        }
+        for (LhScheduleResult result : skuResults) {
+            if (result != null && StringUtils.isNotEmpty(result.getLhMachineCode())) {
+                map.put(result.getLhMachineCode(), result);
+            }
+        }
+        return map;
+    }
+
+    /**
+     * 在续作结果列表中查找正规SKU单控机台的配对侧结果。
+     * <p>只有当前机台属于正规SKU单控整机时,才查找同一列表中物料相同的配对侧结果;
+     * 试制、量试、小批量返回null,保持单边独立降模。</p>
+     *
+     * @param result 当前结果
+     * @param wholeSingleControlMachineCodes 正规SKU单控整机机台编码集合
+     * @param machineCodeResultMap 机台编码->结果索引
+     * @return 配对侧结果;不存在或不适用时返回null
+     */
+    private LhScheduleResult resolvePairSingleControlResultInList(LhScheduleResult result,
+                                                                  Set<String> wholeSingleControlMachineCodes,
+                                                                  Map<String, LhScheduleResult> machineCodeResultMap) {
+        if (result == null || StringUtils.isEmpty(result.getLhMachineCode())
+                || CollectionUtils.isEmpty(wholeSingleControlMachineCodes)
+                || !wholeSingleControlMachineCodes.contains(result.getLhMachineCode())) {
+            return null;
+        }
+        String pairMachineCode = LhSingleControlMachineUtil.resolvePairMachineCode(result.getLhMachineCode());
+        if (StringUtils.isEmpty(pairMachineCode)) {
+            return null;
+        }
+        LhScheduleResult pairResult = machineCodeResultMap.get(pairMachineCode);
+        if (pairResult == null || !StringUtils.equals(result.getMaterialCode(), pairResult.getMaterialCode())) {
+            return null;
+        }
+        return pairResult;
     }
 
     /**
@@ -7832,6 +8029,75 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                             + "effect: S4.4换活字块可识别，S4.5新增选机仅降优先级",
                     materialCode, machineCode, reason);
         }
+        // 正规SKU单控整机释放时,配对侧必须同步释放,不允许只释放单边给其他SKU使用
+        registerWholeSingleControlPairReleaseIfNeeded(context, machineCode, materialCode, reason);
+    }
+
+    /**
+     * 正规SKU单控整机释放时同步释放配对侧。
+     * <p>试制、量试、小批量按单边独立释放;只有正规SKU在配置生效的单控机台上释放时,
+     * 才查找配对侧并同步登记释放,确保整机L/R同进同出。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 当前释放机台编码
+     * @param materialCode 续作SKU物料编码
+     * @param reason 释放原因
+     */
+    private void registerWholeSingleControlPairReleaseIfNeeded(LhScheduleContext context,
+                                                               String machineCode,
+                                                               String materialCode,
+                                                               String reason) {
+        if (context == null || StringUtils.isEmpty(machineCode) || StringUtils.isEmpty(materialCode)) {
+            return;
+        }
+        if (!LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, machineCode)) {
+            return;
+        }
+        // 通过续作SKU列表反查物料对应的SKU类型,判断是否为正规SKU整机粒度
+        if (!isMaterialWholeSingleControlSku(context, materialCode)) {
+            return;
+        }
+        String pairMachineCode = LhSingleControlMachineUtil.resolvePairMachineCode(machineCode);
+        if (StringUtils.isEmpty(pairMachineCode)) {
+            return;
+        }
+        boolean pairAdded = context.getReleasedContinuousMachineCodeSet().add(pairMachineCode);
+        if (pairAdded) {
+            log.info("正规SKU单控整机同步释放配对侧, materialCode: {}, machineCode: {}, pairMachineCode: {}, reason: {}",
+                    materialCode, machineCode, pairMachineCode, reason);
+        }
+    }
+
+    /**
+     * 判断指定物料是否为正规SKU(整机粒度)。
+     * <p>从续作SKU列表和新增SKU列表中查找物料编码匹配的SKU,判断其是否为整机粒度。
+     * 试制、量试、小批量返回false,正规SKU返回true。</p>
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @return true-正规SKU整机粒度
+     */
+    private boolean isMaterialWholeSingleControlSku(LhScheduleContext context, String materialCode) {
+        if (context == null || StringUtils.isEmpty(materialCode)) {
+            return false;
+        }
+        if (!CollectionUtils.isEmpty(context.getContinuousSkuList())) {
+            for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
+                if (sku != null && StringUtils.equals(materialCode, sku.getMaterialCode())
+                        && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)) {
+                    return true;
+                }
+            }
+        }
+        if (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
+            for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
+                if (sku != null && StringUtils.equals(materialCode, sku.getMaterialCode())
+                        && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

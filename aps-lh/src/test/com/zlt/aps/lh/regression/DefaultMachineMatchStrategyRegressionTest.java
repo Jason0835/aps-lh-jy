@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
@@ -672,30 +673,33 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldKeepSingleControlMachineForNormalSkuBehindNormalCandidate() {
+    void matchMachines_shouldOnlyKeepWholeSingleControlMachineForFormalSkuBehindNormalCandidate() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
         context.setPendingSmallBatchNewSpecSkuCount(1);
 
-        MachineScheduleDTO singleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 0),
+        MachineScheduleDTO leftSingleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        MachineScheduleDTO rightSingleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-SINGLE");
         MachineScheduleDTO normalMachine = machine("K1401", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-NORMAL");
-        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+        context.getMachineScheduleMap().put(leftSingleControlMachine.getMachineCode(), leftSingleControlMachine);
+        context.getMachineScheduleMap().put(rightSingleControlMachine.getMachineCode(), rightSingleControlMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001418", "SPEC-A", "22.5"));
 
-        assertEquals(2, candidates.size(), "正规SKU应保留单控候选作为普通机台不足时的回落");
+        assertEquals(2, candidates.size(), "正规SKU只能保留成组单控整机候选作为普通机台后的回落");
         assertEquals("K1401", candidates.get(0).getMachineCode(),
                 "正规SKU应优先选择非单控机台");
         assertEquals("K1501L", candidates.get(1).getMachineCode(),
-                "单控机台应排在正规SKU普通候选之后");
+                "单控整机候选使用左侧作为代表机台，后续排产必须同步占用右侧");
     }
 
     @Test
-    void matchMachines_shouldKeepSingleControlCandidatesForNormalSkuAsFallback() {
+    void matchMachines_shouldFilterSingleSideSingleControlCandidateForFormalSku() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -710,27 +714,29 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
-        assertEquals(2, candidates.size(), "正规物料存在普通候选时，也应保留单控候选作为后续回落机台");
+        assertEquals(1, candidates.size(), "正规SKU不得保留缺少配对侧的单控单边候选");
         assertEquals("K1111", candidates.get(0).getMachineCode());
-        assertEquals("K1501R", candidates.get(1).getMachineCode(),
-                "单控机台应作为正规 SKU 的回落候选，而不是在选机阶段提前剔除");
     }
 
     @Test
-    void matchMachines_shouldFallbackToSingleControlForFormalSkuWhenOnlySingleControlCandidate() {
+    void matchMachines_shouldFallbackToWholeSingleControlForFormalSkuWhenOnlyPairedSingleControlCandidate() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
         context.setPendingSmallBatchNewSpecSkuCount(2);
 
-        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
+        MachineScheduleDTO leftSingleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 0),
                 "SPEC-A", "22.5", "MAT-SINGLE");
-        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+        MachineScheduleDTO rightSingleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        context.getMachineScheduleMap().put(rightSingleControlMachine.getMachineCode(), rightSingleControlMachine);
+        context.getMachineScheduleMap().put(leftSingleControlMachine.getMachineCode(), leftSingleControlMachine);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
-        assertEquals(1, candidates.size(), "正规SKU没有非单控候选时，应允许回落单控机台");
-        assertEquals("K1501R", candidates.get(0).getMachineCode());
+        assertEquals(1, candidates.size(), "正规SKU没有非单控候选时，仅允许回落可同步占用L/R的单控整机");
+        assertEquals("K1501L", candidates.get(0).getMachineCode(),
+                "正规SKU单控整机候选统一用左侧作为代表，避免后续重复调度左右两边");
     }
 
     @Test
@@ -750,7 +756,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
-        assertEquals(2, candidates.size(), "显式定点到单控机台时，应保留定点单控候选");
+        assertEquals(1, candidates.size(), "显式定点到单控机台但缺少配对侧时，正规SKU仍不得保留单边候选");
         assertEquals("K1111", candidates.get(0).getMachineCode(),
                 "定点优先已不在新增选机排序调用链内，正规SKU应按单控拆分得分先选普通机台");
     }
@@ -778,7 +784,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldFallbackToSingleControlCandidatesWhenNoNormalCandidates() {
+    void matchMachines_shouldRejectSingleSideSingleControlWhenNoNormalCandidatesForFormalSku() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -789,12 +795,11 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
-        assertEquals(1, candidates.size(), "普通 SKU 无普通机台候选时，应回退保留单控拆分机台");
-        assertEquals("K1501R", candidates.get(0).getMachineCode());
+        assertTrue(candidates.isEmpty(), "正规SKU无普通机台候选且单控缺少配对侧时，不允许单边上机");
     }
 
     @Test
-    void matchMachines_shouldFallbackToSingleControlForFormalSkuEvenWhenHigherTypesPending() {
+    void matchMachines_shouldRejectSingleSideSingleControlForFormalSkuEvenWhenHigherTypesPending() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -806,8 +811,30 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
 
-        assertEquals(1, candidates.size(), "正规SKU仅无普通机台时，应允许回退保留单控机台");
-        assertEquals("K1501R", candidates.get(0).getMachineCode());
+        assertTrue(candidates.isEmpty(), "正规SKU不因更高类型待排而放宽单控整机约束");
+    }
+
+    @Test
+    void matchMachines_shouldRejectWholeSingleControlForFormalSkuWhenPairSideOccupiedByDifferentSku() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+
+        MachineScheduleDTO leftSingleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        MachineScheduleDTO rightSingleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        context.getMachineScheduleMap().put(leftSingleControlMachine.getMachineCode(), leftSingleControlMachine);
+        context.getMachineScheduleMap().put(rightSingleControlMachine.getMachineCode(), rightSingleControlMachine);
+        LhScheduleResult occupiedResult = new LhScheduleResult();
+        occupiedResult.setMaterialCode("MAT-SMALL-BATCH");
+        occupiedResult.setLhMachineCode("K1501R");
+        occupiedResult.setSpecEndTime(dateTime(2026, 5, 9, 20, 0));
+        context.getMachineAssignmentMap().put("K1501R", Collections.singletonList(occupiedResult));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+
+        assertTrue(candidates.isEmpty(), "任意一侧已被其它SKU占用时，正规SKU不得生成单控整机候选");
     }
 
     @Test

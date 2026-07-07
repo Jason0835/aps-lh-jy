@@ -159,7 +159,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
 
-        // 单控/普通机台约束是类型规则：试制强约束单控，量试/小批量优先单控，正规优先普通。
+        // 单控/普通机台约束是类型规则：试制强约束单控，量试/小批量优先单边单控，正规单控必须L/R成组。
         // 该规则只处理候选集合，不在此消费机台；最终是否占用仍由 S4.5 换模、首检和产能结果决定。
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
@@ -184,8 +184,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
     /**
      * 对单控拆分机台执行SKU类型约束。
-     * <p>试制只保留单控候选；量试/小批量优先单控、无单控时回落普通；
-     * 正规优先普通，单控候选保留为普通机台后的回落机台。</p>
+     * <p>试制只保留单边单控候选；量试/小批量优先单边单控、无单控时回落普通；
+     * 正规优先普通，单控候选必须先收敛成L/R整机候选后才能作为普通机台后的回落。</p>
      *
      * <p>业务边界：这里不做新增排序重排，不让后续试制/量试反向抢占当前 SKU 的全局顺序；
      * 只在当前 SKU 已轮到选机时，按类型决定单控和普通候选是否保留。</p>
@@ -200,13 +200,13 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                                                                        SkuScheduleDTO sku,
                                                                        List<MachineScheduleDTO> candidates,
                                                                        MachineFilterTrace trace) {
-        if (CollectionUtils.isEmpty(candidates) || sku == null) {
+        if (CollectionUtils.isEmpty(candidates) || Objects.isNull(sku)) {
             return candidates;
         }
         List<MachineScheduleDTO> singleControlCandidates = new ArrayList<>(2);
         List<MachineScheduleDTO> normalCandidates = new ArrayList<>(candidates.size());
         for (MachineScheduleDTO candidate : candidates) {
-            if (candidate == null) {
+            if (Objects.isNull(candidate)) {
                 continue;
             }
             if (isSingleControlMachine(context, candidate.getMachineCode())) {
@@ -216,8 +216,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
             normalCandidates.add(candidate);
         }
+        List<MachineScheduleDTO> effectiveSingleControlCandidates = isFormalSku(sku)
+                ? resolveWholeSingleControlCandidates(context, sku, singleControlCandidates)
+                : singleControlCandidates;
         List<MachineScheduleDTO> filteredCandidates = resolveCandidatesBySkuType(
-                context, sku, singleControlCandidates, normalCandidates);
+                context, sku, effectiveSingleControlCandidates, normalCandidates);
         markTypeRuleBlocked(context, sku, candidates, filteredCandidates, trace);
         recordSingleControlRuleTrace(trace, candidates, filteredCandidates, context, sku);
         logSingleControlCandidateDecision(context, sku, candidates, filteredCandidates, trace);
@@ -232,6 +235,93 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                     context.getPendingFormalNewSpecSkuCount());
         }
         return filteredCandidates;
+    }
+
+    /**
+     * 将正规 SKU 的单控 L/R 候选收敛成物理整机候选。
+     * <p>正规 SKU 不能单边上机，因此只有左右两侧都已经通过前置硬过滤、且当前排程运行态没有被其它 SKU
+     * 占用时，才保留一个左侧代表候选。代表候选只用于排序和后续入口传递，真正结果写入仍需同步生成 L/R 两条。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待排正规 SKU
+     * @param singleControlCandidates 单边候选集合
+     * @return 整机候选集合，每个物理单控机台最多返回一个左侧代表
+     */
+    private List<MachineScheduleDTO> resolveWholeSingleControlCandidates(LhScheduleContext context,
+                                                                         SkuScheduleDTO sku,
+                                                                         List<MachineScheduleDTO> singleControlCandidates) {
+        if (CollectionUtils.isEmpty(singleControlCandidates)) {
+            return singleControlCandidates;
+        }
+        Map<String, MachineScheduleDTO> candidateMap = new HashMap<>(singleControlCandidates.size());
+        for (MachineScheduleDTO candidate : singleControlCandidates) {
+            if (Objects.nonNull(candidate) && StringUtils.isNotEmpty(candidate.getMachineCode())) {
+                candidateMap.put(candidate.getMachineCode(), candidate);
+            }
+        }
+        List<MachineScheduleDTO> wholeMachineCandidates = new ArrayList<>(singleControlCandidates.size());
+        Set<String> processedPhysicalMachineSet = new HashSet<>(singleControlCandidates.size());
+        for (MachineScheduleDTO candidate : singleControlCandidates) {
+            if (Objects.isNull(candidate) || StringUtils.isEmpty(candidate.getMachineCode())) {
+                continue;
+            }
+            String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(candidate.getMachineCode());
+            if (StringUtils.isEmpty(physicalMachineCode) || processedPhysicalMachineSet.contains(physicalMachineCode)) {
+                continue;
+            }
+            processedPhysicalMachineSet.add(physicalMachineCode);
+            String leftMachineCode = LhSingleControlMachineUtil.resolveLeftMachineCode(candidate.getMachineCode());
+            String rightMachineCode = LhSingleControlMachineUtil.resolveRightMachineCode(candidate.getMachineCode());
+            MachineScheduleDTO leftMachine = candidateMap.get(leftMachineCode);
+            MachineScheduleDTO rightMachine = candidateMap.get(rightMachineCode);
+            if (Objects.isNull(leftMachine) || Objects.isNull(rightMachine)) {
+                log.debug("正规SKU单控整机候选过滤, materialCode: {}, physicalMachine: {}, leftExists: {}, rightExists: {}, reason: {}",
+                        sku.getMaterialCode(), physicalMachineCode, Objects.nonNull(leftMachine), Objects.nonNull(rightMachine),
+                        "L/R两侧未同时通过硬性机台约束");
+                continue;
+            }
+            if (hasOtherSkuAssignment(context, sku, leftMachineCode) || hasOtherSkuAssignment(context, sku, rightMachineCode)) {
+                log.info("正规SKU单控整机候选过滤, materialCode: {}, physicalMachine: {}, leftMachine: {}, rightMachine: {}, reason: {}",
+                        sku.getMaterialCode(), physicalMachineCode, leftMachineCode, rightMachineCode,
+                        "L/R任一侧已被其它SKU占用");
+                continue;
+            }
+            wholeMachineCandidates.add(leftMachine);
+        }
+        return wholeMachineCandidates;
+    }
+
+    /**
+     * 判断单控某一侧是否已被其它 SKU 的当前排程结果占用。
+     * <p>正规 SKU 整机候选要求左右两侧同进同出；若任一侧已登记其它物料结果，
+     * 当前物理单控机台不能再作为正规 SKU 候选，避免左右模混排。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待排 SKU
+     * @param machineCode 机台编码
+     * @return true-已被其它 SKU 占用
+     */
+    private boolean hasOtherSkuAssignment(LhScheduleContext context, SkuScheduleDTO sku, String machineCode) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(context.getMachineAssignmentMap())) {
+            return false;
+        }
+        List<LhScheduleResult> assignedResults = context.getMachineAssignmentMap().get(machineCode);
+        if (CollectionUtils.isEmpty(assignedResults)) {
+            return false;
+        }
+        for (LhScheduleResult assignedResult : assignedResults) {
+            if (shouldIgnoreReleasedContinuousPlaceholder(context, assignedResult)) {
+                continue;
+            }
+            if (Objects.isNull(assignedResult) || StringUtils.isEmpty(assignedResult.getMaterialCode())) {
+                return true;
+            }
+            if (!StringUtils.equals(sku.getMaterialCode(), assignedResult.getMaterialCode())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -283,11 +373,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return retainedCandidates;
         }
         if (!CollectionUtils.isEmpty(normalCandidates)) {
-            // 正规SKU优先普通机台，但仍可保留单控候选作为普通机台不足时的回落机台。
-            // 单控放在普通机台之后，避免正规 SKU 抢占后续特殊 SKU 可能需要的单控资源。
+            // 正规SKU优先普通机台；若要使用单控机台，候选必须已经收敛为L/R整机代表。
+            // 单控整机放在普通机台之后，避免正规 SKU 抢占后续特殊 SKU 可能需要的单边单控资源。
             return retainNormalThenSingleCandidates(singleControlCandidates, normalCandidates);
         }
-        // 正规SKU仅剩单控候选时，允许直接使用单控机台。
+        // 正规SKU仅剩单控候选时，也只能使用已经成组的单控整机候选。
         return singleControlCandidates;
     }
 
@@ -358,7 +448,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return "小批量SKU优先使用单控机台，单控候选不足时允许普通机台";
         }
         if (isFormalSku(sku) && singleControlMachine) {
-            return "正规SKU优先使用普通机台";
+            return "正规SKU使用单控机台必须L/R整机同步，单边候选已过滤";
         }
         return "SKU类型机台约束";
     }
@@ -837,7 +927,33 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private Date resolveAlignedCandidateReferenceTime(LhScheduleContext context,
                                                       SkuScheduleDTO sku,
                                                       MachineScheduleDTO machine) {
+        if (LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)
+                && machine != null
+                && isSingleControlMachine(context, machine.getMachineCode())) {
+            MachineScheduleDTO pairMachine = LhSingleControlMachineUtil.resolvePairMachine(context, machine.getMachineCode());
+            Date currentSideReferenceTime = resolveAlignedCandidateReferenceTime(context, machine);
+            Date pairSideReferenceTime = resolveAlignedCandidateReferenceTime(context, pairMachine);
+            // 正规SKU按整机占用单控机台，最早换模起点必须等L/R两边都释放。
+            return resolveLaterTime(currentSideReferenceTime, pairSideReferenceTime);
+        }
         return resolveAlignedCandidateReferenceTime(context, machine);
+    }
+
+    /**
+     * 获取两个时间中较晚的一个。
+     *
+     * @param first 第一个时间
+     * @param second 第二个时间
+     * @return 较晚时间
+     */
+    private Date resolveLaterTime(Date first, Date second) {
+        if (Objects.isNull(first)) {
+            return second;
+        }
+        if (Objects.isNull(second)) {
+            return first;
+        }
+        return first.after(second) ? first : second;
     }
 
     /**

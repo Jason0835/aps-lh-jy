@@ -1227,6 +1227,13 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             recordTypeBlockAppendFailure(failureReason, "换活字块开产时间为空");
             return false;
         }
+        if (shouldBlockWholeSingleControlTypeBlock(context, machine, sku)) {
+            recordTypeBlockAppendFailure(failureReason, "正规SKU单控机台禁止单边换活字块");
+            log.info("正规SKU单控机台禁止单边换活字块, machineCode: {}, materialCode: {}, pairMachine: {}",
+                    machine.getMachineCode(), sku.getMaterialCode(),
+                    LhSingleControlMachineUtil.resolvePairMachineCode(machine.getMachineCode()));
+            return false;
+        }
         // 成型胎胚库存收尾优先按胎胚库存严格控量，避免被零目标或共用胎胚零余量规则提前拦截。
         boolean embryoStockEndingTargetApplied = getTargetScheduleQtyResolver()
                 .applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "换活字块");
@@ -1451,6 +1458,26 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             getMouldChangeBalanceStrategy().rollbackMouldChange(context, switchStartTime);
         }
         return success;
+    }
+
+    /**
+     * 判断是否需要阻断正规 SKU 单控单边换活字块。
+     * <p>换活字块当前追加逻辑一次只生成一侧机台结果；正规 SKU 使用单控机台时必须 L/R 同步，
+     * 因此在未进入整机成组排产前，不能让正规 SKU 通过该入口追加单边结果。
+     * 试制、量试、小批量仍允许按单边独立换活字块。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 当前机台
+     * @param sku 当前SKU
+     * @return true-需要阻断
+     */
+    private boolean shouldBlockWholeSingleControlTypeBlock(LhScheduleContext context,
+                                                           MachineScheduleDTO machine,
+                                                           SkuScheduleDTO sku) {
+        return Objects.nonNull(context)
+                && Objects.nonNull(machine)
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)
+                && LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, machine.getMachineCode());
     }
 
     /**
