@@ -9650,11 +9650,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             ResultDowntimeSummaryUtil.clearDowntimeSummary(result);
             return;
         }
+        List<LhShiftConfigVO> scheduleWindowShifts = context.getScheduleWindowShifts();
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
                 result,
                 resolveMachineMaintenanceWindowList(context, result.getLhMachineCode()),
                 resolveEffectiveCleaningWindowList(context, result, firstPlannedShiftStartTime),
-                resolveMachineShutdownWindowList(context, result.getLhMachineCode()));
+                resolveMachineShutdownWindowList(context, result.getLhMachineCode()),
+                scheduleWindowShifts);
         Date mouldChangeCompleteTime = Objects.nonNull(result.getMouldChangeStartTime())
                 ? LhScheduleTimeUtil.addHours(result.getMouldChangeStartTime(),
                 LhScheduleTimeUtil.getMouldChangeTotalHours(context)) : firstPlannedShiftStartTime;
@@ -9663,7 +9665,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 result,
                 resolveMachineCleaningWindowList(context, result.getLhMachineCode()),
                 result.getMouldChangeStartTime(),
-                mouldChangeCompleteTime);
+                mouldChangeCompleteTime,
+                scheduleWindowShifts);
     }
 
     /**

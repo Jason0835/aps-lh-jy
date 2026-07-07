@@ -3267,11 +3267,24 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             ResultDowntimeSummaryUtil.clearDowntimeSummary(result);
             return;
         }
+        List<LhShiftConfigVO> scheduleWindowShifts = context.getScheduleWindowShifts();
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
                 result,
                 resolveMachineMaintenanceWindowList(context, result.getLhMachineCode()),
                 resolveEffectiveCleaningWindowList(context, result, firstPlannedShiftStartTime),
-                resolveMachineShutdownWindowList(context, result.getLhMachineCode()));
+                resolveMachineShutdownWindowList(context, result.getLhMachineCode()),
+                scheduleWindowShifts);
+        // 清洗与普通换模重叠时只执行换模，有效清洗窗口已剔除该清洗；这里用原始全量清洗窗口
+        // 按真实换模8h窗口补写“清洗+换模”备注，与新增排产口径保持一致。
+        Date mouldChangeCompleteTime = Objects.nonNull(result.getMouldChangeStartTime())
+                ? LhScheduleTimeUtil.addHours(result.getMouldChangeStartTime(),
+                LhScheduleTimeUtil.getMouldChangeTotalHours(context)) : firstPlannedShiftStartTime;
+        ResultDowntimeSummaryUtil.appendCleaningMouldChangeAnalysis(
+                result,
+                resolveMachineCleaningWindowList(context, result.getLhMachineCode()),
+                result.getMouldChangeStartTime(),
+                mouldChangeCompleteTime,
+                scheduleWindowShifts);
     }
 
     /**
