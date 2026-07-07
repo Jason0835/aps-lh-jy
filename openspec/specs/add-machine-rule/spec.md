@@ -1207,3 +1207,18 @@ SKU 收尾时，必须严格按照目标量排产，不允许超排。
 - **WHEN** 同物料续作判断首次增机日为 T+N
 - **THEN** 新增排产复用同一公共方法判断，首次增机日必须也为 T+N
 - **AND** 不得因产能口径或末日处理差异导致新增排产跳过补偿 SKU
+
+### Requirement: 单边粒度SKU扩机台模拟必须折半单控机台产能
+
+系统必须（MUST）在新增排产扩机台模拟（simulateExpansion）中，当 SKU 为单边粒度（试制/量试/小批量）且候选机台为单控机台时，将单台日理论产能（singleMachineDailyCapacityMap、singleMachineWindowCapacityQty、shiftCapacity）按班产折半，与续作 `resolveContinuationDayMinimumMachineCount` 的单控折半口径保持一致。
+
+#### Scenario: 小批量SKU使用单控单侧机台扩机台模拟
+
+- **WHEN** 小批量 SKU 使用 K1501L 等单控单侧机台参与扩机台模拟
+- **THEN** 模拟用的单台日理论产能必须按班产折半
+- **AND** 不得用未折半的满班产计算，避免高估单控单侧产能导致加机台数量不足
+
+#### Scenario: 正规SKU使用单控整机不折半
+
+- **WHEN** 正规 SKU 使用单控机台（L/R 整机同步）参与扩机台模拟
+- **THEN** 单台日理论产能不折半，整机产能等于普通机台
