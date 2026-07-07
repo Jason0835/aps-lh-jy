@@ -4794,12 +4794,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, sku, candidates, excludedMachineCodes, policy, segment, candidateMachine,
                 shifts, capacityCalculate, request.getDailyPlanQuotaMap(), existingMachineCapacityMaps));
         request.setInitialActiveMachines(Math.max(1, existingMachineCapacityMaps.size() + 1));
-        request.setShiftCapacity(Math.max(0, sku.getShiftCapacity()));
+        // 单边粒度SKU（试制/量试/小批量）使用单控机台时，单台日硫化标准量折半，
+        // 避免扩机台模拟高估单控单侧机台产能，导致加机台数量不足
+        int simulationShiftCapacity = Math.max(0, sku.getShiftCapacity());
+        if (LhSingleControlMachineUtil.isSingleSideGranularitySku(sku)
+                && Objects.nonNull(candidateMachine)
+                && LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
+                        context, candidateMachine.getMachineCode())) {
+            simulationShiftCapacity = Math.max(1, simulationShiftCapacity / 2);
+        }
+        request.setShiftCapacity(simulationShiftCapacity);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         request.setSingleMachineWindowCapacityQty(ShiftCapacityResolverUtil.sumActualShiftPlanQty(
-                shifts, Math.max(0, sku.getShiftCapacity()), configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
+                shifts, simulationShiftCapacity, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
         request.setSingleMachineDailyCapacityMap(ShiftCapacityResolverUtil.sumActualShiftPlanQtyByWorkDate(
-                shifts, Math.max(0, sku.getShiftCapacity()), configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
+                shifts, simulationShiftCapacity, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
         request.setShortageLookAheadDays(resolveNewSpecShortageLookAheadDays(context));
         int monthlyHistoryShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         request.setMonthlyHistoryShortageQty(monthlyHistoryShortageQty);
