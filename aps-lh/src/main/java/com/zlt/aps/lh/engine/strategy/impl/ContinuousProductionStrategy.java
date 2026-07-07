@@ -1330,7 +1330,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (sourceSku == null || CollectionUtils.isEmpty(activeResults)) {
             return keptResults;
         }
-        int minimumMachineCount = resolveContinuationDayMinimumMachineCount(context, sourceSku, dayPlanQty);
+        // 传入activeResults以便识别单控机台折半产能
+        int minimumMachineCount = resolveContinuationDayMinimumMachineCount(context, sourceSku, dayPlanQty, activeResults);
         if (minimumMachineCount <= 0 || (!CollectionUtils.isEmpty(keptResults)
                 && keptResults.size() >= minimumMachineCount)) {
             return keptResults;
@@ -1368,6 +1369,25 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private int resolveContinuationDayMinimumMachineCount(LhScheduleContext context,
                                                           SkuScheduleDTO sourceSku,
                                                           int dayPlanQty) {
+        return resolveContinuationDayMinimumMachineCount(context, sourceSku, dayPlanQty, null);
+    }
+
+    /**
+     * 解析 dayN 计划量对应的续作最小机台数（支持单控机台折半产能）。
+     * <p>单控机台每侧（L或R）只有普通机台一半的硫化产能，计算最小机台数时
+     * 必须将硫化日标准量折半，否则会错误判定单台单控机台即可覆盖日计划量，
+     * 导致不必要的降模减机台。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param dayPlanQty 当前 dayN 日计划量
+     * @param machineResults 当前续作机台结果列表；用于判断是否全部为单控机台
+     * @return 最小续作机台数
+     */
+    private int resolveContinuationDayMinimumMachineCount(LhScheduleContext context,
+                                                          SkuScheduleDTO sourceSku,
+                                                          int dayPlanQty,
+                                                          List<LhScheduleResult> machineResults) {
         int positiveDayPlanQty = Math.max(0, dayPlanQty);
         if (positiveDayPlanQty <= 0) {
             return 0;
@@ -1376,7 +1396,67 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (dailyStandardQty <= 0) {
             return 0;
         }
+        // 单控机台每侧只有普通机台一半的产能，硫化日标准量折半后再参与最小机台数计算
+        if (isAllSingleControlMachines(context, machineResults)) {
+            dailyStandardQty = Math.max(1, dailyStandardQty / 2);
+        }
         return (positiveDayPlanQty + dailyStandardQty - 1) / dailyStandardQty;
+    }
+
+    /**
+     * 判断续作机台结果列表是否全部为单控机台。
+     * <p>全部为单控机台时，硫化日标准量需要折半计算最小机台数，
+     * 避免误判单台单控机台即可覆盖日计划量。</p>
+     *
+     * @param context 排程上下文
+     * @param machineResults 续作机台结果列表
+     * @return true-全部为单控机台；false-包含非单控机台或列表为空
+     */
+    private boolean isAllSingleControlMachines(LhScheduleContext context,
+                                               List<LhScheduleResult> machineResults) {
+        if (context == null || CollectionUtils.isEmpty(machineResults)) {
+            return false;
+        }
+        for (LhScheduleResult result : machineResults) {
+            if (result == null || StringUtils.isEmpty(result.getLhMachineCode())) {
+                continue;
+            }
+            if (!LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
+                    context, result.getLhMachineCode())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 解析来源SKU对应的续作机台结果列表。
+     * <p>用于在不直接持有skuResults的场景（如增机台判断）中，
+     * 从排程上下文获取当前续作机台，以判断是否为单控机台。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @return 续作机台结果列表
+     */
+    private List<LhScheduleResult> resolveContinuousMachineResults(LhScheduleContext context,
+                                                                   SkuScheduleDTO sourceSku) {
+        if (context == null || sourceSku == null
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return new ArrayList<LhScheduleResult>(0);
+        }
+        List<LhScheduleResult> results = new ArrayList<LhScheduleResult>(4);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!isPureContinuousResult(result)) {
+                continue;
+            }
+            SkuScheduleDTO resultSourceSku = resolveResultSourceSku(context, result);
+            if (resultSourceSku == null
+                    || resultSourceSku.getDailyPlanQuotaMap() != sourceSku.getDailyPlanQuotaMap()) {
+                continue;
+            }
+            results.add(result);
+        }
+        return results;
     }
 
     /**
@@ -2180,8 +2260,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (firstDayPlanQty <= 0) {
             return false;
         }
+        // 传入skuResults以便识别单控机台折半产能
         int firstDayMinimumMachineCount = resolveContinuationDayMinimumMachineCount(
-                context, sourceSku, firstDayPlanQty);
+                context, sourceSku, firstDayPlanQty, skuResults);
         if (firstDayMinimumMachineCount > 1) {
             log.info("续作收尾单机降模跳过, materialCode: {}, historyShortageQty: {}, threshold: {}, "
                             + "firstDayPlanQty: {}, SKU日标准产量: {}, dayN最小机台数: {}, 原始机台: {}, "
@@ -6250,8 +6331,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int activeMachineCount = resolveContinuousMachineCount(context, sourceSku);
             int addMachineDayPlanQty = resolveContinuationDayPlanQtyByDate(
                     context, sourceSku, firstAddMachineProductionDate);
+            // 传入续作机台结果以便识别单控机台折半产能
+            List<LhScheduleResult> continuousMachineResults = resolveContinuousMachineResults(context, sourceSku);
             int requiredMachineCount = resolveContinuationDayMinimumMachineCount(
-                    context, sourceSku, addMachineDayPlanQty);
+                    context, sourceSku, addMachineDayPlanQty, continuousMachineResults);
             int shortageMachineCount = Math.max(0, requiredMachineCount - activeMachineCount);
             int dayNShortageCompensationQty = resolveContinuationAddMachineCompensationQty(
                     context, sourceSku, firstAddMachineProductionDate, activeMachineCount);
@@ -6488,7 +6571,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
             int dayPlanQty = resolveContinuationDayPlanQtyByDate(context, sourceSku, entry.getKey());
-            int requiredMachineCount = resolveContinuationDayMinimumMachineCount(context, sourceSku, dayPlanQty);
+            // 传入续作机台结果以便识别单控机台折半产能
+            int requiredMachineCount = resolveContinuationDayMinimumMachineCount(context, sourceSku, dayPlanQty, resolveContinuousMachineResults(context, sourceSku));
             maxRequiredMachineCount = Math.max(maxRequiredMachineCount, requiredMachineCount);
             if (requiredMachineCount > activeMachineCount) {
                 log.info("续作补偿新增判断，已有续作机台不满足原始dayN最小机台数, materialCode: {}, 日期: {}, "
