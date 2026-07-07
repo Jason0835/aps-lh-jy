@@ -71,7 +71,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private static final long MILLIS_PER_HOUR = 60L * 60L * 1000L;
     /** 每分钟毫秒数 */
     private static final long MILLIS_PER_MINUTE = 60L * 1000L;
-    /** 新增选机优先比较的收尾时间窗口分钟数 */
+    /**
+     * 新增选机收尾窗口分钟数（已废弃）。
+     * <p>原"最早收尾时间后20分钟窗口"已改为"最早可开产时间所在班次同班次筛选"，
+     * 该常量仅保留用于历史日志对比，不再参与窗口筛选判定。</p>
+     */
     private static final int ENDING_WINDOW_MINUTES = 20;
     /** 试制SKU单控机台优先得分 */
     private static final int SINGLE_CONTROL_TRIAL_SCORE = 0;
@@ -159,7 +163,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 该规则只处理候选集合，不在此消费机台；最终是否占用仍由 S4.5 换模、首检和产能结果决定。
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
-        // 5. 先筛最早收尾20分钟窗口，再按单控、胎胚、模壳、规格、胶囊、英寸和机台编码排序。
+        // 5. 先按最早可开产时间同班次筛选，再按单控、胎胚、模壳、规格、胶囊、英寸和机台编码排序。
         EndingWindowContext endingWindowContext = sortCandidates(context, candidates, sku);
         traceMachineCandidates(context, sku, specialMaterialMatchResult, candidates, trace, endingWindowContext);
 
@@ -951,7 +955,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
     /**
      * 构建机台优先级比较器。
-     * <p>硬性过滤和收尾20分钟窗口已在外层完成，本比较器只保留业务指定的排序层级。</p>
+     * <p>硬性过滤和同班次窗口筛选已在外层完成，本比较器只保留业务指定的排序层级。</p>
      *
      * @param context 排程上下文
      * @param sku 待排SKU
@@ -1001,7 +1005,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 按最早收尾时间生成20分钟候选窗口，并移除窗口外机台。
+     * 按最早可开产时间所在班次生成同班次候选窗口，并移除班次外机台。
+     * <p>基准班次 = 所有候选机台中最早的可开产时间(switchStartTime + 换模总时长)所命中的班次；
+     * 保留机台收尾时间(referenceTime)落在该班次区间 [班次开始, 班次结束) 内的候选。</p>
      *
      * @param context 排程上下文
      * @param candidates 候选机台
@@ -1017,64 +1023,102 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (CollectionUtils.isEmpty(candidates)) {
             return EndingWindowContext.empty(originalCount);
         }
-        Date windowStartTime = resolveEarliestCandidateReferenceTime(context, candidates, sku, profileCache);
-        if (Objects.isNull(windowStartTime)) {
+        // 基准 = 最早可开产时间所在班次；可开产时间 = 换模开始时间 + 换模总时长
+        Date earliestProductionStartTime = resolveEarliestProductionStartTime(context, candidates, sku, profileCache);
+        LhShiftConfigVO baseShift = resolveBaseShiftByTime(context, earliestProductionStartTime);
+        if (Objects.isNull(baseShift) || baseShift.getShiftIndex() == null
+                || baseShift.getShiftStartDateTime() == null || baseShift.getShiftEndDateTime() == null) {
+            // 最早可开产时间未命中任何班次，无法确定同班次基准，保持原有兜底：不筛
             return EndingWindowContext.empty(originalCount);
         }
-        Date windowEndTime = new Date(windowStartTime.getTime() + ENDING_WINDOW_MINUTES * MILLIS_PER_MINUTE);
+        // 同班次窗口区间 = 基准班次的 [开始时间, 结束时间)
+        Date windowStartTime = baseShift.getShiftStartDateTime();
+        Date windowEndTime = baseShift.getShiftEndDateTime();
+        int baseShiftIndex = baseShift.getShiftIndex();
         List<MachineScheduleDTO> windowCandidates = new ArrayList<>(candidates.size());
         for (MachineScheduleDTO candidate : candidates) {
             CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, candidate, profileCache);
+            // 同班次判定：机台收尾时间落在基准班次区间内
             if (isInEndingWindow(profile.getReferenceTime(), windowStartTime, windowEndTime)) {
                 windowCandidates.add(candidate);
             }
         }
         candidates.clear();
         candidates.addAll(windowCandidates);
-        return new EndingWindowContext(windowStartTime, windowEndTime, originalCount,
+        return new EndingWindowContext(windowStartTime, windowEndTime, baseShiftIndex, originalCount,
                 Math.max(0, originalCount - windowCandidates.size()));
     }
 
     /**
-     * 解析候选机台最早参考收尾时间。
+     * 解析候选机台中最早的可开产时间，作为同班次筛选的基准。
+     * <p>可开产时间 = 换模开始时间 + 换模总时长；取所有候选机台中的最小值。</p>
      *
      * @param context 排程上下文
      * @param candidates 候选机台
      * @param sku 待排SKU
      * @param profileCache 候选机台窗口画像缓存
-     * @return 最早参考收尾时间
+     * @return 最早可开产时间；无任何可开产时间时返回 null
      */
-    private Date resolveEarliestCandidateReferenceTime(LhScheduleContext context,
-                                                       List<MachineScheduleDTO> candidates,
-                                                       SkuScheduleDTO sku,
-                                                       Map<String, CandidateWindowProfile> profileCache) {
-        Date earliestReferenceTime = null;
+    private Date resolveEarliestProductionStartTime(LhScheduleContext context,
+                                                   List<MachineScheduleDTO> candidates,
+                                                   SkuScheduleDTO sku,
+                                                   Map<String, CandidateWindowProfile> profileCache) {
+        Date earliest = null;
         for (MachineScheduleDTO candidate : candidates) {
             CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, candidate, profileCache);
-            Date referenceTime = profile.getReferenceTime();
-            if (Objects.isNull(referenceTime)) {
+            Date productionStartTime = profile.getProductionStartTime();
+            if (Objects.isNull(productionStartTime)) {
                 continue;
             }
-            if (Objects.isNull(earliestReferenceTime) || referenceTime.before(earliestReferenceTime)) {
-                earliestReferenceTime = referenceTime;
+            if (Objects.isNull(earliest) || productionStartTime.before(earliest)) {
+                earliest = productionStartTime;
             }
         }
-        return earliestReferenceTime;
+        return earliest;
     }
 
     /**
-     * 判断候选机台参考时间是否落在本轮收尾窗口内。
+     * 根据基准时间定位其所在班次，返回该班次配置。
+     * <p>班次命中区间为半开区间 [班次开始, 班次结束)，与 resolveShiftIndex 判定保持一致。</p>
+     *
+     * @param context 排程上下文
+     * @param baseTime 基准时间(最早可开产时间)
+     * @return 基准班次配置；未命中任何班次时返回 null
+     */
+    private LhShiftConfigVO resolveBaseShiftByTime(LhScheduleContext context, Date baseTime) {
+        if (context == null || baseTime == null
+                || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (shift == null || shift.getShiftIndex() == null
+                    || shift.getShiftStartDateTime() == null || shift.getShiftEndDateTime() == null) {
+                continue;
+            }
+            // 半开区间 [start, end)，与 resolveShiftIndex 判定保持一致
+            if (!baseTime.before(shift.getShiftStartDateTime())
+                    && baseTime.before(shift.getShiftEndDateTime())) {
+                return shift;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 判断候选机台参考时间是否落在本轮同班次窗口内。
+     * <p>窗口区间为半开区间 [班次开始, 班次结束)，与班次命中判定保持一致。</p>
      *
      * @param referenceTime 候选机台参考收尾时间
-     * @param windowStartTime 收尾窗口起点
-     * @param windowEndTime 收尾窗口截止
+     * @param windowStartTime 班次开始时间
+     * @param windowEndTime 班次结束时间
      * @return true-在窗口内，false-窗口外
      */
     private boolean isInEndingWindow(Date referenceTime, Date windowStartTime, Date windowEndTime) {
         if (Objects.isNull(referenceTime) || Objects.isNull(windowStartTime) || Objects.isNull(windowEndTime)) {
             return false;
         }
-        return !referenceTime.before(windowStartTime) && !referenceTime.after(windowEndTime);
+        // 半开区间 [班次开始, 班次结束)，班次结束时刻归属下一班次
+        return !referenceTime.before(windowStartTime) && referenceTime.before(windowEndTime);
     }
 
     /**
@@ -2001,11 +2045,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                         + ", 模具占用=" + trace.mouldConflictCount
                         + ", 单控规则=" + trace.singleControlRuleFilteredCount);
         PriorityTraceLogHelper.appendLine(detailBuilder,
-                PriorityTraceLogHelper.kv("收尾窗口起点", PriorityTraceLogHelper.formatDateTime(
+                PriorityTraceLogHelper.kv("同班次基准班次序号", endingWindowContext.getBaseShiftIndex())
+                        + ", " + PriorityTraceLogHelper.kv("同班次窗口起点(班次开始)", PriorityTraceLogHelper.formatDateTime(
                         endingWindowContext.getWindowStartTime()))
-                        + ", " + PriorityTraceLogHelper.kv("收尾窗口截止", PriorityTraceLogHelper.formatDateTime(
+                        + ", " + PriorityTraceLogHelper.kv("同班次窗口截止(班次结束)", PriorityTraceLogHelper.formatDateTime(
                         endingWindowContext.getWindowEndTime()))
-                        + ", " + PriorityTraceLogHelper.kv("收尾窗口分钟", ENDING_WINDOW_MINUTES)
                         + ", " + PriorityTraceLogHelper.kv("窗口筛选前候选数", endingWindowContext.getOriginalCount())
                         + ", " + PriorityTraceLogHelper.kv("窗口外过滤数", endingWindowContext.getFilteredCount()));
         if (!CollectionUtils.isEmpty(trace.filteredMachineMessages)) {
@@ -2486,27 +2530,36 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 新增选机收尾窗口上下文。
+     * 新增选机同班次窗口上下文。
+     * <p>窗口区间即基准班次的 [班次开始, 班次结束)，windowStartTime/windowEndTime 分别对应班次起止时间。</p>
      */
     private static class EndingWindowContext {
-        /** 收尾窗口起点 */
+        /** 同班次筛选基准班次序号 */
+        private final int baseShiftIndex;
+        /** 班次开始时间(窗口起点) */
         private final Date windowStartTime;
-        /** 收尾窗口截止 */
+        /** 班次结束时间(窗口截止) */
         private final Date windowEndTime;
         /** 窗口筛选前候选数 */
         private final int originalCount;
         /** 窗口外过滤数 */
         private final int filteredCount;
 
-        private EndingWindowContext(Date windowStartTime, Date windowEndTime, int originalCount, int filteredCount) {
+        private EndingWindowContext(Date windowStartTime, Date windowEndTime, int baseShiftIndex,
+                                    int originalCount, int filteredCount) {
             this.windowStartTime = windowStartTime;
             this.windowEndTime = windowEndTime;
+            this.baseShiftIndex = baseShiftIndex;
             this.originalCount = originalCount;
             this.filteredCount = filteredCount;
         }
 
         private static EndingWindowContext empty(int originalCount) {
-            return new EndingWindowContext(null, null, originalCount, 0);
+            return new EndingWindowContext(null, null, LhScheduleConstant.MAX_SHIFT_SLOT_COUNT + 1, originalCount, 0);
+        }
+
+        private int getBaseShiftIndex() {
+            return baseShiftIndex;
         }
 
         private Date getWindowStartTime() {
