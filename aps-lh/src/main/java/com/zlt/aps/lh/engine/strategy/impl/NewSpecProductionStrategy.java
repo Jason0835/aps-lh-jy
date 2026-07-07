@@ -4976,8 +4976,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (!hasPositiveOriginalNewSpecDayPlan(context, sku, checkDateList)) {
             return false;
         }
-        LocalDate firstAddMachineDate = resolveFirstContinuousDailyRhythmAddMachineDate(
-                context, sku, checkDateList, dailyStandardQty, continuousMachineCodes.size());
+        // 欠产超过阈值时走强制增机台模式（spec 7），不用逐日后看判断是否跳过新增
+        int shortageAddMachineThreshold = DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context);
+        int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
+        if (shortageAddMachineThreshold > 0 && historyShortageQty > shortageAddMachineThreshold) {
+            return false;
+        }
+        // 复用续作公共逐日后看判断，统一新增排产与续作的加机台口径，避免产能口径和末日处理不一致
+        LocalDate firstAddMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, continuousMachineCodes.size(), ScheduleTypeEnum.NEW_SPEC.getCode());
         if (Objects.nonNull(firstAddMachineDate)) {
             log.info("新增SKU同物料续作机台不足，继续新增选机, materialCode: {}, 首次需加机日期: {}, "
                             + "SKU日标准产量: {}, 已有续作机台数: {}, 续作机台: {}, 判断口径: 当前日不足且下一生产日也不足",
@@ -5014,83 +5021,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             }
         }
         return false;
-    }
-
-    /**
-     * 按当前日优先口径解析同物料续作保护下首次需要新增机台的业务日。
-     * <p>dayN 只用于节奏判断：当前日已满足时不因后续单日计划增大提前抢机台；当前日不足时，
-     * 只有下一生产日也不足才生成新增候选。</p>
-     *
-     * @param context 排程上下文
-     * @param sku 当前新增SKU
-     * @param checkDateList 待检查业务日
-     * @param dailyStandardQty SKU日标准产量
-     * @param continuousMachineCount 已有纯续作机台数
-     * @return 首次需要新增机台的业务日；null表示已有续作机台满足当前节奏
-     */
-    private LocalDate resolveFirstContinuousDailyRhythmAddMachineDate(LhScheduleContext context,
-                                                                      SkuScheduleDTO sku,
-                                                                      List<LocalDate> checkDateList,
-                                                                      int dailyStandardQty,
-                                                                      int continuousMachineCount) {
-        if (CollectionUtils.isEmpty(checkDateList) || dailyStandardQty <= 0 || continuousMachineCount <= 0) {
-            return null;
-        }
-        LocalDate firstProductionDate = checkDateList.get(0);
-        int activeDailyCapacityQty = dailyStandardQty * continuousMachineCount;
-        for (int index = 0; index < checkDateList.size(); index++) {
-            LocalDate productionDate = checkDateList.get(index);
-            int dayPlanQty = resolveOriginalNewSpecDayPlanQty(context, sku, productionDate);
-            int currentDayPlanQty = resolveContinuousProtectCurrentDayPlanQty(
-                    sku, productionDate, firstProductionDate, dayPlanQty);
-            if (currentDayPlanQty <= activeDailyCapacityQty) {
-                log.info("新增SKU同物料续作dayN节奏判断当前日已满足, materialCode: {}, productionDate: {}, "
-                                + "dayN计划量: {}, 当前日判断量: {}, 已有续作机台数: {}, 当前机台日标准产能: {}, "
-                                + "是否加机台: {}, 原因: 当前日满足不进入后续单日放大判断",
-                        sku.getMaterialCode(), productionDate, dayPlanQty, currentDayPlanQty,
-                        continuousMachineCount, activeDailyCapacityQty, false);
-                continue;
-            }
-            LocalDate nextProductionDate = index + 1 < checkDateList.size() ? checkDateList.get(index + 1) : null;
-            if (Objects.isNull(nextProductionDate)) {
-                log.info("新增SKU同物料续作dayN节奏判断末日不足但不提前加机台, materialCode: {}, productionDate: {}, "
-                                + "dayN计划量: {}, 当前日判断量: {}, 已有续作机台数: {}, 当前机台日标准产能: {}, "
-                                + "是否加机台: {}, 原因: 无下一生产日共同确认不足",
-                        sku.getMaterialCode(), productionDate, dayPlanQty, currentDayPlanQty,
-                        continuousMachineCount, activeDailyCapacityQty, false);
-                continue;
-            }
-            int nextDayPlanQty = resolveOriginalNewSpecDayPlanQty(context, sku, nextProductionDate);
-            boolean addMachine = nextDayPlanQty > activeDailyCapacityQty;
-            log.info("新增SKU同物料续作dayN节奏后看判断, materialCode: {}, productionDate: {}, "
-                            + "dayN计划量: {}, 当前日判断量: {}, nextProductionDate: {}, nextDayPlanQty: {}, "
-                            + "已有续作机台数: {}, 当前机台日标准产能: {}, 是否加机台: {}",
-                    sku.getMaterialCode(), productionDate, dayPlanQty, currentDayPlanQty,
-                    nextProductionDate, nextDayPlanQty, continuousMachineCount, activeDailyCapacityQty, addMachine);
-            if (addMachine) {
-                return productionDate;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 解析同物料续作保护的当前日判断量。
-     *
-     * @param sku 当前新增SKU
-     * @param productionDate 当前业务日
-     * @param firstProductionDate 窗口首个业务日
-     * @param dayPlanQty 原始dayN计划量
-     * @return 扣除T日晚班已完成量后的当前日判断量
-     */
-    private int resolveContinuousProtectCurrentDayPlanQty(SkuScheduleDTO sku,
-                                                          LocalDate productionDate,
-                                                          LocalDate firstProductionDate,
-                                                          int dayPlanQty) {
-        if (Objects.nonNull(productionDate) && productionDate.equals(firstProductionDate)) {
-            return Math.max(0, Math.max(0, dayPlanQty) - Math.max(0, sku.getScheduleDayFinishQty()));
-        }
-        return Math.max(0, dayPlanQty);
     }
 
     /**
