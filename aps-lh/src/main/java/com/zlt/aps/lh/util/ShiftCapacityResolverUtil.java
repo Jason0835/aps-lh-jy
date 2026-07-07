@@ -223,8 +223,12 @@ public final class ShiftCapacityResolverUtil {
             return currentPlanQty;
         }
         int remainderQty = dailyStandardQty - otherShiftPlanQty;
-        if (remainderQty < 0) {
-            return 0;
+        if (remainderQty <= 0) {
+            /*
+             * 日标准产量只修正剩余班次的计划量，不作为已上机 SKU 是否可继续生产的硬阻断。
+             * 当其他班次计划量已经覆盖或超过日标准量时，当前班次仍有物理产能，不能被裁成 0 后形成中间空班。
+             */
+            return currentPlanQty;
         }
         if (remainderQty > classCapacity) {
             return currentPlanQty;

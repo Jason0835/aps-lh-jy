@@ -4972,29 +4972,125 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (dailyStandardQty <= 0) {
             return false;
         }
-        int maxRequiredMachineCount = 0;
-        for (LocalDate productionDate : resolveNewSpecDayMinimumCheckDates(context, sku)) {
-            int dayPlanQty = resolveOriginalNewSpecDayPlanQty(context, sku, productionDate);
-            int requiredMachineCount = divideCeiling(Math.max(0, dayPlanQty), dailyStandardQty);
-            maxRequiredMachineCount = Math.max(maxRequiredMachineCount, requiredMachineCount);
-            if (requiredMachineCount > continuousMachineCodes.size()) {
-                log.info("新增SKU同物料续作机台不足，继续新增选机, materialCode: {}, 日期: {}, dayN计划量: {}, "
-                                + "SKU日标准产量: {}, 最小机台数: {}, 已有续作机台数: {}, 续作机台: {}",
-                        sku.getMaterialCode(), productionDate, dayPlanQty, dailyStandardQty,
-                        requiredMachineCount, continuousMachineCodes.size(), String.join(",", continuousMachineCodes));
-                return false;
-            }
-        }
-        if (maxRequiredMachineCount <= 0) {
+        List<LocalDate> checkDateList = resolveNewSpecDayMinimumCheckDates(context, sku);
+        if (!hasPositiveOriginalNewSpecDayPlan(context, sku, checkDateList)) {
             return false;
         }
-        log.info("新增SKU跳过，同物料已有纯续作机台满足原始dayN最小机台数, materialCode: {}, "
-                        + "SKU日标准产量: {}, 最大最小机台数: {}, 已有续作机台数: {}, 续作机台: {}",
-                sku.getMaterialCode(), dailyStandardQty, maxRequiredMachineCount,
+        LocalDate firstAddMachineDate = resolveFirstContinuousDailyRhythmAddMachineDate(
+                context, sku, checkDateList, dailyStandardQty, continuousMachineCodes.size());
+        if (Objects.nonNull(firstAddMachineDate)) {
+            log.info("新增SKU同物料续作机台不足，继续新增选机, materialCode: {}, 首次需加机日期: {}, "
+                            + "SKU日标准产量: {}, 已有续作机台数: {}, 续作机台: {}, 判断口径: 当前日不足且下一生产日也不足",
+                    sku.getMaterialCode(), firstAddMachineDate, dailyStandardQty,
+                    continuousMachineCodes.size(), String.join(",", continuousMachineCodes));
+            return false;
+        }
+        log.info("新增SKU跳过，同物料已有纯续作机台满足当前日优先dayN节奏, materialCode: {}, "
+                        + "SKU日标准产量: {}, 已有续作机台数: {}, 续作机台: {}, 判断口径: 当前日满足则不因后续dayN单日增大提前加机台",
+                sku.getMaterialCode(), dailyStandardQty,
                 continuousMachineCodes.size(), String.join(",", continuousMachineCodes));
         appendContinuousSatisfiedNewSpecSkipProcessLog(
-                context, sku, dailyStandardQty, maxRequiredMachineCount, continuousMachineCodes);
+                context, sku, dailyStandardQty, continuousMachineCodes.size(), continuousMachineCodes);
         return true;
+    }
+
+    /**
+     * 判断原始 dayN 是否存在正计划量。
+     *
+     * @param context 排程上下文
+     * @param sku 当前新增SKU
+     * @param checkDateList 待检查业务日
+     * @return true-存在正计划量；false-没有正计划量
+     */
+    private boolean hasPositiveOriginalNewSpecDayPlan(LhScheduleContext context,
+                                                      SkuScheduleDTO sku,
+                                                      List<LocalDate> checkDateList) {
+        if (CollectionUtils.isEmpty(checkDateList)) {
+            return false;
+        }
+        for (LocalDate productionDate : checkDateList) {
+            if (resolveOriginalNewSpecDayPlanQty(context, sku, productionDate) > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 按当前日优先口径解析同物料续作保护下首次需要新增机台的业务日。
+     * <p>dayN 只用于节奏判断：当前日已满足时不因后续单日计划增大提前抢机台；当前日不足时，
+     * 只有下一生产日也不足才生成新增候选。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前新增SKU
+     * @param checkDateList 待检查业务日
+     * @param dailyStandardQty SKU日标准产量
+     * @param continuousMachineCount 已有纯续作机台数
+     * @return 首次需要新增机台的业务日；null表示已有续作机台满足当前节奏
+     */
+    private LocalDate resolveFirstContinuousDailyRhythmAddMachineDate(LhScheduleContext context,
+                                                                      SkuScheduleDTO sku,
+                                                                      List<LocalDate> checkDateList,
+                                                                      int dailyStandardQty,
+                                                                      int continuousMachineCount) {
+        if (CollectionUtils.isEmpty(checkDateList) || dailyStandardQty <= 0 || continuousMachineCount <= 0) {
+            return null;
+        }
+        LocalDate firstProductionDate = checkDateList.get(0);
+        int activeDailyCapacityQty = dailyStandardQty * continuousMachineCount;
+        for (int index = 0; index < checkDateList.size(); index++) {
+            LocalDate productionDate = checkDateList.get(index);
+            int dayPlanQty = resolveOriginalNewSpecDayPlanQty(context, sku, productionDate);
+            int currentDayPlanQty = resolveContinuousProtectCurrentDayPlanQty(
+                    sku, productionDate, firstProductionDate, dayPlanQty);
+            if (currentDayPlanQty <= activeDailyCapacityQty) {
+                log.info("新增SKU同物料续作dayN节奏判断当前日已满足, materialCode: {}, productionDate: {}, "
+                                + "dayN计划量: {}, 当前日判断量: {}, 已有续作机台数: {}, 当前机台日标准产能: {}, "
+                                + "是否加机台: {}, 原因: 当前日满足不进入后续单日放大判断",
+                        sku.getMaterialCode(), productionDate, dayPlanQty, currentDayPlanQty,
+                        continuousMachineCount, activeDailyCapacityQty, false);
+                continue;
+            }
+            LocalDate nextProductionDate = index + 1 < checkDateList.size() ? checkDateList.get(index + 1) : null;
+            if (Objects.isNull(nextProductionDate)) {
+                log.info("新增SKU同物料续作dayN节奏判断末日不足但不提前加机台, materialCode: {}, productionDate: {}, "
+                                + "dayN计划量: {}, 当前日判断量: {}, 已有续作机台数: {}, 当前机台日标准产能: {}, "
+                                + "是否加机台: {}, 原因: 无下一生产日共同确认不足",
+                        sku.getMaterialCode(), productionDate, dayPlanQty, currentDayPlanQty,
+                        continuousMachineCount, activeDailyCapacityQty, false);
+                continue;
+            }
+            int nextDayPlanQty = resolveOriginalNewSpecDayPlanQty(context, sku, nextProductionDate);
+            boolean addMachine = nextDayPlanQty > activeDailyCapacityQty;
+            log.info("新增SKU同物料续作dayN节奏后看判断, materialCode: {}, productionDate: {}, "
+                            + "dayN计划量: {}, 当前日判断量: {}, nextProductionDate: {}, nextDayPlanQty: {}, "
+                            + "已有续作机台数: {}, 当前机台日标准产能: {}, 是否加机台: {}",
+                    sku.getMaterialCode(), productionDate, dayPlanQty, currentDayPlanQty,
+                    nextProductionDate, nextDayPlanQty, continuousMachineCount, activeDailyCapacityQty, addMachine);
+            if (addMachine) {
+                return productionDate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 解析同物料续作保护的当前日判断量。
+     *
+     * @param sku 当前新增SKU
+     * @param productionDate 当前业务日
+     * @param firstProductionDate 窗口首个业务日
+     * @param dayPlanQty 原始dayN计划量
+     * @return 扣除T日晚班已完成量后的当前日判断量
+     */
+    private int resolveContinuousProtectCurrentDayPlanQty(SkuScheduleDTO sku,
+                                                          LocalDate productionDate,
+                                                          LocalDate firstProductionDate,
+                                                          int dayPlanQty) {
+        if (Objects.nonNull(productionDate) && productionDate.equals(firstProductionDate)) {
+            return Math.max(0, Math.max(0, dayPlanQty) - Math.max(0, sku.getScheduleDayFinishQty()));
+        }
+        return Math.max(0, dayPlanQty);
     }
 
     /**
@@ -5097,21 +5193,20 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * @param context 排程上下文
      * @param sku 当前新增SKU
      * @param dailyStandardQty SKU日标准产量
-     * @param maxRequiredMachineCount 最大最小机台数
+     * @param continuousMachineCount 已有纯续作机台数
      * @param continuousMachineCodes 续作机台集合
      */
     private void appendContinuousSatisfiedNewSpecSkipProcessLog(LhScheduleContext context,
                                                                 SkuScheduleDTO sku,
                                                                 int dailyStandardQty,
-                                                                int maxRequiredMachineCount,
+                                                                int continuousMachineCount,
                                                                 Set<String> continuousMachineCodes) {
         String detail = new StringBuilder(192)
                 .append("materialCode=").append(sku.getMaterialCode())
                 .append(", dailyStandardQty=").append(dailyStandardQty)
-                .append(", maxRequiredMachineCount=").append(maxRequiredMachineCount)
-                .append(", continuousMachineCount=").append(continuousMachineCodes.size())
+                .append(", continuousMachineCount=").append(continuousMachineCount)
                 .append(", continuousMachines=").append(String.join(",", continuousMachineCodes))
-                .append(", reason=已有纯续作机台满足原始dayN最小机台数")
+                .append(", reason=已有纯续作机台满足当前日优先dayN节奏")
                 .toString();
         PriorityTraceLogHelper.appendProcessLog(context, "新增排产同物料续作满足dayN跳过", detail);
     }
@@ -8960,6 +9055,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
             ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, startTime);
             if (control == null || !control.isCanSchedule()) {
+                logNewSpecShiftSkip(result, shift, remaining, shiftCapacity, 0,
+                        0, "班次管控不可排");
                 continue;
             }
             Date effectiveStart = control.getEffectiveStartTime();
@@ -8987,6 +9084,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     Objects.isNull(firstInspectionShift) ? -1 : firstInspectionShift.getShiftIndex(),
                     firstInspectionQty,
                     shiftCapacity, ScheduleTypeEnum.NEW_SPEC.getCode());
+            int physicalShiftMaxQty = shiftMaxQty;
             Integer dailyStandardShiftLimit = CollectionUtils.isEmpty(shiftPlanCapacityMap)
                     ? null : shiftPlanCapacityMap.get(shift.getShiftIndex());
             if (Objects.nonNull(dailyStandardShiftLimit)) {
@@ -8994,6 +9092,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 shiftMaxQty = Math.min(shiftMaxQty, Math.max(0, dailyStandardShiftLimit));
             }
             if (shiftMaxQty <= 0) {
+                String skipReason = physicalShiftMaxQty <= 0
+                        ? "停机/清洗/保养/首检/班次管控扣减后无可用产能"
+                        : "日标准产量修正后无可用产能";
+                logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
+                        physicalShiftMaxQty, shiftMaxQty, skipReason);
                 continue;
             }
 
@@ -9007,6 +9110,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     shiftMaxQty = Math.min(shiftMaxQty, dailyQuotaCap);
                 }
                 if (shiftMaxQty <= 0) {
+                    logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
+                            physicalShiftMaxQty, shiftMaxQty, "试制非收尾日计划额度账本回裁为0");
                     continue;
                 }
             }
@@ -9016,6 +9121,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (shiftQty > 0) {
                 if (!canIncreaseShiftQtyByClassTotalLimit(context, sku, result, shift.getShiftIndex(), shiftQty,
                         "新增排产班次分配")) {
+                    logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
+                            physicalShiftMaxQty, shiftMaxQty, "班次总量上限不足");
                     continue;
                 }
                 Date shiftPlanEndTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
@@ -9049,9 +9156,40 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         st.setRemainingCapacity(Math.max(0, shiftMaxQty - shiftQty));
                     }
                 }
+            } else {
+                logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
+                        physicalShiftMaxQty, shiftMaxQty, "目标量或硫化余量账本回裁为0");
             }
         }
         return remaining;
+    }
+
+    /**
+     * 记录新增排产班次跳过原因，便于核对已换模上机 SKU 中间空班是否存在硬约束。
+     *
+     * @param result 新增排程结果
+     * @param shift 当前班次
+     * @param remaining 当前剩余目标量
+     * @param shiftCapacity 原始班产
+     * @param physicalShiftMaxQty 停机/清洗/保养/首检/班次管控扣减后的物理可用产能
+     * @param finalShiftMaxQty 日标准或日计划账本修正后的最终可排产能
+     * @param skipReason 跳过原因
+     */
+    private void logNewSpecShiftSkip(LhScheduleResult result,
+                                     LhShiftConfigVO shift,
+                                     int remaining,
+                                     int shiftCapacity,
+                                     int physicalShiftMaxQty,
+                                     int finalShiftMaxQty,
+                                     String skipReason) {
+        if (Objects.isNull(result) || Objects.isNull(shift)) {
+            return;
+        }
+        log.info("连续排产班次跳过诊断, 当前流程: 新增排产, materialCode: {}, machineCode: {}, 班次: {}, "
+                        + "剩余余量: {}, 原始班产: {}, 班次物理可用产能: {}, 最终班次可用产能: {}, "
+                        + "是否跳过: {}, 跳过原因: {}",
+                result.getMaterialCode(), result.getLhMachineCode(), shift.getShiftIndex(), remaining,
+                shiftCapacity, physicalShiftMaxQty, finalShiftMaxQty, true, skipReason);
     }
 
     /**

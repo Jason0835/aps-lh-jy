@@ -1348,9 +1348,9 @@ public class SchedulingStrategyRegressionTest {
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
         Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class);
+                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class, int.class);
         method.setAccessible(true);
-        int compensationQty = (Integer) method.invoke(strategy, context, sku);
+        int compensationQty = (Integer) method.invoke(strategy, context, sku, 0);
 
         Assertions.assertEquals(0, compensationQty);
     }
@@ -1371,9 +1371,9 @@ public class SchedulingStrategyRegressionTest {
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
         Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class);
+                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class, int.class);
         method.setAccessible(true);
-        int compensationQty = (Integer) method.invoke(strategy, context, sku);
+        int compensationQty = (Integer) method.invoke(strategy, context, sku, 0);
 
         Assertions.assertEquals(0, compensationQty);
     }
@@ -1402,9 +1402,9 @@ public class SchedulingStrategyRegressionTest {
         }
 
         Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class);
+                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class, int.class);
         method.setAccessible(true);
-        int compensationQty = (Integer) method.invoke(strategy, context, sku);
+        int compensationQty = (Integer) method.invoke(strategy, context, sku, 0);
 
         Assertions.assertEquals(0, compensationQty);
     }
@@ -1448,6 +1448,36 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 纯续作机台已经满足当前日节奏时，不得仅因后续 dayN 大于单机日标准量而新增加机台。
+     */
+    @Test
+    public void shouldSkipNewSpecWhenContinuousMachineCoversCurrentRhythmForEightFortySixSixtySix() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstDate = resolveShiftWorkDate(shifts, 1);
+        appendMonthPlan(context, "3302001318", firstDate, 8, 46, 66);
+        SkuScheduleDTO sku = buildContinuousSku("3302001318", 16, 120,
+                buildQuotaMapByShifts(shifts, 8, 46, 66));
+        sku.setSurplusQty(120);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001318");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001318", capacity);
+        context.getScheduleResultList().add(buildContinuousResult("3302001318", "K1506", 16, shifts, "0"));
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "shouldSkipNewSpecBecauseContinuousSatisfiesOriginalDayMinimum",
+                LhScheduleContext.class, SkuScheduleDTO.class, ProductionQuantityPolicy.class);
+        method.setAccessible(true);
+        boolean skip = (Boolean) method.invoke(
+                strategy, context, sku, ProductionQuantityPolicy.from(sku, false));
+
+        Assertions.assertTrue(skip, "当前日和次日节奏已由K1506覆盖时，不能因第三日66大于日标准46提前加机台");
+    }
+
+    /**
      * dayN 不得覆盖收尾目标量；严格目标存在缺口时，续作补偿必须按业务目标补齐。
      */
     @Test
@@ -1466,9 +1496,9 @@ public class SchedulingStrategyRegressionTest {
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
         Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class);
+                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class, int.class);
         method.setAccessible(true);
-        int compensationQty = (Integer) method.invoke(strategy, context, sku);
+        int compensationQty = (Integer) method.invoke(strategy, context, sku, 0);
 
         Assertions.assertEquals(64, compensationQty);
     }
@@ -1490,9 +1520,9 @@ public class SchedulingStrategyRegressionTest {
         context.getScheduleResultSourceSkuMap().put(result, sku);
 
         Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class);
+                "resolveContinuousCompensationQty", LhScheduleContext.class, SkuScheduleDTO.class, int.class);
         method.setAccessible(true);
-        int compensationQty = (Integer) method.invoke(strategy, context, sku);
+        int compensationQty = (Integer) method.invoke(strategy, context, sku, 0);
 
         Assertions.assertEquals(209, compensationQty);
     }

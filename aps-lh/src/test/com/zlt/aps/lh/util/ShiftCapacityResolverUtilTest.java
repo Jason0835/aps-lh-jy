@@ -403,6 +403,23 @@ class ShiftCapacityResolverUtilTest {
     }
 
     @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldNotCutSchedulableRemainShiftToZero() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 7, 3));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 3, 16, 4, 16, 5, 16);
+
+        int nightQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                30, 16, 16, shifts.get(2), "1", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.NEW_SPEC.getCode());
+        int continuousNightQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                30, 16, 16, shifts.get(2), "1", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        assertEquals(16, nightQty, "新增SKU已完成换模并进入连续生产链路时，日标准余量为负不能把可生产晚班裁成0");
+        assertEquals(16, continuousNightQty, "续作SKU已在机生产时，日标准余量为负不能把可生产晚班裁成0");
+    }
+
+    @Test
     void calculateShiftPlanQtyByDailyStandard_shouldKeepAfternoonFullWhenNightShiftNotFull() {
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
                 new LhScheduleContext(), date(2026, 6, 14));
