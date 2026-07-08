@@ -7,6 +7,8 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.util.LeftRightMouldUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -92,11 +94,66 @@ public class LhCleaningScheduleService {
                 continue;
             }
             cleaningWindowMap.computeIfAbsent(cleaningWindow.getLhCode(), key -> new ArrayList<>()).add(cleaningWindow);
+            // 单控机台（如 K1501L/K1501R）左右模生产同物料时需一起清洗：
+            // 为配对侧机台创建相同时间、相同类型的清洗窗口，不额外消耗每日上限名额。
+            MachineCleaningWindowDTO pairedWindow = createPairedSingleControlCleaningWindow(context, cleaningWindow);
+            if (Objects.nonNull(pairedWindow)) {
+                cleaningWindowMap.computeIfAbsent(pairedWindow.getLhCode(), key -> new ArrayList<>()).add(pairedWindow);
+            }
         }
         // 清洗类停机已转换为运行态清洗窗口；剥离后普通停机产能扣减只处理维修、精度等真实设备停机。
         context.setDevicePlanShutList(getDeviceStopPlanScheduleService()
                 .filterNonCleaningStopPlans(context.getDevicePlanShutList()));
         return cleaningWindowMap;
+    }
+
+    /**
+     * 为单控机台配对侧创建清洗窗口。
+     * <p>单控机台（如 K1501L/K1501R）左右模需一起清洗，当一侧机台生成了清洗窗口时，
+     * 为配对侧机台创建相同时间、相同类型的清洗窗口，左右模标识按配对侧机台编码确定。
+     * 配对窗口不额外消耗每日上限名额（与原窗口共享同一次清洗占用）。</p>
+     *
+     * @param context 排程上下文
+     * @param cleaningWindow 原始清洗窗口
+     * @return 配对侧清洗窗口；非单控机台或无配对侧时返回 null
+     */
+    private MachineCleaningWindowDTO createPairedSingleControlCleaningWindow(LhScheduleContext context,
+                                                                             MachineCleaningWindowDTO cleaningWindow) {
+        if (Objects.isNull(cleaningWindow) || Objects.isNull(context)
+                || StringUtils.isEmpty(cleaningWindow.getLhCode())) {
+            return null;
+        }
+        String machineCode = cleaningWindow.getLhCode();
+        // 非单控机台无需配对
+        if (!LhSingleControlMachineUtil.isSingleMouldMachine(machineCode)) {
+            return null;
+        }
+        String pairMachineCode = LhSingleControlMachineUtil.resolvePairMachineCode(machineCode);
+        if (StringUtils.isEmpty(pairMachineCode)) {
+            return null;
+        }
+        // 配对侧机台需在排程机台中存在
+        Map<String, ?> machineScheduleMap = context.getMachineScheduleMap();
+        if (Objects.isNull(machineScheduleMap) || !machineScheduleMap.containsKey(pairMachineCode)) {
+            return null;
+        }
+        // 创建配对侧清洗窗口，时间、类型与原窗口一致，左右模按配对侧机台编码确定
+        MachineCleaningWindowDTO pairedWindow = new MachineCleaningWindowDTO();
+        pairedWindow.setLhCode(pairMachineCode);
+        pairedWindow.setCleanType(cleaningWindow.getCleanType());
+        pairedWindow.setLeftRightMould(LeftRightMouldUtil.resolveCleaningLeftRightMould(pairMachineCode));
+        pairedWindow.setMouldCode(cleaningWindow.getMouldCode());
+        pairedWindow.setCleanStartTime(cleaningWindow.getCleanStartTime());
+        pairedWindow.setCleanEndTime(cleaningWindow.getCleanEndTime());
+        pairedWindow.setReadyTime(cleaningWindow.getReadyTime());
+        pairedWindow.setSourcePlanStartTime(cleaningWindow.getSourcePlanStartTime());
+        pairedWindow.setSourcePlanEndTime(cleaningWindow.getSourcePlanEndTime());
+        pairedWindow.setDataSource(cleaningWindow.getDataSource());
+        pairedWindow.setRemark(cleaningWindow.getRemark());
+        log.info("单控机台配对侧清洗窗口创建, 原机台: {}, 配对机台: {}, 清洗类型: {}, 清洗开始: {}",
+                machineCode, pairMachineCode, cleaningWindow.getCleanType(),
+                LhScheduleTimeUtil.formatDateTime(cleaningWindow.getCleanStartTime()));
+        return pairedWindow;
     }
 
     /**
@@ -257,10 +314,13 @@ public class LhCleaningScheduleService {
         MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
         cleaningWindow.setLhCode(cleaningPlan.getMachineCode());
         cleaningWindow.setCleanType(cleanType);
-        cleaningWindow.setLeftRightMould(LhScheduleConstant.LEFT_RIGHT_MOULD);
+        // 单控机台按机台编码后缀确定左/右模，双模机台统一 LR
+        cleaningWindow.setLeftRightMould(LeftRightMouldUtil.resolveCleaningLeftRightMould(cleaningPlan.getMachineCode()));
         cleaningWindow.setMouldCode(resolveCleaningMouldCode(context, cleaningPlan.getMachineCode()));
         cleaningWindow.setCleanStartTime(cleanStartTime);
-        Date cleanEndTime = LhScheduleTimeUtil.addHours(cleanStartTime, cleanDurationHours);
+        // 喷砂清洗含首检耗时（12h）用于班次产能扣减和机台可开产时间；干冰清洗时长不变
+        int readyDurationHours = resolveReadyDurationHours(context, cleanType, cleanDurationHours);
+        Date cleanEndTime = LhScheduleTimeUtil.addHours(cleanStartTime, readyDurationHours);
         cleaningWindow.setCleanEndTime(cleanEndTime);
         cleaningWindow.setReadyTime(cleanEndTime);
         // 保留来源设备停机计划窗口，后续换模重叠判断用计划窗口识别“清洗+换模”，但不作为实际清洗时间。
@@ -492,9 +552,10 @@ public class LhCleaningScheduleService {
     }
 
     private int resolveReadyDurationHours(LhScheduleContext context, String cleanType, int cleanDurationHours) {
+        // 喷砂清洗含首检耗时（默认12h = 10h清洗 + 2h首检），用于产能扣减和机台可开产时间
         if (CleaningTypeEnum.SAND_BLAST.getCode().equals(cleanType)) {
-            return context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_DURATION_HOURS,
-                    LhScheduleConstant.SAND_BLAST_DURATION_HOURS);
+            return context.getParamIntValue(LhScheduleParamConstant.SAND_BLAST_WITH_INSPECTION_HOURS,
+                    LhScheduleConstant.SAND_BLAST_WITH_INSPECTION_HOURS);
         }
         return cleanDurationHours;
     }

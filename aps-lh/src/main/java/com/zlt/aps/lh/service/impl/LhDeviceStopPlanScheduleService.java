@@ -41,11 +41,12 @@ public class LhDeviceStopPlanScheduleService {
 
     /**
      * 从设备停机计划中过滤干冰/喷砂清洗候选，并按计划开始时间、机台编码升序返回。
-     * <p>清洗计划加载口径与普通设备停机不同：计划开始时间只用于判断候选顺序和是否晚于 T 日，
-     * 不要求落在 T～T+2 排程窗口内，实际清洗开始/结束时间由清洗排程服务重新安排。</p>
+     * <p>清洗计划加载口径与普通设备停机不同：计划开始时间只用于候选排序，
+     * 不要求落在 T～T+2 排程窗口内，也不限制计划开始时间必须晚于 T 日；
+     * 实际清洗开始/结束时间由清洗排程服务按 T～T+2 窗口班次重新安排。</p>
      *
      * @param context 排程上下文
-     * @return T 日及之后的清洗类设备停机候选
+     * @return 全部清洗类设备停机候选（按计划开始时间、机台编码升序）
      */
     public List<MdmDevicePlanShut> queryCleaningStopPlans(LhScheduleContext context) {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getDevicePlanShutList())) {
@@ -53,10 +54,12 @@ public class LhDeviceStopPlanScheduleService {
         }
         List<MdmDevicePlanShut> cleaningStopPlans = new ArrayList<>(context.getDevicePlanShutList().size());
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
-            if (!isValidStopPlan(planShut) || !isCleaningStopType(planShut.getMachineStopType())) {
+            // 清洗类停机计划的实际时长由配置参数决定（干冰3h/喷砂含首检12h），不依赖计划 begin/end 时长，
+            // 因此允许 begin=end 的清洗计划纳入候选；计划开始时间只用于排序，不作为 T 日下限过滤条件。
+            if (Objects.isNull(planShut) || !isCleaningStopType(planShut.getMachineStopType())) {
                 continue;
             }
-            if (!isPlanBeginOnOrAfterScheduleDate(context, planShut.getBeginDate())) {
+            if (!isValidCleaningStopPlan(planShut)) {
                 continue;
             }
             cleaningStopPlans.add(planShut);
@@ -273,6 +276,21 @@ public class LhDeviceStopPlanScheduleService {
         }
         Date scheduleStartTime = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
         return !planBeginTime.before(scheduleStartTime);
+    }
+
+    /**
+     * 校验清洗类设备停机计划是否有效。
+     * <p>清洗类停机计划的实际清洗时长由配置参数决定（干冰3h/喷砂含首检12h），
+     * 不依赖计划 begin/end 时长，因此允许 begin=end（零时长计划）纳入候选。</p>
+     *
+     * @param planShut 设备停机计划
+     * @return true-有效清洗候选；false-无效
+     */
+    private boolean isValidCleaningStopPlan(MdmDevicePlanShut planShut) {
+        return Objects.nonNull(planShut)
+                && StringUtils.isNotEmpty(planShut.getMachineCode())
+                && Objects.nonNull(planShut.getBeginDate())
+                && Objects.nonNull(planShut.getEndDate());
     }
 
     private boolean isValidStopPlan(MdmDevicePlanShut planShut) {
