@@ -231,8 +231,9 @@ public final class MachineCleaningOverlapUtil {
     /**
      * 判断清洗窗口是否与换模/换活字块窗口重叠。
      *
-     * <p>实际清洗时间用于产能扣减；来源设备停机计划时间只用于识别“清洗+换模”特殊场景。
-     * 因此这里同时检查两套时间：任一时间窗口重叠，都应从产能扣减清洗列表中剔除。</p>
+     * <p>只检查实际清洗窗口是否与切换窗口严格相交，不检查来源设备停机计划窗口。
+     * 实际清洗时间已由硫化排程按 T～T+2 窗口班次重新安排，来源计划时间不再作为
+     * 产能扣减过滤和重叠判定的依据。来源计划窗口只用于备注分析的场景识别。</p>
      *
      * @param cleaningWindow 清洗窗口
      * @param switchStartTime 切换开始时间
@@ -242,14 +243,7 @@ public final class MachineCleaningOverlapUtil {
     public static boolean isSwitchOverlap(MachineCleaningWindowDTO cleaningWindow,
                                           Date switchStartTime,
                                           Date switchEndTime) {
-        if (isOverlap(cleaningWindow, switchStartTime, switchEndTime)) {
-            return true;
-        }
-        if (Objects.isNull(cleaningWindow)) {
-            return false;
-        }
-        return isWindowOverlap(cleaningWindow.getSourcePlanStartTime(), cleaningWindow.getSourcePlanEndTime(),
-                switchStartTime, switchEndTime);
+        return isOverlap(cleaningWindow, switchStartTime, switchEndTime);
     }
 
     public static boolean isDryIceCleaning(MachineCleaningWindowDTO cleaningWindow) {

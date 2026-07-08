@@ -275,15 +275,9 @@ public final class ResultDowntimeSummaryUtil {
             if (Objects.isNull(analysis)) {
                 continue;
             }
-            // 换模重叠备注按清洗来源计划窗口或实际窗口判断；命中后只写原因，不把清洗作为额外产能扣减。
+            // 只有实际清洗窗口与换模窗口重叠时才写“清洗+换模”备注；
+            // 实际清洗时间已由硫化排程重新安排，来源计划窗口不再作为重叠判定依据。
             // 换模窗口必须按真实换模总时长(8h)判断，不能用首个生产班次开始时间截断，否则首检落在换模班次时会漏判。
-            appendOverlapAnalysis(result,
-                    MachineCleaningOverlapUtil.resolveMouldChangeAnalysisStartTime(cleaningWindow),
-                    MachineCleaningOverlapUtil.resolveMouldChangeAnalysisEndTime(cleaningWindow),
-                    mouldChangeStartTime, mouldChangeCompleteTime, analysis, fallbackShiftIndex,
-                    scheduleWindowShifts);
-            // 排程可能把清洗提前/延后到换模时段，实际清洗窗口与来源计划窗口不一致；
-            // 两者任一与换模重叠都需写“清洗+换模”，同一班次重复写入会被自动去重。
             appendOverlapAnalysis(result,
                     cleaningWindow.getCleanStartTime(), cleaningWindow.getCleanEndTime(),
                     mouldChangeStartTime, mouldChangeCompleteTime, analysis, fallbackShiftIndex,
