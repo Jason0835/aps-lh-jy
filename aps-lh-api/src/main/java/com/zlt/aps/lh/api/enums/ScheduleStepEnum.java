@@ -20,6 +20,8 @@ public enum ScheduleStepEnum {
     S4_3_ADJUST_AND_GATHER("S4.3", "排程调整与SKU归集"),
     S4_4_CONTINUOUS_PRODUCTION("S4.4", "续作规格排产"),
     S4_5_NEW_PRODUCTION("S4.5", "新增规格排产"),
+    /** S4.5.1 特殊材料硫化机置换：续作、换活字块、新增排产全部完成后，对仍未排上机台的特殊材料SKU执行兜底置换 */
+    S4_5_1_SPECIAL_MATERIAL_SUBSTITUTION("S4.5.1", "特殊材料硫化机置换"),
     S4_6_RESULT_VALIDATION("S4.6", "结果校验与发布保存");
 
     /** 步骤编码 */

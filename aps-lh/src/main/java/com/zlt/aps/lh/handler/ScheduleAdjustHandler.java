@@ -1830,6 +1830,23 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         context.setContinuousSkuList(continuousSkuList);
         context.setNewSpecSkuList(newSpecSkuList);
+        // 填充全量SKU排程信息索引，供S4.5.1置换等后置阶段按物料编码查找SKU
+        for (SkuScheduleDTO sku : continuousSkuList) {
+            if (Objects.nonNull(sku) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
+                context.getAllSkuScheduleDtoMap().put(sku.getMaterialCode(), sku);
+            }
+        }
+        for (SkuScheduleDTO sku : newSpecSkuList) {
+            if (Objects.nonNull(sku) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
+                context.getAllSkuScheduleDtoMap().put(sku.getMaterialCode(), sku);
+            }
+        }
+        // 被阻塞的SKU也需记录到索引，避免置换时无法找回
+        for (SkuScheduleDTO blockedSku : blockedNewSkuList) {
+            if (Objects.nonNull(blockedSku) && StringUtils.isNotEmpty(blockedSku.getMaterialCode())) {
+                context.getAllSkuScheduleDtoMap().put(blockedSku.getMaterialCode(), blockedSku);
+            }
+        }
         log.info("续作/新增SKU区分完成, 续作: {}个, 新增: {}个", continuousSkuList.size(), newSpecSkuList.size());
     }
 

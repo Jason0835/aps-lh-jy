@@ -314,6 +314,10 @@ public class LhScheduleContext {
     private List<LhMouldChangePlan> mouldChangePlanList = new ArrayList<>();
     /** 排程日志列表 */
     private List<LhScheduleProcessLog> scheduleLogList = new ArrayList<>();
+    /** 特殊材料硫化机置换备注Map，key=被置换机台编码，value=置换备注（供S4.6生成模具交替计划时追加备注） */
+    private Map<String, String> substitutionRemarkMap;
+    /** 全量SKU排程信息索引Map，key=物料编码，value=SkuScheduleDTO。在S4.3创建SKU时填充，永不清空，供S4.5.1置换等后置阶段按物料编码查找SKU排程信息 */
+    private Map<String, SkuScheduleDTO> allSkuScheduleDtoMap = new LinkedHashMap<>();
 
     // ========== 流程控制 ==========
 

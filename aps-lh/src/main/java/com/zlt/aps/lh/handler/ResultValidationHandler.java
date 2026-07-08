@@ -832,9 +832,40 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             updateRollingState(state, result);
         }
 
+        // 追加特殊材料硫化机置换备注到模具交替计划
+        appendSubstitutionRemark(context, plans);
+
         planOrder = appendCleaningMouldChangePlans(context, plans, planOrder, changeResults);
         logOutOfWindowMouldChangePlans(context, plans);
         log.info("生成模具交替计划完成, 共 {} 条", plans.size());
+    }
+
+    /**
+     * 追加特殊材料硫化机置换备注到模具交替计划。
+     *
+     * <p>特殊材料SKU置换上机后，在上下文中记录了置换备注（置换类型+被置换机台编码+被置换SKU）。
+     * 此处按机台编码匹配模具交替计划，将置换备注追加到对应计划的备注字段。</p>
+     *
+     * @param context 排程上下文
+     * @param plans 模具交替计划列表
+     */
+    private void appendSubstitutionRemark(LhScheduleContext context, List<LhMouldChangePlan> plans) {
+        if (CollectionUtils.isEmpty(plans) || context.getSubstitutionRemarkMap() == null
+                || context.getSubstitutionRemarkMap().isEmpty()) {
+            return;
+        }
+        for (LhMouldChangePlan plan : plans) {
+            String substitutionRemark = context.getSubstitutionRemarkMap().get(plan.getLhMachineCode());
+            if (StringUtils.isNotEmpty(substitutionRemark)) {
+                String existingRemark = plan.getRemark();
+                if (StringUtils.isNotEmpty(existingRemark)) {
+                    plan.setRemark(existingRemark + "；" + substitutionRemark);
+                } else {
+                    plan.setRemark(substitutionRemark);
+                }
+                log.info("模具交替计划追加置换备注, 机台: {}, 备注: {}", plan.getLhMachineCode(), plan.getRemark());
+            }
+        }
     }
 
     /**

@@ -5,6 +5,7 @@ import com.zlt.aps.lh.handler.ContinuousProductionHandler;
 import com.zlt.aps.lh.handler.DataInitHandler;
 import com.zlt.aps.lh.handler.NewProductionHandler;
 import com.zlt.aps.lh.handler.PreValidationHandler;
+import com.zlt.aps.lh.handler.SpecialMaterialSubstitutionHandler;
 import com.zlt.aps.lh.handler.ResultValidationHandler;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 
@@ -50,6 +51,9 @@ public class LhScheduleTemplateImpl extends AbsLhScheduleTemplate {
     private NewProductionHandler newProductionHandler;
 
     @Resource
+    private SpecialMaterialSubstitutionHandler specialMaterialSubstitutionHandler;
+
+    @Resource
     private ResultValidationHandler resultValidationHandler;
 
     @Override
@@ -75,6 +79,11 @@ public class LhScheduleTemplateImpl extends AbsLhScheduleTemplate {
     @Override
     protected void doNewSpecProduction(LhScheduleContext context) {
         newProductionHandler.handle(context);
+    }
+
+    @Override
+    protected void doSpecialMaterialSubstitution(LhScheduleContext context) {
+        specialMaterialSubstitutionHandler.handle(context);
     }
 
     @Override
