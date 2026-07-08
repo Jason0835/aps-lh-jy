@@ -9039,6 +9039,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
 
+            // 同班次总计划量上限剩余容量收敛：班次总量接近上限时按剩余容量部分填充，
+            // 避免拟排量超出剩余被整体拒绝、整班次跳过导致生产不连续（夜班跳空）
+            shiftMaxQty = Math.min(shiftMaxQty,
+                    resolveClassTotalRemainingCapacity(context, result, shift.getShiftIndex()));
+            if (shiftMaxQty <= 0) {
+                logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
+                        physicalShiftMaxQty, shiftMaxQty, "同班次总计划量上限已满");
+                continue;
+            }
+
             // 试制非收尾SKU严格按照日计划额度限制班次可排量上限，不允许超出当日计划量补满班次
             if (trialDailyConsumedMap != null) {
                 int dailyQuotaCap = sku != null && sku.isStrictNewSpecShortageOnly()
@@ -9280,14 +9290,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (classTotalQtyLimit <= 0) {
             return true;
         }
-        int currentClassScheduledQty = resolveClassShiftScheduledQty(context, shiftIndex);
-        if (!isResultPersistedInContext(context, result)) {
-            currentClassScheduledQty += resolvePositiveShiftQty(result, shiftIndex);
-        }
-        int projectedQty = currentClassScheduledQty + incrementQty;
-        if (projectedQty <= classTotalQtyLimit) {
+        // 复用剩余容量口径，与 distributeToShifts 中 shiftMaxQty 收敛保持一致
+        int remainingCapacity = resolveClassTotalRemainingCapacity(context, result, shiftIndex);
+        if (remainingCapacity >= incrementQty) {
             return true;
         }
+        int currentClassScheduledQty = classTotalQtyLimit - remainingCapacity;
+        int projectedQty = currentClassScheduledQty + incrementQty;
         logClassTotalQtyLimitSkip(context, sku, result, shiftIndex, currentClassScheduledQty,
                 incrementQty, projectedQty, classTotalQtyLimit, action);
         return false;
@@ -9396,6 +9405,31 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             totalQty += resolvePositiveShiftQty(scheduleResult, shiftIndex);
         }
         return totalQty;
+    }
+
+    /**
+     * 解析指定班次的同班次总计划量上限剩余容量。
+     * <p>与 {@link #canIncreaseShiftQtyByClassTotalLimit} 统一口径：统计当前排程上下文内
+     * 同班次已排总量，未持久化结果需叠加当前结果已有量避免重复计算。
+     * 班次总量接近上限时按剩余容量部分填充，避免整班次跳过导致生产不连续。</p>
+     *
+     * @param context 排程上下文
+     * @param result 当前排程结果
+     * @param shiftIndex 班次索引
+     * @return 剩余可排容量；上限<=0表示不限制时返回 Integer.MAX_VALUE
+     */
+    private int resolveClassTotalRemainingCapacity(LhScheduleContext context,
+                                                   LhScheduleResult result,
+                                                   Integer shiftIndex) {
+        int classTotalQtyLimit = resolveClassTotalQtyLimit(context);
+        if (classTotalQtyLimit <= 0 || Objects.isNull(shiftIndex)) {
+            return Integer.MAX_VALUE;
+        }
+        int currentClassScheduledQty = resolveClassShiftScheduledQty(context, shiftIndex);
+        if (!isResultPersistedInContext(context, result)) {
+            currentClassScheduledQty += resolvePositiveShiftQty(result, shiftIndex);
+        }
+        return Math.max(0, classTotalQtyLimit - currentClassScheduledQty);
     }
 
     /**
