@@ -57,11 +57,13 @@ public class MdmDevicePlanShut extends BaseEntity {
     private String machineCode;
 
     /**
-     * 停机类型，字典：machine_stop_type；00-精度校验、01-润滑、02-巡检点检、03-预见性维护、04-预防性维护、05-计划性维修、06-临时性故障
+     * 停机类型，字典：machine_stop_type；
+     * 00-精度校验、01-润滑、02-巡检点检、03-预见性维护、04-预防性维护、05-计划性维修、06-临时性故障、
+     * 07-干冰清洗、08-喷砂清洗、09-盘点
      */
     @ImportExcelValidated(required = true)
     @Excel(name = "ui.data.column.mdmDevicePlanShut.machineStopType", dictType = "machine_stop_type")
-    @ApiModelProperty(value = "停机类型，字典：machine_stop_type；00-精度校验、01-润滑、02-巡检点检、03-预见性维护、04-预防性维护、05-计划性维修、06-临时性故障", name = "machineStopType")
+    @ApiModelProperty(value = "停机类型，字典：machine_stop_type；00-精度校验、01-润滑、02-巡检点检、03-预见性维护、04-预防性维护、05-计划性维修、06-临时性故障、07-干冰清洗、08-喷砂清洗、09-盘点", name = "machineStopType")
     @TableField(value = "MACHINE_STOP_TYPE")
     private String machineStopType;
 

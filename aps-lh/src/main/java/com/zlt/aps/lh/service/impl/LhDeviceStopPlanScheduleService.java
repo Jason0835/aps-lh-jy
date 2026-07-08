@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -72,6 +73,11 @@ public class LhDeviceStopPlanScheduleService {
      * <p>清洗类停机计划会先被转换成运行态清洗窗口；转换完成后必须从普通停机列表中剥离，
      * 否则超过每日上限或 3 天内收尾被跳过的清洗仍会按普通停机扣减产能。</p>
      *
+     * <p>非清洗类停机（含精度校验、润滑、巡检点检、预见性维护、预防性维护、计划性维修、
+     * 临时性故障、盘点等）保留在普通停机列表中，后续统一由 {@link ShiftCapacityResolverUtil}
+     * 按时间重叠折算扣减班次可生产秒数。其中盘点（{@link MachineStopTypeEnum#TAKE_STOCK}）
+     * 只扣时间产能，不触发换模、换活字块、预热等逻辑。</p>
+     *
      * @param devicePlanShutList 原始设备停机计划
      * @return 非清洗类设备停机计划
      */
@@ -117,6 +123,18 @@ public class LhDeviceStopPlanScheduleService {
      */
     public boolean isSandBlastCleaning(String machineStopType) {
         return StringUtils.equals(MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode(), machineStopType);
+    }
+
+    /**
+     * 判断停机类型是否为盘点。
+     * <p>盘点停机只扣除对应时间段的可生产计划量，不触发换模、换活字块、首检、预热等逻辑；
+     * 盘点期间机台视为已完成预热，盘点结束后可直接进入生产排产。</p>
+     *
+     * @param machineStopType 停机类型编码
+     * @return true-盘点停机；false-非盘点停机
+     */
+    public boolean isInventoryStopType(String machineStopType) {
+        return StringUtils.equals(MachineStopTypeEnum.TAKE_STOCK.getCode(), machineStopType);
     }
 
     /**

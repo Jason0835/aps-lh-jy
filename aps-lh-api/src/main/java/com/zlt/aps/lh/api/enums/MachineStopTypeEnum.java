@@ -24,6 +24,7 @@ public enum MachineStopTypeEnum {
     TEMPORARY_FAULT("06", "临时性故障"),
     DRY_ICE_CLEANING("07", "干冰清洗"),
     SANDBLASTING_CLEANING("08", "喷砂清洗"),
+    /** 盘点：只扣时间产能，不触发换模、换活字块、预热等逻辑；盘点结束后机台可直接排产 */
     TAKE_STOCK("09", "盘点");
 
     /** 类型编码 */

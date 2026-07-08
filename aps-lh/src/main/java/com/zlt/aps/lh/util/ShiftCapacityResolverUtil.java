@@ -786,8 +786,11 @@ public final class ShiftCapacityResolverUtil {
     /**
      * 计算机台在指定时间窗内被计划停机占用的总秒数。
      * <p>同一机台可能存在多条停机记录，本方法会先裁剪到目标时间窗，再做区间合并，避免重复扣秒。</p>
+     * <p>所有非清洗类设备停机类型（含精度校验、润滑、巡检点检、预见性维护、预防性维护、
+     * 计划性维修、临时性故障、盘点等）均通过本方法统一按时间重叠折算扣减，
+     * 其中盘点只扣时间产能，不触发换模、换活字块、预热等逻辑。</p>
      *
-     * @param devicePlanShutList 设备计划停机列表
+     * @param devicePlanShutList 设备计划停机列表（已剥离清洗类停机）
      * @param machineCode 机台编号
      * @param windowStartTime 时间窗开始时间
      * @param windowEndTime 时间窗结束时间
@@ -1540,6 +1543,11 @@ public final class ShiftCapacityResolverUtil {
     /**
      * 收集并合并指定时间窗内的停机区间。
      * <p>windowEndTime 允许为 null，表示一直统计到停机记录自身结束时刻。</p>
+     * <p>本方法对所有非清洗类设备停机计划统一处理，包括精度校验、润滑、巡检点检、预见性维护、
+     * 预防性维护、计划性维修、临时性故障、盘点等。所有停机类型均按 beginDate～endDate 与目标时间窗
+     * 取交集后合并区间，统一折算扣减班次可生产秒数。</p>
+     * <p>盘点（{@link com.zlt.aps.lh.api.enums.MachineStopTypeEnum#TAKE_STOCK}）与其他停机类型一样
+     * 只扣时间产能，不触发换模、换活字块、首检、预热等逻辑；盘点结束后机台可直接进入生产排产。</p>
      */
     private static List<Date[]> collectMergedPlannedStopIntervals(List<MdmDevicePlanShut> devicePlanShutList,
                                                                   String machineCode,
