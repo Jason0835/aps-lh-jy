@@ -234,12 +234,23 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                         dto.setStopType(planShut.getMachineStopType());
                     }
                     MachineStopTypeEnum stopTypeEnum = MachineStopTypeEnum.getByCode(planShut.getMachineStopType());
-                    // 仅临时性故障(06)需要标记维修计划，抬高机台准备就绪时间；
-                    // 盘点(09)、计划性维修(05)、精度校验(00)等其他停机类型仅保留停机窗口用于产能扣减，
+                    // 临时性故障(06)和计划性维修(05)需要标记维修计划，抬高机台准备就绪时间。
+                    // 计划性维修(05)属于下机维修，维修结束后机台不能直接续产，必须换模或换活字块；
+                    // 临时性故障(06)维修后可继续生产。
+                    // 盘点(09)、精度校验(00)等其他停机类型仅保留停机窗口用于产能扣减，
                     // 不触发换模、换活字块、首检、预热等逻辑。
-                    if (stopTypeEnum == MachineStopTypeEnum.TEMPORARY_FAULT) {
+                    if (stopTypeEnum == MachineStopTypeEnum.TEMPORARY_FAULT
+                            || stopTypeEnum == MachineStopTypeEnum.PLANNED_REPAIR) {
                         dto.setHasRepairPlan(true);
                         dto.setRepairPlanTime(earlier(dto.getRepairPlanTime(), planShut.getBeginDate()));
+                        // 计划性维修(05)属于下机维修，维修后强制换模/换活字块，阻止续产
+                        if (stopTypeEnum == MachineStopTypeEnum.PLANNED_REPAIR) {
+                            dto.setForceChangeoverAfterRepair(true);
+                            log.info("机台存在计划性维修停机计划, 机台: {}, 维修开始: {}, 维修结束: {}",
+                                    machineCode,
+                                    LhScheduleTimeUtil.formatDateTime(planShut.getBeginDate()),
+                                    LhScheduleTimeUtil.formatDateTime(planShut.getEndDate()));
+                        }
                     }
                     // 盘点停机计划日志：记录机台、盘点时间段，便于排查盘点扣产能问题
                     if (stopTypeEnum == MachineStopTypeEnum.TAKE_STOCK) {
@@ -330,10 +341,16 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                     dto.setStopType(planShut.getMachineStopType());
                 }
                 MachineStopTypeEnum stopTypeEnum = MachineStopTypeEnum.getByCode(planShut.getMachineStopType());
-                // 计划性维修仅保留停机窗口，避免在初始化阶段直接抬高机台准备就绪时间。
-                if (stopTypeEnum == MachineStopTypeEnum.TEMPORARY_FAULT) {
+                // 临时性故障(06)和计划性维修(05)需要标记维修计划，抬高机台准备就绪时间。
+                // 计划性维修(05)属于下机维修，维修后强制换模/换活字块，阻止续产。
+                if (stopTypeEnum == MachineStopTypeEnum.TEMPORARY_FAULT
+                        || stopTypeEnum == MachineStopTypeEnum.PLANNED_REPAIR) {
                     dto.setHasRepairPlan(true);
                     dto.setRepairPlanTime(earlier(dto.getRepairPlanTime(), planShut.getBeginDate()));
+                    // 计划性维修(05)属于下机维修，维修后强制换模/换活字块
+                    if (stopTypeEnum == MachineStopTypeEnum.PLANNED_REPAIR) {
+                        dto.setForceChangeoverAfterRepair(true);
+                    }
                 }
             }
         }

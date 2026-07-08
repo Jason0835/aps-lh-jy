@@ -198,6 +198,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.MOULD_CLEANING_ADVANCE_DAYS, 0);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD,
                 LhScheduleConstant.CLEANING_SKIP_ENDING_DAY_THRESHOLD, 2);
+        putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY,
+                LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY, 0);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ENABLE_LOCAL_SEARCH,
                 LhScheduleConstant.ENABLE_LOCAL_SEARCH);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.LOCAL_SEARCH_MACHINE_THRESHOLD,

@@ -642,4 +642,17 @@ public class LhScheduleConfig {
         return getParamIntValue(LhScheduleParamConstant.ENABLE_CURE_FORMULA_HISTORY_PROTECT,
                 LhScheduleConstant.ENABLE_CURE_FORMULA_HISTORY_PROTECT) == 1;
     }
+
+    /**
+     * 获取计划性维修固定计划量（条）。
+     * <p>该参数用于 05-计划性维修场景，在维修计划开始时间所在班次额外扣除的固定损失量。
+     * 未配置或负数时按默认值 2 处理。</p>
+     *
+     * @return 计划性维修固定计划量
+     */
+    public int getPlannedRepairFixedQty() {
+        int qty = getParamIntValue(LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY,
+                LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
+        return Math.max(0, qty);
+    }
 }

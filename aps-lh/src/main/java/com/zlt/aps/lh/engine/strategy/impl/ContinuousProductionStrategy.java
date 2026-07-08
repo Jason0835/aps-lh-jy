@@ -2655,6 +2655,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         int actualShiftPlanQty = ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
                 shiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.CONTINUOUS.getCode());
@@ -2686,7 +2688,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 dryIceDurationHours,
                 shift,
                 configPlusShiftType,
-                ScheduleTypeEnum.CONTINUOUS.getCode());
+                ScheduleTypeEnum.CONTINUOUS.getCode(),
+                plannedRepairFixedQty);
         if (oddShiftAdjustEnabled) {
             log.info("奇数班产修正命中, 当前流程: 续作排产, materialCode: {}, machineCode: {}, 参数值: {}, "
                             + "原始班产: {}, 班次序号: {}, 当前班别: {}, 修正后班次计划量: {}, 班产落库字段值: {}",
@@ -5252,6 +5255,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         Map<Integer, Integer> dailyStandardShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
                 context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
@@ -5293,7 +5298,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     dryIceDurationHours,
                     shift,
                     configPlusShiftType,
-                    ScheduleTypeEnum.CONTINUOUS.getCode());
+                    ScheduleTypeEnum.CONTINUOUS.getCode(),
+                    plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             int physicalShiftMaxQty = shiftMaxQty;
             shiftMaxQty = dailyStandardShiftCapacityMap.getOrDefault(shift.getShiftIndex(), shiftMaxQty);
@@ -5399,6 +5405,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
@@ -5428,7 +5436,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     dryIceDurationHours,
                     shift,
                     configPlusShiftType,
-                    ScheduleTypeEnum.CONTINUOUS.getCode());
+                    ScheduleTypeEnum.CONTINUOUS.getCode(),
+                    plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             rawShiftCapacityMap.put(shift.getShiftIndex(), Math.max(0, shiftMaxQty));
         }
@@ -5925,6 +5934,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         Map<Integer, Integer> dailyStandardShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
                 context, result, shifts, cursorStartTime, shiftCapacity, result.getLhTime(), mouldQty,
@@ -5963,7 +5974,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     dryIceDurationHours,
                     shift,
                     configPlusShiftType,
-                    ScheduleTypeEnum.CONTINUOUS.getCode());
+                    ScheduleTypeEnum.CONTINUOUS.getCode(),
+                    plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             shiftMaxQty = dailyStandardShiftCapacityMap.getOrDefault(shift.getShiftIndex(), shiftMaxQty);
             if (shiftMaxQty <= 0) {

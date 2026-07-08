@@ -1118,6 +1118,8 @@ public class TargetScheduleQtyResolver {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
 
         Date cursorStartTime = firstProductionStartTime;
@@ -1158,7 +1160,8 @@ public class TargetScheduleQtyResolver {
                     dryIceDurationHours,
                     shift,
                     configPlusShiftType,
-                    scheduleType);
+                    scheduleType,
+                    plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
                     context, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
@@ -1580,6 +1583,8 @@ public class TargetScheduleQtyResolver {
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
             if (shift == null || shift.getShiftIndex() == null) {
@@ -1611,7 +1616,8 @@ public class TargetScheduleQtyResolver {
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
-                    dryIceDurationHours);
+                    dryIceDurationHours,
+                plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             if (shiftMaxQty <= 0) {
                 continue;

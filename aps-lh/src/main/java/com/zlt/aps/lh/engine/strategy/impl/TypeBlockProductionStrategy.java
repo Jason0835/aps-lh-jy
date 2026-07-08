@@ -2614,6 +2614,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         Map<Integer, Integer> dailyStandardShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
                 context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
@@ -2690,7 +2692,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     dryIceDurationHours,
                     shift,
                     configPlusShiftType,
-                    ScheduleTypeEnum.TYPE_BLOCK.getCode());
+                    ScheduleTypeEnum.TYPE_BLOCK.getCode(),
+                    plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             int physicalShiftMaxQty = shiftMaxQty;
             shiftMaxQty = dailyStandardShiftCapacityMap.getOrDefault(shift.getShiftIndex(), shiftMaxQty);
@@ -2904,6 +2907,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
@@ -2933,7 +2938,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     dryIceDurationHours,
                     shift,
                     configPlusShiftType,
-                    ScheduleTypeEnum.TYPE_BLOCK.getCode());
+                    ScheduleTypeEnum.TYPE_BLOCK.getCode(),
+                    plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             rawShiftCapacityMap.put(shift.getShiftIndex(), Math.max(0, shiftMaxQty));
         }

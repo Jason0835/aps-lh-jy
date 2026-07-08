@@ -237,7 +237,8 @@ public class LhCleaningScheduleServiceDeviceStopTest {
                 1,
                 8 * 3600L,
                 0,
-                3);
+                3,
+                0);
 
         Assertions.assertEquals(5, shiftCapacity, "喷砂 2 小时与精度 3 小时重叠时只扣 3 小时产能");
     }

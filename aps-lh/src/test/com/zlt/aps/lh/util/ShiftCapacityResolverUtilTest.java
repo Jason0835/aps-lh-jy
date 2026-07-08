@@ -122,7 +122,7 @@ class ShiftCapacityResolverUtilTest {
         );
 
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                null, cleaningWindowList, "K1514", shiftStart, shiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3);
+                null, cleaningWindowList, "K1514", shiftStart, shiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3, 0);
         Date completionTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
                 null, cleaningWindowList, "K1514", shiftStart, shiftEnd, 12, 12);
 
@@ -144,9 +144,9 @@ class ShiftCapacityResolverUtilTest {
         );
 
         int morningShiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                null, cleaningWindowList, "K1514", morningShiftStart, morningShiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3);
+                null, cleaningWindowList, "K1514", morningShiftStart, morningShiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3, 0);
         int noonShiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                null, cleaningWindowList, "K1514", noonShiftStart, noonShiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3);
+                null, cleaningWindowList, "K1514", noonShiftStart, noonShiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3, 0);
 
         assertEquals(6, morningShiftQty, "喷砂清洗跨班时，早班应按重叠时长折算后仅保留 6 条产能");
         assertEquals(9, noonShiftQty, "喷砂清洗跨班时，中班应继续按重叠时长折算扣减");
@@ -180,7 +180,7 @@ class ShiftCapacityResolverUtilTest {
         );
 
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                null, cleaningWindowList, "K2025", shiftStart, shiftEnd, 21, 2160, 2, 8 * 3600L, 6, 3);
+                null, cleaningWindowList, "K2025", shiftStart, shiftEnd, 21, 2160, 2, 8 * 3600L, 6, 3, 0);
 
         assertEquals(12, shiftQty, "双模机台喷砂扣量后的残班计划量应向上收敛为偶数");
     }
@@ -197,7 +197,7 @@ class ShiftCapacityResolverUtilTest {
         );
 
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                null, cleaningWindowList, "K1514", shiftStart, shiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3);
+                null, cleaningWindowList, "K1514", shiftStart, shiftEnd, 18, 1600, 1, 8 * 3600L, 6, 3, 0);
 
         assertEquals(13, shiftQty, "干冰仅重叠 2 小时时，应按剩余有效生产时间折算班产");
     }
@@ -214,7 +214,7 @@ class ShiftCapacityResolverUtilTest {
         );
 
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                null, cleaningWindowList, "K1110", shiftStart, shiftEnd, 22, 2160, 2, 8 * 3600L, 6, 3);
+                null, cleaningWindowList, "K1110", shiftStart, shiftEnd, 22, 2160, 2, 8 * 3600L, 6, 3, 0);
         Date completionTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
                 null, cleaningWindowList, "K1110", shiftStart, shiftEnd, 14, 13);
 
@@ -234,7 +234,7 @@ class ShiftCapacityResolverUtilTest {
         );
 
         int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                null, null, maintenanceWindowList, "K1110", shiftStart, shiftEnd, 22, 2160, 2, 8 * 3600L, 6, 3);
+                null, null, maintenanceWindowList, "K1110", shiftStart, shiftEnd, 22, 2160, 2, 8 * 3600L, 6, 3, 0);
         Date completionTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
                 null, null, maintenanceWindowList, "K1110", shiftStart, shiftEnd, 20, 19);
 

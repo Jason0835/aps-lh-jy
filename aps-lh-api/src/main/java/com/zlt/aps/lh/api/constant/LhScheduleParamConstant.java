@@ -152,6 +152,8 @@ public final class LhScheduleParamConstant {
     public static final String MOULD_CLEANING_ADVANCE_DAYS = "SYS0308002";
     /** 清洗跳过近收尾天数阈值（机台当前物料剩余天数 <= 该值时跳过清洗） */
     public static final String CLEANING_SKIP_ENDING_DAY_THRESHOLD = "SYS0308003";
+    /** 计划性维修固定排产量（条），维修开始班次固定只排该数量，不按时间折算 */
+    public static final String PLANNED_REPAIR_FIXED_QTY = "SYS0308010";
     /** 胶囊预警次数 */
     public static final String CAPSULE_WARNING_COUNT = "SYS0309001";
     /** 胶囊强制下机次数 */

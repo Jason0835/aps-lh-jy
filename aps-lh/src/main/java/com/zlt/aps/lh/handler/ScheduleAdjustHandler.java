@@ -2059,6 +2059,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                                                  String machineCode,
                                                  MachineScheduleDTO machine,
                                                  LhMachineOnlineInfo onlineInfo) {
+        // 计划性维修(05)属于下机维修，维修结束后机台不能直接续产，必须换模或换活字块
+        if (machine != null && machine.isForceChangeoverAfterRepair()) {
+            log.info("机台存在计划性维修，阻止续产并释放给换模/换活字块链路, 机台: {}", machineCode);
+            return null;
+        }
         String rollingMaterialCode = resolveRollingContinuousMaterialCode(context, machineCode, machine);
         if (StringUtils.isNotEmpty(rollingMaterialCode)) {
             return rollingMaterialCode;
@@ -2077,6 +2082,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private String resolveRollingContinuousMaterialCode(LhScheduleContext context,
                                                         String machineCode,
                                                         MachineScheduleDTO machine) {
+        // 计划性维修(05)属于下机维修，维修结束后机台不能直接续产，必须换模或换活字块
+        if (machine != null && machine.isForceChangeoverAfterRepair()) {
+            return null;
+        }
         if (context == null
                 || !context.isRollingScheduleHandoff()
                 || machine == null

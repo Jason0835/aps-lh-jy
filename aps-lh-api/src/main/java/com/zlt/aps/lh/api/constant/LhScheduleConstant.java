@@ -225,6 +225,9 @@ public final class LhScheduleConstant {
     /** 清洗跳过近收尾天数阈值（机台当前物料剩余天数 <= 该值时跳过清洗） */
     public static final int CLEANING_SKIP_ENDING_DAY_THRESHOLD = 2;
 
+    /** 计划性维修固定排产量（条），维修开始班次固定只排该数量，不按时间折算 */
+    public static final int PLANNED_REPAIR_FIXED_QTY = 2;
+
     // ======================== 胶囊相关 ========================
 
     /** 胶囊预警次数 */

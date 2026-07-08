@@ -444,6 +444,10 @@ public class LocalSearchMachineAllocatorStrategy {
         int dryIceDurationHours = context.getParamIntValue(
                 LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
 
+        int plannedRepairFixedQty = context.getParamIntValue(
+
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
+
         Date cursorStartTime = productionStartTime;
         LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
                 context, sku, shifts, mouldChangeCompleteTime, ScheduleTypeEnum.NEW_SPEC.getCode());
@@ -486,7 +490,8 @@ public class LocalSearchMachineAllocatorStrategy {
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
                     dryIceLossQty,
-                    dryIceDurationHours);
+                    dryIceDurationHours,
+                plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
                     context, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
