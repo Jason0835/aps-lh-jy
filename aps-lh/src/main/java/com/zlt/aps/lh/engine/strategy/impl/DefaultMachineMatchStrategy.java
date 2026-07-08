@@ -73,7 +73,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private static final long MILLIS_PER_MINUTE = 60L * 1000L;
     /**
      * 新增选机收尾窗口分钟数（已废弃）。
-     * <p>原"最早收尾时间后20分钟窗口"已改为"最早可开产时间所在班次同班次筛选"，
+     * <p>原"最早收尾时间后20分钟窗口"已改为"最早参考收尾时间所在班次同班次筛选"，
      * 该常量仅保留用于历史日志对比，不再参与窗口筛选判定。</p>
      */
     private static final int ENDING_WINDOW_MINUTES = 20;
@@ -163,7 +163,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         // 该规则只处理候选集合，不在此消费机台；最终是否占用仍由 S4.5 换模、首检和产能结果决定。
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
-        // 5. 先按最早可开产时间同班次筛选，再按单控、胎胚、模壳、规格、胶囊、英寸和机台编码排序。
+        // 5. 先按最早参考收尾时间同班次筛选，再按单控、胎胚、模壳、规格、胶囊、英寸和机台编码排序。
         EndingWindowContext endingWindowContext = sortCandidates(context, candidates, sku);
         traceMachineCandidates(context, sku, specialMaterialMatchResult, candidates, trace, endingWindowContext);
 
@@ -1121,9 +1121,12 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 按最早可开产时间所在班次生成同班次候选窗口，并移除班次外机台。
-     * <p>基准班次 = 所有候选机台中最早的可开产时间(switchStartTime + 换模总时长)所命中的班次；
+     * 按最早参考收尾时间所在班次生成同班次候选窗口，并移除班次外机台。
+     * <p>基准班次 = 所有候选机台中最早的参考收尾时间(referenceTime)所命中的班次；
      * 保留机台收尾时间(referenceTime)落在该班次区间 [班次开始, 班次结束) 内的候选。</p>
+     * <p>注意：基准必须取参考收尾时间而非可开产时间(switchStartTime + 换模总时长)。可开产时间会因
+     * 晚班不能换模推迟到次日、再叠加换模总时长(默认8h)而跨到与收尾时间不同的班次，若用其定基准再按
+     * 收尾时间过滤，会把包括基准机台在内的全部候选过滤为0，导致新增排产SKU数为0。</p>
      *
      * @param context 排程上下文
      * @param candidates 候选机台
@@ -1139,12 +1142,12 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (CollectionUtils.isEmpty(candidates)) {
             return EndingWindowContext.empty(originalCount);
         }
-        // 基准 = 最早可开产时间所在班次；可开产时间 = 换模开始时间 + 换模总时长
-        Date earliestProductionStartTime = resolveEarliestProductionStartTime(context, candidates, sku, profileCache);
-        LhShiftConfigVO baseShift = resolveBaseShiftByTime(context, earliestProductionStartTime);
+        // 基准 = 最早参考收尾时间(referenceTime)所在班次；与"收尾时间同班次"语义及选机规则spec保持一致
+        Date earliestReferenceTime = resolveEarliestCandidateReferenceTime(context, candidates, sku, profileCache);
+        LhShiftConfigVO baseShift = resolveBaseShiftByTime(context, earliestReferenceTime);
         if (Objects.isNull(baseShift) || baseShift.getShiftIndex() == null
                 || baseShift.getShiftStartDateTime() == null || baseShift.getShiftEndDateTime() == null) {
-            // 最早可开产时间未命中任何班次，无法确定同班次基准，保持原有兜底：不筛
+            // 最早参考收尾时间未命中任何班次，无法确定同班次基准，保持原有兜底：不筛
             return EndingWindowContext.empty(originalCount);
         }
         // 同班次窗口区间 = 基准班次的 [开始时间, 结束时间)
@@ -1166,28 +1169,29 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 解析候选机台中最早的可开产时间，作为同班次筛选的基准。
-     * <p>可开产时间 = 换模开始时间 + 换模总时长；取所有候选机台中的最小值。</p>
+     * 解析候选机台中最早的参考收尾时间，作为同班次筛选的基准。
+     * <p>参考收尾时间 = 机台已占用结束时间(或释放时间)对齐排程窗口首班后的值；
+     * 取所有候选机台中的最小值。基准与过滤口径必须同为收尾时间，避免换模耗时跨班次导致全量过滤。</p>
      *
      * @param context 排程上下文
      * @param candidates 候选机台
      * @param sku 待排SKU
      * @param profileCache 候选机台窗口画像缓存
-     * @return 最早可开产时间；无任何可开产时间时返回 null
+     * @return 最早参考收尾时间；无任何参考收尾时间时返回 null
      */
-    private Date resolveEarliestProductionStartTime(LhScheduleContext context,
-                                                   List<MachineScheduleDTO> candidates,
-                                                   SkuScheduleDTO sku,
-                                                   Map<String, CandidateWindowProfile> profileCache) {
+    private Date resolveEarliestCandidateReferenceTime(LhScheduleContext context,
+                                                      List<MachineScheduleDTO> candidates,
+                                                      SkuScheduleDTO sku,
+                                                      Map<String, CandidateWindowProfile> profileCache) {
         Date earliest = null;
         for (MachineScheduleDTO candidate : candidates) {
             CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, candidate, profileCache);
-            Date productionStartTime = profile.getProductionStartTime();
-            if (Objects.isNull(productionStartTime)) {
+            Date referenceTime = profile.getReferenceTime();
+            if (Objects.isNull(referenceTime)) {
                 continue;
             }
-            if (Objects.isNull(earliest) || productionStartTime.before(earliest)) {
-                earliest = productionStartTime;
+            if (Objects.isNull(earliest) || referenceTime.before(earliest)) {
+                earliest = referenceTime;
             }
         }
         return earliest;
@@ -1198,7 +1202,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * <p>班次命中区间为半开区间 [班次开始, 班次结束)，与 resolveShiftIndex 判定保持一致。</p>
      *
      * @param context 排程上下文
-     * @param baseTime 基准时间(最早可开产时间)
+     * @param baseTime 基准时间(最早参考收尾时间)
      * @return 基准班次配置；未命中任何班次时返回 null
      */
     private LhShiftConfigVO resolveBaseShiftByTime(LhScheduleContext context, Date baseTime) {
