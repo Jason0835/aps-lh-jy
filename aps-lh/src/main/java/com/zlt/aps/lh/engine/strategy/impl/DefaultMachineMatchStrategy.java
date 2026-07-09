@@ -1155,11 +1155,27 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         Date windowEndTime = baseShift.getShiftEndDateTime();
         int baseShiftIndex = baseShift.getShiftIndex();
         List<MachineScheduleDTO> windowCandidates = new ArrayList<>(candidates.size());
+        // 窗口外过滤的单控候选,用于单边粒度SKU候选不足时回补
+        List<MachineScheduleDTO> filteredSingleControlCandidates = new ArrayList<>(2);
         for (MachineScheduleDTO candidate : candidates) {
             CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, candidate, profileCache);
             // 同班次判定：机台收尾时间落在基准班次区间内
             if (isInEndingWindow(profile.getReferenceTime(), windowStartTime, windowEndTime)) {
                 windowCandidates.add(candidate);
+            } else if (LhSingleControlMachineUtil.isSingleSideGranularitySku(sku)
+                    && isSingleControlMachine(context, candidate.getMachineCode())) {
+                // 单边粒度SKU的单控候选被窗口过滤,暂存用于候选不足时回补
+                filteredSingleControlCandidates.add(candidate);
+            }
+        }
+        // 单边粒度SKU(试制/量试/小批量)只能使用单控机台,窗口过滤后如果单控候选不足,回补被过滤的单控候选
+        if (LhSingleControlMachineUtil.isSingleSideGranularitySku(sku)
+                && !CollectionUtils.isEmpty(filteredSingleControlCandidates)) {
+            long windowSingleControlCount = windowCandidates.stream()
+                    .filter(machine -> isSingleControlMachine(context, machine.getMachineCode()))
+                    .count();
+            if (windowSingleControlCount <= 1) {
+                windowCandidates.addAll(filteredSingleControlCandidates);
             }
         }
         candidates.clear();

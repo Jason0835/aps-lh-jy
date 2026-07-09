@@ -130,6 +130,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String TARGET_SKU_MOULD_ALL_OCCUPIED_UNSCHEDULED_REASON =
             "目标 SKU 模具全部被占用";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
+    /** 反向匹配规格层级:同规格 */
+    private static final int REVERSE_MATCH_SPEC_LEVEL_SAME_SPEC = 0;
+    /** 反向匹配规格层级:同断面宽 */
+    private static final int REVERSE_MATCH_SPEC_LEVEL_SAME_WIDTH = 1;
+    /** 反向匹配规格层级:同英寸 */
+    private static final int REVERSE_MATCH_SPEC_LEVEL_SAME_INCH = 2;
+    /** 反向匹配规格层级:无匹配 */
+    private static final int REVERSE_MATCH_SPEC_LEVEL_NONE = 3;
     private static final Set<String> EMPTY_STRING_SET = Collections.emptySet();
     private static final Map<String, String> EMPTY_STRING_MAP = Collections.emptyMap();
     @Resource
@@ -562,6 +570,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Iterator<SkuScheduleDTO> iterator = context.getNewSpecSkuList().iterator();
         // 单控反向匹配推荐映射:materialCode -> 配对侧机台编码,单边粒度SKU排上单控一侧后设置,目标SKU选机时优先使用
         Map<String, String> reverseMatchPreferredMachineMap = new HashMap<String, String>(4);
+        // 单控反向匹配预留机台编码集合:配对侧机台被反向匹配推荐后,非推荐目标SKU选机时排除,使配对侧留给推荐目标SKU
+        Set<String> reverseMatchReservedMachineCodes = new HashSet<String>(4);
         while (iterator.hasNext()) {
             SkuScheduleDTO sku = iterator.next();
             boolean currentSkuRemoved = false;
@@ -722,10 +732,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         && !excludedMachineCodes.contains(preferredPairMachineCode)) {
                     candidateMachine = findMachineInList(candidates, preferredPairMachineCode);
                     reverseMatchPreferredMachineMap.remove(sku.getMaterialCode());
+                    // 推荐目标SKU选中预留机台后,释放预留
+                    reverseMatchReservedMachineCodes.remove(preferredPairMachineCode);
                     log.info("单控反向匹配推荐机台优先选择, materialCode: {}, machineCode: {}",
                             sku.getMaterialCode(), preferredPairMachineCode);
                 }
                 if (candidateMachine == null) {
+                    // 非反向匹配推荐目标SKU选机时,排除被反向匹配预留的单控机台,使配对侧留给推荐目标SKU
+                    if (LhSingleControlMachineUtil.isSingleSideGranularitySku(sku)
+                            && !CollectionUtils.isEmpty(reverseMatchReservedMachineCodes)) {
+                        for (String reservedMachineCode : reverseMatchReservedMachineCodes) {
+                            if (containsMachine(candidates, reservedMachineCode)) {
+                                excludedMachineCodes.add(reservedMachineCode);
+                            }
+                        }
+                    }
                     candidateMachine = selectCandidateMachine(
                             context, sku, candidateCache, excludedMachineCodes, machineMatch,
                             preferredTrialMachine, quantityPolicy);
@@ -789,18 +810,24 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                             context, candidateMachine, endingTime);
                 }
-                // 试制SKU换模需在早班完成：维保窗口挂载后，检查以机台初始就绪时间（endingTime）
-                // 构建的正序换模窗口是否与维保窗口物理重叠。若重叠则清除维保窗口，
-                // 使后续 calculateStartTime 不被维保推迟，换模可在早班开始；
+                // 试制SKU换模需在早班完成：维保窗口挂载后，检查正序换模窗口是否与维保窗口物理重叠。
+                // 若重叠则清除维保窗口，使后续 calculateStartTime 不被维保推迟，换模可在早班开始；
                 // 维保将在后续排程迭代中重新安排。
+                // 注意：endingTime可能落在禁止换模时段(晚班20:00-次日06:00)，此时实际换模开始时间
+                // 应为次日早班，需先对齐到早班后再检查重叠，否则会遗漏晚班endingTime对应的早班换模窗口。
                 if (isTrialConstructionStage(sku)) {
                     int trialNormalSwitchHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+                    // 试制SKU换模必须在早班开始,若endingTime落在禁止换模时段,对齐到次日早班后再检查重叠
+                    Date trialSwitchStartTime = LhScheduleTimeUtil.isNoMouldChangeTime(context, endingTime)
+                            ? LhScheduleTimeUtil.resolveNextMorningAfterNoMouldChangeWindow(context, endingTime)
+                            : endingTime;
                     if (getMaintenanceScheduleService().isNormalSwitchOverlapMaintenance(
-                            context, candidateMachine, endingTime, trialNormalSwitchHours)) {
+                            context, candidateMachine, trialSwitchStartTime, trialNormalSwitchHours)) {
                         log.info("试制SKU换模窗口与维保窗口物理重叠，清除维保窗口以便早班换模, "
-                                        + "materialCode: {}, machineCode: {}, endingTime: {}, normalSwitchHours: {}",
+                                        + "materialCode: {}, machineCode: {}, endingTime: {}, switchStartTime: {}, normalSwitchHours: {}",
                                 sku.getMaterialCode(), machineCode,
-                                LhScheduleTimeUtil.formatDateTime(endingTime), trialNormalSwitchHours);
+                                LhScheduleTimeUtil.formatDateTime(endingTime),
+                                LhScheduleTimeUtil.formatDateTime(trialSwitchStartTime), trialNormalSwitchHours);
                         getMaintenanceScheduleService().clearMaintenanceWindows(candidateMachine);
                     }
                 }
@@ -1154,7 +1181,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 // 单边粒度SKU排上单控机台一侧后,尝试为配对侧反向匹配SKU
                 if (!wholeSingleControlUnit && isSingleControlMachine(context, machineCode)) {
                     tryReverseMatchPairSingleControlSku(
-                            context, sku, machineCode, reverseMatchPreferredMachineMap);
+                            context, sku, machineCode, reverseMatchPreferredMachineMap,
+                            reverseMatchReservedMachineCodes);
                 }
                 candidateCache.clearCapacityCache();
                 scheduledCount++;
@@ -3205,9 +3233,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private void tryReverseMatchPairSingleControlSku(LhScheduleContext context,
                                                     SkuScheduleDTO currentSku,
                                                     String currentMachineCode,
-                                                    Map<String, String> reverseMatchPreferredMachineMap) {
+                                                    Map<String, String> reverseMatchPreferredMachineMap,
+                                                    Set<String> reverseMatchReservedMachineCodes) {
         if (context == null || currentSku == null || StringUtils.isEmpty(currentMachineCode)
-                || reverseMatchPreferredMachineMap == null) {
+                || reverseMatchPreferredMachineMap == null
+                || reverseMatchReservedMachineCodes == null) {
             return;
         }
         // 只有单边粒度SKU才触发反向匹配(试制、量试、小批量)
@@ -3232,6 +3262,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         // 记录推荐映射:目标SKU物料编码 -> 配对侧机台编码,使该SKU在后续选机时优先选择配对侧
         reverseMatchPreferredMachineMap.put(matchedSku.getMaterialCode(), pairMachineCode);
+        // 预留配对侧机台:非推荐目标SKU选机时排除该机台,使配对侧留给推荐目标SKU
+        reverseMatchReservedMachineCodes.add(pairMachineCode);
         log.info("单控反向匹配成功, currentMachine: {}, pairMachine: {}, currentMaterial: {}, matchedMaterial: {}",
                 currentMachineCode, pairMachineCode, currentSku.getMaterialCode(), matchedSku.getMaterialCode());
     }
@@ -3262,12 +3294,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     /**
      * 从待排SKU列表中查找可反向匹配的单边粒度SKU。
      * <p>只匹配试制、量试、小批量SKU(正规SKU不参与单边反向匹配)。
-     * 按SKU类型优先级(试制>量试>小批量)和规格匹配(同规格>同断面宽>同英寸)排序。</p>
+     * 先按规格匹配层级排序(同规格>同断面宽>同英寸),层级相同再按SKU类型优先级排序(试制>量试>小批量)。
+     * 规格匹配为分层过滤条件,不满足任何规格匹配层级的候选不参与反向匹配,配对侧允许空闲。</p>
      *
      * @param context 排程上下文
      * @param currentSku 当前已排SKU
      * @param pairMachineCode 配对侧机台编码
-     * @return 最佳匹配SKU;无匹配时返回null
+     * @return 最佳匹配SKU;无规格匹配时返回null
      */
     private SkuScheduleDTO findReverseMatchSku(LhScheduleContext context,
                                                SkuScheduleDTO currentSku,
@@ -3293,15 +3326,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (CollectionUtils.isEmpty(candidates)) {
             return null;
         }
-        // 按SKU类型优先级和规格匹配排序
+        // 先按规格匹配层级排序(同规格>同断面宽>同英寸>无匹配),层级相同再按SKU类型优先级排序(试制>量试>小批量)
         candidates.sort((left, right) -> {
-            int result = compareReverseMatchSkuTypePriority(left, right);
+            int result = resolveReverseMatchSpecLevel(context, currentSku, left)
+                    - resolveReverseMatchSpecLevel(context, currentSku, right);
             if (result != 0) {
                 return result;
             }
-            return compareReverseMatchSpecPriority(context, currentSku, left, right);
+            return compareReverseMatchSkuTypePriority(left, right);
         });
-        return candidates.get(0);
+        // 排序后第一个候选为最优匹配;若最优候选规格匹配层级为"无匹配",则配对侧允许空闲
+        SkuScheduleDTO bestCandidate = candidates.get(0);
+        if (resolveReverseMatchSpecLevel(context, currentSku, bestCandidate) >= REVERSE_MATCH_SPEC_LEVEL_NONE) {
+            return null;
+        }
+        return bestCandidate;
     }
 
     /**
@@ -3336,48 +3375,40 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 比较反向匹配规格优先级:同规格 > 同断面宽 > 同英寸。
-     * <p>断面宽从规格中解析,复用ProductSpecificationsUtils。</p>
+     * 解析候选SKU与当前SKU的规格匹配层级。
+     * <p>规格匹配作为分层过滤条件,层级越低优先级越高:
+     * 同规格(0) > 同断面宽(1) > 同英寸(2) > 无匹配(3)。
+     * 断面宽从规格中解析,复用ProductSpecificationsUtils。</p>
      *
      * @param context 排程上下文
      * @param currentSku 当前已排SKU
-     * @param left 左侧候选SKU
-     * @param right 右侧候选SKU
-     * @return 比较结果
+     * @param candidate 候选SKU
+     * @return 规格匹配层级;0-同规格,1-同断面宽,2-同英寸,3-无匹配
      */
-    private int compareReverseMatchSpecPriority(LhScheduleContext context,
-                                                SkuScheduleDTO currentSku,
-                                                SkuScheduleDTO left,
-                                                SkuScheduleDTO right) {
+    private int resolveReverseMatchSpecLevel(LhScheduleContext context,
+                                             SkuScheduleDTO currentSku,
+                                             SkuScheduleDTO candidate) {
         String currentSpecCode = StringUtils.defaultString(currentSku.getSpecCode());
         String currentProSize = resolveSkuProSize(context, currentSku);
-        // 同规格优先
-        boolean leftSameSpec = StringUtils.equals(currentSpecCode, StringUtils.defaultString(left.getSpecCode()));
-        boolean rightSameSpec = StringUtils.equals(currentSpecCode, StringUtils.defaultString(right.getSpecCode()));
-        if (leftSameSpec != rightSameSpec) {
-            return leftSameSpec ? -1 : 1;
+        // 同规格
+        if (StringUtils.equals(currentSpecCode, StringUtils.defaultString(candidate.getSpecCode()))) {
+            return REVERSE_MATCH_SPEC_LEVEL_SAME_SPEC;
         }
-        // 同断面宽优先,断面宽从规格中解析,复用ProductSpecificationsUtils
+        // 同断面宽,断面宽从规格中解析,复用ProductSpecificationsUtils
         String currentSectionWidth = resolveSectionWidthFromSpec(currentProSize);
-        String leftSectionWidth = resolveSectionWidthFromSpec(resolveSkuProSize(context, left));
-        String rightSectionWidth = resolveSectionWidthFromSpec(resolveSkuProSize(context, right));
-        boolean leftSameWidth = StringUtils.isNotEmpty(currentSectionWidth)
-                && StringUtils.equals(currentSectionWidth, leftSectionWidth);
-        boolean rightSameWidth = StringUtils.isNotEmpty(currentSectionWidth)
-                && StringUtils.equals(currentSectionWidth, rightSectionWidth);
-        if (leftSameWidth != rightSameWidth) {
-            return leftSameWidth ? -1 : 1;
+        String candidateSectionWidth = resolveSectionWidthFromSpec(resolveSkuProSize(context, candidate));
+        if (StringUtils.isNotEmpty(currentSectionWidth)
+                && StringUtils.equals(currentSectionWidth, candidateSectionWidth)) {
+            return REVERSE_MATCH_SPEC_LEVEL_SAME_WIDTH;
         }
-        // 同英寸优先
+        // 同英寸
         BigDecimal currentInch = LhMachineHardMatchUtil.parseInch(currentProSize);
-        BigDecimal leftInch = LhMachineHardMatchUtil.parseInch(resolveSkuProSize(context, left));
-        BigDecimal rightInch = LhMachineHardMatchUtil.parseInch(resolveSkuProSize(context, right));
-        boolean leftSameInch = currentInch != null && leftInch != null && currentInch.compareTo(leftInch) == 0;
-        boolean rightSameInch = currentInch != null && rightInch != null && currentInch.compareTo(rightInch) == 0;
-        if (leftSameInch != rightSameInch) {
-            return leftSameInch ? -1 : 1;
+        BigDecimal candidateInch = LhMachineHardMatchUtil.parseInch(resolveSkuProSize(context, candidate));
+        if (currentInch != null && candidateInch != null && currentInch.compareTo(candidateInch) == 0) {
+            return REVERSE_MATCH_SPEC_LEVEL_SAME_INCH;
         }
-        return 0;
+        // 无匹配
+        return REVERSE_MATCH_SPEC_LEVEL_NONE;
     }
 
     /**
