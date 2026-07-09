@@ -4,6 +4,35 @@
 
 规范硫化排程中试制、量试、小批量和正规 SKU 的候选机台选择优先级，确保 SKU 排序仍复用项目现有逻辑，只在轮到具体 SKU 后按 SKU 类型执行机台类型硬约束、单控粒度和候选排序规则。
 
+## 实现说明
+
+### 试制 SKU 换模早班豁免机制
+
+试制 SKU 的换模/换活字块属于开产前的准备动作，必须在早班完成，使首检计划量归入中班、
+生产从中班开始。系统通过以下两层豁免保障该规则：
+
+1. **开产模式豁免**：`ShiftProductionControlUtil.resolveEarliestSwitchStartTime` 新增接收
+   `SkuScheduleDTO` 参数的重载方法，试制 SKU（`ConstructionStageEnum.TRIAL`）直接返回请求时间，
+   不推迟到开产班次开始时间。非试制 SKU 或 `sku` 为 `null` 时退回原有逻辑。
+
+2. **维保重叠重新评估**：当 `shouldApplyMaintenanceOverlapSwitchRule` 返回 `true` 时，
+   `LhMaintenanceScheduleService.isNormalSwitchOverlapMaintenance` 进一步检查正常换模窗口
+   （机台就绪时间 + 正常换模时长）是否与维保窗口物理重叠。若无重叠，使用正常换模；
+   若有重叠，清除维保窗口使换模在早班完成，维保在后续排程迭代中重新安排。
+
+### 影响的调用点
+
+| 文件 | 方法 | 说明 |
+|------|------|------|
+| `NewSpecProductionStrategy` | 新增排产主路径换模就绪时间计算 | 传入 `sku`，增加试制维保重评 |
+| `NewSpecProductionStrategy` | 局部搜索预览路径换模就绪时间计算 | 传入 `sku` |
+| `TypeBlockProductionStrategy` | `resolveTypeBlockSwitchReadyTime` | 新增 `sku` 参数 |
+| `TypeBlockProductionStrategy` | `canScheduleSpecifySkuByNewSpecPath` | 传入 `specifySku` |
+| `LocalSearchMachineAllocatorStrategy` | 局部搜索换模开始时间 | 传入 `sku` |
+| `ShiftProductionControlUtil` | `resolveEarliestSwitchStartTime` 重载 | 新增 `sku` 参数 |
+| `LhMaintenanceScheduleService` | `isNormalSwitchOverlapMaintenance` | 新增方法 |
+| `LhMaintenanceScheduleService` | `clearMaintenanceWindows` | 新增方法 |
+
 ## Requirements
 
 ### Requirement: SKU 排序不得因机台类型规则改变
@@ -39,6 +68,25 @@
 - **THEN** 系统 MUST 只保留满足约束的单控机台候选
 - **AND** 系统 MUST 将生产开班和首检计划量归入中班
 - **AND** 系统 MUST NOT 选择普通机台候选
+
+#### Scenario: 试制 SKU 换模必须在早班完成
+
+- **WHEN** 试制 SKU 进入新增排产或换活字块排产
+- **AND** 机台处于开产模式（开产班次为中班）
+- **THEN** 系统 MUST NOT 将换模/换活字块开始时间推迟到开产班次开始时间
+- **AND** 系统 MUST 允许换模在早班开始，使换模在早班内完成（正常8小时换模）
+- **AND** 系统 MUST 使换模完成时间落在早班，从而触发试制首检归中班规则
+- **AND** 系统 MUST 使中班计划量等于硫化余量（含首检条数）
+
+#### Scenario: 试制 SKU 换模与维保窗口重叠时优先换模
+
+- **WHEN** 试制 SKU 进入新增排产
+- **AND** 机台已被安排维保窗口（如"首个规格收尾后保养"）
+- **AND** 维保窗口触发维保重叠规则（shouldApplyMaintenanceOverlapSwitchRule=true）
+- **THEN** 系统 MUST 检查正常换模窗口（机台就绪时间 + 正常换模时长）是否与维保窗口物理重叠
+- **AND** 若无实际重叠（换模可在维保开始前完成），系统 MUST 使用正常换模，不等待维保结束
+- **AND** 若有实际重叠，系统 MUST 清除维保窗口使试制换模在早班完成，维保在后续排程迭代中重新安排
+- **AND** 系统 MUST NOT 对试制 SKU 使用维保重叠短时长换模（4小时），必须使用正常换模时长（8小时）
 
 #### Scenario: 量试和小批量 SKU 单控不可用时可以回落普通机台
 

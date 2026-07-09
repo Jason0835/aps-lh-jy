@@ -789,6 +789,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                             context, candidateMachine, endingTime);
                 }
+                // 试制SKU换模需在早班完成：维保窗口挂载后，检查以机台初始就绪时间（endingTime）
+                // 构建的正序换模窗口是否与维保窗口物理重叠。若重叠则清除维保窗口，
+                // 使后续 calculateStartTime 不被维保推迟，换模可在早班开始；
+                // 维保将在后续排程迭代中重新安排。
+                if (isTrialConstructionStage(sku)) {
+                    int trialNormalSwitchHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+                    if (getMaintenanceScheduleService().isNormalSwitchOverlapMaintenance(
+                            context, candidateMachine, endingTime, trialNormalSwitchHours)) {
+                        log.info("试制SKU换模窗口与维保窗口物理重叠，清除维保窗口以便早班换模, "
+                                        + "materialCode: {}, machineCode: {}, endingTime: {}, normalSwitchHours: {}",
+                                sku.getMaterialCode(), machineCode,
+                                LhScheduleTimeUtil.formatDateTime(endingTime), trialNormalSwitchHours);
+                        getMaintenanceScheduleService().clearMaintenanceWindows(candidateMachine);
+                    }
+                }
                 // 保养窗口挂载会改变候选机台运行态，提前清理窗口产能缓存，避免后续复用旧产能。
                 candidateCache.clearCapacityCache();
                 Date machineReadyTime = capacityCalculate.calculateStartTime(context,
@@ -799,7 +814,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, candidateMachine)
                         : machineReadyTime;
                 switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, machineCode, switchReadyTime);
-                switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+                // 试制SKU换模需在早班完成，不受开产模式限制；非试制SKU仍受开产模式约束
+                switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
+                        context, switchReadyTime, sku);
                 switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
 
                 // 4. 分配换模窗口；晚班不可换模、换模上限和维保重叠都在分配器中统一收口。
@@ -5888,7 +5905,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, candidate)
                 : machineReadyTime;
         switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, candidate.getMachineCode(), switchReadyTime);
-        switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+        // 试制SKU换模需在早班完成，不受开产模式限制
+        switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
+                context, switchReadyTime, sku);
         switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
         int switchDurationHours = maintenanceOverlapSwitch
                 ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)

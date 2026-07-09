@@ -191,6 +191,67 @@ public class LhMaintenanceScheduleService {
         return resolveMaintenanceEndTime(context, machine, null);
     }
 
+    /**
+     * 判断正常换模窗口是否与机台维保窗口物理重叠。
+     * <p>试制SKU换模需在早班完成，当维保重叠规则触发时（shouldApplyMaintenanceOverlapSwitchRule=true），
+     * 需进一步检查以换模开始时间 + 正常换模时长构建的换模窗口，是否与维保窗口存在物理时间重叠。
+     * 若不重叠，说明换模可在维保开始前完成，试制SKU可使用正常换模，无需等待维保结束。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 机台运行态
+     * @param switchStartTime 换模开始时间（通常为机台就绪时间）
+     * @param switchDurationHours 正常换模时长（小时）
+     * @return true-换模窗口与维保窗口有实际时间重叠；false-无重叠或无机台维保计划
+     */
+    public boolean isNormalSwitchOverlapMaintenance(LhScheduleContext context,
+                                                     MachineScheduleDTO machine,
+                                                     Date switchStartTime,
+                                                     int switchDurationHours) {
+        if (Objects.isNull(machine) || !machine.isHasMaintenancePlan()
+                || Objects.isNull(switchStartTime) || switchDurationHours <= 0) {
+            return false;
+        }
+        // 计算正常换模窗口结束时间
+        Date switchEndTime = LhScheduleTimeUtil.addHours(switchStartTime, switchDurationHours);
+        if (CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            return false;
+        }
+        for (MachineMaintenanceWindowDTO window : machine.getMaintenanceWindowList()) {
+            if (Objects.isNull(window)
+                    || Objects.isNull(window.getMaintenanceStartTime())
+                    || Objects.isNull(window.getMaintenanceEndTime())
+                    || !window.getMaintenanceStartTime().before(window.getMaintenanceEndTime())) {
+                continue;
+            }
+            // 换模窗口与维保窗口有实际重叠：换模开始 < 维保结束 且 换模结束 > 维保开始
+            if (switchStartTime.before(window.getMaintenanceEndTime())
+                    && switchEndTime.after(window.getMaintenanceStartTime())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 清除机台当前所有维保窗口。
+     * <p>试制SKU换模需在早班完成，当维保窗口与早班换模窗口物理重叠时，
+     * 需先清除维保窗口使试制换模能在早班进行，维保将在后续排程迭代中重新安排。</p>
+     *
+     * @param machine 机台运行态
+     */
+    public void clearMaintenanceWindows(MachineScheduleDTO machine) {
+        if (Objects.isNull(machine)) {
+            return;
+        }
+        if (!CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            log.info("试制SKU换模与维保窗口重叠，清除机台维保窗口以便早班换模, 机台: {}, 维保窗口数: {}",
+                    machine.getMachineCode(), machine.getMaintenanceWindowList().size());
+            machine.getMaintenanceWindowList().clear();
+            machine.setHasMaintenancePlan(false);
+            machine.setMaintenancePlanTime(null);
+        }
+    }
+
     private boolean attachMaintenanceWindow(LhScheduleContext context,
                                             MachineScheduleDTO machine,
                                             LhPrecisionPlan plan,

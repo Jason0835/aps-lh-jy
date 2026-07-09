@@ -1,7 +1,9 @@
 package com.zlt.aps.lh.util;
 
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import org.springframework.util.CollectionUtils;
 
@@ -76,6 +78,30 @@ public final class ShiftProductionControlUtil {
         }
         return requestedSwitchStartTime.before(openShift.getEffectiveStartTime())
                 ? openShift.getEffectiveStartTime() : requestedSwitchStartTime;
+    }
+
+    /**
+     * 解析开产模式下允许发起切换（换模/换活字块）的最早时间。
+     * <p>业务口径：开产夜班顺延后，切换动作也不能早于开产班次开始时间，
+     * 否则会出现"早班直接有计划量，但换模提前落到开产前"的结果。</p>
+     * <p>试制SKU特殊豁免：试制SKU的换模/换活字块必须在早班完成、开产在中班，
+     * 换模属于开产前的准备动作，不受开产模式限制。传入sku为null或非试制SKU时，
+     * 退回到不传sku的原有逻辑。</p>
+     *
+     * @param context 排程上下文
+     * @param requestedSwitchStartTime 请求切换开始时间
+     * @param sku 当前排产SKU，用于判断是否试制SKU豁免开产模式限制
+     * @return 收口后的最早切换开始时间；试制SKU直接返回请求时间
+     */
+    public static Date resolveEarliestSwitchStartTime(LhScheduleContext context,
+                                                       Date requestedSwitchStartTime,
+                                                       SkuScheduleDTO sku) {
+        // 试制SKU换模需在早班完成，开产模式不限制试制换模开始时间
+        if (Objects.nonNull(sku)
+                && Objects.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
+            return requestedSwitchStartTime;
+        }
+        return resolveEarliestSwitchStartTime(context, requestedSwitchStartTime);
     }
 
     /**

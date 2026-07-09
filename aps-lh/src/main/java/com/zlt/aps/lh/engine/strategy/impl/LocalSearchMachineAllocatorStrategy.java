@@ -314,8 +314,9 @@ public class LocalSearchMachineAllocatorStrategy {
         Date mouldChangeStartTime = null;
         Date mouldChangeCompleteTime = null;
         Date inspectionTime = null;
+        // 试制SKU换模需在早班完成，不受开产模式限制；非试制SKU仍受开产模式约束
         Date candidateSwitchStartTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
-                context, machineReadyTime);
+                context, machineReadyTime, sku);
         int maxDelayRetryCount = resolveMaxSwitchDelayRetryCount(machine);
         for (int retry = 0; retry < maxDelayRetryCount; retry++) {
             mouldChangeStartTime = mouldChangeBalance.allocateMouldChange(

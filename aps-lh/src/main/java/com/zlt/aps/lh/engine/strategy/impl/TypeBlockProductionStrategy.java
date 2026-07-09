@@ -942,7 +942,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (machine == null || estimatedEndTime == null) {
             return null;
         }
-        Date switchReadyTime = resolveTypeBlockSwitchReadyTime(context, machine, estimatedEndTime);
+        // 传入sku以便试制SKU豁免开产模式限制
+        Date switchReadyTime = resolveTypeBlockSwitchReadyTime(context, machine, estimatedEndTime, sku);
         if (switchReadyTime == null) {
             return null;
         }
@@ -965,9 +966,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
      * @param estimatedEndTime 预计收尾时间
      * @return 理论可切换时间
      */
+    /**
+     * 基于指定收尾时间计算换活字块理论就绪时间。
+     * <p>试制SKU换活字块同样需在早班完成，不受开产模式限制。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 机台
+     * @param estimatedEndTime 预计收尾时间
+     * @param sku 当前排产SKU，用于判断是否试制SKU豁免开产模式限制
+     * @return 理论可切换时间
+     */
     private Date resolveTypeBlockSwitchReadyTime(LhScheduleContext context,
                                                  MachineScheduleDTO machine,
-                                                 Date estimatedEndTime) {
+                                                 Date estimatedEndTime,
+                                                 SkuScheduleDTO sku) {
         if (machine == null || estimatedEndTime == null) {
             return null;
         }
@@ -983,7 +995,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             switchReadyTime = getMaintenanceScheduleService().delaySwitchStartByMaintenance(
                     machine, rawSwitchStartTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
         }
-        switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+        // 试制SKU换活字块需在早班完成，不受开产模式限制；非试制SKU仍受开产模式约束
+        switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
+                context, switchReadyTime, sku);
         return getMaintenanceScheduleService().delaySwitchStartByMaintenance(
                 machine, switchReadyTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
     }
@@ -992,7 +1006,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (machine == null || machine.getEstimatedEndTime() == null) {
             return null;
         }
-        return resolveTypeBlockSwitchReadyTime(context, machine, machine.getEstimatedEndTime());
+        // 排序预览场景不区分SKU类型，传入null使用原有逻辑
+        return resolveTypeBlockSwitchReadyTime(context, machine, machine.getEstimatedEndTime(), null);
     }
 
     private int resolveTypeBlockSwitchDurationHours(LhScheduleContext context,
@@ -1801,7 +1816,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         Date switchReadyTime = maintenanceOverlapSwitch
                 ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine)
                 : machineReadyTime;
-        switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
+        // 试制SKU换模需在早班完成，不受开产模式限制
+        switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
+                context, switchReadyTime, specifySku);
         int switchDurationHours = maintenanceOverlapSwitch
                 ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                 : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
