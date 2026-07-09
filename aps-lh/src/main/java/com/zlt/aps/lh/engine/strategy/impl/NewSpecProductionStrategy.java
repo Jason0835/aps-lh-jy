@@ -9078,20 +9078,31 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 if (!skuStartedOnMachine && !canIncreaseShiftQtyByClassTotalLimit(context, sku, result,
                         shift.getShiftIndex(), shiftQty, "新增排产起排班次判断")) {
                     // 完整班产超过SYS0303004上限，判断首检特殊规则
-                    if (firstInspectionQty > 0) {
-                        // 首检已排入当前结果，SKU视为已经上机。
+                    boolean isCurrentShiftFirstInspectionShift = Objects.nonNull(firstInspectionShift)
+                            && Objects.equals(firstInspectionShift.getShiftIndex(), shift.getShiftIndex());
+                    if (firstInspectionQty > 0 && isCurrentShiftFirstInspectionShift) {
+                        // 首检已排入当前班次（首检归属班次=当前班次），SKU视为已经上机。
                         // 当前班次仅保留首检计划量，不排常规产量，后续班次不再受SYS0303004限制。
                         skuStartedOnMachine = true;
                         logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
                                 physicalShiftMaxQty, shiftMaxQty,
                                 "同班次总计划量上限不足，首检已排入，起排班次仅保留首检");
+                        continue;
+                    } else if (firstInspectionQty > 0) {
+                        // 首检已排入更早班次（首检归属班次 < 当前班次），SKU已经上机。
+                        // 当前班次不再受SYS0303004限制，直接排常规产量，避免中间班次空量。
+                        skuStartedOnMachine = true;
+                        log.info("新增排产首检已排入更早班次，SKU已上机，当前班次跳过SYS0303004限制, "
+                                + "batchNo: {}, materialCode: {}, machineCode: {}, classNo: class{}",
+                                context.getBatchNo(), result.getMaterialCode(),
+                                result.getLhMachineCode(), shift.getShiftIndex());
                     } else {
                         // 无首检排入，当前班次不能作为起排班次，顺延到下一个班次继续判断
                         logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
                                 physicalShiftMaxQty, shiftMaxQty,
                                 "同班次总计划量上限不足，起排班次顺延");
+                        continue;
                     }
-                    continue;
                 }
                 Date shiftPlanEndTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
                         context.getDevicePlanShutList(),
