@@ -119,7 +119,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                     conflictedMouldCodes.size(), freeMouldCount, conflictedMouldCodes);
         }
         // 4. 过滤候选机台：状态启用 + 硬性指标匹配 + 模具未被占用。
-        // 模壳匹配不再作为硬过滤，后续在最早收尾20分钟窗口内按同模壳排序降级处理。
+        // 模套型号匹配作为硬过滤（到货模具不降级），同模壳仍参与后续最早收尾窗口内排序降级。
         // 这里只保留业务上可承接的机台，不在这里提前决定最终排产量。
         BigDecimal skuInch = parseInch(sku.getProSize());
         SpecialMaterialMatchResult specialMaterialMatchResult =
@@ -738,6 +738,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (!LhMachineHardMatchUtil.isInchInRange(
                 skuInch, machine.getDimensionMinimum(), machine.getDimensionMaximum())) {
             return MachineAvailabilityReason.INCH_MISMATCH;
+        }
+        // 模套型号硬过滤：普通模具模壳必须命中机台模套型号，仅到货模具时不降级。
+        if (!LhMachineHardMatchUtil.isMouldSetPriorityMatched(context, sku, machine)) {
+            return MachineAvailabilityReason.MOULD_SET_MISMATCH;
         }
         MachineAvailabilityReason specialSupportReason =
                 resolveSpecialSupportAvailabilityReason(matchResult, machine);
