@@ -8988,6 +8988,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
 
         boolean started = false;
+        // SYS0303004仅控制新增SKU起排班次（上机班次），SKU上机后后续班次不再受限制。
+        // 首检已排入时不立即标记为上机，需在起排班次循环中完成SYS0303004判断后再标记。
+        boolean skuStartedOnMachine = false;
         for (LhShiftConfigVO shift : shifts) {
             if (remaining <= 0) {
                 break;
@@ -9048,15 +9051,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 continue;
             }
 
-            // 同班次总计划量上限剩余容量收敛：班次总量接近上限时按剩余容量部分填充，
-            // 避免拟排量超出剩余被整体拒绝、整班次跳过导致生产不连续（夜班跳空）
-            shiftMaxQty = Math.min(shiftMaxQty,
-                    resolveClassTotalRemainingCapacity(context, result, shift.getShiftIndex()));
-            if (shiftMaxQty <= 0) {
-                logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
-                        physicalShiftMaxQty, shiftMaxQty, "同班次总计划量上限已满");
-                continue;
-            }
+            // SYS0303004起排班次判断：SKU尚未上机时不做剩余容量收敛（不部分填充），
+            // 完整班产超限时整体顺延或仅保留首检，避免部分填充导致生产不连续。
+            // SKU已上机后不再受SYS0303004限制，直接按班产和原有约束排产。
 
             // 试制非收尾SKU严格按照日计划额度限制班次可排量上限，不允许超出当日计划量补满班次
             if (trialDailyConsumedMap != null) {
@@ -9077,10 +9074,23 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             int shiftQty = getTargetScheduleQtyResolver().resolveAllocatedShiftQty(
                     context, sku, Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
             if (shiftQty > 0) {
-                if (!canIncreaseShiftQtyByClassTotalLimit(context, sku, result, shift.getShiftIndex(), shiftQty,
-                        "新增排产班次分配")) {
-                    logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
-                            physicalShiftMaxQty, shiftMaxQty, "班次总量上限不足");
+                // 起排班次（SKU尚未上机）需判断SYS0303004同班次总计划量上限
+                if (!skuStartedOnMachine && !canIncreaseShiftQtyByClassTotalLimit(context, sku, result,
+                        shift.getShiftIndex(), shiftQty, "新增排产起排班次判断")) {
+                    // 完整班产超过SYS0303004上限，判断首检特殊规则
+                    if (firstInspectionQty > 0) {
+                        // 首检已排入当前结果，SKU视为已经上机。
+                        // 当前班次仅保留首检计划量，不排常规产量，后续班次不再受SYS0303004限制。
+                        skuStartedOnMachine = true;
+                        logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
+                                physicalShiftMaxQty, shiftMaxQty,
+                                "同班次总计划量上限不足，首检已排入，起排班次仅保留首检");
+                    } else {
+                        // 无首检排入，当前班次不能作为起排班次，顺延到下一个班次继续判断
+                        logNewSpecShiftSkip(result, shift, remaining, shiftCapacity,
+                                physicalShiftMaxQty, shiftMaxQty,
+                                "同班次总计划量上限不足，起排班次顺延");
+                    }
                     continue;
                 }
                 Date shiftPlanEndTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
@@ -9098,6 +9108,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 setShiftPlanQty(result, shift.getShiftIndex(), mergedQty,
                         existingStartTime == null ? effectiveStart : existingStartTime, shiftPlanEndTime);
                 remaining -= shiftQty;
+                // SKU已上机（常规排产已写入），后续班次不再受SYS0303004限制
+                skuStartedOnMachine = true;
 
                 // 更新本轮分配内该日已消费的日计划额度
                 if (trialDailyConsumedMap != null && shift.getWorkDate() != null) {
@@ -9299,7 +9311,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (classTotalQtyLimit <= 0) {
             return true;
         }
-        // 复用剩余容量口径，与 distributeToShifts 中 shiftMaxQty 收敛保持一致
+        // 复用剩余容量口径判断增量是否超限，起排班次判断和后置重分配统一使用
         int remainingCapacity = resolveClassTotalRemainingCapacity(context, result, shiftIndex);
         if (remainingCapacity >= incrementQty) {
             return true;
@@ -9420,7 +9432,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
      * 解析指定班次的同班次总计划量上限剩余容量。
      * <p>与 {@link #canIncreaseShiftQtyByClassTotalLimit} 统一口径：统计当前排程上下文内
      * 同班次已排总量，未持久化结果需叠加当前结果已有量避免重复计算。
-     * 班次总量接近上限时按剩余容量部分填充，避免整班次跳过导致生产不连续。</p>
+     * 起排班次判断时用于校验完整班产是否超限，不再做部分填充收敛。</p>
      *
      * @param context 排程上下文
      * @param result 当前排程结果
