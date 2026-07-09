@@ -424,19 +424,17 @@ public class ScheduleAdjustHandlerTest {
     }
 
     /**
-     * 用例说明：单控机台动态粒度以“小批量数量 <= 阈值”为边界，
-     * 数量刚好等于默认 100 时应标记为小批量，后续选机才能按单边机台处理。
+     * 用例说明：单控机台动态粒度改为使用月计划 totalQty 判断，
+     * 数量刚好等于 100 时应标记为小批量，后续选机才能按单边机台处理。
      *
      * @throws Exception 反射调用异常
      */
     @Test
-    public void shouldMarkSmallBatchWhenSurplusEqualsThreshold() throws Exception {
+    public void shouldMarkSmallBatchWhenMonthPlanTotalEqualsThreshold() throws Exception {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(toDate(LocalDate.of(2026, 5, 1)));
         context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 1)));
-        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
-                LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD, "100")));
 
         FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 100, 100, 0, 0);
         context.setMonthPlanList(Collections.singletonList(plan));
@@ -444,8 +442,34 @@ public class ScheduleAdjustHandlerTest {
         invokeGatherSkuByStructure(handler, context);
 
         SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(100, sku.getMonthPlanQty());
         Assertions.assertEquals(100, sku.getSurplusQty());
-        Assertions.assertTrue(sku.isSmallBatchValidation(), "硫化余量等于小批量阈值时应按小批量单边粒度处理");
+        Assertions.assertTrue(sku.isSmallBatchValidation(), "月计划 totalQty 等于 100 时应按小批量单边粒度处理");
+    }
+
+    /**
+     * 用例说明：小批量口径改为月计划 totalQty 后，
+     * 不能再因为“当前余量刚好变小”就把大计划 SKU 误判成小批量。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldNotMarkSmallBatchWhenOnlySurplusFallsBelowThreshold() throws Exception {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(LocalDate.of(2026, 5, 1)));
+        context.setScheduleTargetDate(toDate(LocalDate.of(2026, 5, 1)));
+
+        FactoryMonthPlanProductionFinalResult plan = buildSchedulePlan("3302001575", "结构A", 200, 200, 0, 0);
+        context.setMonthPlanList(Collections.singletonList(plan));
+        context.getMaterialMonthFinishedQtyMap().put("3302001575", 150);
+
+        invokeGatherSkuByStructure(handler, context);
+
+        SkuScheduleDTO sku = getFirstGatheredSku(context);
+        Assertions.assertEquals(200, sku.getMonthPlanQty());
+        Assertions.assertEquals(50, sku.getSurplusQty());
+        Assertions.assertFalse(sku.isSmallBatchValidation(), "月计划 totalQty 大于 100 时不应因为余量降低被判成小批量");
     }
 
     private void invokeAdjustPreviousSchedule(ScheduleAdjustHandler handler,

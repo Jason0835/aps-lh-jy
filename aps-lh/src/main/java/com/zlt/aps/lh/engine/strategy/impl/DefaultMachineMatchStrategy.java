@@ -478,7 +478,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (!needLog) {
             return;
         }
-        log.info("SKU单控候选诊断, materialCode: {}, skuType: {}, surplusQty: {}, smallBatchThreshold: {}, isSmallBatch: {}, "
+        log.info("SKU单控候选诊断, materialCode: {}, skuType: {}, surplusQty: {}, smallBatchTotalQtyThreshold: {}, isSmallBatch: {}, "
                         + "待排小批量SKU数: {}, 原候选: {}, 过滤后候选: {}, K1501L入候选: {}, K1501R入候选: {}, K1501L保留: {}, K1501R保留: {}, 过滤明细: {}",
                 sku.getMaterialCode(), resolveSkuTypeDesc(sku), sku.getSurplusQty(),
                 resolveSmallBatchThreshold(context), sku.isSmallBatchValidation(),
@@ -536,14 +536,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     private int resolveSmallBatchThreshold(LhScheduleContext context) {
-        if (context != null && Objects.nonNull(context.getScheduleConfig())) {
-            return context.getScheduleConfig().getSmallBatchSkuThreshold();
-        }
-        if (context == null) {
-            return LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD;
-        }
-        return context.getParamIntValue(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
-                LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD);
+        return LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD;
     }
 
     /**

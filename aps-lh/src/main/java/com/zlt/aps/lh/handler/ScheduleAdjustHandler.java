@@ -838,15 +838,16 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 月计划模具变化信息只在 S4.5 窗口无日计划历史欠产补排时用于判断计划使用模数。
         dto.setMouldChangeInfo(targetMonthPlan.getMouldChangeInfo());
         dto.setTrial(isTrialStage(targetMonthPlan.getConstructionStage()));
-        // 正规SKU余量小于等于阈值时标记为小批量，供单控机台按单边粒度处理，数量等于100也不能按整机正规SKU占用。
-        int smallBatchThreshold = resolveSmallBatchSkuThreshold(context);
+        // 正规SKU按月计划表原始 totalQty 判定小批量，供单控机台按单边粒度处理；
+        // 这里不能再用运行态余量，否则大计划 SKU 会在后期余量变小后被误判成小批量。
+        int monthPlanTotalQty = safeInt(targetMonthPlan.getTotalQty());
         boolean isSmallBatch = !dto.isTrial()
-                && dto.getSurplusQty() <= smallBatchThreshold;
+                && monthPlanTotalQty <= LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD;
         dto.setSmallBatchValidation(isSmallBatch);
         if (isSmallBatch) {
-            log.info("小批量SKU判定命中, 物料编码: {}, 施工阶段: {}, 余量: {}, 阈值: {}",
+            log.info("小批量SKU判定命中, 物料编码: {}, 施工阶段: {}, 月计划totalQty: {}, 固定阈值: {}",
                     dto.getMaterialCode(), dto.getConstructionStage(),
-                    dto.getSurplusQty(), smallBatchThreshold);
+                    monthPlanTotalQty, LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD);
         }
 
         // 示方书信息
@@ -904,20 +905,6 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private boolean isTrialStage(String constructionStage) {
         return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), constructionStage)
                 || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), constructionStage);
-    }
-
-    /**
-     * 解析小批量验证SKU阈值。
-     *
-     * @param context 排程上下文
-     * @return 阈值
-     */
-    private int resolveSmallBatchSkuThreshold(LhScheduleContext context) {
-        if (Objects.nonNull(context.getScheduleConfig())) {
-            return context.getScheduleConfig().getSmallBatchSkuThreshold();
-        }
-        return context.getParamIntValue(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
-                LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD);
     }
 
     /**

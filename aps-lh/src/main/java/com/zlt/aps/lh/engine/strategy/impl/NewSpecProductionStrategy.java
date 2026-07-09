@@ -3080,7 +3080,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (!needLog) {
             return;
         }
-        log.info("新增SKU候选快照, materialCode: {}, skuType: {}, surplusQty: {}, remainingQty: {}, threshold: {}, isSmallBatch: {}, "
+        log.info("新增SKU候选快照, materialCode: {}, skuType: {}, surplusQty: {}, remainingQty: {}, smallBatchTotalQtyThreshold: {}, isSmallBatch: {}, "
                         + "待排小批量SKU数: {}, 候选机台: {}, 排除机台: {}, K1501L候选: {}, K1501R候选: {}, 已有排除原因: {}",
                 sku.getMaterialCode(), resolveNewSpecSkuType(sku), sku.getSurplusQty(),
                 sku.getRemainingScheduleQty(), resolveSmallBatchThreshold(context), sku.isSmallBatchValidation(),
@@ -3174,14 +3174,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     private int resolveSmallBatchThreshold(LhScheduleContext context) {
-        if (context != null && Objects.nonNull(context.getScheduleConfig())) {
-            return context.getScheduleConfig().getSmallBatchSkuThreshold();
-        }
-        if (context == null) {
-            return LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD;
-        }
-        return context.getParamIntValue(LhScheduleParamConstant.SMALL_BATCH_SKU_THRESHOLD,
-                LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD);
+        return LhScheduleConstant.SMALL_BATCH_SKU_THRESHOLD;
     }
 
     private boolean containsMachine(List<MachineScheduleDTO> candidates, String machineCode) {

@@ -88,7 +88,7 @@ public class SkuScheduleDTO {
     private String constructionStage;
     /** 试制量试需求量 */
     private int trialDemandQty;
-    /** 是否小批量验证SKU；正规 SKU 余量低于参数阈值时置为 true，主要影响单控/普通机台选择规则 */
+    /** 是否小批量验证SKU；正规 SKU 命中月计划表 totalQty<=100 时置为 true，主要影响单控/普通机台选择规则 */
     private boolean smallBatchValidation;
     /** 月计划结构起产日 */
     private Integer beginDay;
