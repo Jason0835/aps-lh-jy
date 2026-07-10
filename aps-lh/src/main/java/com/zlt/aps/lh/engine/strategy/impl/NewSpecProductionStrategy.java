@@ -900,7 +900,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             switchAllocateFailReason = NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED;
                         } else {
                             /*
-                             * 普通换模8小时已包含首检，首检均衡只占用首检资源，不得再推迟正常生产；
+                             * 普通 SKU 的8小时换模已包含首检，首检均衡只占用首检资源，不得再推迟正常生产；
+                             * 试制 SKU 首检任务仍由均衡策略登记，但生产量改由中班固定2小时产能上限控制；
                              * 维保重叠专用口径仍按“4小时切换 + 1小时首检”顺延开产。
                              */
                             Date defaultProductionStartTime = maintenanceOverlapSwitch
@@ -1000,9 +1001,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 Map<Integer, Integer> shiftCapacityMap = calculateShiftCapacityMap(
                         context, candidateMachine, sku, firstProductionStartTime, mouldChangeStartTime,
                         shifts, machineMouldQty, runtimeShiftCapacity, isEnding);
-                // 普通换模8小时已包含首检：非试制按完成班次计入产能，试制早班完成则计入中班。
+                // 普通 SKU 按换模完成班次合并首检数量；试制 SKU 不写首检条数，仅在中班应用固定2小时产能上限。
                 shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
-                        context, shifts, firstInspectionAttributionShift, shiftCapacityMap,
+                        context, sku, shifts, firstInspectionAttributionShift, shiftCapacityMap,
                         runtimeShiftCapacity, dynamicTargetQty,
                         ScheduleTypeEnum.NEW_SPEC.getCode(), machineCode);
                 shiftCapacityMap = applyDailyStandardCapacityAdjust(
@@ -5968,7 +5969,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 context, candidate, sku, firstProductionStartTime, mouldChangeStartTime,
                 shifts, machineMouldQty, runtimeShiftCapacity, policy != null && policy.isEnding());
         shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
-                context, shifts, firstInspectionAttributionShift, shiftCapacityMap, runtimeShiftCapacity,
+                context, sku, shifts, firstInspectionAttributionShift, shiftCapacityMap, runtimeShiftCapacity,
                 sku.resolveTargetScheduleQty(), ScheduleTypeEnum.NEW_SPEC.getCode(), candidate.getMachineCode());
         shiftCapacityMap = applyDailyStandardCapacityAdjust(
                 context, sku, candidate.getMachineCode(), shifts, shiftCapacityMap, runtimeShiftCapacity);
@@ -7414,7 +7415,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         // 保存真实换模开始时间，供下游换模计划表直接复用。
         result.setMouldChangeStartTime(mouldChangeStartTime);
 
-        // 按班次分配计划量；试制SKU早班换模后首检归中班，8小时换模耗时不再额外增加。
+        // 按班次分配计划量；试制SKU早班换模后首检任务归属中班，但不生成首检条数，8小时换模耗时不再额外增加。
         int pendingQty = sku.resolveTargetScheduleQty();
         // 构建结果分班前过滤清洗窗口：清洗+换模不额外扣产能，3天内可收尾SKU不安排清洗。
         List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
@@ -8996,18 +8997,18 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
          * 1. 换模8小时已包含首检，不额外增加首检时间；
          * 2. 首检只影响数量归属和班产占用；
          * 3. 非试制归属班次由换模完成时间落点决定，试制早班切换后归同业务日中班；
-         * 4. 首检数量参与排产量、余量消耗和班产上限校验。
+         * 4. 非试制首检数量参与排产量、余量消耗和班产上限校验；试制首检仅通过中班固定2小时上限体现。
          */
         LhShiftConfigVO firstInspectionShift = firstInspectionAttributionShift;
         int previewFirstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
-                context, firstInspectionShift, shiftCapacity, remaining, ScheduleTypeEnum.NEW_SPEC.getCode(),
+                context, sku, firstInspectionShift, shiftCapacity, remaining, ScheduleTypeEnum.NEW_SPEC.getCode(),
                 result.getLhMachineCode());
         int firstInspectionQty = 0;
         if (previewFirstInspectionQty > 0 && Objects.nonNull(firstInspectionShift)
                 && canIncreaseShiftQtyByClassTotalLimit(context, sku, result, firstInspectionShift.getShiftIndex(),
                 previewFirstInspectionQty, "新增排产首检数量归属")) {
             firstInspectionQty = FirstInspectionQtyUtil.addFirstInspectionQtyToResult(
-                    context, result, firstInspectionShift, mouldChangeCompleteTime, shiftCapacity,
+                    context, sku, result, firstInspectionShift, mouldChangeCompleteTime, shiftCapacity,
                     remaining, ScheduleTypeEnum.NEW_SPEC.getCode());
         }
         remaining -= firstInspectionQty;
@@ -9074,10 +9075,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
-                    context, shift, shiftMaxQty,
+                    context, sku, shift, shiftMaxQty,
                     Objects.isNull(firstInspectionShift) ? -1 : firstInspectionShift.getShiftIndex(),
                     firstInspectionQty,
-                    shiftCapacity, ScheduleTypeEnum.NEW_SPEC.getCode());
+                    shiftCapacity, ScheduleTypeEnum.NEW_SPEC.getCode(), result.getLhMachineCode());
             int physicalShiftMaxQty = shiftMaxQty;
             Integer dailyStandardShiftLimit = CollectionUtils.isEmpty(shiftPlanCapacityMap)
                     ? null : shiftPlanCapacityMap.get(shift.getShiftIndex());

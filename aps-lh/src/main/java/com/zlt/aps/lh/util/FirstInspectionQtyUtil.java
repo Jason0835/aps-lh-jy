@@ -38,6 +38,12 @@ public final class FirstInspectionQtyUtil {
     /** 班次首检计数键分隔符 */
     private static final String SHIFT_COUNTER_KEY_SEPARATOR = "#";
 
+    /** 试制首检产能折算使用的标准班次时长（小时） */
+    private static final int TRIAL_SHIFT_DURATION_HOURS = 8;
+
+    /** 试制首检固定占用中班时长（小时） */
+    private static final int TRIAL_FIRST_INSPECTION_HOURS = 2;
+
     private FirstInspectionQtyUtil() {
     }
 
@@ -358,9 +364,40 @@ public final class FirstInspectionQtyUtil {
                                                        int remainingQty,
                                                        String scheduleType,
                                                        String machineCode) {
+        return resolvePreviewFirstInspectionQty(
+                context, null, attributionShift, shiftCapacity, remainingQty, scheduleType, machineCode);
+    }
+
+    /**
+     * 按 SKU 类型预读当前班次下一台首检的有效数量，不写入计数器。
+     *
+     * <p>试制 SKU 使用固定2小时首检时间扣减中班产能，不生成首检条数，因此直接返回0，
+     * 也不会读取 SYS0303002、SYS0303003 或推进当班首检数量顺序。量试、正规和小批量
+     * SKU 继续沿用现有首检条数参数及单控折半规则。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息，传null时保持原有非试制逻辑
+     * @param attributionShift 首检归属班次
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前剩余目标量
+     * @param scheduleType 排程类型
+     * @param machineCode 机台编码
+     * @return 受班产和目标量截断后的首检数量；试制SKU固定返回0
+     */
+    public static int resolvePreviewFirstInspectionQty(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       LhShiftConfigVO attributionShift,
+                                                       int shiftCapacity,
+                                                       int remainingQty,
+                                                       String scheduleType,
+                                                       String machineCode) {
+        if (isTrialTimeBasedFirstInspection(sku, attributionShift, scheduleType)) {
+            return 0;
+        }
         int sequence = resolveNextFirstInspectionSequence(context, attributionShift);
         return resolveEffectiveFirstInspectionQty(
-                context, attributionShift, shiftCapacity, remainingQty, scheduleType, machineCode, sequence, false);
+                context, sku, attributionShift, shiftCapacity, remainingQty,
+                scheduleType, machineCode, sequence, false);
     }
 
     /**
@@ -385,9 +422,35 @@ public final class FirstInspectionQtyUtil {
                                                     int shiftCapacity,
                                                     int remainingQty,
                                                     String scheduleType) {
+        return addFirstInspectionQtyToResult(
+                context, null, result, shifts, mouldChangeCompleteTime, shiftCapacity, remainingQty, scheduleType);
+    }
+
+    /**
+     * 按 SKU 类型将换模首检数量写入归属班次。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息，传null时保持原有非试制逻辑
+     * @param result 排程结果
+     * @param shifts 排程窗口班次
+     * @param mouldChangeCompleteTime 换模完成时间
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前结果剩余目标量
+     * @param scheduleType 排程类型
+     * @return 实际写入的首检数量；试制SKU固定返回0
+     */
+    public static int addFirstInspectionQtyToResult(LhScheduleContext context,
+                                                    SkuScheduleDTO sku,
+                                                    LhScheduleResult result,
+                                                    List<LhShiftConfigVO> shifts,
+                                                    Date mouldChangeCompleteTime,
+                                                    int shiftCapacity,
+                                                    int remainingQty,
+                                                    String scheduleType) {
         LhShiftConfigVO attributionShift = resolveAttributionShift(shifts, mouldChangeCompleteTime);
         return addFirstInspectionQtyToResult(
-                context, result, attributionShift, mouldChangeCompleteTime, shiftCapacity, remainingQty, scheduleType);
+                context, sku, result, attributionShift, mouldChangeCompleteTime,
+                shiftCapacity, remainingQty, scheduleType);
     }
 
     /**
@@ -412,9 +475,41 @@ public final class FirstInspectionQtyUtil {
                                                     int shiftCapacity,
                                                     int remainingQty,
                                                     String scheduleType) {
+        return addFirstInspectionQtyToResult(
+                context, null, result, attributionShift, switchCompleteTime,
+                shiftCapacity, remainingQty, scheduleType);
+    }
+
+    /**
+     * 按 SKU 类型将首检数量写入指定归属班次。
+     *
+     * <p>试制 SKU 的首检只以固定2小时方式压缩中班最大生产量，不写首检条数；
+     * 其他 SKU 继续写入参数首检条数，并登记当班首检数量顺序。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息，传null时保持原有非试制逻辑
+     * @param result 排程结果
+     * @param attributionShift 首检归属班次
+     * @param switchCompleteTime 换模/换活字块完成时间
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前结果剩余目标量
+     * @param scheduleType 排程类型
+     * @return 实际写入的首检数量；试制SKU固定返回0
+     */
+    public static int addFirstInspectionQtyToResult(LhScheduleContext context,
+                                                    SkuScheduleDTO sku,
+                                                    LhScheduleResult result,
+                                                    LhShiftConfigVO attributionShift,
+                                                    Date switchCompleteTime,
+                                                    int shiftCapacity,
+                                                    int remainingQty,
+                                                    String scheduleType) {
+        if (isTrialTimeBasedFirstInspection(sku, attributionShift, scheduleType)) {
+            return 0;
+        }
         int firstInspectionSequence = resolveNextFirstInspectionSequence(context, attributionShift);
         int firstInspectionQty = resolveEffectiveFirstInspectionQty(
-                context, attributionShift, shiftCapacity, remainingQty, scheduleType,
+                context, sku, attributionShift, shiftCapacity, remainingQty, scheduleType,
                 Objects.isNull(result) ? null : result.getLhMachineCode(), firstInspectionSequence, true);
         if (Objects.isNull(result) || Objects.isNull(attributionShift) || firstInspectionQty <= 0) {
             return 0;
@@ -472,6 +567,35 @@ public final class FirstInspectionQtyUtil {
             int remainingQty,
             String scheduleType,
             String machineCode) {
+        return applyFirstInspectionQtyToCapacityMap(
+                context, null, shifts, mouldChangeCompleteTime, shiftCapacityMap,
+                shiftCapacity, remainingQty, scheduleType, machineCode);
+    }
+
+    /**
+     * 按 SKU 类型调整换模首检对应的班次产能图。
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息，传null时保持原有非试制逻辑
+     * @param shifts 排程窗口班次
+     * @param mouldChangeCompleteTime 换模完成时间
+     * @param shiftCapacityMap 正常生产产能图
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前剩余目标量
+     * @param scheduleType 排程类型
+     * @param machineCode 运行态机台编码
+     * @return 调整后的产能图
+     */
+    public static Map<Integer, Integer> applyFirstInspectionQtyToCapacityMap(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            List<LhShiftConfigVO> shifts,
+            Date mouldChangeCompleteTime,
+            Map<Integer, Integer> shiftCapacityMap,
+            int shiftCapacity,
+            int remainingQty,
+            String scheduleType,
+            String machineCode) {
         Map<Integer, Integer> adjustedMap = new LinkedHashMap<Integer, Integer>(
                 CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
         if (CollectionUtils.isEmpty(shifts)) {
@@ -479,8 +603,8 @@ public final class FirstInspectionQtyUtil {
         }
         LhShiftConfigVO attributionShift = resolveAttributionShift(shifts, mouldChangeCompleteTime);
         return applyFirstInspectionQtyToCapacityMap(
-                context, shifts, attributionShift, shiftCapacityMap, shiftCapacity, remainingQty, scheduleType,
-                machineCode);
+                context, sku, shifts, attributionShift, shiftCapacityMap,
+                shiftCapacity, remainingQty, scheduleType, machineCode);
     }
 
     /**
@@ -505,19 +629,59 @@ public final class FirstInspectionQtyUtil {
             int remainingQty,
             String scheduleType,
             String machineCode) {
+        return applyFirstInspectionQtyToCapacityMap(
+                context, null, shifts, attributionShift, shiftCapacityMap,
+                shiftCapacity, remainingQty, scheduleType, machineCode);
+    }
+
+    /**
+     * 按 SKU 类型和指定首检归属班次调整产能图。
+     *
+     * <p>试制 SKU 不补首检条数，仅把中班正常生产上限压缩到实际中班班产的75%；
+     * 非试制 SKU 继续把首检条数与正常生产量合并，并共享现有班产上限。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息，传null时保持原有非试制逻辑
+     * @param shifts 排程窗口班次
+     * @param attributionShift 首检归属班次
+     * @param shiftCapacityMap 正常生产产能图
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前剩余目标量
+     * @param scheduleType 排程类型
+     * @param machineCode 运行态机台编码
+     * @return 调整后的产能图
+     */
+    public static Map<Integer, Integer> applyFirstInspectionQtyToCapacityMap(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            List<LhShiftConfigVO> shifts,
+            LhShiftConfigVO attributionShift,
+            Map<Integer, Integer> shiftCapacityMap,
+            int shiftCapacity,
+            int remainingQty,
+            String scheduleType,
+            String machineCode) {
         Map<Integer, Integer> adjustedMap = new LinkedHashMap<Integer, Integer>(
                 CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
         if (CollectionUtils.isEmpty(shifts)) {
             return adjustedMap;
         }
         int firstInspectionQty = resolvePreviewFirstInspectionQty(
-                context, attributionShift, shiftCapacity, remainingQty, scheduleType, machineCode);
+                context, sku, attributionShift, shiftCapacity, remainingQty, scheduleType, machineCode);
         for (LhShiftConfigVO shift : shifts) {
             if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
                 continue;
             }
             Integer originalCapacity = CollectionUtils.isEmpty(shiftCapacityMap)
                     ? null : shiftCapacityMap.get(shift.getShiftIndex());
+            if (Objects.nonNull(originalCapacity)
+                    && Objects.nonNull(attributionShift)
+                    && Objects.equals(shift.getShiftIndex(), attributionShift.getShiftIndex())
+                    && isTrialTimeBasedFirstInspection(sku, attributionShift, scheduleType)) {
+                adjustedMap.put(shift.getShiftIndex(), resolveTrialCapacityAfterFirstInspection(
+                        context, sku, shift, originalCapacity, shiftCapacity, scheduleType, machineCode));
+                continue;
+            }
             if (Objects.nonNull(attributionShift)
                     && Objects.equals(shift.getShiftIndex(), attributionShift.getShiftIndex())
                     && firstInspectionQty > 0) {
@@ -554,8 +718,47 @@ public final class FirstInspectionQtyUtil {
             int firstInspectionQty,
             int shiftCapacity,
             String scheduleType) {
-        if (Objects.isNull(shift) || !Objects.equals(shift.getShiftIndex(), firstInspectionShiftIndex)
-                || firstInspectionQty <= 0) {
+        return resolveNormalCapacityAfterFirstInspection(
+                context, null, shift, shiftMaxQty, firstInspectionShiftIndex,
+                firstInspectionQty, shiftCapacity, scheduleType, null);
+    }
+
+    /**
+     * 按 SKU 类型解析首检后的正常生产上限。
+     *
+     * <p>试制 SKU 不扣首检条数，而是把首检归属中班的最大生产量限制为实际班产的75%；
+     * 非试制 SKU 仍按首检条数占用班产。调用方继续在该上限之外叠加停机、清洗、保养、
+     * 日标准产量和剩余目标量约束，最终自然取各类上限的最小值。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息，传null时保持原有非试制逻辑
+     * @param shift 当前班次
+     * @param shiftMaxQty 当前班次正常生产上限
+     * @param firstInspectionShiftIndex 首检归属班次
+     * @param firstInspectionQty 首检数量
+     * @param shiftCapacity 运行态班产
+     * @param scheduleType 排程类型
+     * @param machineCode 机台编码，用于记录诊断日志
+     * @return 首检规则收口后的正常生产上限
+     */
+    public static int resolveNormalCapacityAfterFirstInspection(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LhShiftConfigVO shift,
+            int shiftMaxQty,
+            int firstInspectionShiftIndex,
+            int firstInspectionQty,
+            int shiftCapacity,
+            String scheduleType,
+            String machineCode) {
+        if (Objects.isNull(shift) || !Objects.equals(shift.getShiftIndex(), firstInspectionShiftIndex)) {
+            return Math.max(0, shiftMaxQty);
+        }
+        if (isTrialTimeBasedFirstInspection(sku, shift, scheduleType)) {
+            return resolveTrialCapacityAfterFirstInspection(
+                    context, sku, shift, shiftMaxQty, shiftCapacity, scheduleType, machineCode);
+        }
+        if (firstInspectionQty <= 0) {
             return Math.max(0, shiftMaxQty);
         }
         int cap = resolveShiftCapacityCap(context, shift, shiftCapacity, scheduleType);
@@ -575,6 +778,7 @@ public final class FirstInspectionQtyUtil {
     }
 
     private static int resolveEffectiveFirstInspectionQty(LhScheduleContext context,
+                                                          SkuScheduleDTO sku,
                                                           LhShiftConfigVO attributionShift,
                                                           int shiftCapacity,
                                                           int remainingQty,
@@ -585,6 +789,9 @@ public final class FirstInspectionQtyUtil {
         if (Objects.isNull(attributionShift) || remainingQty <= 0) {
             return 0;
         }
+        if (isTrialTimeBasedFirstInspection(sku, attributionShift, scheduleType)) {
+            return 0;
+        }
         // 按机台类型折算首检数量：单控机台（L/R）按参数折半向下取整
         int configuredQty = resolveAdjustedFirstInspectionQty(
                 context, sequence, machineCode, logOddSingleControlParam);
@@ -593,6 +800,45 @@ public final class FirstInspectionQtyUtil {
         }
         int cap = resolveShiftCapacityCap(context, attributionShift, shiftCapacity, scheduleType);
         return Math.max(0, Math.min(Math.min(configuredQty, remainingQty), cap));
+    }
+
+    /**
+     * 计算试制 SKU 扣除固定2小时首检后的中班正常生产上限。
+     *
+     * <p>先按现有奇数班产修正规则取得当前中班实际班产，再按6/8向下取整。
+     * 最终只作为最大值上限与当前物理可排产能取小，不重复扣减停机、清洗或保养时间。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 试制SKU
+     * @param shift 首检归属中班
+     * @param shiftMaxQty 其他规则计算后的当前班次上限
+     * @param shiftCapacity 运行态班产
+     * @param scheduleType 排程类型
+     * @param machineCode 机台编码
+     * @return 扣除试制首检时间后的中班最大生产量
+     */
+    private static int resolveTrialCapacityAfterFirstInspection(LhScheduleContext context,
+                                                                SkuScheduleDTO sku,
+                                                                LhShiftConfigVO shift,
+                                                                int shiftMaxQty,
+                                                                int shiftCapacity,
+                                                                String scheduleType,
+                                                                String machineCode) {
+        int currentCapacity = Math.max(0, shiftMaxQty);
+        int actualShiftCapacity = resolveShiftCapacityCap(context, shift, shiftCapacity, scheduleType);
+        int productiveHours = TRIAL_SHIFT_DURATION_HOURS - TRIAL_FIRST_INSPECTION_HOURS;
+        int trialCapacityCap = (int) ((long) actualShiftCapacity * productiveHours
+                / TRIAL_SHIFT_DURATION_HOURS);
+        int finalCapacity = Math.min(currentCapacity, Math.max(0, trialCapacityCap));
+        log.debug("试制SKU中班首检产能收口, batchNo: {}, materialCode: {}, machineCode: {}, scheduleType: {}, "
+                        + "班次: {}, 原始运行态班产: {}, 奇数修正后班产: {}, 标准班次时长: {}, "
+                        + "首检占用小时: {}, 首检前现有上限: {}, 试制中班75%上限: {}, 最终中班上限: {}",
+                Objects.isNull(context) ? null : context.getBatchNo(),
+                Objects.isNull(sku) ? null : sku.getMaterialCode(), machineCode, scheduleType,
+                Objects.isNull(shift) ? null : shift.getShiftIndex(), shiftCapacity, actualShiftCapacity,
+                TRIAL_SHIFT_DURATION_HOURS, TRIAL_FIRST_INSPECTION_HOURS,
+                currentCapacity, trialCapacityCap, finalCapacity);
+        return finalCapacity;
     }
 
     private static int resolveShiftCapacityCap(LhScheduleContext context,
@@ -630,6 +876,28 @@ public final class FirstInspectionQtyUtil {
             return false;
         }
         return defaultShift.isMorningShift();
+    }
+
+    /**
+     * 判断当前首检是否采用试制 SKU 固定2小时的时间扣减规则。
+     *
+     * @param sku SKU排程信息
+     * @param attributionShift 首检归属班次
+     * @param scheduleType 排程类型
+     * @return true-试制新增/换活字块中班首检；false-沿用首检条数规则
+     */
+    private static boolean isTrialTimeBasedFirstInspection(SkuScheduleDTO sku,
+                                                           LhShiftConfigVO attributionShift,
+                                                           String scheduleType) {
+        if (Objects.isNull(sku) || Objects.isNull(attributionShift)
+                || !attributionShift.isAfternoonShift()) {
+            return false;
+        }
+        if (!Objects.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
+            return false;
+        }
+        return Objects.equals(ScheduleTypeEnum.NEW_SPEC.getCode(), scheduleType)
+                || Objects.equals(ScheduleTypeEnum.TYPE_BLOCK.getCode(), scheduleType);
     }
 
     private static LhShiftConfigVO resolveAfternoonShiftOnSameWorkDate(List<LhShiftConfigVO> shifts,

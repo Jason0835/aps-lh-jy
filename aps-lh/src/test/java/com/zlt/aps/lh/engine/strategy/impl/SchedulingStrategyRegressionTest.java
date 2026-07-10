@@ -154,7 +154,7 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 试制SKU早班完成换模后，首检和生产必须推迟到同业务日中班，早班只保留换模占用。
+     * 试制SKU早班完成换模后，中班固定扣除2小时首检产能，不生成首检计划条数。
      */
     @Test
     public void shouldMoveTrialSkuFirstInspectionAndProductionToAfternoonAfterMorningChangeover() throws Exception {
@@ -163,7 +163,8 @@ public class SchedulingStrategyRegressionTest {
         LhScheduleContext context = buildNewSpecFirstInspectionContext();
         MachineScheduleDTO machine = buildNewSpecMachine("K1101");
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
-        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(8);
+        sku.setShiftCapacity(8);
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
 
         LhScheduleResult result = invokeBuildNewSpecScheduleResult(
@@ -174,9 +175,70 @@ public class SchedulingStrategyRegressionTest {
                 context.getScheduleWindowShifts(), 1, false);
 
         Assertions.assertEquals(0, resolveShiftPlanQty(result, 1));
-        Assertions.assertEquals(16, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(6, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(2, resolveShiftPlanQty(result, 3));
+        Assertions.assertEquals(8, result.getDailyPlanQty());
         Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#1"));
-        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#2").intValue());
+        Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#2"));
+    }
+
+    /**
+     * 试制SKU目标量小于中班扣除首检后的产能时，只排剩余目标量，不补首检条数。
+     */
+    @Test
+    public void shouldCapTrialSkuAfternoonQtyByRemainingTargetWithoutInspectionQty() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectNewSpecBuildDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        Map<String, String> paramMap = new HashMap<String, String>(4);
+        paramMap.put("SYS0303002", "20");
+        paramMap.put("SYS0303003", "10");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+        MachineScheduleDTO machine = buildNewSpecMachine("K1101");
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(5);
+        sku.setShiftCapacity(8);
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+
+        LhScheduleResult result = invokeBuildNewSpecScheduleResult(
+                strategy, context, machine, sku,
+                dateTime(2026, 6, 1, 14, 0),
+                dateTime(2026, 6, 1, 6, 0),
+                dateTime(2026, 6, 1, 14, 0),
+                context.getScheduleWindowShifts(), 1, false);
+
+        Assertions.assertEquals(0, resolveShiftPlanQty(result, 1));
+        Assertions.assertEquals(5, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(0, resolveShiftPlanQty(result, 3));
+        Assertions.assertEquals(5, result.getDailyPlanQty());
+        Assertions.assertTrue(context.getShiftFirstInspectionCountMap().isEmpty());
+    }
+
+    /**
+     * 试制 SKU 不登记首检数量顺序，后续非试制 SKU 仍使用当班首个首检参数。
+     */
+    @Test
+    public void shouldNotConsumeFirstInspectionQtySequenceForTrialSku() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectNewSpecBuildDependencies(strategy);
+        LhScheduleContext context = buildNewSpecFirstInspectionContext();
+        Map<String, String> paramMap = new HashMap<String, String>(4);
+        paramMap.put("SYS0303002", "4");
+        paramMap.put("SYS0303003", "2");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+
+        SkuScheduleDTO trialSku = buildNewSpecFirstInspectionSku(8);
+        trialSku.setShiftCapacity(8);
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        LhScheduleResult trialResult = buildNewSpecFirstInspectionResult(
+                strategy, context, buildNewSpecMachine("K1101"), trialSku);
+        LhScheduleResult formalResult = buildNewSpecFirstInspectionResult(
+                strategy, context, buildNewSpecMachine("K1102"), buildNewSpecFirstInspectionSku(8));
+
+        Assertions.assertEquals(6, resolveShiftPlanQty(trialResult, 2));
+        Assertions.assertEquals(2, resolveShiftPlanQty(trialResult, 3));
+        Assertions.assertEquals(4, resolveShiftPlanQty(formalResult, 1));
+        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#1").intValue());
     }
 
     /**
@@ -190,7 +252,7 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 试制SKU中班完成换模时沿用现有中班归属，不需要额外推迟。
+     * 试制SKU异常落在中班完成换模时，仍按中班固定2小时首检产能上限收口。
      */
     @Test
     public void shouldKeepTrialSkuFirstInspectionOnAfternoonWhenChangeoverCompletesInAfternoon() throws Exception {
@@ -199,7 +261,8 @@ public class SchedulingStrategyRegressionTest {
         LhScheduleContext context = buildNewSpecFirstInspectionContext();
         MachineScheduleDTO machine = buildNewSpecMachine("K1101");
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
-        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(8);
+        sku.setShiftCapacity(8);
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
 
         LhScheduleResult result = invokeBuildNewSpecScheduleResult(
@@ -210,12 +273,13 @@ public class SchedulingStrategyRegressionTest {
                 context.getScheduleWindowShifts(), 1, false);
 
         Assertions.assertEquals(0, resolveShiftPlanQty(result, 1));
-        Assertions.assertEquals(16, resolveShiftPlanQty(result, 2));
-        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#2").intValue());
+        Assertions.assertEquals(6, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(2, resolveShiftPlanQty(result, 3));
+        Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#2"));
     }
 
     /**
-     * 试制SKU早班完成换活字块后，首检同样归属中班，避免S4.4在早班落首检量。
+     * 试制SKU早班完成换活字块后，中班同样扣除固定2小时首检产能且不生成首检条数。
      */
     @Test
     public void shouldMoveTrialSkuTypeBlockFirstInspectionToAfternoonAfterMorningSwitch() throws Exception {
@@ -224,7 +288,8 @@ public class SchedulingStrategyRegressionTest {
         LhScheduleContext context = buildNewSpecFirstInspectionContext();
         MachineScheduleDTO machine = buildNewSpecMachine("K1305");
         context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
-        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(16);
+        SkuScheduleDTO sku = buildNewSpecFirstInspectionSku(8);
+        sku.setShiftCapacity(8);
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
 
         LhScheduleResult result = invokeBuildTypeBlockScheduleResult(
@@ -234,9 +299,10 @@ public class SchedulingStrategyRegressionTest {
                 context.getScheduleWindowShifts(), 1, false);
 
         Assertions.assertEquals(0, resolveShiftPlanQty(result, 1));
-        Assertions.assertEquals(16, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(6, resolveShiftPlanQty(result, 2));
+        Assertions.assertEquals(2, resolveShiftPlanQty(result, 3));
         Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#1"));
-        Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#2").intValue());
+        Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#2"));
     }
 
     /**

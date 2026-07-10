@@ -455,8 +455,8 @@ public class LocalSearchMachineAllocatorStrategy {
         int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
                 || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
         int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
-                context, firstInspectionShift, shiftCapacity, Math.max(remainingQty, shiftCapacity),
-                null, machine.getMachineCode());
+                context, sku, firstInspectionShift, shiftCapacity,
+                Math.max(remainingQty, shiftCapacity), ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
         Date specEndTime = null;
         int totalQty = 0;
         boolean started = false;
@@ -495,8 +495,8 @@ public class LocalSearchMachineAllocatorStrategy {
                 plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
             shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
-                    context, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
-                    shiftCapacity, null);
+                    context, sku, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
+                    shiftCapacity, ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
             if (shiftMaxQty <= 0) {
                 continue;
             }
@@ -520,7 +520,7 @@ public class LocalSearchMachineAllocatorStrategy {
             cursorStartTime = effectiveEndTime;
         }
         totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
-                context, shifts, firstInspectionShift, productionStartTime, shiftCapacity, totalQty,
+                context, sku, shifts, firstInspectionShift, productionStartTime, shiftCapacity, totalQty,
                 machine.getMachineCode());
 
         if (totalQty <= 0 || specEndTime == null) {
@@ -531,6 +531,7 @@ public class LocalSearchMachineAllocatorStrategy {
     }
 
     private int resolveFirstInspectionCapacityOutsideProductionWindow(LhScheduleContext context,
+                                                                       SkuScheduleDTO sku,
                                                                        List<LhShiftConfigVO> shifts,
                                                                        LhShiftConfigVO attributionShift,
                                                                        Date productionStartTime,
@@ -542,7 +543,7 @@ public class LocalSearchMachineAllocatorStrategy {
             return 0;
         }
         Map<Integer, Integer> firstInspectionCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
-                context, shifts, attributionShift, new HashMap<Integer, Integer>(0),
+                context, sku, shifts, attributionShift, new HashMap<Integer, Integer>(0),
                 shiftCapacity, Math.max(remainingQty, shiftCapacity),
                 ScheduleTypeEnum.NEW_SPEC.getCode(), machineCode);
         Integer firstInspectionQty = firstInspectionCapacityMap.get(attributionShift.getShiftIndex());
