@@ -2,15 +2,21 @@ package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.handler.DataInitHandler;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -24,6 +30,48 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ContinuousSkuAssignmentRegressionTest {
 
     private final ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepPlannedRepairMachineAsContinuous() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(dateTime(2026, 7, 6, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 7, 8, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                context, context.getScheduleDate()));
+
+        SkuScheduleDTO sku = buildSku("3302000750", "STRUCT-0750");
+        Map<String, java.util.List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("STRUCT-0750", new ArrayList<SkuScheduleDTO>(Collections.singletonList(sku)));
+        context.setStructureSkuMap(structureSkuMap);
+
+        LhMachineInfo machineInfo = new LhMachineInfo();
+        machineInfo.setMachineCode("K1110");
+        machineInfo.setMachineName("K1110");
+        machineInfo.setStatus("1");
+        machineInfo.setMaxMoldNum(2);
+        context.setMachineInfoMap(new LinkedHashMap<String, LhMachineInfo>());
+        context.getMachineInfoMap().put("K1110", machineInfo);
+
+        context.setMachineOnlineInfoMap(new LinkedHashMap<String, LhMachineOnlineInfo>());
+        context.getMachineOnlineInfoMap().put("K1110", buildOnlineInfo("K1110", "3302000750"));
+
+        MdmDevicePlanShut plannedRepair = new MdmDevicePlanShut();
+        plannedRepair.setMachineCode("K1110");
+        plannedRepair.setMachineStopType("05");
+        plannedRepair.setBeginDate(dateTime(2026, 7, 8, 8, 0));
+        plannedRepair.setEndDate(dateTime(2026, 7, 8, 16, 0));
+        context.setDevicePlanShutList(Collections.singletonList(plannedRepair));
+
+        // 先走真实初始化入口，再执行续作/新增分类，验证05维修不会通过全局状态阻断续作。
+        ReflectionTestUtils.invokeMethod(new DataInitHandler(), "buildStandardDataObjects", context);
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
+        assertEquals("3302000750", context.getContinuousSkuList().get(0).getMaterialCode());
+        assertEquals("K1110", context.getContinuousSkuList().get(0).getContinuousMachineCode());
+        assertEquals("01", context.getContinuousSkuList().get(0).getScheduleType());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+    }
 
     @Test
     void classifyContinuousAndNewSkus_shouldSkipMesMachineThatIsNotSchedulable() {
@@ -228,5 +276,12 @@ class ContinuousSkuAssignmentRegressionTest {
         result.setSpecEndTime(new Date());
         result.setRollingInherited(true);
         return result;
+    }
+
+    private Date dateTime(int year, int month, int day, int hour, int minute) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.clear();
+        calendar.set(year, month - 1, day, hour, minute, 0);
+        return calendar.getTime();
     }
 }

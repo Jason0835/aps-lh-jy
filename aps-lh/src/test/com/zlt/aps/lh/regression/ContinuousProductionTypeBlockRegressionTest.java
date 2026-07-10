@@ -83,7 +83,7 @@ class ContinuousProductionTypeBlockRegressionTest {
     private TypeBlockProductionStrategy typeBlockProductionStrategy;
 
     @Test
-    void scheduleTypeBlockChange_shouldOnlyUseMachinesEndingOnFirstDay() {
+    void scheduleTypeBlockChange_shouldUseMachinesEndingWithinScheduleWindow() {
         LhScheduleContext context = newContext();
         MachineScheduleDTO firstDayMachine = buildMachine("M1", "MAT-C1");
         firstDayMachine.setEnding(true);
@@ -119,16 +119,55 @@ class ContinuousProductionTypeBlockRegressionTest {
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
-        assertEquals(1, context.getScheduleResultList().size());
-        assertEquals("MAT-T1", context.getScheduleResultList().get(0).getMaterialCode());
-        assertEquals(Arrays.asList("MAT-T2", "MAT-T3"),
+        assertEquals(3, context.getScheduleResultList().size());
+        assertEquals(Arrays.asList("MAT-T1", "MAT-T2", "MAT-T3"),
                 Arrays.asList(
-                        context.getNewSpecSkuList().get(0).getMaterialCode(),
-                        context.getNewSpecSkuList().get(1).getMaterialCode()));
+                        context.getScheduleResultList().get(0).getMaterialCode(),
+                        context.getScheduleResultList().get(1).getMaterialCode(),
+                        context.getScheduleResultList().get(2).getMaterialCode()));
+        assertTrue(context.getNewSpecSkuList().isEmpty());
     }
 
     @Test
-    void scheduleTypeBlockChange_shouldSkipReleasedAndFallbackMachinesEndingAfterFirstDay() {
+    void scheduleTypeBlockChange_shouldScheduleK1103AfterTPlusOneEnding() {
+        LhScheduleContext context = newContext();
+        context.setBatchNo("LHPC20260707071-REGRESSION");
+        context.setScheduleDate(date(2026, 7, 6));
+        context.setScheduleTargetDate(date(2026, 7, 8));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                context, context.getScheduleDate()));
+
+        MachineScheduleDTO machine = buildMachine("K1103", "3302001513");
+        machine.setEnding(true);
+        machine.setEstimatedEndTime(dateTime(2026, 7, 7, 14, 0, 0));
+        context.getMachineScheduleMap().put("K1103", machine);
+        context.getNewSpecSkuList().add(buildNewSku(
+                "3302002546", "215104553", "STRUCT-2546", "SPEC-2546", "PAT-2546", 4));
+        putMaterialInfo(context, "3302001513", "胎胚-215104553", "SPEC-1513", "PAT-1513", "PAT-1513");
+        putMaterialInfo(context, "3302002546", "胎胚-215104553", "SPEC-2546", "PAT-2546", "PAT-2546");
+        putMouldRel(context, "3302001513", "HM20200902141");
+        putMouldRel(context, "3302002546", "HM20200902141");
+
+        when(orderNoGenerator.generateOrderNo(any())).thenReturn("ORD-K1103-2546");
+        when(endingJudgmentStrategy.isCurrentWindowEnding(any(), any())).thenReturn(false);
+
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        LhScheduleResult result = context.getScheduleResultList().get(0);
+        assertEquals("K1103", result.getLhMachineCode());
+        assertEquals("3302002546", result.getMaterialCode());
+        assertEquals("03", result.getScheduleType());
+        assertEquals("1", result.getIsTypeBlock());
+        assertTrue(!result.getMouldChangeStartTime().before(dateTime(2026, 7, 7, 14, 0, 0)),
+                "换活字块切换时间不得早于3302001513真实收尾时间");
+        assertTrue(!result.getSpecEndTime().after(
+                context.getScheduleWindowShifts().get(context.getScheduleWindowShifts().size() - 1)
+                        .getShiftEndDateTime()), "K1103换活字块结果不得越过排程窗口");
+    }
+
+    @Test
+    void scheduleTypeBlockChange_shouldUseReleasedAndFallbackMachinesEndingWithinWindow() {
         LhScheduleContext context = newContext();
         MachineScheduleDTO releasedMachine = buildMachine("M1", "MAT-C1");
         releasedMachine.setEstimatedEndTime(dateTime(2026, 4, 19, 6, 0, 0));
@@ -155,13 +194,13 @@ class ContinuousProductionTypeBlockRegressionTest {
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
-        assertEquals(0, context.getScheduleResultList().size());
+        assertEquals(2, context.getScheduleResultList().size());
         assertEquals(0, context.getUnscheduledResultList().size());
-        assertEquals(2, context.getNewSpecSkuList().size());
+        assertEquals(0, context.getNewSpecSkuList().size());
     }
 
     @Test
-    void scheduleTypeBlockChange_shouldStopChainingWhenLatestEndTimeMovesToNextDay() {
+    void scheduleTypeBlockChange_shouldContinueChainingWhenLatestEndTimeRemainsWithinWindow() {
         LhScheduleContext context = newContext();
         MachineScheduleDTO machine = buildMachine("M1", "MAT-C1");
         machine.setEnding(true);
@@ -184,10 +223,47 @@ class ContinuousProductionTypeBlockRegressionTest {
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
-        assertEquals(1, context.getScheduleResultList().size());
+        assertEquals(2, context.getScheduleResultList().size());
         assertEquals("MAT-T1", context.getScheduleResultList().get(0).getMaterialCode());
+        assertEquals("MAT-T2", context.getScheduleResultList().get(1).getMaterialCode());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+    }
+
+    @Test
+    void scheduleTypeBlockChange_shouldSkipCandidateWhenMaterialIsUnchanged() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine = buildMachine("K1110", "3302000750");
+        machine.setEnding(true);
+        context.getMachineScheduleMap().put("K1110", machine);
+        context.getNewSpecSkuList().add(buildNewSku(
+                "3302000750", "EMB-0750", "STRUCT-0750", "SPEC-0750", "PAT-0750", 4));
+        putMaterialInfo(context, "3302000750", "胎胚-0750", "SPEC-0750", "PAT-0750", "PAT-0750");
+        putMouldRel(context, "3302000750", "MOULD-0750");
+
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertTrue(context.getScheduleResultList().isEmpty(), "同物料不得生成换活字块排程结果");
+        assertEquals(1, context.getNewSpecSkuList().size(), "同物料候选应保留给后续正确链路处理");
+    }
+
+    @Test
+    void scheduleTypeBlockChange_shouldSkipMachineEndingAtWindowBoundary() {
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO machine = buildMachine("M1", "MAT-C1");
+        machine.setEnding(true);
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        machine.setEstimatedEndTime(shifts.get(shifts.size() - 1).getShiftEndDateTime());
+        context.getMachineScheduleMap().put("M1", machine);
+        context.getNewSpecSkuList().add(buildNewSku("MAT-T1", "EMB-1", "STRUCT-1", "SPEC-1", "PAT-1", 1));
+        putMaterialInfo(context, "MAT-C1", "胎胚-1", "SPEC-C1", "PAT-C1", "PAT-C1");
+        putMaterialInfo(context, "MAT-T1", "胎胚-1", "SPEC-1", "PAT-1", "PAT-1");
+        putMouldRel(context, "MAT-C1", "MOULD-1");
+        putMouldRel(context, "MAT-T1", "MOULD-1");
+
+        typeBlockProductionStrategy.scheduleTypeBlockChange(context);
+
+        assertTrue(context.getScheduleResultList().isEmpty(), "收尾等于窗口上界时已无换活字块后生产能力");
         assertEquals(1, context.getNewSpecSkuList().size());
-        assertEquals("MAT-T2", context.getNewSpecSkuList().get(0).getMaterialCode());
     }
 
     @Test
@@ -458,7 +534,7 @@ class ContinuousProductionTypeBlockRegressionTest {
     }
 
     @Test
-    void scheduleContinuousEnding_shouldSqueezeLastWorkDayAndLeaveNonFirstDayMachineForNewSpec() {
+    void scheduleContinuousEnding_shouldSqueezeLastWorkDayAndAllowWindowEndingMachineForTypeBlock() {
         LhScheduleContext context = newContext();
         enableSpecifyMachineRule(context);
         context.getMachineScheduleMap().put("M1", buildMachine("M1", "MAT-C1"));
@@ -484,11 +560,11 @@ class ContinuousProductionTypeBlockRegressionTest {
 
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
 
-        assertEquals(1, context.getScheduleResultList().size(),
-                "非T日收尾机台不应在S4.4提前为定点物料执行换活字块");
-        assertEquals(1, context.getNewSpecSkuList().size());
-        assertEquals("MAT-SPECIFY", context.getNewSpecSkuList().get(0).getMaterialCode(),
-                "非T日收尾机台对应的定点物料应保留给S4.5新增排产");
+        assertEquals(2, context.getScheduleResultList().size(),
+                "窗口内真实收尾且仍有产能时，应在S4.4优先承接同胎胚同模具定点物料");
+        assertEquals("MAT-SPECIFY", context.getScheduleResultList().get(1).getMaterialCode());
+        assertEquals("03", context.getScheduleResultList().get(1).getScheduleType());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
     }
 
     @Test

@@ -3,7 +3,9 @@ package com.zlt.aps.lh.util;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
+import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.junit.jupiter.api.Test;
 
@@ -11,6 +13,7 @@ import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -49,7 +52,8 @@ class ResultDowntimeSummaryUtilTest {
                 result,
                 Collections.singletonList(maintenanceWindow),
                 Arrays.asList(firstCleaningWindow, secondCleaningWindow),
-                Arrays.asList(firstShutdown, secondShutdown));
+                Arrays.asList(firstShutdown, secondShutdown),
+                buildScheduleWindowShifts());
 
         assertEquals(dateTime(2026, 5, 21, 7, 30), result.getMaintenanceStartTime());
         assertEquals(dateTime(2026, 5, 21, 10, 0), result.getMaintenanceEndTime());
@@ -79,7 +83,8 @@ class ResultDowntimeSummaryUtilTest {
         sandBlastWindow.setCleanEndTime(dateTime(2026, 5, 21, 16, 0));
 
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
-                result, Collections.emptyList(), Arrays.asList(dryIceWindow, sandBlastWindow), Collections.emptyList());
+                result, Collections.emptyList(), Arrays.asList(dryIceWindow, sandBlastWindow),
+                Collections.emptyList(), buildScheduleWindowShifts());
 
         assertEquals("干冰清洗+换模,喷砂清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, 1));
     }
@@ -99,7 +104,8 @@ class ResultDowntimeSummaryUtilTest {
         dryIceWindow.setCleanEndTime(dateTime(2026, 5, 21, 9, 0));
 
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
-                result, Collections.emptyList(), Collections.singletonList(dryIceWindow), Collections.emptyList());
+                result, Collections.emptyList(), Collections.singletonList(dryIceWindow),
+                Collections.emptyList(), buildScheduleWindowShifts());
 
         assertEquals("干冰清洗", ShiftFieldUtil.getShiftAnalysis(result, 1));
     }
@@ -126,7 +132,8 @@ class ResultDowntimeSummaryUtilTest {
                 "来源计划窗口与换模重叠时，不再把该清洗窗口纳入产能扣减");
 
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
-                result, Collections.emptyList(), Collections.singletonList(sandBlastWindow), Collections.emptyList());
+                result, Collections.emptyList(), Collections.singletonList(sandBlastWindow),
+                Collections.emptyList(), buildScheduleWindowShifts());
 
         assertEquals("喷砂清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, 1));
     }
@@ -153,7 +160,8 @@ class ResultDowntimeSummaryUtilTest {
                 result,
                 Collections.singletonList(maintenanceWindow),
                 Collections.singletonList(cleaningWindow),
-                Collections.singletonList(shutdown));
+                Collections.singletonList(shutdown),
+                buildScheduleWindowShifts());
 
         assertNull(result.getMaintenanceStartTime());
         assertNull(result.getMaintenanceEndTime());
@@ -188,5 +196,17 @@ class ResultDowntimeSummaryUtilTest {
         calendar.set(year, month - 1, day, hour, minute, 0);
         calendar.set(Calendar.MILLISECOND, 0);
         return calendar.getTime();
+    }
+
+    /**
+     * 构造与测试结果时间一致的标准排程班次。
+     *
+     * @return 2026-05-21 起始的三日排程班次
+     */
+    private List<LhShiftConfigVO> buildScheduleWindowShifts() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(dateTime(2026, 5, 21, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 5, 23, 0, 0));
+        return LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate());
     }
 }

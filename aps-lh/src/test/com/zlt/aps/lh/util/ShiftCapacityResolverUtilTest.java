@@ -62,6 +62,21 @@ class ShiftCapacityResolverUtilTest {
     }
 
     @Test
+    void plannedRepairStartShift_shouldKeepConfiguredFixedPlanQty() {
+        Date shiftStart = dateTime(2026, 7, 8, 6, 0);
+        Date shiftEnd = dateTime(2026, 7, 8, 14, 0);
+        MdmDevicePlanShut plannedRepair = buildStop(
+                "K1110", dateTime(2026, 7, 8, 8, 0), dateTime(2026, 7, 8, 16, 0));
+        plannedRepair.setMachineStopType("05");
+
+        int shiftQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                Arrays.asList(plannedRepair), null, "K1110", shiftStart, shiftEnd,
+                22, 2160, 2, 8 * 3600L, 6, 3, 2);
+
+        assertEquals(2, shiftQty, "05维修开始班次仍应按SYS0308010配置的固定量排产");
+    }
+
+    @Test
     void multipleStopsWithinSameShift_shouldAccumulateDeductionAndDelayCompletion() {
         Date shiftStart = dateTime(2026, 4, 17, 6, 0);
         Date shiftEnd = dateTime(2026, 4, 17, 14, 0);

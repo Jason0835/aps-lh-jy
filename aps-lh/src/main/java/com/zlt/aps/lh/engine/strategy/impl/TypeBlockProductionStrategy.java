@@ -172,8 +172,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             candidateMachines.add(fallbackMachine);
             machineTriggerSourceMap.put(machineCode, TYPE_BLOCK_TRIGGER_FALLBACK);
         }
-        // 换活字块仅处理最新收尾时间落在第一天 T 日的机台，其他机台保留给 S4.5 新增排产。
-        candidateMachines = filterFirstDayEndingMachines(context, candidateMachines);
+        // 换活字块只处理窗口结束前已真实收尾或释放的机台；窗口上界之外的机台保留给 S4.5 新增排产。
+        candidateMachines = filterScheduleWindowEndingMachines(context, candidateMachines);
         for (MachineScheduleDTO candidateMachine : candidateMachines) {
             String triggerSource = machineTriggerSourceMap.get(candidateMachine.getMachineCode());
             if (StringUtils.equals(TYPE_BLOCK_TRIGGER_FIRST_DAY_NO_PLAN_RELEASE, triggerSource)
@@ -315,22 +315,25 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
-     * 过滤只允许在排程窗口第一天 T 日收尾的换活字块机台。
+     * 过滤在排程窗口结束前已真实收尾或释放的换活字块机台。
+     *
+     * <p>窗口最后班次结束时间为硬上界，收尾时间等于或晚于上界时，换活字块后已无有效生产时间，
+     * 必须留给后续排程处理，避免生成越窗结果。</p>
      *
      * @param context 排程上下文
      * @param candidateMachines 原候选机台
-     * @return T 日收尾候选机台
+     * @return 窗口内仍有换活字块后生产时间的候选机台
      */
-    private List<MachineScheduleDTO> filterFirstDayEndingMachines(
+    private List<MachineScheduleDTO> filterScheduleWindowEndingMachines(
             LhScheduleContext context, List<MachineScheduleDTO> candidateMachines) {
         if (CollectionUtils.isEmpty(candidateMachines)) {
             return new ArrayList<MachineScheduleDTO>(0);
         }
-        List<MachineScheduleDTO> firstDayMachines = new ArrayList<>(candidateMachines.size());
+        List<MachineScheduleDTO> windowEndingMachines = new ArrayList<>(candidateMachines.size());
         List<String> skippedMachineSummaries = new ArrayList<>(candidateMachines.size());
         for (MachineScheduleDTO machine : candidateMachines) {
-            if (isFirstDayEndingMachine(context, machine)) {
-                firstDayMachines.add(machine);
+            if (hasTypeBlockProductionTimeInWindow(context, machine)) {
+                windowEndingMachines.add(machine);
                 continue;
             }
             skippedMachineSummaries.add(String.format("%s@%s",
@@ -338,32 +341,43 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     machine == null ? "-" : LhScheduleTimeUtil.formatDateTime(machine.getEstimatedEndTime())));
         }
         if (!CollectionUtils.isEmpty(skippedMachineSummaries)) {
-            log.info("非T日收尾机台跳过换活字块, T日: {}, 过滤前候选: {}, 跳过机台数: {}, 跳过明细: {}",
-                    LhScheduleTimeUtil.formatDate(context.getScheduleDate()), candidateMachines.size(),
+            log.info("窗口内无换活字块后生产时间的机台跳过, 窗口结束: {}, 过滤前候选: {}, 跳过机台数: {}, 跳过明细: {}",
+                    LhScheduleTimeUtil.formatDateTime(resolveScheduleWindowEndTime(context)), candidateMachines.size(),
                     skippedMachineSummaries.size(), String.join(",", skippedMachineSummaries));
         }
-        return firstDayMachines;
+        return windowEndingMachines;
     }
 
     /**
-     * 判断机台最新预计收尾时间是否落在排程窗口第一天 T 日。
+     * 判断机台最新预计收尾或释放时间之后，排程窗口内是否仍有换活字块生产时间。
      *
      * @param context 排程上下文
      * @param machine 机台
-     * @return true-T 日收尾，false-非 T 日收尾
+     * @return true-窗口内仍有生产时间，false-已到达或越过窗口上界
      */
-    private boolean isFirstDayEndingMachine(LhScheduleContext context, MachineScheduleDTO machine) {
-        if (Objects.isNull(context)
-                || Objects.isNull(context.getScheduleDate())
+    private boolean hasTypeBlockProductionTimeInWindow(LhScheduleContext context, MachineScheduleDTO machine) {
+        Date windowEndTime = resolveScheduleWindowEndTime(context);
+        if (Objects.isNull(windowEndTime)
                 || Objects.isNull(machine)
                 || Objects.isNull(machine.getEstimatedEndTime())) {
             return false;
         }
-        LocalDate firstDay = context.getScheduleDate().toInstant()
-                .atZone(ZoneId.systemDefault()).toLocalDate();
-        LocalDate endingDay = machine.getEstimatedEndTime().toInstant()
-                .atZone(ZoneId.systemDefault()).toLocalDate();
-        return firstDay.equals(endingDay);
+        return machine.getEstimatedEndTime().before(windowEndTime);
+    }
+
+    /**
+     * 解析排程窗口最后一个班次的结束时间。
+     *
+     * @param context 排程上下文
+     * @return 窗口结束时间；班次未初始化时返回 null
+     */
+    private Date resolveScheduleWindowEndTime(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return null;
+        }
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO lastShift = shifts.get(shifts.size() - 1);
+        return Objects.isNull(lastShift) ? null : lastShift.getShiftEndDateTime();
     }
 
     /**
@@ -388,11 +402,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             if (Boolean.TRUE.equals(completedMachineMap.get(machineCode))) {
                 continue;
             }
-            if (!isFirstDayEndingMachine(context, machine)) {
+            if (!hasTypeBlockProductionTimeInWindow(context, machine)) {
                 completedMachineMap.put(machineCode, true);
-                log.info("机台最新收尾时间已不在T日，停止换活字块并交由新增排产, machineCode: {}, estimatedEndTime: {}, T日: {}",
+                log.info("机台最新完工时间已到达排程窗口上界，停止连续换活字块并交由新增排产, machineCode: {}, estimatedEndTime: {}, windowEndTime: {}",
                         machineCode, LhScheduleTimeUtil.formatDateTime(machine.getEstimatedEndTime()),
-                        LhScheduleTimeUtil.formatDate(context.getScheduleDate()));
+                        LhScheduleTimeUtil.formatDateTime(resolveScheduleWindowEndTime(context)));
                 continue;
             }
             String triggerSource = machineTriggerSourceMap.get(machineCode);
@@ -689,6 +703,13 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                          SkuScheduleDTO sku,
                                          boolean writeDecisionLog) {
         if (sku == null) {
+            return false;
+        }
+        String machineMaterialCode = Objects.isNull(machine) ? null : machine.getCurrentMaterialCode();
+        if (StringUtils.isNotEmpty(machineMaterialCode)
+                && StringUtils.equals(machineMaterialCode, sku.getMaterialCode())) {
+            log.info("换活字块候选跳过, machineCode: {}, currentMaterialCode: {}, candidateMaterialCode: {}, reason: 当前物料与候选物料相同",
+                    machine.getMachineCode(), machineMaterialCode, sku.getMaterialCode());
             return false;
         }
         if (!isMachineHardMatched(context, machine, sku)) {

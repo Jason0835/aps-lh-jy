@@ -102,8 +102,6 @@ public class MachineScheduleDTO {
     private boolean hasRepairPlan;
     /** 维修计划时间 */
     private Date repairPlanTime;
-    /** 是否维修后强制换模/换活字块（05-计划性维修为下机维修，维修结束后不能直接续产，必须换模或换活字块） */
-    private boolean forceChangeoverAfterRepair;
 
     // ========== 胶囊信息 ==========
     /** 胶囊已使用次数 */
