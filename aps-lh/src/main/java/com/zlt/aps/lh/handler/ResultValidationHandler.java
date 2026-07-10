@@ -799,6 +799,17 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         for (LhScheduleResult result : changeResults) {
             RollingMachineState state = rollingStateMap.computeIfAbsent(result.getLhMachineCode(),
                     machineCode -> buildInitialState(context, machineCode));
+            String changeMouldType = determineChangeMouldType(result);
+            if (shouldSkipSameMaterialMouldChangePlan(state, result)) {
+                log.info("前后物料编码相同，跳过模具交替计划生成, 工厂: {}, 批次: {}, 机台: {}, 前物料: {}, "
+                                + "后物料: {}, 交替类型: {}, 产品状态: {}",
+                        context.getFactoryCode(), context.getBatchNo(), result.getLhMachineCode(),
+                        state.getCurrentMaterialCode(), result.getMaterialCode(), changeMouldType,
+                        result.getProductStatus());
+                // 即使不生成交替计划，也必须推进机台运行态，确保后续真实换模沿用最新物料与结束时间。
+                updateRollingState(state, result);
+                continue;
+            }
             LhMouldChangePlan plan = new LhMouldChangePlan();
             plan.setFactoryCode(context.getFactoryCode());
             plan.setLhResultBatchNo(context.getBatchNo());
@@ -826,7 +837,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setChangeTime(resolvePlanChangeTime(result, state));
 
             // 判断交替类型：普通换模、换活字块、干冰清洗、喷砂清洗在这里统一落数据字典值。
-            plan.setChangeMouldType(determineChangeMouldType(result));
+            plan.setChangeMouldType(changeMouldType);
             plans.add(plan);
 
             updateRollingState(state, result);
@@ -838,6 +849,26 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         planOrder = appendCleaningMouldChangePlans(context, plans, planOrder, changeResults);
         logOutOfWindowMouldChangePlans(context, plans);
         log.info("生成模具交替计划完成, 共 {} 条", plans.size());
+    }
+
+    /**
+     * 判断当前换模结果是否属于前后同物料的无效交替。
+     * <p>
+     * 模具交替计划只以物料编码判断前后规格是否发生变化，不比较产品状态。
+     * 前物料或后物料缺失时无法确认属于同物料，保留原有计划生成行为。
+     * </p>
+     *
+     * @param state 当前机台滚动状态
+     * @param result 本次换模排程结果
+     * @return true-前后物料编码相同且均非空，应跳过计划生成；false-保留原有生成逻辑
+     */
+    private boolean shouldSkipSameMaterialMouldChangePlan(RollingMachineState state,
+                                                          LhScheduleResult result) {
+        return Objects.nonNull(state)
+                && Objects.nonNull(result)
+                && StringUtils.isNotEmpty(state.getCurrentMaterialCode())
+                && StringUtils.isNotEmpty(result.getMaterialCode())
+                && StringUtils.equals(state.getCurrentMaterialCode(), result.getMaterialCode());
     }
 
     /**

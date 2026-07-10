@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -199,6 +200,130 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
         assertEquals("物料A", secondPlan.getBeforeMaterialDesc());
         assertEquals("MAT-B", secondPlan.getAfterMaterialCode());
         assertEquals("物料B", secondPlan.getAfterMaterialDesc());
+    }
+
+    @Test
+    void generateMouldChangePlan_shouldSkipRegularPlanWhenConsecutiveResultsShareMaterialDespiteDifferentProductStatus() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.setInitialMachineScheduleMap(new LinkedHashMap<>());
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501");
+        machine.setCurrentMaterialCode("MAT-ONLINE");
+        machine.setCurrentMaterialDesc("当前在机物料");
+        context.getMachineScheduleMap().put("K1501", machine);
+        context.getInitialMachineScheduleMap().put("K1501", machine);
+
+        LhScheduleResult formalResult = buildChangeResult("K1501", "MAT-SAME", "同物料正规示方",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 10, 0));
+        formalResult.setProductStatus("S");
+        LhScheduleResult trialResult = buildChangeResult("K1501", "MAT-SAME", "同物料试验示方",
+                dateTime(2026, 4, 17, 11, 0), dateTime(2026, 4, 17, 14, 0));
+        trialResult.setProductStatus("T");
+        context.getScheduleResultList().add(formalResult);
+        context.getScheduleResultList().add(trialResult);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(1, context.getMouldChangePlanList().size());
+        assertEquals("MAT-ONLINE", context.getMouldChangePlanList().get(0).getBeforeMaterialCode());
+        assertEquals("MAT-SAME", context.getMouldChangePlanList().get(0).getAfterMaterialCode());
+        assertEquals(MouldChangeTypeEnum.REGULAR.getCode(),
+                context.getMouldChangePlanList().get(0).getChangeMouldType());
+    }
+
+    @Test
+    void generateMouldChangePlan_shouldSkipTypeBlockPlanWhenConsecutiveResultsShareMaterialDespiteDifferentProductStatus() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.setInitialMachineScheduleMap(new LinkedHashMap<>());
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501");
+        machine.setCurrentMaterialCode("MAT-ONLINE");
+        machine.setCurrentMaterialDesc("当前在机物料");
+        context.getMachineScheduleMap().put("K1501", machine);
+        context.getInitialMachineScheduleMap().put("K1501", machine);
+
+        LhScheduleResult formalResult = buildChangeResult("K1501", "MAT-SAME", "同物料正规示方",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 10, 0));
+        formalResult.setIsTypeBlock("1");
+        formalResult.setProductStatus("S");
+        LhScheduleResult trialResult = buildChangeResult("K1501", "MAT-SAME", "同物料试验示方",
+                dateTime(2026, 4, 17, 11, 0), dateTime(2026, 4, 17, 14, 0));
+        trialResult.setIsTypeBlock("1");
+        trialResult.setProductStatus("T");
+        context.getScheduleResultList().add(formalResult);
+        context.getScheduleResultList().add(trialResult);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(1, context.getMouldChangePlanList().size());
+        assertEquals(MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                context.getMouldChangePlanList().get(0).getChangeMouldType());
+    }
+
+    @Test
+    void generateMouldChangePlan_shouldAdvanceRollingStateAfterSkippingSameMaterialResult() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.setInitialMachineScheduleMap(new LinkedHashMap<>());
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501");
+        machine.setCurrentMaterialCode("MAT-SAME");
+        machine.setCurrentMaterialDesc("当前在机物料");
+        context.getMachineScheduleMap().put("K1501", machine);
+        context.getInitialMachineScheduleMap().put("K1501", machine);
+
+        LhScheduleResult sameMaterialResult = buildChangeResult("K1501", "MAT-SAME", "同物料续作",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 10, 0));
+        LhScheduleResult nextMaterialResult = buildChangeResult("K1501", "MAT-NEXT", "下一物料",
+                dateTime(2026, 4, 17, 11, 0), dateTime(2026, 4, 17, 14, 0));
+        context.getScheduleResultList().add(sameMaterialResult);
+        context.getScheduleResultList().add(nextMaterialResult);
+        AtomicInteger changePlanSequence = (AtomicInteger) ReflectionTestUtils.getField(
+                ResultValidationHandler.class, "CHG_SEQ");
+        int sequenceBeforeGenerate = changePlanSequence.get();
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(1, context.getMouldChangePlanList().size());
+        LhMouldChangePlan plan = context.getMouldChangePlanList().get(0);
+        assertEquals(1, plan.getPlanOrder());
+        assertEquals("MAT-SAME", plan.getBeforeMaterialCode());
+        assertEquals("MAT-NEXT", plan.getAfterMaterialCode());
+        assertEquals(sameMaterialResult.getSpecEndTime(), plan.getChangeTime());
+        assertTrue(plan.getOrderNo().endsWith(String.format("%03d", (sequenceBeforeGenerate + 1) % 1000)));
+        assertEquals(sequenceBeforeGenerate + 1, changePlanSequence.get());
+    }
+
+    @Test
+    void generateMouldChangePlan_shouldKeepPlanWhenEitherMaterialCodeIsMissing() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.setInitialMachineScheduleMap(new LinkedHashMap<>());
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1501");
+        context.getMachineScheduleMap().put("K1501", machine);
+        context.getInitialMachineScheduleMap().put("K1501", machine);
+
+        LhScheduleResult beforeMaterialMissingResult = buildChangeResult("K1501", "MAT-NEW", "新上物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        LhScheduleResult afterMaterialMissingResult = buildChangeResult("K1501", null, "缺失物料编码",
+                dateTime(2026, 4, 17, 15, 0), dateTime(2026, 4, 17, 22, 0));
+        context.getScheduleResultList().add(beforeMaterialMissingResult);
+        context.getScheduleResultList().add(afterMaterialMissingResult);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(2, context.getMouldChangePlanList().size());
+        assertEquals(null, context.getMouldChangePlanList().get(0).getBeforeMaterialCode());
+        assertEquals("MAT-NEW", context.getMouldChangePlanList().get(0).getAfterMaterialCode());
+        assertEquals("MAT-NEW", context.getMouldChangePlanList().get(1).getBeforeMaterialCode());
+        assertEquals(null, context.getMouldChangePlanList().get(1).getAfterMaterialCode());
     }
 
     @Test
