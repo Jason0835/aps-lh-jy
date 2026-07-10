@@ -304,10 +304,13 @@ public class SchedulePersistenceService {
             boolean windowEndShift = currentLastPlannedShift == LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
             boolean endingMachine = currentMachineLastPlan && (beforeWindowEndShift || (windowEndShift && skuEnding));
             int lastPlannedShift = ShiftFieldUtil.applyLastPlannedShiftEndMark(result, endingMachine);
-            log.info("排程结果班次收尾标记, SKU: {}, 机台: {}, 是否多机台: {}, SKU是否收尾: {}, "
+            // 正规状态的0/1收尾逻辑必须完整执行后，再按最终产品状态覆盖量试、试验/试制有量班次。
+            ShiftFieldUtil.applyProductStatusShiftEndOverride(result);
+            log.info("排程结果班次收尾标记, SKU: {}, 产品状态: {}, 机台: {}, 是否多机台: {}, SKU是否收尾: {}, "
                             + "是否收尾机台: {}, 是否机台最后计划: {}, 是否窗口末班: {}, 最后有计划量班次: {}, {}",
-                    result.getMaterialCode(), result.getLhMachineCode(), oneZero(multiMachine), oneZero(skuEnding),
-                    oneZero(endingMachine), oneZero(currentMachineLastPlan), oneZero(windowEndShift),
+                    result.getMaterialCode(), result.getProductStatus(), result.getLhMachineCode(),
+                    oneZero(multiMachine), oneZero(skuEnding), oneZero(endingMachine),
+                    oneZero(currentMachineLastPlan), oneZero(windowEndShift),
                     lastPlannedShift > 0 ? lastPlannedShift : 0, ShiftFieldUtil.buildShiftIsEndSummary(result));
         }
     }

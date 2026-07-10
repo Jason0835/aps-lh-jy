@@ -4,6 +4,7 @@ import cn.hutool.core.bean.BeanUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.TrialStatusEnum;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 
@@ -21,7 +22,8 @@ import java.util.Objects;
  *   <li>class1～class8 是本次排程窗口内的班次槽位，不固定等同自然日早/中/晚；</li>
  *   <li>班次真实含义由 {@code LhShiftConfigVO.shiftIndex}、工作日和班次类型共同决定；</li>
  *   <li>classNPlanQty、classNStartTime、classNEndTime 必须成组维护，否则落库后会出现有量无时间或空班带时间；</li>
- *   <li>classNIsEnd 表示该结果行在该班次是否收尾，由 S4.6 按最终班次量统一回填。</li>
+ *   <li>classNIsEnd 表示该结果行的班次收尾及产品状态，由 S4.6 先按最终班次量计算正规状态的0/1，
+ *   再把量试、试验/试制有量班次分别覆盖为2、3。</li>
  * </ul>
  *
  * @author APS
@@ -32,6 +34,10 @@ public final class ShiftFieldUtil {
     private static final String SHIFT_END_NORMAL = "0";
 
     private static final String SHIFT_END_MARK = "1";
+
+    private static final String SHIFT_END_MASS_TRIAL = "2";
+
+    private static final String SHIFT_END_TRIAL = "3";
 
     private static final String ANALYSIS_SEPARATOR = ",";
 
@@ -178,7 +184,7 @@ public final class ShiftFieldUtil {
      *
      * @param result 排程结果
      * @param shiftIndex 班次索引
-     * @param isEnd 是否收尾，1-收尾，其他按0处理
+     * @param isEnd 班次标记，0-正规正常，1-正规收尾，2-量试，3-试验/试制，其他按0处理
      */
     public static void setShiftIsEnd(LhScheduleResult result, int shiftIndex, String isEnd) {
         if (Objects.isNull(result)) {
@@ -196,7 +202,7 @@ public final class ShiftFieldUtil {
      *
      * @param result 排程结果
      * @param shiftIndex 班次索引
-     * @return 1-收尾，其他返回0，越界返回 null
+     * @return 0-正规正常，1-正规收尾，2-量试，3-试验/试制，非法值返回0，越界返回 null
      */
     public static String getShiftIsEnd(LhScheduleResult result, int shiftIndex) {
         if (Objects.isNull(result) || !isValidIndex(shiftIndex)) {
@@ -236,6 +242,46 @@ public final class ShiftFieldUtil {
             setShiftIsEnd(result, lastPlannedShiftIndex, SHIFT_END_MARK);
         }
         return lastPlannedShiftIndex;
+    }
+
+    /**
+     * 按排程结果产品状态覆盖有计划量班次的最终标记。
+     * <p>该方法必须在正规状态0/1收尾计算完成后调用。量试状态T统一覆盖为2，试验/试制状态X统一覆盖为3；
+     * 正规状态S、空状态和未知状态不覆盖，继续保留已经计算出的0/1。无计划量或零量班次不参与覆盖，保持空值。</p>
+     *
+     * @param result 已完成正规状态0/1收尾计算的排程结果
+     */
+    public static void applyProductStatusShiftEndOverride(LhScheduleResult result) {
+        if (Objects.isNull(result)) {
+            return;
+        }
+        String productStatusShiftEndFlag = resolveProductStatusShiftEndFlag(result.getProductStatus());
+        if (StringUtils.isEmpty(productStatusShiftEndFlag)) {
+            return;
+        }
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer planQty = getShiftPlanQty(result, shiftIndex);
+            if (Objects.nonNull(planQty) && planQty > 0) {
+                setShiftIsEnd(result, shiftIndex, productStatusShiftEndFlag);
+            }
+        }
+    }
+
+    /**
+     * 解析产品状态对应的班次覆盖标记。
+     *
+     * @param productStatus 产品状态编码
+     * @return 量试返回2，试验/试制返回3，正规、空或未知状态返回null
+     */
+    private static String resolveProductStatusShiftEndFlag(String productStatus) {
+        TrialStatusEnum trialStatus = TrialStatusEnum.getByCode(productStatus);
+        if (TrialStatusEnum.MASS_TRIAL == trialStatus) {
+            return SHIFT_END_MASS_TRIAL;
+        }
+        if (TrialStatusEnum.TRIAL == trialStatus) {
+            return SHIFT_END_TRIAL;
+        }
+        return null;
     }
 
     /**
@@ -377,7 +423,12 @@ public final class ShiftFieldUtil {
     }
 
     private static String normalizeShiftEndFlag(String isEnd) {
-        return SHIFT_END_MARK.equals(isEnd) ? SHIFT_END_MARK : SHIFT_END_NORMAL;
+        if (SHIFT_END_MARK.equals(isEnd)
+                || SHIFT_END_MASS_TRIAL.equals(isEnd)
+                || SHIFT_END_TRIAL.equals(isEnd)) {
+            return isEnd;
+        }
+        return SHIFT_END_NORMAL;
     }
 
     /**

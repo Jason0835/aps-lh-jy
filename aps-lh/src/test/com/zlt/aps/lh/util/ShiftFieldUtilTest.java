@@ -77,6 +77,29 @@ class ShiftFieldUtilTest {
         assertNull(result.getClass4IsEnd());
     }
 
+    /**
+     * 验证班次收尾字段支持完整业务编码，并继续把非法编码归一为正常编码。
+     */
+    @Test
+    void setAndGetShiftIsEnd_shouldSupportAllBusinessFlagsAndNormalizeUnknownValue() {
+        LhScheduleResult result = new LhScheduleResult();
+
+        ShiftFieldUtil.setShiftIsEnd(result, 1, "0");
+        ShiftFieldUtil.setShiftIsEnd(result, 2, "1");
+        ShiftFieldUtil.setShiftIsEnd(result, 3, "2");
+        ShiftFieldUtil.setShiftIsEnd(result, 4, "3");
+        ShiftFieldUtil.setShiftIsEnd(result, 5, "9");
+
+        assertEquals("0", ShiftFieldUtil.getShiftIsEnd(result, 1));
+        assertEquals("1", ShiftFieldUtil.getShiftIsEnd(result, 2));
+        assertEquals("2", ShiftFieldUtil.getShiftIsEnd(result, 3));
+        assertEquals("3", ShiftFieldUtil.getShiftIsEnd(result, 4));
+        assertEquals("0", ShiftFieldUtil.getShiftIsEnd(result, 5));
+        assertEquals("class1IsEnd=0,class2IsEnd=1,class3IsEnd=2,class4IsEnd=3,"
+                        + "class5IsEnd=0,class6IsEnd=0,class7IsEnd=0,class8IsEnd=0",
+                ShiftFieldUtil.buildShiftIsEndSummary(result));
+    }
+
     @Test
     void shouldPreserveSingleResultTotalWhenScalingShiftPlanQty() {
         LhScheduleResult result = buildResult(16, 16, 16, 16, 16, 16, 16, 16);

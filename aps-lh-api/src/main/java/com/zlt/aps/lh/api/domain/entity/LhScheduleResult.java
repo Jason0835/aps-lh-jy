@@ -560,66 +560,74 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private Integer class8FinishQty;
 
     /**
-     * 1班是否收尾 0-正常 1-收尾。S4.6 按同 SKU 多机台、SKU 收尾和机台收尾规则统一回填。
+     * 1班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先按同 SKU 多机台、SKU 收尾和机台收尾规则计算0/1，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class1IsEnd")
-    @ApiModelProperty(value = "1班是否收尾 0-正常 1-收尾", name = "class1IsEnd")
+    @ApiModelProperty(value = "1班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class1IsEnd")
     @TableField(value = "CLASS1_IS_END")
     private String class1IsEnd;
 
     /**
-     * 2班是否收尾 0-正常 1-收尾
+     * 2班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先执行正规状态收尾计算，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class2IsEnd")
-    @ApiModelProperty(value = "2班是否收尾 0-正常 1-收尾", name = "class2IsEnd")
+    @ApiModelProperty(value = "2班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class2IsEnd")
     @TableField(value = "CLASS2_IS_END")
     private String class2IsEnd;
 
     /**
-     * 3班是否收尾 0-正常 1-收尾
+     * 3班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先执行正规状态收尾计算，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class3IsEnd")
-    @ApiModelProperty(value = "3班是否收尾 0-正常 1-收尾", name = "class3IsEnd")
+    @ApiModelProperty(value = "3班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class3IsEnd")
     @TableField(value = "CLASS3_IS_END")
     private String class3IsEnd;
 
     /**
-     * 4班是否收尾 0-正常 1-收尾
+     * 4班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先执行正规状态收尾计算，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class4IsEnd")
-    @ApiModelProperty(value = "4班是否收尾 0-正常 1-收尾", name = "class4IsEnd")
+    @ApiModelProperty(value = "4班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class4IsEnd")
     @TableField(value = "CLASS4_IS_END")
     private String class4IsEnd;
 
     /**
-     * 5班是否收尾 0-正常 1-收尾
+     * 5班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先执行正规状态收尾计算，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class5IsEnd")
-    @ApiModelProperty(value = "5班是否收尾 0-正常 1-收尾", name = "class5IsEnd")
+    @ApiModelProperty(value = "5班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class5IsEnd")
     @TableField(value = "CLASS5_IS_END")
     private String class5IsEnd;
 
     /**
-     * 6班是否收尾 0-正常 1-收尾
+     * 6班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先执行正规状态收尾计算，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class6IsEnd")
-    @ApiModelProperty(value = "6班是否收尾 0-正常 1-收尾", name = "class6IsEnd")
+    @ApiModelProperty(value = "6班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class6IsEnd")
     @TableField(value = "CLASS6_IS_END")
     private String class6IsEnd;
 
     /**
-     * 7班是否收尾 0-正常 1-收尾
+     * 7班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先执行正规状态收尾计算，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class7IsEnd")
-    @ApiModelProperty(value = "7班是否收尾 0-正常 1-收尾", name = "class7IsEnd")
+    @ApiModelProperty(value = "7班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class7IsEnd")
     @TableField(value = "CLASS7_IS_END")
     private String class7IsEnd;
 
     /**
-     * 8班是否收尾 0-正常 1-收尾
+     * 8班排产状态标记：0-正规正常，1-正规收尾，2-量试，3-试验/试制；无计划量班次为空。
+     * S4.6 先执行正规状态收尾计算，再按产品状态覆盖有计划量班次。
      */
     @Excel(name = "ui.data.column.lhScheduleResult.class8IsEnd")
-    @ApiModelProperty(value = "8班是否收尾 0-正常 1-收尾", name = "class8IsEnd")
+    @ApiModelProperty(value = "8班排产状态标记 0-正规正常 1-正规收尾 2-量试 3-试验/试制，无计划量班次为空", name = "class8IsEnd")
     @TableField(value = "CLASS8_IS_END")
     private String class8IsEnd;
 
