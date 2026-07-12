@@ -35,6 +35,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * 机台匹配回归：SKU存在多条模具关系时，不应把关系条数误当成待选前的用模数。
@@ -900,16 +901,41 @@ class DefaultMachineMatchStrategyRegressionTest {
                 "SPEC-A", "22.5", "MAT-SINGLE");
         context.getMachineScheduleMap().put(leftSingleControlMachine.getMachineCode(), leftSingleControlMachine);
         context.getMachineScheduleMap().put(rightSingleControlMachine.getMachineCode(), rightSingleControlMachine);
+        // 配对侧被其它SKU占用且未设置specEndTime（仍在生产中），整机候选应被拒绝
         LhScheduleResult occupiedResult = new LhScheduleResult();
         occupiedResult.setMaterialCode("MAT-SMALL-BATCH");
         occupiedResult.setLhMachineCode("K1501R");
-        occupiedResult.setSpecEndTime(dateTime(2026, 5, 9, 20, 0));
         context.getMachineAssignmentMap().put("K1501R", Collections.singletonList(occupiedResult));
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(
                 context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
 
-        assertTrue(candidates.isEmpty(), "任意一侧已被其它SKU占用时，正规SKU不得生成单控整机候选");
+        assertTrue(candidates.isEmpty(), "配对侧存在未结束的其它SKU占用时，正规SKU不得生成单控整机候选");
+    }
+
+    @Test
+    void matchMachines_shouldKeepWholeSingleControlWhenPairSideOccupiedByReleasedSku() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+
+        MachineScheduleDTO leftSingleControlMachine = machine("K1501L", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        MachineScheduleDTO rightSingleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        context.getMachineScheduleMap().put(leftSingleControlMachine.getMachineCode(), leftSingleControlMachine);
+        context.getMachineScheduleMap().put(rightSingleControlMachine.getMachineCode(), rightSingleControlMachine);
+        // 配对侧被其它SKU占用但已设置specEndTime（机台已释放），整机候选应保留
+        LhScheduleResult releasedResult = new LhScheduleResult();
+        releasedResult.setMaterialCode("MAT-SMALL-BATCH");
+        releasedResult.setLhMachineCode("K1501R");
+        releasedResult.setSpecEndTime(dateTime(2026, 5, 9, 20, 0));
+        context.getMachineAssignmentMap().put("K1501R", Collections.singletonList(releasedResult));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
+
+        assertFalse(candidates.isEmpty(), "配对侧已释放（specEndTime已设置）时，正规SKU应保留单控整机候选");
     }
 
     @Test

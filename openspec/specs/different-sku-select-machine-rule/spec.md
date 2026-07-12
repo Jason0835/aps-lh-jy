@@ -2,7 +2,9 @@
 
 ## Purpose
 
-规范硫化排程中试制、量试、小批量和正规 SKU 的候选机台选择优先级，确保 SKU 排序仍复用项目现有逻辑，只在轮到具体 SKU 后按 SKU 类型执行机台类型硬约束、单控粒度和候选排序规则。
+规范硫化排程中试制、量试、小批量和正规 SKU 的候选机台选择优先级，确保 SKU 排序仍复用项目现有逻辑，只在轮到具体 SKU 后按 SKU 类型执行机台类型硬约束和候选排序规则。
+
+单控机台的单模/双模粒度不再由 SKU 类型决定，而是由 `single-control-machine-granularity` spec 中定义的冻结规则（试验 SKU 数量边界 + 初始待排量 4 条边界）统一决定。本 spec 不再重复定义单模/双模判定规则。
 
 ## 实现说明
 
@@ -12,8 +14,9 @@
 试制首检不生成计划条数，而是固定占用中班2小时对应的生产产能。系统通过以下规则保障该口径：
 
 1. **开产模式豁免**：`ShiftProductionControlUtil.resolveEarliestSwitchStartTime` 新增接收
-   `SkuScheduleDTO` 参数的重载方法，试制 SKU（`ConstructionStageEnum.TRIAL`）直接返回请求时间，
-   不推迟到开产班次开始时间。非试制 SKU 或 `sku` 为 `null` 时退回原有逻辑。
+   `SkuScheduleDTO` 参数的重载方法，试制 SKU（`ConstructionStageEnum.TRIAL`）不受开产模式限制，
+   不推迟到开产班次开始时间。但如果请求时间不在早班时段，MUST 顺延到下一个早班开始时间，
+   确保换模在早班内完成、生产从中班开始。非试制 SKU 或 `sku` 为 `null` 时退回原有逻辑。
 
 2. **维保重叠重新评估**：当 `shouldApplyMaintenanceOverlapSwitchRule` 返回 `true` 时，
    `LhMaintenanceScheduleService.isNormalSwitchOverlapMaintenance` 进一步检查正常换模窗口
@@ -35,7 +38,8 @@
 | `TypeBlockProductionStrategy` | `resolveTypeBlockSwitchReadyTime` | 新增 `sku` 参数 |
 | `TypeBlockProductionStrategy` | `canScheduleSpecifySkuByNewSpecPath` | 传入 `specifySku` |
 | `LocalSearchMachineAllocatorStrategy` | 局部搜索换模开始时间 | 传入 `sku` |
-| `ShiftProductionControlUtil` | `resolveEarliestSwitchStartTime` 重载 | 新增 `sku` 参数 |
+| `ShiftProductionControlUtil` | `resolveEarliestSwitchStartTime` 重载 | 新增 `sku` 参数，试制 SKU 非早班顺延到次日早班 |
+| `LhScheduleTimeUtil` | `resolveNextMorningStart` | 新增方法，解析下一个早班开始时间 |
 | `LhMaintenanceScheduleService` | `isNormalSwitchOverlapMaintenance` | 新增方法 |
 | `LhMaintenanceScheduleService` | `clearMaintenanceWindows` | 新增方法 |
 | `FirstInspectionQtyUtil` | 试制首检数量与产能收口方法 | 首检数量固定为0，中班最大生产量按75%班产计算 |
@@ -68,7 +72,7 @@
 3. 小批量 SKU 优先选择单控机台，单控不可用、产能不足或不满足约束时，可以选择普通机台；
 4. 正规 SKU 优先选择普通机台，普通机台中条件少、约束少的机台优先；
 5. 正规 SKU 只有在普通机台不可用、产能不足或不满足约束时，才可以选择单控整机候选；
-6. 正规 SKU 不允许选择单控单边候选，单控候选必须由同一物理机台 L/R 两侧成组生成。
+6. 正规 SKU 冻结为双模时不允许选择单控单边候选，单控候选必须由同一物理机台 L/R 两侧成组生成；冻结为单模时允许单边候选。
 
 #### Scenario: 试制 SKU 只能选择单控中班
 
@@ -104,6 +108,15 @@
 - **THEN** 试制 SKU MUST NOT 推进普通首检数量顺序计数
 - **AND** 后续非试制 SKU MUST 继续按原有首检参数顺序计算首检数量
 
+#### Scenario: 试制 SKU 机台在中班释放时换模顺延到次日早班
+
+- **WHEN** 试制 SKU A 已在 `K1501L/R` 中班收尾释放（如 17:35）
+- **AND** 试制 SKU B 随后排产到同一机台
+- **THEN** 系统 MUST NOT 在中班立即开始 SKU B 的换模
+- **AND** 系统 MUST 将换模开始时间顺延到次日早班开始时间（如 06:00）
+- **AND** 系统 MUST 使换模在早班内完成（8小时换模，06:00-14:00）
+- **AND** 系统 MUST 使生产从次日中班开始
+
 #### Scenario: 试制 SKU 换模与维保窗口重叠时优先换模
 
 - **WHEN** 试制 SKU 进入新增排产
@@ -120,24 +133,42 @@
 - **AND** 单控机台不可用、产能不足或不满足既有资源约束
 - **THEN** 系统 MAY 选择满足条件的普通机台候选
 
-#### Scenario: 正规 SKU 优先普通机台再回落单控整机
+#### Scenario: 正规 SKU 优先普通机台再回落单控候选
 
 - **WHEN** 正规 SKU 的候选机台列表同时包含普通机台和单控物理机台
 - **AND** 单控物理机台 L/R 两侧均满足该 SKU 的既有约束
-- **THEN** 系统 MUST 将普通机台排在单控整机候选之前
-- **AND** 系统 MUST NOT 生成该正规 SKU 的单控单边候选
+- **THEN** 系统 MUST 将普通机台排在单控候选之前
+- **AND** 若正规 SKU 冻结为双模，系统 MUST NOT 生成单控单边候选
+- **AND** 若正规 SKU 冻结为单模，系统 MAY 生成单控单边候选
 
-### Requirement: 单控机台粒度必须由 SKU 类型决定
+### Requirement: 单控机台粒度由冻结模式决定，不再由 SKU 类型决定
 
-系统 MUST 按 SKU 类型决定单控机台占用粒度：
+单控机台的单模（单边粒度）和双模（L/R 整机粒度）MUST 由 `single-control-machine-granularity` spec 中定义的冻结规则统一决定，不再按 SKU 类型固定：
 
-1. 试制、量试、小批量 SKU 使用单控机台时按单边粒度处理；
-2. 正规 SKU 使用单控机台时必须按 L/R 整机粒度处理；
-3. 单边粒度 SKU 可独立使用 `K1501L`、`K1501R`、`K1502L`、`K1502R`；
-4. 整机粒度 SKU 必须同步占用、同步写入和同步释放同一物理机台的 L/R 两侧。
+1. 旧规则"试制、量试、小批量 SKU 固定使用单模"和"正规 SKU 固定使用双模"已废止；
+2. 试制 SKU 待排量大于 4 条时使用双模，小于等于 4 条时使用单模；
+3. 正规 SKU 待排量大于 4 条时使用双模，小于等于 4 条时使用单模；
+4. 不同试验 SKU 数量大于等于 3 时，全部试验 SKU 强制单模；
+5. 单模 SKU 可独立使用 `K1501L`、`K1501R`、`K1502L`、`K1502R`；
+6. 双模 SKU 必须同步占用、同步写入和同步释放同一物理机台的 L/R 两侧。
 
-#### Scenario: 正规 SKU 不得保留单边单控候选
+#### Scenario: 试制 SKU 待排量大于 4 条时使用双模
 
-- **WHEN** 正规 SKU 只有 `K1501L` 或 `K1501R` 单侧通过候选机台硬过滤
+- **WHEN** 试制 SKU 初始待排量为 10 条
+- **AND** 不同试验 SKU 数量不足 3 个
+- **THEN** 系统 MUST 冻结为双模
+- **AND** 系统 MUST 同时占用同一物理机台的 L/R 两侧排相同 SKU
+
+#### Scenario: 正规 SKU 冻结为双模时不保留单边候选
+
+- **WHEN** 正规 SKU 冻结为双模
+- **AND** 只有 `K1501L` 或 `K1501R` 单侧通过候选机台硬过滤
 - **THEN** 系统 MUST NOT 保留该单侧候选
 - **AND** 系统 MUST 继续尝试其他普通机台或满足 L/R 成组条件的单控整机候选
+
+#### Scenario: 试制 SKU 冻结为单模时可独立使用一侧
+
+- **WHEN** 试制 SKU 初始待排量为 3 条
+- **AND** 不同试验 SKU 数量不足 3 个
+- **THEN** 系统 MUST 冻结为单模
+- **AND** 系统 MUST 允许只占用 `K1501L` 或 `K1501R` 其中一侧

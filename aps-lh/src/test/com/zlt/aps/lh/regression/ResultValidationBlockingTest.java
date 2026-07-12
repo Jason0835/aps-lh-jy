@@ -7,11 +7,14 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
+import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.handler.ResultValidationHandler;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -51,6 +54,40 @@ class ResultValidationBlockingTest {
 
     @InjectMocks
     private ResultValidationHandler handler;
+
+    /**
+     * 双模SKU仅存在单侧结果时必须在保存前阻断。
+     */
+    @Test
+    void handle_throwsWhenWholeSingleControlPairResultMissing() {
+        LhScheduleContext context = wholeSingleControlContext("WHOLE-MISSING");
+        SkuScheduleDTO sku = context.getNewSpecSkuList().get(0);
+        LhScheduleResult leftResult = wholeSingleControlResult("K1501L", sku.getMaterialCode(), 5);
+        context.setScheduleResultList(Collections.singletonList(leftResult));
+        context.getScheduleResultSourceSkuMap().put(leftResult, sku);
+
+        assertThrows(ScheduleException.class, () -> handler.handle(context));
+
+        verify(schedulePersistenceService, never()).replaceScheduleAtomically(context);
+    }
+
+    /**
+     * 双模L/R班次数量不一致时必须在保存前阻断。
+     */
+    @Test
+    void handle_throwsWhenWholeSingleControlPairQtyInconsistent() {
+        LhScheduleContext context = wholeSingleControlContext("WHOLE-QTY");
+        SkuScheduleDTO sku = context.getNewSpecSkuList().get(0);
+        LhScheduleResult leftResult = wholeSingleControlResult("K1501L", sku.getMaterialCode(), 5);
+        LhScheduleResult rightResult = wholeSingleControlResult("K1501R", sku.getMaterialCode(), 4);
+        context.setScheduleResultList(Arrays.asList(leftResult, rightResult));
+        context.getScheduleResultSourceSkuMap().put(leftResult, sku);
+        context.getScheduleResultSourceSkuMap().put(rightResult, sku);
+
+        assertThrows(ScheduleException.class, () -> handler.handle(context));
+
+        verify(schedulePersistenceService, never()).replaceScheduleAtomically(context);
+    }
 
     @Test
     void handle_throwsWhenSpecEndTimeMissing() {
@@ -426,6 +463,56 @@ class ResultValidationBlockingTest {
 
         verify(schedulePersistenceService, times(1)).replaceScheduleAtomically(context);
         verify(scheduleEventPublisher, times(1)).publish(any());
+    }
+
+    /**
+     * 构建已冻结为双模的保存校验上下文。
+     *
+     * @param materialCode 物料编码
+     * @return 排程上下文
+     */
+    private static LhScheduleContext wholeSingleControlContext(String materialCode) {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC-WHOLE-VALIDATION");
+        context.setScheduleDate(date(2026, 5, 1));
+        context.setScheduleTargetDate(date(2026, 5, 2));
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode(materialCode);
+        sku.setProductStatus("S");
+        sku.setTargetScheduleQty(10);
+        context.getNewSpecSkuList().add(sku);
+        context.getSingleControlModeSnapshotMap().put(
+                LhSingleControlMachineUtil.buildSkuModeKey(sku), SingleControlMachineModeEnum.WHOLE_PAIR);
+        context.setSingleControlModeSnapshotInitialized(true);
+        return context;
+    }
+
+    /**
+     * 构建双模单侧结果。
+     *
+     * @param machineCode 机台编码
+     * @param materialCode 物料编码
+     * @param shiftQty 中班计划量
+     * @return 排程结果
+     */
+    private static LhScheduleResult wholeSingleControlResult(String machineCode,
+                                                             String materialCode,
+                                                             int shiftQty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setLhMachineCode(machineCode);
+        result.setMaterialCode(materialCode);
+        result.setScheduleType("02");
+        result.setMouldQty(1);
+        result.setIsChangeMould("1");
+        result.setIsTypeBlock("0");
+        result.setIsEnd("1");
+        result.setMouldCode("MOULD-" + machineCode);
+        result.setSpecEndTime(dateTime(2026, 5, 1, 22, 0));
+        ShiftFieldUtil.setShiftPlanQty(result, 2, shiftQty,
+                dateTime(2026, 5, 1, 14, 0), dateTime(2026, 5, 1, 22, 0));
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        return result;
     }
 
     private static java.util.Date date(int year, int month, int day) {

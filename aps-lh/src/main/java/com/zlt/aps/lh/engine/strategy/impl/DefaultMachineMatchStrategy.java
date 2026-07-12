@@ -361,10 +361,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                         "L/R两侧未同时通过硬性机台约束");
                 continue;
             }
-            if (hasOtherSkuAssignment(context, sku, leftMachineCode) || hasOtherSkuAssignment(context, sku, rightMachineCode)) {
+            // 双模候选检查：L/R任一侧存在未结束的其它SKU占用时才过滤。
+            // 如果已登记结果有specEndTime，说明机台有明确释放时间，
+            // 下游resolveMachineOccupationEndTime会取L/R两侧较晚的specEndTime作为新SKU开工基准。
+            if (hasUnfinishedOtherSkuAssignment(context, sku, leftMachineCode)
+                    || hasUnfinishedOtherSkuAssignment(context, sku, rightMachineCode)) {
                 log.info("双模SKU单控整机候选过滤, materialCode: {}, physicalMachine: {}, leftMachine: {}, rightMachine: {}, reason: {}",
                         sku.getMaterialCode(), physicalMachineCode, leftMachineCode, rightMachineCode,
-                        "L/R任一侧已被其它SKU占用");
+                        "L/R任一侧存在未结束的其它SKU占用");
                 continue;
             }
             wholeMachineCandidates.add(leftMachine);
@@ -399,6 +403,48 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 return true;
             }
             if (!StringUtils.equals(sku.getMaterialCode(), assignedResult.getMaterialCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断单控某一侧是否存在未结束的其它SKU排产结果占用。
+     * <p>双模 SKU 整机候选要求左右两侧同步使用。如果某一侧已有其它 SKU 的排产结果
+     * 但该结果已设置 specEndTime（表示机台在该时间后释放），则不视为占用——
+     * 下游 resolveMachineOccupationEndTime 会取 L/R 两侧较晚的 specEndTime
+     * 作为新 SKU 的最早开工时间。只有当结果未设置 specEndTime（异常占位或仍在生产中）
+     * 时才阻止候选。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待排 SKU
+     * @param machineCode 机台编码
+     * @return true-存在未结束的其它SKU占用；false-机台已释放或无其它SKU占用
+     */
+    private boolean hasUnfinishedOtherSkuAssignment(LhScheduleContext context, SkuScheduleDTO sku, String machineCode) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(context.getMachineAssignmentMap())) {
+            return false;
+        }
+        List<LhScheduleResult> assignedResults = context.getMachineAssignmentMap().get(machineCode);
+        if (CollectionUtils.isEmpty(assignedResults)) {
+            return false;
+        }
+        for (LhScheduleResult assignedResult : assignedResults) {
+            if (shouldIgnoreReleasedContinuousPlaceholder(context, assignedResult)) {
+                continue;
+            }
+            if (Objects.isNull(assignedResult) || StringUtils.isEmpty(assignedResult.getMaterialCode())) {
+                return true;
+            }
+            if (!StringUtils.equals(sku.getMaterialCode(), assignedResult.getMaterialCode())) {
+                // 不同SKU的结果：如果specEndTime已设置，说明机台有明确释放时间，
+                // 下游会基于该时间计算新SKU的开工时间（含换模），不视为未结束占用。
+                if (Objects.nonNull(assignedResult.getSpecEndTime())) {
+                    continue;
+                }
+                // specEndTime未设置，说明结果异常或仍在生产中，阻止候选。
                 return true;
             }
         }

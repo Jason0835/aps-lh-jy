@@ -33,6 +33,7 @@ class SingleControlModeSnapshotInitializerTest {
         context.getNewSpecSkuList().add(trialA);
         context.getNewSpecSkuList().add(trialB);
         context.getNewSpecSkuList().add(trialC);
+        putProductionLedger(context, trialA, trialB, trialC);
 
         initializer(true).initialize(context);
 
@@ -55,6 +56,7 @@ class SingleControlModeSnapshotInitializerTest {
         context.getNewSpecSkuList().add(trialA);
         context.getNewSpecSkuList().add(trialB);
         context.getNewSpecSkuList().add(constructionTrial);
+        putProductionLedger(context, trialA, trialB, constructionTrial);
 
         initializer(true).initialize(context);
 
@@ -78,6 +80,7 @@ class SingleControlModeSnapshotInitializerTest {
         context.getNewSpecSkuList().add(trialB);
         context.getNewSpecSkuList().add(trialC);
         context.getNewSpecSkuList().add(zeroTrial);
+        putProductionLedger(context, trialA, trialB, trialC, zeroTrial);
         SingleControlModeSnapshotInitializer initializer = initializer(true);
 
         initializer.initialize(context);
@@ -91,6 +94,53 @@ class SingleControlModeSnapshotInitializerTest {
         Assertions.assertEquals(SingleControlMachineModeEnum.SINGLE_SIDE,
                 context.getSingleControlModeSnapshotMap().get(
                         LhSingleControlMachineUtil.buildSkuModeKey(trialA)));
+    }
+
+    /**
+     * 满排理论目标量不得覆盖进入排产链路时已冻结的实际消费账本。
+     */
+    @Test
+    void initialize_shouldUseProductionLedgerInsteadOfTheoreticalFullProductionTarget() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO singleSideSku = sku("LEDGER-THREE", TrialStatusEnum.FORMAL.getCode(), 160);
+        SkuScheduleDTO wholePairSku = sku("LEDGER-FIVE", TrialStatusEnum.FORMAL.getCode(), 160);
+        context.getNewSpecSkuList().add(singleSideSku);
+        context.getNewSpecSkuList().add(wholePairSku);
+        context.getSkuProductionRemainingQtyMap().put(singleSideSku.getMaterialCode(), 3);
+        context.getSkuProductionRemainingQtyMap().put(wholePairSku.getMaterialCode(), 5);
+
+        initializer(true).initialize(context);
+
+        Assertions.assertEquals(3, context.getSingleControlInitialTargetQtyMap().get(
+                LhSingleControlMachineUtil.buildSkuModeKey(singleSideSku)));
+        Assertions.assertEquals(5, context.getSingleControlInitialTargetQtyMap().get(
+                LhSingleControlMachineUtil.buildSkuModeKey(wholePairSku)));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, singleSideSku));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, wholePairSku));
+    }
+
+    /**
+     * 试制SKU的strictTargetQty=true时，模式冻结仍必须使用surplusQty而非理论窗口产能。
+     * <p>满排模式下targetScheduleQty=160代表窗口理论产能，但试制SKU实际余量只有3条，
+     * 模式应按3<=4冻结为单模，不能被160>4误判为双模。</p>
+     */
+    @Test
+    void initialize_shouldUseSurplusQtyForTrialSkuEvenWhenStrictTargetQtyIsTrue() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO trialSku = sku("TRIAL-STRICT", TrialStatusEnum.TRIAL.getCode(), 160);
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setStrictTargetQty(true);
+        trialSku.setSurplusQty(3);
+        context.getNewSpecSkuList().add(trialSku);
+        // 实际消费账本被TargetScheduleQtyResolver初始化为理论窗口产能160
+        context.getSkuProductionRemainingQtyMap().put(trialSku.getMaterialCode(), 160);
+
+        initializer(true).initialize(context);
+
+        // 模式冻结必须使用surplusQty=3，而不是targetScheduleQty=160
+        Assertions.assertEquals(3, context.getSingleControlInitialTargetQtyMap().get(
+                LhSingleControlMachineUtil.buildSkuModeKey(trialSku)));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, trialSku));
     }
 
     /**
@@ -160,5 +210,18 @@ class SingleControlModeSnapshotInitializerTest {
         sku.setTargetScheduleQty(targetQty);
         sku.setPendingQty(targetQty);
         return sku;
+    }
+
+    /**
+     * 按SKU目标量构造进入排产链路时的实际消费账本。
+     *
+     * @param context 排程上下文
+     * @param skus 待写入账本的SKU
+     */
+    private void putProductionLedger(LhScheduleContext context, SkuScheduleDTO... skus) {
+        for (SkuScheduleDTO sku : skus) {
+            context.getSkuProductionRemainingQtyMap().put(
+                    sku.getMaterialCode(), sku.resolveTargetScheduleQty());
+        }
     }
 }

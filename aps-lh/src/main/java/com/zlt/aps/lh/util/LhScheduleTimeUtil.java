@@ -553,6 +553,32 @@ public final class LhScheduleTimeUtil {
     }
 
     /**
+     * 解析指定时间之后的下一个早班开始时刻。
+     * <p>试制SKU换模必须在早班完成，如果机台释放时间不在早班时段，
+     * 需要顺延到下一个早班开始时间，确保换模在早班内完成、生产从中班开始。</p>
+     *
+     * @param context  排程上下文
+     * @param baseTime 基准时间
+     * @return 下一个早班开始时间；context 或 baseTime 为 null 时返回 null
+     */
+    public static Date resolveNextMorningStart(LhScheduleContext context, Date baseTime) {
+        if (context == null || baseTime == null) {
+            return null;
+        }
+        int morningHour = getMorningStartHour(context);
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTime(baseTime);
+        int hour = calendar.get(Calendar.HOUR_OF_DAY);
+        Date morningBaseDate = clearTime(baseTime);
+        // 如果在早班开始时间之前，下一个早班是当天
+        if (hour < morningHour) {
+            return buildTime(morningBaseDate, morningHour, 0, 0);
+        }
+        // 否则下一个早班是次日
+        return buildTime(addDays(morningBaseDate, 1), morningHour, 0, 0);
+    }
+
+    /**
      * 判断指定时间是否在早班时段
      *
      * @param context 排程上下文

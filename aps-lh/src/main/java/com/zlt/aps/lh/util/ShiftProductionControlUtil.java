@@ -96,10 +96,16 @@ public final class ShiftProductionControlUtil {
     public static Date resolveEarliestSwitchStartTime(LhScheduleContext context,
                                                        Date requestedSwitchStartTime,
                                                        SkuScheduleDTO sku) {
-        // 试制SKU换模需在早班完成，开产模式不限制试制换模开始时间
+        // 试制SKU换模需在早班完成、生产从中班开始。开产模式不限制试制换模开始时间，
+        // 但如果请求时间不在早班时段，需顺延到下一个早班开始时间，
+        // 确保换模在早班内完成、生产从中班开始。
         if (Objects.nonNull(sku)
                 && Objects.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())) {
-            return requestedSwitchStartTime;
+            if (LhScheduleTimeUtil.isMorningShift(context, requestedSwitchStartTime)) {
+                return requestedSwitchStartTime;
+            }
+            // 请求时间不在早班时段，顺延到下一个早班开始时间
+            return LhScheduleTimeUtil.resolveNextMorningStart(context, requestedSwitchStartTime);
         }
         return resolveEarliestSwitchStartTime(context, requestedSwitchStartTime);
     }

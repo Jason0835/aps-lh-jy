@@ -7497,11 +7497,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (isEnding) {
             tailConcentrated = concentrateEndingTailWithinSameShift(context, sku, shifts, sameSkuResults);
         }
-        if (!isEnding && quantityPolicy != null
+        // 双模 L/R 是同一物理排产组，不能进入按单台结果释放的辅助机台链路。
+        List<LhScheduleResult> independentResults = resolveIndependentPostProcessResults(
+                context, sku, sameSkuResults);
+        if (!isEnding && independentResults.size() >= 2 && quantityPolicy != null
                 && quantityPolicy.isAllowFillStartedShift()
                 && !quantityPolicy.isStrictUpperLimit()) {
             auxiliaryReleased = releaseAuxiliaryMachineForNonEnding(
-                    context, sku, shifts, quantityPolicy, sameSkuResults);
+                    context, sku, shifts, quantityPolicy, independentResults);
         }
         staggered = adjustSameSkuMultiMachineEndingStagger(context, sku, shifts);
         if (tailConcentrated || auxiliaryReleased || staggered) {
@@ -7543,6 +7546,15 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (!StringUtils.equals(sku.getMaterialCode(), result.getMaterialCode())
                 || !StringUtils.equals(result.getLhMachineCode(), segment.getMachineCode())
                 || CollectionUtils.isEmpty(segment.getShiftCapacityMap())) {
+            return 0;
+        }
+        if (isWholeSingleControlResult(context, sku, result)) {
+            // 当前回填段只描述单侧机台产能，无法证明配对侧在相同班次仍有等量尾部产能。
+            // 双模组宁可保留剩余量给后续排程，也不能只增加一侧而破坏 L/R 同步。
+            log.info("新增SKU双模组跳过单侧尾部回填, materialCode: {}, machineCode: {}, pairMachineCode: {}, "
+                            + "remainingQty: {}, reason: 缺少配对侧等量尾部产能段",
+                    sku.getMaterialCode(), result.getLhMachineCode(),
+                    LhSingleControlMachineUtil.resolvePairMachineCode(result.getLhMachineCode()), remainingQty);
             return 0;
         }
         int currentScheduledQty = ShiftFieldUtil.resolveScheduledQty(result);
@@ -7744,11 +7756,40 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         sortedResults.sort(buildSameSkuPrimaryComparator(endingShiftIndex));
         Map<LhScheduleResult, Integer> originalShiftQtyMap = new LinkedHashMap<LhScheduleResult, Integer>(sortedResults.size());
         Map<LhScheduleResult, Integer> targetShiftQtyMap = new LinkedHashMap<LhScheduleResult, Integer>(sortedResults.size());
+        Set<String> processedWholeMachineCodeSet = new HashSet<String>(4);
         int remainingToAllocate = remainingQty;
         boolean changed = false;
         for (LhScheduleResult result : sortedResults) {
             Integer originalQty = ShiftFieldUtil.getShiftPlanQty(result, endingShiftIndex);
             if (originalQty == null || originalQty <= 0) {
+                continue;
+            }
+            if (isWholeSingleControlResult(context, sku, result)) {
+                String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                        result.getLhMachineCode());
+                if (!processedWholeMachineCodeSet.add(physicalMachineCode)) {
+                    continue;
+                }
+                LhScheduleResult pairResult = findPairResult(results, result);
+                if (Objects.isNull(pairResult)) {
+                    // 配对侧缺失交由保存前强校验阻断，不能把缺侧结果继续当普通单机归集。
+                    continue;
+                }
+                Integer pairOriginalQty = ShiftFieldUtil.getShiftPlanQty(pairResult, endingShiftIndex);
+                int resolvedPairOriginalQty = Objects.isNull(pairOriginalQty) ? 0 : Math.max(0, pairOriginalQty);
+                originalShiftQtyMap.put(result, originalQty);
+                originalShiftQtyMap.put(pairResult, resolvedPairOriginalQty);
+                int groupShiftCapacity = resolveWholeSingleControlShiftCapacity(
+                        context, result, pairResult, endingShift);
+                int groupTargetQty = Math.min(Math.max(0, groupShiftCapacity), Math.max(0, remainingToAllocate));
+                // 双模组总量必须可均分到 L/R，奇数尾量留给其他独立机台或后续滚动排程。
+                groupTargetQty -= groupTargetQty % 2;
+                int sideTargetQty = groupTargetQty / 2;
+                targetShiftQtyMap.put(result, sideTargetQty);
+                targetShiftQtyMap.put(pairResult, sideTargetQty);
+                remainingToAllocate = Math.max(0, remainingToAllocate - groupTargetQty);
+                changed = changed || sideTargetQty != originalQty
+                        || sideTargetQty != resolvedPairOriginalQty;
                 continue;
             }
             originalShiftQtyMap.put(result, originalQty);
@@ -8090,7 +8131,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 || CollectionUtils.isEmpty(context.getScheduleResultList())) {
             return false;
         }
-        List<LhScheduleResult> sameSkuEndingResults = collectSameSkuNewSpecResults(context, sku, null);
+        // 双模组不能作为普通 donor/receiver 单侧转移尾量，仅保留可独立处理的普通机台或单模结果。
+        List<LhScheduleResult> sameSkuEndingResults = resolveIndependentPostProcessResults(
+                context, sku, collectSameSkuNewSpecResults(context, sku, null));
         if (sameSkuEndingResults.size() < 2) {
             return false;
         }
@@ -8204,6 +8247,94 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             sameSkuResults.add(currentResult);
         }
         return sameSkuResults;
+    }
+
+    /**
+     * 过滤只能按物理组处理的双模 L/R 结果，供普通单机释放和错峰逻辑使用。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param results 同SKU结果
+     * @return 可按独立机台处理的结果
+     */
+    private List<LhScheduleResult> resolveIndependentPostProcessResults(LhScheduleContext context,
+                                                                         SkuScheduleDTO sku,
+                                                                         List<LhScheduleResult> results) {
+        List<LhScheduleResult> independentResults = new ArrayList<LhScheduleResult>(
+                CollectionUtils.isEmpty(results) ? 0 : results.size());
+        if (CollectionUtils.isEmpty(results)) {
+            return independentResults;
+        }
+        for (LhScheduleResult result : results) {
+            if (!isWholeSingleControlResult(context, sku, result)) {
+                independentResults.add(result);
+            }
+        }
+        return independentResults;
+    }
+
+    /**
+     * 判断结果是否属于当前SKU冻结的双模单控物理组。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param result 排程结果
+     * @return true-必须与配对侧同步处理
+     */
+    private boolean isWholeSingleControlResult(LhScheduleContext context,
+                                               SkuScheduleDTO sku,
+                                               LhScheduleResult result) {
+        return Objects.nonNull(context)
+                && Objects.nonNull(sku)
+                && Objects.nonNull(result)
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)
+                && LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
+                context, result.getLhMachineCode());
+    }
+
+    /**
+     * 从同一批结果中查找当前单控侧的配对侧结果。
+     *
+     * @param results 同SKU结果
+     * @param currentResult 当前侧结果
+     * @return 配对侧结果；不存在时返回null
+     */
+    private LhScheduleResult findPairResult(List<LhScheduleResult> results,
+                                            LhScheduleResult currentResult) {
+        if (CollectionUtils.isEmpty(results) || Objects.isNull(currentResult)) {
+            return null;
+        }
+        String pairMachineCode = LhSingleControlMachineUtil.resolvePairMachineCode(
+                currentResult.getLhMachineCode());
+        for (LhScheduleResult candidate : results) {
+            if (candidate != currentResult
+                    && Objects.nonNull(candidate)
+                    && StringUtils.equals(pairMachineCode, candidate.getLhMachineCode())
+                    && StringUtils.equals(currentResult.getMaterialCode(), candidate.getMaterialCode())) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 计算双模物理组在指定班次可承接的两侧合计量。
+     *
+     * @param context 排程上下文
+     * @param primaryResult 主侧结果
+     * @param pairResult 配对侧结果
+     * @param shift 当前班次
+     * @return L/R两侧合计可排量
+     */
+    private int resolveWholeSingleControlShiftCapacity(LhScheduleContext context,
+                                                       LhScheduleResult primaryResult,
+                                                       LhScheduleResult pairResult,
+                                                       LhShiftConfigVO shift) {
+        int primaryCapacity = Math.max(resolveResultBaseShiftCapacity(primaryResult),
+                resolveAvailableShiftQtyForEndingStagger(context, primaryResult, shift));
+        int pairCapacity = Math.max(resolveResultBaseShiftCapacity(pairResult),
+                resolveAvailableShiftQtyForEndingStagger(context, pairResult, shift));
+        return Math.max(0, primaryCapacity) + Math.max(0, pairCapacity);
     }
 
     private Comparator<LhScheduleResult> buildSameSkuPrimaryComparator(int shiftIndex) {

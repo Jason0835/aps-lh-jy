@@ -1,10 +1,13 @@
 package com.zlt.aps.lh.component;
 
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.api.enums.TrialStatusEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
+import com.zlt.aps.lh.exception.ScheduleErrorCode;
+import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -58,7 +61,10 @@ public class SingleControlModeSnapshotInitializer {
             }
             String skuKey = LhSingleControlMachineUtil.buildSkuModeKey(sku);
             uniqueSkuMap.putIfAbsent(skuKey, sku);
-            initialTargetQtyMap.putIfAbsent(skuKey, Math.max(0, sku.resolveTargetScheduleQty()));
+            // 满排模式下 targetScheduleQty 可能是窗口理论产能，并不等于本轮真实可消费量。
+            // 单控模式必须冻结 SKU 进入排产链路时已经初始化的实际消费账本；只有严格目标量、
+            // 停产收尾这类明确业务目标才继续采用 targetScheduleQty，避免 3 条正规 SKU 被理论产能误判为双模。
+            initialTargetQtyMap.putIfAbsent(skuKey, resolveInitialTargetQty(context, sku));
         }
 
         Set<String> eligibleTrialSkuKeySet = new LinkedHashSet<String>(4);
@@ -110,5 +116,39 @@ public class SingleControlModeSnapshotInitializer {
             result.addAll(context.getNewSpecSkuList());
         }
         return result;
+    }
+
+    /**
+     * 解析单控模式冻结使用的本轮初始待排量。
+     * <p>优先使用进入排产链路时的实际硫化余量（surplusQty），不使用代表窗口理论产能的
+     * targetScheduleQty。试制 SKU 的 strictTargetQty=true 会使实际消费账本被初始化为
+     * targetScheduleQty（理论窗口产能），但模式冻结只关心实际待排量，不关心满排理论产能。
+     * 只有在 surplusQty 为 0 的特殊场景（停产收尾、胎胚库存收尾等）才回退到严格目标量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待冻结SKU
+     * @return 实际硫化余量或特殊场景下的严格业务目标量
+     */
+    private int resolveInitialTargetQty(LhScheduleContext context, SkuScheduleDTO sku) {
+        // 优先使用实际硫化余量，避免满排模式下理论窗口产能覆盖实际待排量
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        if (surplusQty > 0) {
+            return surplusQty;
+        }
+        // surplusQty 为 0 时，可能是停产收尾或胎胚库存收尾等特殊场景，
+        // 此时 targetScheduleQty 已经被上游设置为明确业务目标量，可以使用。
+        if (sku.isStrictTargetQty() || context.isStopProductionMode()) {
+            return Math.max(0, sku.resolveTargetScheduleQty());
+        }
+        Integer productionRemainingQty = context.getSkuProductionRemainingQtyMap().get(sku.getMaterialCode());
+        if (Objects.nonNull(productionRemainingQty)) {
+            return Math.max(0, productionRemainingQty);
+        }
+        // S4.3 正式主链必须在快照初始化前建立实际消费账本。账本缺失时无法可靠判断模式，
+        // 必须阻断本批排程，禁止退回理论目标量或0条继续排产，否则仍可能生成错误的单模/双模结果。
+        throw new ScheduleException(ScheduleStepEnum.S4_3_ADJUST_AND_GATHER,
+                ScheduleErrorCode.SURPLUS_CALCULATION_ERROR,
+                context.getFactoryCode(), context.getBatchNo(),
+                "单控模式冻结失败，SKU实际消费账本缺失，materialCode=" + sku.getMaterialCode());
     }
 }
