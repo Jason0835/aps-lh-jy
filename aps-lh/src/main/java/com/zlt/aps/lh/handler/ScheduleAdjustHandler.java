@@ -3,6 +3,7 @@ package com.zlt.aps.lh.handler;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.SingleControlModeSnapshotInitializer;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
@@ -106,6 +107,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private IEndingJudgmentStrategy endingJudgmentStrategy;
     @Resource
     private TargetScheduleQtyResolver targetScheduleQtyResolver;
+    @Resource
+    private SingleControlModeSnapshotInitializer singleControlModeSnapshotInitializer;
 
     @Override
     protected void doHandle(LhScheduleContext context) {
@@ -129,6 +132,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // S4.3.4 区分续作SKU和新增SKU
         classifyContinuousAndNewSkus(context);
+
+        // 单控模式必须在续作、新增和换活字块开始前一次性冻结，后续待排量递减不得改变本轮模式。
+        singleControlModeSnapshotInitializer.initialize(context);
 
         log.info("排程调整与SKU归集完成, 续作SKU: {}个, 新增SKU: {}个",
                 context.getContinuousSkuList().size(), context.getNewSpecSkuList().size());
@@ -838,7 +844,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // 月计划模具变化信息只在 S4.5 窗口无日计划历史欠产补排时用于判断计划使用模数。
         dto.setMouldChangeInfo(targetMonthPlan.getMouldChangeInfo());
         dto.setTrial(isTrialStage(targetMonthPlan.getConstructionStage()));
-        // 正规SKU按月计划表原始 totalQty 判定小批量，供单控机台按单边粒度处理；
+        // 正规SKU仍按月计划表原始 totalQty 标记小批量，仅供分类和排序；不得再决定单控单模/双模。
         // 这里不能再用运行态余量，否则大计划 SKU 会在后期余量变小后被误判成小批量。
         int monthPlanTotalQty = safeInt(targetMonthPlan.getTotalQty());
         boolean isSmallBatch = !dto.isTrial()

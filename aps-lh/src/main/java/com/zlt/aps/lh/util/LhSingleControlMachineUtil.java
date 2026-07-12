@@ -4,7 +4,8 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
-import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
@@ -14,9 +15,9 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * 单模机台工具类。
- * <p>机台编码以 L/R 结尾的视为单模拆分机台（左右侧单独控制），
- * 用于校验侧别兼容性及试制SKU优先策略。</p>
+ * 单控机台工具类。
+ * <p>机台编码以 L/R 结尾表示同一物理机台的左右侧运行单元；SKU究竟按单边还是L/R整组使用，
+ * 统一读取本次排程开始时生成的模式快照。</p>
  */
 public final class LhSingleControlMachineUtil {
 
@@ -24,7 +25,6 @@ public final class LhSingleControlMachineUtil {
     private static final String SINGLE_CONTROL_MACHINE_SEPARATOR_REGEX = "[,，]";
     /** 硫化运行态机台编码前缀 */
     private static final String LH_MACHINE_CODE_PREFIX = "K";
-
     private LhSingleControlMachineUtil() {
     }
 
@@ -77,7 +77,7 @@ public final class LhSingleControlMachineUtil {
     /**
      * 解析单控运行态机台所属的物理机台编码。
      * <p>业务示例：K1501L、K1501R 都归属物理机台 K1501；非 L/R 拆分机台返回自身。
-     * 正规 SKU 使用单控机台时必须以该物理机台为整机粒度判断左右侧是否齐备。</p>
+     * 双模 SKU 使用单控机台时必须以该物理机台为整机粒度判断左右侧是否齐备。</p>
      *
      * @param machineCode 运行态机台编码
      * @return 物理机台编码；入参为空时返回 null
@@ -113,7 +113,7 @@ public final class LhSingleControlMachineUtil {
 
     /**
      * 解析单控物理机台左侧运行态编码。
-     * <p>正规 SKU 整机候选统一使用左侧作为代表机台，避免候选集合中 L/R 两边重复参与排序和排产。</p>
+     * <p>双模 SKU 整机候选统一使用左侧作为代表机台，避免候选集合中 L/R 两边重复参与排序和排产。</p>
      *
      * @param machineCode 任一侧运行态机台编码
      * @return 左侧运行态编码；无法解析物理机台时返回 null
@@ -136,7 +136,7 @@ public final class LhSingleControlMachineUtil {
 
     /**
      * 从上下文运行态机台中查找配对侧。
-     * <p>正规 SKU 需要左右侧同时存在并通过既有硬约束；缺少配对侧时不能把单边当作可用整机。</p>
+     * <p>双模 SKU 需要左右侧同时存在并通过既有硬约束；缺少配对侧时不能把单边当作可用整机。</p>
      *
      * @param context 排程上下文
      * @param machineCode 当前侧机台编码
@@ -161,31 +161,61 @@ public final class LhSingleControlMachineUtil {
     }
 
     /**
-     * 判断 SKU 是否按单控单边粒度使用机台。
-     * <p>试制、量试和小批量 SKU 可以独立占用 K1501L/K1501R 等单侧机台，
-     * 左右侧允许排不同 SKU，也允许排相同 SKU。</p>
+     * 构建 SKU 单控模式快照键。
+     * <p>产品状态必须参与键值，避免同一物料的试验、量试、正规月计划错误共用模式。</p>
      *
+     * @param sku SKU排程DTO
+     * @return materialCode_productStatus；SKU为空时返回空字符串
+     */
+    public static String buildSkuModeKey(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return StringUtils.EMPTY;
+        }
+        return MonthPlanDateResolver.buildMaterialStatusKey(sku.getMaterialCode(), sku.getProductStatus());
+    }
+
+    /**
+     * 读取本次排程已冻结的单控机台使用模式。
+     * <p>模式只能由 S4.3 快照初始化器写入。缺少快照表示排程主链不完整，必须立即失败，
+     * 禁止按当前剩余量或旧 SKU 类型规则动态兜底。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return 已冻结的单控模式
+     */
+    public static SingleControlMachineModeEnum resolveFrozenMode(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)) {
+            throw new IllegalStateException("单控机台模式解析失败：排程上下文或SKU为空");
+        }
+        String skuKey = buildSkuModeKey(sku);
+        SingleControlMachineModeEnum mode = context.getSingleControlModeSnapshotMap().get(skuKey);
+        if (Objects.isNull(mode)) {
+            throw new IllegalStateException("单控机台模式快照缺失，materialCode=" + sku.getMaterialCode()
+                    + ", productStatus=" + sku.getProductStatus());
+        }
+        return mode;
+    }
+
+    /**
+     * 判断 SKU 是否按单控单边粒度使用机台。
+     *
+     * @param context 排程上下文
      * @param sku SKU排程DTO
      * @return true-按单边粒度排产
      */
-    public static boolean isSingleSideGranularitySku(SkuScheduleDTO sku) {
-        if (Objects.isNull(sku)) {
-            return false;
-        }
-        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
-                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())
-                || sku.isSmallBatchValidation();
+    public static boolean isSingleSideGranularitySku(LhScheduleContext context, SkuScheduleDTO sku) {
+        return SingleControlMachineModeEnum.SINGLE_SIDE == resolveFrozenMode(context, sku);
     }
 
     /**
      * 判断 SKU 是否按单控整机粒度使用机台。
-     * <p>非试制、非量试、非小批量的正规 SKU 使用单控机台时必须同时占用 L/R 两边。</p>
      *
+     * @param context 排程上下文
      * @param sku SKU排程DTO
-     * @return true-按整机粒度排产
+     * @return true-L/R两侧按整机粒度同步排产
      */
-    public static boolean isWholeMachineGranularitySku(SkuScheduleDTO sku) {
-        return Objects.nonNull(sku) && !isSingleSideGranularitySku(sku);
+    public static boolean isWholeMachineGranularitySku(LhScheduleContext context, SkuScheduleDTO sku) {
+        return SingleControlMachineModeEnum.WHOLE_PAIR == resolveFrozenMode(context, sku);
     }
 
     /**

@@ -119,7 +119,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private static final int EMBRYO_ON_MACHINE_ENDING_FLAG = 0;
     private static final LocalTime ENDING_FILL_THRESHOLD_TIME = LocalTime.of(20, 0);
     private static final String WHOLE_SINGLE_CONTROL_CONTINUATION_UNSCHEDULED_REASON =
-            "正规SKU单控机台L/R整机续作条件不满足，禁止单边续作";
+            "双模SKU单控机台L/R整机续作条件不满足，禁止单边续作";
 
     @Resource
     private OrderNoGenerator orderNoGenerator;
@@ -174,10 +174,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             if (shouldSkipInvalidWholeSingleControlContinuation(context, sku, machineCode)) {
                 appendInvalidWholeSingleControlContinuationUnscheduledResult(context, sku, machineCode);
-                PriorityTraceLogHelper.appendProcessLog(context, "正规SKU单控续作阻断",
-                        "正规SKU单控续作必须L/R两侧同物料同步续作，当前机台不满足整机续作条件, materialCode: "
+                PriorityTraceLogHelper.appendProcessLog(context, "双模SKU单控续作阻断",
+                        "双模SKU单控续作必须L/R两侧同物料同步续作，当前机台不满足整机续作条件, materialCode: "
                                 + sku.getMaterialCode() + ", machineCode: " + machineCode);
-                log.warn("正规SKU单控续作整机条件不满足，跳过单边续作, materialCode: {}, machineCode: {}",
+                log.warn("双模SKU单控续作整机条件不满足，跳过单边续作, materialCode: {}, machineCode: {}",
                         sku.getMaterialCode(), machineCode);
                 continue;
             }
@@ -1742,8 +1742,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 判断正规 SKU 单控续作是否因缺少配对侧而必须跳过。
-     * <p>正规 SKU 在 K1501L/R、K1502L/R 上续作时，必须左右两侧同物料同步续作；
+     * 判断冻结为双模的 SKU 单控续作是否因缺少配对侧而必须跳过。
+     * <p>双模 SKU 在 K1501L/R、K1502L/R 上续作时，必须左右两侧同物料同步续作；
      * 如果当前续作队列中不存在配对侧，或配对侧物料不同，继续生成单边结果会破坏整机占用规则。</p>
      *
      * @param context 排程上下文
@@ -1755,7 +1755,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                                    SkuScheduleDTO sku,
                                                                    String machineCode) {
         if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(machineCode)
-                || !LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)
+                || !LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)
                 || !LhSingleControlMachineUtil.isConfiguredSingleControlMachine(context, machineCode)) {
             return false;
         }
@@ -1769,7 +1769,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             if (StringUtils.equals(pairMachineCode, candidate.getContinuousMachineCode())
                     && StringUtils.equals(sku.getMaterialCode(), candidate.getMaterialCode())
-                    && LhSingleControlMachineUtil.isWholeMachineGranularitySku(candidate)) {
+                    && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, candidate)) {
                 return false;
             }
         }
@@ -1777,7 +1777,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 写入正规 SKU 单控整机续作条件不满足的未排结果。
+     * 写入双模 SKU 单控整机续作条件不满足的未排结果。
      *
      * @param context 排程上下文
      * @param sku 续作SKU
@@ -1811,7 +1811,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         unscheduled.setDataSource(AUTO_DATA_SOURCE);
         unscheduled.setIsDelete(0);
         context.getUnscheduledResultList().add(unscheduled);
-        log.info("正规SKU单控整机续作未排, materialCode: {}, machineCode: {}, reason: {}",
+        log.info("双模SKU单控整机续作未排, materialCode: {}, machineCode: {}, reason: {}",
                 sku.getMaterialCode(), machineCode, WHOLE_SINGLE_CONTROL_CONTINUATION_UNSCHEDULED_REASON);
     }
 
@@ -2242,9 +2242,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
             return false;
         }
-        // 正规SKU单控整机降模必须L/R同步,不进入单机降模链路(单机降模只保留一侧会破坏整机占用)
+        // 双模SKU单控整机降模必须L/R同步，不进入只保留一侧的单机降模链路。
         if (!resolveWholeSingleControlMachineCodes(context, skuResults).isEmpty()) {
-            log.info("正规SKU单控整机跳过单机降模, materialCode: {}, 机台: {}, 原因: L/R必须同步保留或释放",
+            log.info("双模SKU单控整机跳过单机降模, materialCode: {}, 机台: {}, 原因: L/R必须同步保留或释放",
                     sourceSku.getMaterialCode(), joinMachineCodes(skuResults));
             return false;
         }
@@ -2714,7 +2714,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                                        int demandQty) {
         List<LhScheduleResult> sortedResults = new ArrayList<LhScheduleResult>(skuResults);
         sortedResults.sort(buildContinuationKeepComparator(context));
-        // 正规SKU单控整机降模时L/R必须同步保留,不允许只保留单边;先识别整机机台编码并构建机台->结果索引
+        // 冻结为双模的SKU在降模时必须同步保留L/R，先识别物理机台并构建机台到结果的索引
         Set<String> wholeSingleControlMachineCodes = resolveWholeSingleControlMachineCodes(context, sortedResults);
         Map<String, LhScheduleResult> machineCodeResultMap = buildMachineCodeResultMap(sortedResults);
         List<LhScheduleResult> keptResults = new ArrayList<LhScheduleResult>(sortedResults.size());
@@ -2728,7 +2728,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             keptResults.add(result);
             accumulatedCapacity += Math.max(0, capacityMap.getOrDefault(result, 0));
-            // 正规SKU单控整机降模:配对侧必须同步保留,避免只保留L或R单边
+            // 双模降模必须把配对侧作为同一组保留，避免只保留L或R单边
             LhScheduleResult pairResult = resolvePairSingleControlResultInList(
                     result, wholeSingleControlMachineCodes, machineCodeResultMap);
             if (pairResult != null && !keptResults.contains(pairResult)) {
@@ -2778,7 +2778,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     sourceSku.getMaterialCode(), productionDate, joinMachineCodes(sortedResults));
             return new ArrayList<LhScheduleResult>(0);
         }
-        // 正规SKU单控整机降模时L/R必须同步保留,先识别整机机台编码并构建机台->结果索引
+        // 冻结为双模的SKU在追补模拟中仍按L/R整组保留，避免模拟结果改变本次排程模式
         Set<String> wholeSingleControlMachineCodes = resolveWholeSingleControlMachineCodes(context, sortedResults);
         Map<String, LhScheduleResult> machineCodeResultMap = buildMachineCodeResultMap(sortedResults);
         List<LhScheduleResult> keptResults = new ArrayList<LhScheduleResult>(sortedResults.size());
@@ -2788,7 +2788,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 continue;
             }
             keptResults.add(result);
-            // 正规SKU单控整机降模:配对侧必须同步保留,避免只保留L或R单边
+            // 双模降模必须把配对侧作为同一组保留，避免只保留L或R单边
             LhScheduleResult pairResult = resolvePairSingleControlResultInList(
                     result, wholeSingleControlMachineCodes, machineCodeResultMap);
             if (pairResult != null && !keptResults.contains(pairResult)) {
@@ -3069,13 +3069,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 识别续作结果列表中属于正规SKU单控整机的机台编码集合。
-     * <p>正规SKU单控整机降模时L/R必须同步保留或释放;该方法提前扫描结果列表,
-     * 通过结果机台编码和sourceSku判断哪些机台属于正规SKU单控整机,供后续降模绑定使用。</p>
+     * 识别续作结果列表中属于双模SKU单控整机的机台编码集合。
+     * <p>双模SKU降模时L/R必须同步保留或释放；该方法按结果来源SKU的冻结模式识别整机组。</p>
      *
      * @param context 排程上下文
      * @param skuResults 同组续作结果列表
-     * @return 正规SKU单控整机机台编码集合
+     * @return 双模SKU单控整机机台编码集合
      */
     private Set<String> resolveWholeSingleControlMachineCodes(LhScheduleContext context,
                                                               List<LhScheduleResult> skuResults) {
@@ -3092,7 +3091,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             // 通过结果反查sourceSku,判断是否为正规SKU整机粒度
             SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
-            if (sourceSku != null && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sourceSku)) {
+            if (sourceSku != null && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sourceSku)) {
                 machineCodes.add(result.getLhMachineCode());
             }
         }
@@ -3120,12 +3119,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 在续作结果列表中查找正规SKU单控机台的配对侧结果。
-     * <p>只有当前机台属于正规SKU单控整机时,才查找同一列表中物料相同的配对侧结果;
-     * 试制、量试、小批量返回null,保持单边独立降模。</p>
+     * 在续作结果列表中查找双模SKU单控机台的配对侧结果。
+     * <p>只有来源SKU冻结为双模时才绑定配对侧；冻结为单模的SKU保持单边独立降模。</p>
      *
      * @param result 当前结果
-     * @param wholeSingleControlMachineCodes 正规SKU单控整机机台编码集合
+     * @param wholeSingleControlMachineCodes 双模SKU单控整机机台编码集合
      * @param machineCodeResultMap 机台编码->结果索引
      * @return 配对侧结果;不存在或不适用时返回null
      */
@@ -8176,14 +8174,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                             + "effect: S4.4换活字块可识别，S4.5新增选机仅降优先级",
                     materialCode, machineCode, reason);
         }
-        // 正规SKU单控整机释放时,配对侧必须同步释放,不允许只释放单边给其他SKU使用
+        // 双模SKU释放时配对侧必须同步释放，不允许只释放单边给其他SKU使用。
         registerWholeSingleControlPairReleaseIfNeeded(context, machineCode, materialCode, reason);
     }
 
     /**
-     * 正规SKU单控整机释放时同步释放配对侧。
-     * <p>试制、量试、小批量按单边独立释放;只有正规SKU在配置生效的单控机台上释放时,
-     * 才查找配对侧并同步登记释放,确保整机L/R同进同出。</p>
+     * 双模SKU单控整机释放时同步释放配对侧。
+     * <p>是否同步只读取冻结模式；单模独立释放，双模确保L/R同进同出。</p>
      *
      * @param context 排程上下文
      * @param machineCode 当前释放机台编码
@@ -8210,19 +8207,18 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         boolean pairAdded = context.getReleasedContinuousMachineCodeSet().add(pairMachineCode);
         if (pairAdded) {
-            log.info("正规SKU单控整机同步释放配对侧, materialCode: {}, machineCode: {}, pairMachineCode: {}, reason: {}",
+            log.info("双模SKU单控整机同步释放配对侧, materialCode: {}, machineCode: {}, pairMachineCode: {}, reason: {}",
                     materialCode, machineCode, pairMachineCode, reason);
         }
     }
 
     /**
-     * 判断指定物料是否为正规SKU(整机粒度)。
-     * <p>从续作SKU列表和新增SKU列表中查找物料编码匹配的SKU,判断其是否为整机粒度。
-     * 试制、量试、小批量返回false,正规SKU返回true。</p>
+     * 判断指定物料是否冻结为双模整机粒度。
+     * <p>从续作和新增列表查找对应SKU并读取本次排程快照，不再按SKU类型判断。</p>
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
-     * @return true-正规SKU整机粒度
+     * @return true-双模整机粒度
      */
     private boolean isMaterialWholeSingleControlSku(LhScheduleContext context, String materialCode) {
         if (context == null || StringUtils.isEmpty(materialCode)) {
@@ -8231,7 +8227,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (!CollectionUtils.isEmpty(context.getContinuousSkuList())) {
             for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
                 if (sku != null && StringUtils.equals(materialCode, sku.getMaterialCode())
-                        && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)) {
+                        && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
                     return true;
                 }
             }
@@ -8239,7 +8235,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (!CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
             for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
                 if (sku != null && StringUtils.equals(materialCode, sku.getMaterialCode())
-                        && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)) {
+                        && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
                     return true;
                 }
             }

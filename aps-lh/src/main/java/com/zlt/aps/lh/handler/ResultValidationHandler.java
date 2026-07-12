@@ -205,9 +205,8 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 校验正规 SKU 单控整机结果完整性。
-     * <p>试制、量试、小批量 SKU 允许单边使用单控机台；正规 SKU 只要落到配置生效的 L/R 单控机台，
-     * 就必须同时存在配对侧结果，且物料、生产开始时间、生产结束时间、各班次计划量完全一致。</p>
+     * 校验冻结为双模的 SKU 单控整机结果完整性。
+     * <p>是否执行整机校验只读取本次排程冻结模式，不再按试制、量试、小批量或正规类型判断。</p>
      *
      * @param context 排程上下文
      */
@@ -221,16 +220,16 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             }
             LhScheduleResult pairResult = findPairSingleControlResult(context, result);
             if (Objects.isNull(pairResult)) {
-                throwValidationFailure(context, result, "正规SKU使用单控机台必须同时生成L/R两侧排产结果");
+                throwValidationFailure(context, result, "双模SKU使用单控机台必须同时生成L/R两侧排产结果");
             }
             if (!isWholeSingleControlPairResultConsistent(result, pairResult)) {
-                throwValidationFailure(context, result, "正规SKU单控机台L/R两侧物料、时间或班次计划量不一致");
+                throwValidationFailure(context, result, "双模SKU单控机台L/R两侧物料、时间、状态或班次计划量不一致");
             }
         }
     }
 
     /**
-     * 判断当前结果是否需要执行正规 SKU 单控整机校验。
+     * 判断当前结果是否需要执行冻结双模的单控整机校验。
      *
      * @param context 排程上下文
      * @param result 排程结果
@@ -244,11 +243,11 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         }
         SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
         return Objects.nonNull(sourceSku)
-                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(sourceSku);
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sourceSku);
     }
 
     /**
-     * 查找正规 SKU 单控结果的配对侧结果。
+     * 查找双模 SKU 单控结果的配对侧结果。
      *
      * @param context 排程上下文
      * @param result 当前结果
@@ -286,6 +285,11 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         }
         if (!Objects.equals(resolveProductionStartTime(leftResult), resolveProductionStartTime(rightResult))
                 || !Objects.equals(leftResult.getSpecEndTime(), rightResult.getSpecEndTime())) {
+            return false;
+        }
+        if (!StringUtils.equals(leftResult.getIsChangeMould(), rightResult.getIsChangeMould())
+                || !StringUtils.equals(leftResult.getIsTypeBlock(), rightResult.getIsTypeBlock())
+                || !StringUtils.equals(leftResult.getIsEnd(), rightResult.getIsEnd())) {
             return false;
         }
         for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {

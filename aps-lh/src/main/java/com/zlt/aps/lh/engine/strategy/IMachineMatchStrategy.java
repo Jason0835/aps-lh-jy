@@ -32,6 +32,35 @@ public interface IMachineMatchStrategy {
     List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku);
 
     /**
+     * 判断 SKU 在单控模式冻结时是否至少存在一个满足静态硬约束的单控侧。
+     * <p>该方法只复用机台、模具、胶囊、特殊物料和窗口准入，不应用尚未冻结的单模/双模规则，
+     * 也不受本轮后续 SKU 动态占用顺序影响。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待冻结模式的SKU
+     * @return true-至少存在一个可参与排产的单控侧
+     */
+    default boolean hasEligibleSingleControlSide(LhScheduleContext context, SkuScheduleDTO sku) {
+        // 测试替身和非默认策略未参与正式 S4.3 冻结时明确返回不可参与；生产默认策略必须覆盖该方法。
+        return false;
+    }
+
+    /**
+     * 判断指定单控侧是否满足 SKU 的静态硬约束。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machineCode 指定单控侧机台编码
+     * @return true-满足静态硬约束
+     */
+    default boolean isEligibleSingleControlSide(LhScheduleContext context,
+                                                SkuScheduleDTO sku,
+                                                String machineCode) {
+        // 非默认策略必须显式实现，避免无依据放宽双模配对侧约束。
+        return false;
+    }
+
+    /**
      * 从候选机台中选择最优机台
      *
      * @param context 排程上下文

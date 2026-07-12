@@ -9,10 +9,12 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.domain.entity.LhSpecifyMachine;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.JobTypeEnum;
+import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
@@ -429,6 +431,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302001575", "SPEC-A", "22.5");
         sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -452,6 +455,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302002637", "SPEC-A", "19.5");
         sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -478,6 +482,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
         sku.setEmbryoCode("EMB-A");
         sku.setMainMaterialDesc("胎胚-A");
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -501,6 +506,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302001575", "SPEC-A", "19.5");
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -523,6 +529,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302001575", "SPEC-A", "19.5");
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -564,6 +571,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302002637", "SPEC-A", "19.5");
         sku.setConstructionStage("02");
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -585,6 +593,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302002637", "SPEC-A", "19.5");
         sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -625,6 +634,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302002638", "SPEC-A", "19.5");
         sku.setSmallBatchValidation(true);
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -645,6 +655,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302002637", "SPEC-A", "19.5");
         sku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -665,11 +676,68 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302002638", "SPEC-A", "19.5");
         sku.setSmallBatchValidation(true);
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
         assertEquals(1, candidates.size(), "小批量SKU全局排序在前时，不应因后续量试待排让出单控机台");
         assertEquals("K1501R", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldKeepSingleSideCandidateForFormalSkuWhenInitialTargetIsFour() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+        MachineScheduleDTO singleControlMachine = machine("K1501R", dateTime(2026, 5, 9, 8, 0),
+                "SPEC-A", "22.5", "MAT-SINGLE");
+        context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
+        SkuScheduleDTO formalSku = singleControlModeSku("FORMAL-FOUR", "SPEC-A", "22.5", 4);
+        formalSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        freezeSingleControlMode(context, formalSku, SingleControlMachineModeEnum.SINGLE_SIDE);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, formalSku);
+
+        assertEquals(1, candidates.size(), "正规SKU初始目标量4条时必须允许单边使用单控机台");
+        assertEquals("K1501R", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldRequirePairedCandidateForTrialConstructionSkuWhenInitialTargetIsFive() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+        context.getMachineScheduleMap().put("K1501L", machine(
+                "K1501L", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-SINGLE"));
+        context.getMachineScheduleMap().put("K1501R", machine(
+                "K1501R", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-SINGLE"));
+        SkuScheduleDTO trialSku = singleControlModeSku("TRIAL-FIVE", "SPEC-A", "22.5", 5);
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        freezeSingleControlMode(context, trialSku, SingleControlMachineModeEnum.WHOLE_PAIR);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, trialSku);
+
+        assertEquals(1, candidates.size(), "试制SKU初始目标量5条时必须按双模收敛L/R候选");
+        assertEquals("K1501L", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldKeepFrozenWholePairAfterRemainingTargetDropsToFour() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+        context.getMachineScheduleMap().put("K1501L", machine(
+                "K1501L", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-SINGLE"));
+        context.getMachineScheduleMap().put("K1501R", machine(
+                "K1501R", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-SINGLE"));
+        SkuScheduleDTO sku = singleControlModeSku("FROZEN-TEN", "SPEC-A", "22.5", 10);
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.WHOLE_PAIR);
+        sku.setTargetScheduleQty(4);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
+
+        assertEquals(1, candidates.size(), "初始10条冻结双模后，剩余4条不得重新切换为单模");
+        assertEquals("K1501L", candidates.get(0).getMachineCode());
     }
 
     @Test
@@ -689,7 +757,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.getMachineScheduleMap().put(rightSingleControlMachine.getMachineCode(), rightSingleControlMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
 
-        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001418", "SPEC-A", "22.5"));
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001418", "SPEC-A", "22.5", 5));
 
         assertEquals(2, candidates.size(), "正规SKU只能保留成组单控整机候选作为普通机台后的回落");
         assertEquals("K1401", candidates.get(0).getMachineCode(),
@@ -712,7 +781,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
         context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
 
-        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
 
         assertEquals(1, candidates.size(), "正规SKU不得保留缺少配对侧的单控单边候选");
         assertEquals("K1111", candidates.get(0).getMachineCode());
@@ -732,7 +802,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.getMachineScheduleMap().put(rightSingleControlMachine.getMachineCode(), rightSingleControlMachine);
         context.getMachineScheduleMap().put(leftSingleControlMachine.getMachineCode(), leftSingleControlMachine);
 
-        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
 
         assertEquals(1, candidates.size(), "正规SKU没有非单控候选时，仅允许回落可同步占用L/R的单控整机");
         assertEquals("K1501L", candidates.get(0).getMachineCode(),
@@ -754,7 +825,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         context.getSpecifyMachineMap().put("3302001513", Collections.singletonList(
                 specifyMachine("3302001513", "K1501", JobTypeEnum.RESTRICTED.getCode())));
 
-        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
 
         assertEquals(1, candidates.size(), "显式定点到单控机台但缺少配对侧时，正规SKU仍不得保留单边候选");
         assertEquals("K1111", candidates.get(0).getMachineCode(),
@@ -793,7 +865,8 @@ class DefaultMachineMatchStrategyRegressionTest {
                 "SPEC-A", "22.5", "MAT-SINGLE");
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
 
-        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
 
         assertTrue(candidates.isEmpty(), "正规SKU无普通机台候选且单控缺少配对侧时，不允许单边上机");
     }
@@ -809,7 +882,8 @@ class DefaultMachineMatchStrategyRegressionTest {
                 "SPEC-A", "22.5", "MAT-SINGLE");
         context.getMachineScheduleMap().put(singleControlMachine.getMachineCode(), singleControlMachine);
 
-        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
 
         assertTrue(candidates.isEmpty(), "正规SKU不因更高类型待排而放宽单控整机约束");
     }
@@ -832,7 +906,8 @@ class DefaultMachineMatchStrategyRegressionTest {
         occupiedResult.setSpecEndTime(dateTime(2026, 5, 9, 20, 0));
         context.getMachineAssignmentMap().put("K1501R", Collections.singletonList(occupiedResult));
 
-        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku("3302001513", "SPEC-A", "22.5"));
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, singleControlModeSku(context, "3302001513", "SPEC-A", "22.5", 5));
 
         assertTrue(candidates.isEmpty(), "任意一侧已被其它SKU占用时，正规SKU不得生成单控整机候选");
     }
@@ -1470,6 +1545,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         SkuScheduleDTO formalSku = sku("MAT-LEGACY", "SPEC-A", "22.5");
         formalSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
         formalSku.setTrial(true);
+        freezeSingleControlMode(context, formalSku, SingleControlMachineModeEnum.WHOLE_PAIR);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, formalSku);
 
@@ -1696,6 +1772,63 @@ class DefaultMachineMatchStrategyRegressionTest {
         sku.setSpecCode(specCode);
         sku.setProSize(proSize);
         return sku;
+    }
+
+    /**
+     * 构建按初始目标量冻结单控模式的测试SKU。
+     *
+     * @param materialCode 物料编码
+     * @param specCode 规格编码
+     * @param proSize 英寸
+     * @param targetQty 初始目标量
+     * @return SKU排程DTO
+     */
+    private SkuScheduleDTO singleControlModeSku(String materialCode,
+                                                String specCode,
+                                                String proSize,
+                                                int targetQty) {
+        SkuScheduleDTO sku = sku(materialCode, specCode, proSize);
+        sku.setTargetScheduleQty(targetQty);
+        return sku;
+    }
+
+    /**
+     * 构建测试SKU并写入对应的单控模式快照。
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param specCode 规格编码
+     * @param proSize 英寸
+     * @param targetQty 初始目标量
+     * @return 已完成模式冻结的SKU
+     */
+    private SkuScheduleDTO singleControlModeSku(LhScheduleContext context,
+                                                String materialCode,
+                                                String specCode,
+                                                String proSize,
+                                                int targetQty) {
+        SkuScheduleDTO sku = singleControlModeSku(materialCode, specCode, proSize, targetQty);
+        SingleControlMachineModeEnum mode = targetQty <= 4
+                ? SingleControlMachineModeEnum.SINGLE_SIDE
+                : SingleControlMachineModeEnum.WHOLE_PAIR;
+        freezeSingleControlMode(context, sku, mode);
+        return sku;
+    }
+
+    /**
+     * 写入测试场景的单控模式快照，模拟正式排程在S4.3之后已完成的批量冻结。
+     *
+     * @param context 排程上下文
+     * @param sku 测试SKU
+     * @param mode 需要冻结的单控模式
+     */
+    private void freezeSingleControlMode(LhScheduleContext context,
+                                         SkuScheduleDTO sku,
+                                         SingleControlMachineModeEnum mode) {
+        String skuKey = LhSingleControlMachineUtil.buildSkuModeKey(sku);
+        context.getSingleControlInitialTargetQtyMap().put(skuKey, sku.resolveTargetScheduleQty());
+        context.getSingleControlModeSnapshotMap().put(skuKey, mode);
+        context.setSingleControlModeSnapshotInitialized(true);
     }
 
     private com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO quota(String materialCode,

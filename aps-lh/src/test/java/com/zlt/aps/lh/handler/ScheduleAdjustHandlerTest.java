@@ -6,7 +6,9 @@ import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.SingleControlModeSnapshotInitializer;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
+import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.junit.jupiter.api.Assertions;
@@ -580,6 +582,9 @@ public class ScheduleAdjustHandlerTest {
     private ScheduleAdjustHandler buildHandlerWithEndingDays(final Map<String, Integer> endingDaysMap) {
         ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
         ReflectionTestUtils.setField(handler, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        SingleControlModeSnapshotInitializer snapshotInitializer = new SingleControlModeSnapshotInitializer();
+        ReflectionTestUtils.setField(snapshotInitializer, "machineMatchStrategy", new DefaultMachineMatchStrategy());
+        ReflectionTestUtils.setField(handler, "singleControlModeSnapshotInitializer", snapshotInitializer);
         ReflectionTestUtils.setField(handler, "endingJudgmentStrategy", new IEndingJudgmentStrategy() {
             @Override
             public boolean isEnding(LhScheduleContext context, SkuScheduleDTO sku) {

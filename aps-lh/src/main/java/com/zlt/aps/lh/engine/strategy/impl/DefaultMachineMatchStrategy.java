@@ -85,8 +85,86 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private static final int SINGLE_CONTROL_SMALL_BATCH_SCORE = 2;
     /** 普通机台默认得分 */
     private static final int SINGLE_CONTROL_NORMAL_MACHINE_SCORE = 3;
-    /** 正规SKU单控机台靠后得分 */
+    /** 正规SKU选择单控机台时的既有排序靠后得分；不参与单模/双模判定 */
     private static final int SINGLE_CONTROL_FORMAL_SCORE = 4;
+
+    /**
+     * 判断冻结时 SKU 是否至少存在一个满足静态准入的单控侧。
+     * <p>这里复用正式选机的定点、机台状态、寸口、模套、特殊物料和模具硬约束，
+     * 但不调用尚未生成的单模/双模快照，也不应用本轮后续动态预留。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待冻结模式的SKU
+     * @return true-至少一个单控侧可在本次窗口参与排产
+     */
+    @Override
+    public boolean hasEligibleSingleControlSide(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)) {
+            return false;
+        }
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (Objects.nonNull(machine)
+                    && isEligibleSingleControlSide(context, sku, machine.getMachineCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 校验指定单控侧是否满足冻结统计或双模配对的静态硬约束。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machineCode 单控侧机台编码
+     * @return true-满足约束且在本次窗口内存在可接续时间
+     */
+    @Override
+    public boolean isEligibleSingleControlSide(LhScheduleContext context,
+                                               SkuScheduleDTO sku,
+                                               String machineCode) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(machineCode)) {
+            return false;
+        }
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        if (Objects.isNull(machine) || !isSingleControlMachine(context, machineCode)) {
+            return false;
+        }
+        Set<String> notAllowedMachineCodes = LhSpecifyMachineUtil.resolveNotAllowedMachineCodes(
+                context, sku.getMaterialCode());
+        List<String> skuMouldCodes = getSkuMouldCodes(context, sku.getMaterialCode());
+        Set<String> occupiedMouldCodes = getOccupiedMouldCodes(context);
+        BigDecimal skuInch = parseInch(sku.getProSize());
+        SpecialMaterialMatchResult matchResult = LhSpecialMaterialUtil.resolveMatchResult(context, sku);
+        Date windowEndTime = resolveScheduleWindowEndTime(context);
+        if (isNotAllowedMachine(notAllowedMachineCodes, machine)) {
+            return false;
+        }
+        MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
+                context, sku, skuMouldCodes, occupiedMouldCodes, skuInch, matchResult, machine);
+        Date referenceTime = resolveAlignedCandidateReferenceTime(context, machine);
+        return MachineAvailabilityReason.AVAILABLE == availabilityReason
+                && (Objects.isNull(windowEndTime) || Objects.isNull(referenceTime)
+                || referenceTime.before(windowEndTime));
+    }
+
+    /**
+     * 解析当前排程窗口的最终结束时间。
+     *
+     * @param context 排程上下文
+     * @return 最后一个有效班次的结束时间
+     */
+    private Date resolveScheduleWindowEndTime(LhScheduleContext context) {
+        Date windowEndTime = null;
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.nonNull(shift) && Objects.nonNull(shift.getShiftEndDateTime())
+                    && (Objects.isNull(windowEndTime) || shift.getShiftEndDateTime().after(windowEndTime))) {
+                windowEndTime = shift.getShiftEndDateTime();
+            }
+        }
+        return windowEndTime;
+    }
+
     @Override
     public List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku) {
         log.debug("匹配可用硫化机台, SKU: {}", sku.getMaterialCode());
@@ -216,7 +294,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
             normalCandidates.add(candidate);
         }
-        List<MachineScheduleDTO> effectiveSingleControlCandidates = isFormalSku(sku)
+        // 没有单控候选时无需读取模式快照，普通机台选机链保持原有行为。
+        List<MachineScheduleDTO> effectiveSingleControlCandidates =
+                !CollectionUtils.isEmpty(singleControlCandidates)
+                        && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)
                 ? resolveWholeSingleControlCandidates(context, sku, singleControlCandidates)
                 : singleControlCandidates;
         List<MachineScheduleDTO> filteredCandidates = resolveCandidatesBySkuType(
@@ -275,13 +356,13 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             MachineScheduleDTO leftMachine = candidateMap.get(leftMachineCode);
             MachineScheduleDTO rightMachine = candidateMap.get(rightMachineCode);
             if (Objects.isNull(leftMachine) || Objects.isNull(rightMachine)) {
-                log.debug("正规SKU单控整机候选过滤, materialCode: {}, physicalMachine: {}, leftExists: {}, rightExists: {}, reason: {}",
+                log.debug("双模SKU单控整机候选过滤, materialCode: {}, physicalMachine: {}, leftExists: {}, rightExists: {}, reason: {}",
                         sku.getMaterialCode(), physicalMachineCode, Objects.nonNull(leftMachine), Objects.nonNull(rightMachine),
                         "L/R两侧未同时通过硬性机台约束");
                 continue;
             }
             if (hasOtherSkuAssignment(context, sku, leftMachineCode) || hasOtherSkuAssignment(context, sku, rightMachineCode)) {
-                log.info("正规SKU单控整机候选过滤, materialCode: {}, physicalMachine: {}, leftMachine: {}, rightMachine: {}, reason: {}",
+                log.info("双模SKU单控整机候选过滤, materialCode: {}, physicalMachine: {}, leftMachine: {}, rightMachine: {}, reason: {}",
                         sku.getMaterialCode(), physicalMachineCode, leftMachineCode, rightMachineCode,
                         "L/R任一侧已被其它SKU占用");
                 continue;
@@ -924,9 +1005,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     private Date resolveAlignedCandidateReferenceTime(LhScheduleContext context,
                                                       SkuScheduleDTO sku,
                                                       MachineScheduleDTO machine) {
-        if (LhSingleControlMachineUtil.isWholeMachineGranularitySku(sku)
-                && machine != null
-                && isSingleControlMachine(context, machine.getMachineCode())) {
+        // 普通机台不消费单控模式快照，只有实际进入单控候选时才校验单模/双模。
+        if (machine != null
+                && isSingleControlMachine(context, machine.getMachineCode())
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
             MachineScheduleDTO pairMachine = LhSingleControlMachineUtil.resolvePairMachine(context, machine.getMachineCode());
             Date currentSideReferenceTime = resolveAlignedCandidateReferenceTime(context, machine);
             Date pairSideReferenceTime = resolveAlignedCandidateReferenceTime(context, pairMachine);
@@ -1159,15 +1241,15 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             // 同班次判定：机台收尾时间落在基准班次区间内
             if (isInEndingWindow(profile.getReferenceTime(), windowStartTime, windowEndTime)) {
                 windowCandidates.add(candidate);
-            } else if (LhSingleControlMachineUtil.isSingleSideGranularitySku(sku)
-                    && isSingleControlMachine(context, candidate.getMachineCode())) {
+            } else if (isSingleControlMachine(context, candidate.getMachineCode())
+                    && LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)) {
                 // 单边粒度SKU的单控候选被窗口过滤,暂存用于候选不足时回补
                 filteredSingleControlCandidates.add(candidate);
             }
         }
-        // 单边粒度SKU(试制/量试/小批量)只能使用单控机台,窗口过滤后如果单控候选不足,回补被过滤的单控候选
-        if (LhSingleControlMachineUtil.isSingleSideGranularitySku(sku)
-                && !CollectionUtils.isEmpty(filteredSingleControlCandidates)) {
+        // 冻结为单模的SKU使用单控机台时，窗口过滤后若单控候选不足，沿用既有规则回补被过滤的单控候选。
+        if (!CollectionUtils.isEmpty(filteredSingleControlCandidates)
+                && LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)) {
             long windowSingleControlCount = windowCandidates.stream()
                     .filter(machine -> isSingleControlMachine(context, machine.getMachineCode()))
                     .count();

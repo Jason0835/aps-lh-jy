@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
@@ -248,6 +249,14 @@ public class LhScheduleContext {
     private Map<SkuScheduleDTO, Boolean> newSpecEarlyProductionAllowedMap = new IdentityHashMap<>();
     /** 新增SKU进入S4.5时是否命中结构五天内收尾层级快照，使用对象身份避免SKU出队后判定漂移 */
     private Map<SkuScheduleDTO, Boolean> newSpecSingleControlStructureEndingLayerMap = new IdentityHashMap<>();
+    /** 单控模式初始目标量快照，key=materialCode_productStatus；S4.3结束时冻结，后续禁止随剩余量变化 */
+    private Map<String, Integer> singleControlInitialTargetQtyMap = new LinkedHashMap<>();
+    /** 单控模式快照，key=materialCode_productStatus；统一供新增、续作、换活字块、降模和校验消费 */
+    private Map<String, SingleControlMachineModeEnum> singleControlModeSnapshotMap = new LinkedHashMap<>();
+    /** 冻结时满足单控静态准入且仍有目标量的不同试验SKU键集合 */
+    private Set<String> singleControlEligibleTrialSkuKeySet = new LinkedHashSet<>();
+    /** 单控模式快照是否已完成初始化；完成后禁止再次按动态运行态覆盖 */
+    private boolean singleControlModeSnapshotInitialized;
     /** 续作结果日额度账本是否已完成最终同步，防止同一上下文重复扣账 */
     private boolean continuousDailyQuotaSynced;
     /** 续作首日/窗口无计划释放的机台集合，仅用于S4.5选机降优先级，不代表禁止生产 */
