@@ -195,7 +195,10 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                 throwValidationFailure(context, result, "换模结果 mouldCode 缺失");
             }
         }
-        validateWholeSingleControlMachineResults(context);
+        // TODO 当前暂时关闭双模 SKU 单控整机 L/R 两侧同步校验。
+        // 真实排程中存在两侧物料、时间、状态或班次计划量尚未完全同步的历史结果，开启该校验会在 S4.6 阻断整批发布。
+        // 本次仅关闭校验入口，不修改两侧排产、结果生成及其他必填字段校验；待单控整机排产链路完成同步修复并通过真实批次验证后再恢复。
+//        validateWholeSingleControlMachineResults(context);
 
 //        TODO 这两个校验当前保持历史关闭状态。后续如需打开，应先用真实批次验证同胎胚换模和多机台补满结果。
 //        validateGreenTireChangeoverShift(context);

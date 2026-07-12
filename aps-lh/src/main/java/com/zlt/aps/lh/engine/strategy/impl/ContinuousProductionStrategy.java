@@ -55,6 +55,7 @@ import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuConstructionRef;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -832,10 +833,16 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             applyMultiMachineEndingTargetRule(context, sourceSku, skuResults);
             log.info("续作同SKU多机台识别, materialCode: {}, 机台列表: {}, 是否多机台: {}",
                     sourceSku.getMaterialCode(), joinMachineCodes(skuResults), true);
-            if (reduceEndingContinuationToSingleMachineWhenCovered(context, sourceSku, skuResults, shifts)) {
+            // T 日原始月计划量与 T-1 相等时，必须先阻断所有首日快捷降模分支，并统一进入逐日降模链路。
+            // 该变量只在当前 SKU 本次降模计算中传递，不写入 DTO 或上下文，后续业务日仍会重新选机降模。
+            boolean skipReduceMachineForFirstDay = shouldSkipReduceMachineForFirstDay(
+                    context, sourceSku, skuResults, shifts);
+            if (!skipReduceMachineForFirstDay
+                    && reduceEndingContinuationToSingleMachineWhenCovered(context, sourceSku, skuResults, shifts)) {
                 continue;
             }
-            boolean reduceByWorkDate = shouldReduceContinuationByWorkDate(sourceSku, skuResults, shifts);
+            boolean reduceByWorkDate = skipReduceMachineForFirstDay
+                    || shouldReduceContinuationByWorkDate(sourceSku, skuResults, shifts);
             if (shouldUseTargetQtyForContinuationReduction(sourceSku) && !reduceByWorkDate) {
                 log.info("续作多机台跳过dayN降模, materialCode: {}, 目标量: {}, 窗口日计划量: {}, "
                                 + "原因: 日计划仅用于准入和增机台判断，不限制当前窗口清尾排产量",
@@ -844,12 +851,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
             }
-            if (capEndingFirstDayOnlyContinuationGroup(context, sourceSku, skuResults, shifts)) {
+            if (!skipReduceMachineForFirstDay
+                    && capEndingFirstDayOnlyContinuationGroup(context, sourceSku, skuResults, shifts)) {
                 capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
             }
             if (reduceByWorkDate) {
-                reduceContinuationMachinesByWorkDate(context, sourceSku, skuResults, shifts);
+                reduceContinuationMachinesByWorkDate(
+                        context, sourceSku, skuResults, shifts, skipReduceMachineForFirstDay);
                 capStrictEndingContinuationGroupToTarget(context, sourceSku, skuResults, shifts);
                 continue;
             }
@@ -1217,11 +1226,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param sourceSku 来源SKU
      * @param skuResults 同SKU续作结果
      * @param shifts 全窗口班次
+     * @param skipReduceMachineForFirstDay true-T 日跳过降模；false-T 日执行既有降模规则
      */
     private void reduceContinuationMachinesByWorkDate(LhScheduleContext context,
                                                       SkuScheduleDTO sourceSku,
                                                       List<LhScheduleResult> skuResults,
-                                                      List<LhShiftConfigVO> shifts) {
+                                                      List<LhShiftConfigVO> shifts,
+                                                      boolean skipReduceMachineForFirstDay) {
         Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate = groupShiftsByWorkDate(shifts);
         List<LhScheduleResult> activeResults = new ArrayList<LhScheduleResult>(skuResults);
         int remainingTargetQty = Math.max(0, sourceSku.resolveTargetScheduleQty());
@@ -1249,15 +1260,24 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     calculateMachineDailyCapacityMapByDate(context, activeResults, dayShifts);
             int totalCapacity = capacityMap.values().stream().mapToInt(Integer::intValue).sum();
             int totalPlanQty = sumScheduledQtyByShifts(activeResults, dayShifts);
-            List<LhScheduleResult> keptResults = selectMachinesToKeepForContinuationByLookAhead(
-                    context, sourceSku, activeResults, shiftMapByDate, productionDate,
-                    rollingDiffQty, remainingTargetQty, shortageLookAheadDays, policy);
-            if (CollectionUtils.isEmpty(keptResults) && effectiveDemandQty > 0) {
-                keptResults = selectMachinesToKeepForContinuation(
-                        context, activeResults, capacityMap, effectiveDemandQty);
+            // 首日保护标识只与当前循环日期组合使用；进入 T+1 后局部判断自然恢复为 false，不会锁定整个窗口。
+            boolean skipReduceMachineForCurrentDay = skipReduceMachineForFirstDay
+                    && productionDate.equals(firstProductionDate);
+            List<LhScheduleResult> keptResults;
+            if (skipReduceMachineForCurrentDay) {
+                // 保留全部 MES 在线续作机台，但继续走公共分配和滚动差额计算，避免破坏 T+1、T+2 判断基础。
+                keptResults = new ArrayList<LhScheduleResult>(activeResults);
+            } else {
+                keptResults = selectMachinesToKeepForContinuationByLookAhead(
+                        context, sourceSku, activeResults, shiftMapByDate, productionDate,
+                        rollingDiffQty, remainingTargetQty, shortageLookAheadDays, policy);
+                if (CollectionUtils.isEmpty(keptResults) && effectiveDemandQty > 0) {
+                    keptResults = selectMachinesToKeepForContinuation(
+                            context, activeResults, capacityMap, effectiveDemandQty);
+                }
+                keptResults = protectContinuationDayMinimumMachineCount(
+                        context, sourceSku, activeResults, keptResults, productionDate, dayPlanQty);
             }
-            keptResults = protectContinuationDayMinimumMachineCount(
-                    context, sourceSku, activeResults, keptResults, productionDate, dayPlanQty);
             int keptTodayCapacity = sumCapacityForResults(capacityMap, keptResults);
             boolean recoverable = canContinuationMachinesMeetLookAhead(
                     context, sourceSku, keptResults, shiftMapByDate, productionDate,
@@ -1270,7 +1290,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     keptTodayCapacity, totalPlanQty, recoverable);
             applyContinuationDayAllocation(context, sourceSku, activeResults, keptResults, capacityMap,
                     demandQty, effectiveDemandQty, remainingTargetQty, productionDate, dayShifts, shifts,
-                    recoverable);
+                    recoverable, skipReduceMachineForCurrentDay);
             int actualTodayQty = sumScheduledQtyByShifts(activeResults, dayShifts);
             rollingDiffQty = effectiveDemandQty - actualTodayQty;
             remainingTargetQty = Math.max(0, remainingTargetQty - sumScheduledQtyByShifts(activeResults, dayShifts));
@@ -1278,6 +1298,53 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             log.info("续作多机台每日排后差额, materialCode: {}, 日期: {}, actualTodayQty: {}, rollingDiffQty: {}, nextActiveMachines: {}",
                     sourceSku.getMaterialCode(), productionDate, actualTodayQty, rollingDiffQty, joinMachineCodes(activeResults));
         }
+    }
+
+    /**
+     * 判断续作 SKU 是否因 T 日与 T-1 日原始月计划量相等而跳过 T 日降模。
+     * <p>该判断位于续作 SKU 降模计算入口，用于同时阻断收尾单机降模、首日收口等快捷分支；
+     * 命中后统一进入逐日降模链路，并仅在 T 日保留全部 MES 在线续作机台，T+1、T+2
+     * 仍按既有最小机台数、后看欠产、收尾和资源约束重新判断。</p>
+     *
+     * @param context 排程上下文，提供按年月加载的原始月计划
+     * @param sourceSku 来源续作 SKU
+     * @param activeResults 当前仍在线参与续作的机台结果
+     * @param shifts 全窗口班次，用于解析首个业务日 T
+     * @return true-T 日跳过降模，false-T 日执行原有降模规则
+     */
+    private boolean shouldSkipReduceMachineForFirstDay(LhScheduleContext context,
+                                                       SkuScheduleDTO sourceSku,
+                                                       List<LhScheduleResult> activeResults,
+                                                       List<LhShiftConfigVO> shifts) {
+        if (Objects.isNull(context) || Objects.isNull(sourceSku)
+                || CollectionUtils.isEmpty(shifts) || StringUtils.isEmpty(sourceSku.getMaterialCode())) {
+            return false;
+        }
+        Map<LocalDate, List<LhShiftConfigVO>> shiftMapByDate = groupShiftsByWorkDate(shifts);
+        if (CollectionUtils.isEmpty(shiftMapByDate)) {
+            return false;
+        }
+        LocalDate productionDate = shiftMapByDate.keySet().iterator().next();
+        LocalDate previousProductionDate = productionDate.minusDays(1);
+        FactoryMonthPlanProductionFinalResult currentPlan = MonthPlanDateResolver.resolvePlan(
+                context, sourceSku.getMaterialCode(), sourceSku.getProductStatus(), productionDate);
+        FactoryMonthPlanProductionFinalResult previousPlan = MonthPlanDateResolver.resolvePlan(
+                context, sourceSku.getMaterialCode(), sourceSku.getProductStatus(), previousProductionDate);
+        if (Objects.isNull(currentPlan) || Objects.isNull(previousPlan)) {
+            log.debug("续作T日降模计划量相等前置判断跳过, materialCode: {}, T日: {}, T-1日: {}, 原因: 原始月计划未完整加载",
+                    sourceSku.getMaterialCode(), productionDate, previousProductionDate);
+            return false;
+        }
+        int currentDayPlanQty = MonthPlanDateResolver.resolveDayQty(
+                context, sourceSku.getMaterialCode(), sourceSku.getProductStatus(), productionDate);
+        int previousDayPlanQty = MonthPlanDateResolver.resolveDayQty(
+                context, sourceSku.getMaterialCode(), sourceSku.getProductStatus(), previousProductionDate);
+        boolean skipReduceMachineForCurrentDay = currentDayPlanQty == previousDayPlanQty;
+        log.info("续作T日降模计划量相等前置判断, materialCode: {}, T日: {}, T-1日: {}, T日原始月计划量: {}, "
+                        + "T-1日原始月计划量: {}, 当前续作机台: {}, 是否跳过T日降模: {}",
+                sourceSku.getMaterialCode(), productionDate, previousProductionDate, currentDayPlanQty,
+                previousDayPlanQty, joinMachineCodes(activeResults), skipReduceMachineForCurrentDay);
+        return skipReduceMachineForCurrentDay;
     }
 
     /**
@@ -3851,6 +3918,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
      * @param dayShifts 当日班次
      * @param allShifts 全窗口班次
      * @param recoverable 保留机台是否满足后续追补需求
+     * @param keepAllActiveMachinesForCurrentDay true-当前 T 日需维持全部在线续作机台
      */
     private void applyContinuationDayAllocation(LhScheduleContext context,
                                                 SkuScheduleDTO sourceSku,
@@ -3863,23 +3931,40 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                 LocalDate productionDate,
                                                 List<LhShiftConfigVO> dayShifts,
                                                 List<LhShiftConfigVO> allShifts,
-                                                boolean recoverable) {
+                                                boolean recoverable,
+                                                boolean keepAllActiveMachinesForCurrentDay) {
         boolean ending = hasEndingResult(activeResults);
         ProductionQuantityPolicy policy = ProductionQuantityPolicy.from(sourceSku, ending);
         boolean fillKeptMachineCapacity = !ending
                 && !policy.isStrictUpperLimit()
                 && !CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap());
         int remainingDemandQty = Math.max(0, effectiveDemandQty);
-        for (LhScheduleResult result : keptResults) {
+        for (int resultIndex = 0; resultIndex < keptResults.size(); resultIndex++) {
+            LhScheduleResult result = keptResults.get(resultIndex);
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
-            int allocation = effectiveDemandQty <= 0 ? 0
-                    : fillKeptMachineCapacity ? machineCapacity : Math.min(remainingDemandQty, machineCapacity);
+            int allocation;
+            if (effectiveDemandQty <= 0) {
+                allocation = 0;
+            } else if (fillKeptMachineCapacity) {
+                // 非收尾续作沿用项目既有满产规则：保留机台按清洗、停机、保养等损失扣减后的有效产能排满。
+                // T 日计划量相等保护只限制降模，不得覆盖该规则将满班产能压缩为当日需求均分量。
+                allocation = machineCapacity;
+            } else if (keepAllActiveMachinesForCurrentDay) {
+                // 严格收尾场景不能超出目标量，将当日既有需求在全部受保护机台间均衡分配，避免后序机台为零而被收口释放。
+                int remainingMachineCount = keptResults.size() - resultIndex;
+                int averageAllocation = (remainingDemandQty + remainingMachineCount - 1) / remainingMachineCount;
+                allocation = Math.min(remainingDemandQty, Math.min(machineCapacity, averageAllocation));
+            } else {
+                allocation = Math.min(remainingDemandQty, machineCapacity);
+            }
             redistributeShiftQty(context, result, dayShifts, allocation);
             remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
             log.info("续作多机台保留机台排量, materialCode: {}, 日期: {}, machineCode: {}, allocation: {}, "
-                            + "machineCapacity: {}, 是否补满班产: {}, 当日生效目标量: {}, 剩余窗口目标量: {}, 是否收尾: {}",
+                            + "machineCapacity: {}, 是否补满班产: {}, 是否T日全机台保护分配: {}, 当日生效目标量: {}, "
+                            + "剩余窗口目标量: {}, 是否收尾: {}",
                     sourceSku.getMaterialCode(), productionDate, result.getLhMachineCode(), allocation,
-                    machineCapacity, fillKeptMachineCapacity, effectiveDemandQty, remainingTargetQty, ending);
+                    machineCapacity, fillKeptMachineCapacity, keepAllActiveMachinesForCurrentDay,
+                    effectiveDemandQty, remainingTargetQty, ending);
         }
         List<LhScheduleResult> supplementResults = policy.isStrictUpperLimit() && remainingDemandQty <= 0
                 ? new ArrayList<LhScheduleResult>(0)

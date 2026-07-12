@@ -94,6 +94,21 @@ class SingleControlModeSnapshotInitializerTest {
     }
 
     /**
+     * 快照缺失时不得抛出异常，应返回空模式并让单边、整机判断均不命中。
+     */
+    @Test
+    void resolveFrozenMode_shouldReturnNullWhenSnapshotMissing() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = sku("SNAPSHOT-MISSING", TrialStatusEnum.FORMAL.getCode(), 10);
+
+        Assertions.assertNull(LhSingleControlMachineUtil.resolveFrozenMode(context, sku));
+        Assertions.assertNull(LhSingleControlMachineUtil.resolveFrozenMode(null, sku));
+        Assertions.assertNull(LhSingleControlMachineUtil.resolveFrozenMode(context, null));
+        Assertions.assertFalse(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku));
+        Assertions.assertFalse(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku));
+    }
+
+    /**
      * 构建初始化器，并用只读机台匹配替身控制静态单控准入结果。
      *
      * @param eligible 是否存在静态可用单控侧

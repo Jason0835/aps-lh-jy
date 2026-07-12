@@ -739,8 +739,12 @@ public class SchedulingStrategyRegressionTest {
         injectContinuousNonEndingDependencies(strategy);
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 46, 46, 46);
         quotaMap.get(resolveShiftWorkDate(shifts, 1)).setRemainingQty(312);
+        appendMonthPlan(context, "3302001075", firstProductionDate, 46, 46, 46);
+        // T-1 原始月计划量高于 T 日，必须继续执行既有 T 日降模逻辑。
+        setMonthPlanDayQty(context.getMonthPlanList().get(0), firstProductionDate.minusDays(1), 92);
         SkuScheduleDTO sku = buildContinuousSku("3302001075", 16, 404, quotaMap);
         sku.setMonthlyHistoryShortageQty(298);
         sku.setScheduleDayFinishQty(32);
@@ -766,6 +770,75 @@ public class SchedulingStrategyRegressionTest {
         }
         Assertions.assertEquals(1, context.getScheduleResultList().size());
         Assertions.assertEquals(Integer.valueOf(122), context.getScheduleResultList().get(0).getDailyPlanQty());
+    }
+
+    /**
+     * T 日与 T-1 日原始月计划量相等时，只能跳过 T 日降模；T+1 仍需按当日计划重新减少机台。
+     */
+    @Test
+    public void shouldSkipOnlyFirstDayReduceWhenOriginalDayPlansAreEqual() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        SkuScheduleDTO sku = buildContinuousSku("3302001582", 16, 256,
+                buildQuotaMapByShifts(shifts, 24, 24, 24));
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 48, 24, 24);
+        // 运行态账本首日仅剩 24，但 T-1 与 T 日原始月计划均为 48，比较必须使用原始月计划并保留两台。
+        setMonthPlanDayQty(context.getMonthPlanList().get(0), firstProductionDate.minusDays(1), 48);
+        // 使用收尾续作结果覆盖真实案例：相等保护必须先于“收尾单机可覆盖”快捷降模分支生效。
+        LhScheduleResult firstResult = buildContinuousResult(
+                sku.getMaterialCode(), "K1406", 16, shifts, "1");
+        LhScheduleResult secondResult = buildContinuousResult(
+                sku.getMaterialCode(), "K1712", 16, shifts, "1");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(2,
+                countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, firstProductionDate),
+                "T 日计划量与 T-1 相等时必须维持两台 MES 在线续作机台");
+        Assertions.assertEquals(1,
+                countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts,
+                        resolveShiftWorkDate(shifts, 3)),
+                "T+1 不得继承 T 日跳过标识，降模机台完成不可换模晚班后后续日期应只保留一台");
+        Assertions.assertFalse(context.getReducedContinuationGroupKeySet().isEmpty(),
+                "T+1 满足既有降模条件时必须登记实际释放分组");
+    }
+
+    /**
+     * 非收尾续作命中 T 日计划量相等保护时，保留机台仍应沿用满产规则，按扣除清洗、停机后的有效班产排满。
+     */
+    @Test
+    public void shouldFillProtectedFirstDayShiftsForNonEndingContinuousSku() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        SkuScheduleDTO sku = buildContinuousSku("3302001582", 16, 256,
+                buildQuotaMapByShifts(shifts, 24, 24, 24));
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 48, 24, 24);
+        setMonthPlanDayQty(context.getMonthPlanList().get(0), firstProductionDate.minusDays(1), 48);
+        LhScheduleResult firstResult = buildContinuousResult(
+                sku.getMaterialCode(), "K1406", 16, shifts, "0");
+        LhScheduleResult secondResult = buildContinuousResult(
+                sku.getMaterialCode(), "K1712", 16, shifts, "0");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(Integer.valueOf(16), firstResult.getClass1PlanQty());
+        Assertions.assertEquals(Integer.valueOf(16), firstResult.getClass2PlanQty());
+        Assertions.assertEquals(Integer.valueOf(16), secondResult.getClass1PlanQty());
+        Assertions.assertEquals(Integer.valueOf(16), secondResult.getClass2PlanQty());
     }
 
     /**
@@ -2427,6 +2500,9 @@ public class SchedulingStrategyRegressionTest {
                                     LocalDate date,
                                     int qty) {
         switch (date.getDayOfMonth()) {
+            case 10:
+                plan.setDay10(qty);
+                break;
             case 11:
                 plan.setDay11(qty);
                 break;

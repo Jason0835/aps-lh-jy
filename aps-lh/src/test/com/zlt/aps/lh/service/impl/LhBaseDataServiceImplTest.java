@@ -57,6 +57,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -419,6 +420,24 @@ public class LhBaseDataServiceImplTest {
         Assertions.assertEquals("PV-06", context.getProductionVersionByYearMonthMap().get("2026_6"));
         Assertions.assertEquals("PV-07", context.getProductionVersionByYearMonthMap().get("2026_7"));
         Assertions.assertEquals(2, context.getLoadedMonthPlanList().size(), "跨月应加载两个自然月的月计划");
+    }
+
+    /**
+     * 用例说明：T 日为月初时，续作降模比较 T-1 原始日计划量需要额外加载上月定稿版本和月计划。
+     *
+     * @throws Exception 反射注入异常
+     */
+    @Test
+    public void loadAllBaseDataShouldLoadPreviousMonthPlanWhenFirstScheduleDayIsMonthStart() throws Exception {
+        LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
+
+        Map<String, LocalDate> requiredMonthMap = ReflectionTestUtils.invokeMethod(service,
+                "resolveMonthPlanRequiredMonthMap", buildDate(2026, 7, 1), buildDate(2026, 7, 4));
+
+        Assertions.assertNotNull(requiredMonthMap);
+        Assertions.assertEquals(Arrays.asList("2026_6", "2026_7"),
+                new ArrayList<String>(requiredMonthMap.keySet()),
+                "月初排程的月计划加载范围必须同时覆盖 T-1 所属上月和 T 日所属当月");
     }
 
     /**

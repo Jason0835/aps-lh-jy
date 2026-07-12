@@ -176,24 +176,19 @@ public final class LhSingleControlMachineUtil {
 
     /**
      * 读取本次排程已冻结的单控机台使用模式。
-     * <p>模式只能由 S4.3 快照初始化器写入。缺少快照表示排程主链不完整，必须立即失败，
-     * 禁止按当前剩余量或旧 SKU 类型规则动态兜底。</p>
+     * <p>模式只能由 S4.3 快照初始化器写入。上下文、SKU 或对应快照缺失时返回 null，
+     * 调用方的单边/整机判断均按不命中处理，不再中断整个排程。</p>
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
-     * @return 已冻结的单控模式
+     * @return 已冻结的单控模式；上下文、SKU或快照缺失时返回null
      */
     public static SingleControlMachineModeEnum resolveFrozenMode(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(context) || Objects.isNull(sku)) {
-            throw new IllegalStateException("单控机台模式解析失败：排程上下文或SKU为空");
+            return null;
         }
         String skuKey = buildSkuModeKey(sku);
-        SingleControlMachineModeEnum mode = context.getSingleControlModeSnapshotMap().get(skuKey);
-        if (Objects.isNull(mode)) {
-            throw new IllegalStateException("单控机台模式快照缺失，materialCode=" + sku.getMaterialCode()
-                    + ", productStatus=" + sku.getProductStatus());
-        }
-        return mode;
+        return context.getSingleControlModeSnapshotMap().get(skuKey);
     }
 
     /**

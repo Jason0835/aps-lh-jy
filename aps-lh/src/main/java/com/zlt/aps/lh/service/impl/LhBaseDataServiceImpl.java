@@ -224,6 +224,10 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         // SKU提前生产需要从窗口结束日继续向后观察N个自然日，月计划和结构机台数按真实年月批量加载。
         Date earlyProductionLookupEndDate = LhScheduleTimeUtil.addDays(endDate, earlyProductionDaysThreshold);
         Map<String, LocalDate> requiredMonthMap = resolveRequiredMonthMap(startDate, earlyProductionLookupEndDate);
+        // 续作 T 日降模需要比较 T 日与 T-1 日原始月计划量；月初排程时，月计划和定稿版本必须额外加载上月。
+        // 该扩展范围只用于月计划链路，结构机台统计、月完成量等其他基础数据仍沿用原排程窗口月份范围。
+        Map<String, LocalDate> monthPlanRequiredMonthMap =
+                resolveMonthPlanRequiredMonthMap(startDate, earlyProductionLookupEndDate);
         // 设备停机、工作日历沿用 T-1 覆盖范围，保证滚动继承和跨日停机判断可复用同一窗口。
         Date calendarControlStartDate = LhScheduleTimeUtil.addDays(startDate, -1);
 
@@ -236,7 +240,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         // 1. 定稿排产版本是月计划、周程滚动调整等任务的前置条件，先单独同步完成。
         //    （若不先同步获取 productionVersion，后续月计划查询会因缺少版本号导致加载不准确。）
         waitForDataInitTasks(runDataInitTaskAsync("月生产计划版本",
-                () -> loadFinalProductionVersions(context, factoryCode, requiredMonthMap, year, month),
+                () -> loadFinalProductionVersions(context, factoryCode, monthPlanRequiredMonthMap, year, month),
                 () -> StringUtils.isNotEmpty(context.getProductionVersion()) ? 1 : 0));
         if (context.isInterrupted()) {
             log.warn("[DataInit] 基础数据初始化中断：totalCost={}ms, reason={}",
@@ -254,7 +258,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         //    - 干冰/喷砂清洗已统一并入设备停机计划，不再加载旧模具清洗表。
         //    - 机台信息与月计划无依赖关系，两者可并发加载。
         CompletableFuture<Void> monthPlanFuture = runDataInitTaskAsync("月生产计划",
-                () -> loadMonthPlan(context, factoryCode, requiredMonthMap),
+                () -> loadMonthPlan(context, factoryCode, monthPlanRequiredMonthMap),
                 () -> sizeOf(context.getMonthPlanList()));
         CompletableFuture<Void> monthPlanStatisticsFuture = runDataInitTaskAsync("月计划结构机台统计",
                 () -> loadMonthPlanStatistics(context, factoryCode, requiredMonthMap, startDate,
@@ -545,6 +549,21 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             cursor = cursor.plusDays(1);
         }
         return requiredMonthMap;
+    }
+
+    /**
+     * 解析月计划及定稿版本需要加载的月份集合。
+     * <p>续作 T 日降模需要比较 T 日和 T-1 日原始月计划量，因此月计划链路从 T-1 开始加载；
+     * 该范围不用于结构统计、完成量等其他基础数据，避免扩大无关业务口径。</p>
+     *
+     * @param scheduleStartDate 排程窗口开始日期 T
+     * @param endDateExclusive 月计划后看结束日期，不含当天
+     * @return key=year_month，value=该月月初
+     */
+    private Map<String, LocalDate> resolveMonthPlanRequiredMonthMap(Date scheduleStartDate,
+                                                                    Date endDateExclusive) {
+        Date monthPlanStartDate = LhScheduleTimeUtil.addDays(scheduleStartDate, -1);
+        return resolveRequiredMonthMap(monthPlanStartDate, endDateExclusive);
     }
 
     /**
