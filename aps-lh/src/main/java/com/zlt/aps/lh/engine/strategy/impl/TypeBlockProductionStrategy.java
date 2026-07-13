@@ -30,6 +30,8 @@ import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineShortageQuotaPlan;
+import com.zlt.aps.lh.engine.strategy.support.PendingSkuUnscheduledRule;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
@@ -1304,13 +1306,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     sku.getSurplusQty(), sku.getEmbryoStock());
             return false;
         }
-        // 换活字块与新增排产共用历史欠产账本口径，避免窗口无日计划时 S4.4 被回裁为0后再落入S4.5换模。
-        DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "换活字块");
+        // 换活字块与新增排产共用历史欠产账本口径，并保留“后续无计划强制收尾”的判断结果。
+        DailyMachineShortageQuotaPlan shortageQuotaPlan =
+                DailyMachineExpansionPlanner.prepareShortageQuota(context, sku, "换活字块");
         // 保存原目标量和严格目标量标识，换活字块单台试算失败时必须完整恢复，不能污染 S4.5 新增排产。
         Integer originalTargetScheduleQty = sku.getTargetScheduleQty();
         int originalRemainingScheduleQty = sku.getRemainingScheduleQty();
         boolean originalStrictTargetQty = sku.isStrictTargetQty();
         boolean isEnding = endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
+        boolean smallEndingRuleEnding = isEnding || shortageQuotaPlan.isForceEndingByNoFuturePlan();
+        // S4.4 在正式生成换活字块结果前执行同一前置未排规则，避免提前消费本应进入未排的SKU。
+        if (handlePendingSkuUnscheduledRuleIfNecessary(context, machine, sku, smallEndingRuleEnding,
+                embryoStockEndingTargetApplied, failureReason)) {
+            return false;
+        }
         boolean typeBlockExpansionContinuation = hasScheduledTypeBlockResult(context, sku);
         applySingleMachineTypeBlockTargetRule(context, machine, sku, startTime, switchStartTime, shifts,
                 isEnding, isSingleMachine, typeBlockExpansionContinuation, embryoStockEndingTargetApplied);
@@ -1405,6 +1414,43 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         context.getNewSpecSkuList().remove(sku);
         log.debug("换活字块排产完成, 机台: {}, SKU: {}, 已排: {}, 剩余: {}",
                 machine.getMachineCode(), sku.getMaterialCode(), scheduledQty, remainingQty);
+        return true;
+    }
+
+    /**
+     * 处理换活字块候选SKU的前置未排规则。
+     *
+     * <p>规则顺序统一为“收尾小余量优先、仅历史欠产其次”。命中后立即写入未排并移出待排队列，
+     * 不再生成换活字块结果和换模计划。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 当前换活字块机台
+     * @param sku 当前候选SKU
+     * @param smallEndingRuleEnding 是否按收尾小余量规则视为收尾
+     * @param embryoStockEndingTargetApplied 是否已命中成型胎胚库存收尾目标
+     * @param failureReason 换活字块失败原因
+     * @return true-已写入未排并终止换活字块；false-继续原排程逻辑
+     */
+    private boolean handlePendingSkuUnscheduledRuleIfNecessary(LhScheduleContext context,
+                                                               MachineScheduleDTO machine,
+                                                               SkuScheduleDTO sku,
+                                                               boolean smallEndingRuleEnding,
+                                                               boolean embryoStockEndingTargetApplied,
+                                                               StringBuilder failureReason) {
+        LhUnscheduledResult unscheduledResult = PendingSkuUnscheduledRule.evaluate(
+                context, sku, smallEndingRuleEnding, embryoStockEndingTargetApplied);
+        if (Objects.isNull(unscheduledResult)) {
+            return false;
+        }
+        context.getUnscheduledResultList().add(unscheduledResult);
+        context.getNewSpecSkuList().remove(sku);
+        String unscheduledReason = unscheduledResult.getUnscheduledReason();
+        recordTypeBlockAppendFailure(failureReason, unscheduledReason);
+        getTargetScheduleQtyResolver().removeActiveEmbryoSku(context, sku, unscheduledReason);
+        log.info("换活字块候选SKU命中前置未排规则，跳过排产并移出待排队列, machineCode: {}, "
+                        + "materialCode: {}, unscheduledQty: {}, reason: {}",
+                Objects.nonNull(machine) ? machine.getMachineCode() : null,
+                sku.getMaterialCode(), unscheduledResult.getUnscheduledQty(), unscheduledReason);
         return true;
     }
 

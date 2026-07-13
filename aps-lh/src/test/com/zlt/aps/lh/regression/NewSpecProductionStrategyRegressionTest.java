@@ -15,6 +15,7 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.OrderNoGenerator;
+import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -31,6 +32,7 @@ import com.zlt.aps.lh.engine.strategy.impl.LocalSearchMachineAllocatorStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.NewSpecProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
+import com.zlt.aps.lh.engine.strategy.support.PendingSkuUnscheduledRule;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
@@ -3081,14 +3083,13 @@ class NewSpecProductionStrategyRegressionTest {
 
     @Test
     void resolveLatestPreviousFinishedQty_shouldStopAtLatestZeroValue() {
-        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         LhScheduleContext context = buildContext();
         context.setScheduleDate(dateTime(2026, 6, 14, 0, 0));
         context.getMaterialMonthDailyFinishedQtyMap().put("3302001139_2026-06-12", 64);
         context.getMaterialMonthDailyFinishedQtyMap().put("3302001139_2026-06-13", 0);
 
-        Integer latestFinishedQty = ReflectionTestUtils.invokeMethod(strategy,
-                "resolveLatestPreviousFinishedQty", context, "3302001139");
+        Integer latestFinishedQty = PendingSkuUnscheduledRule.resolveLatestPreviousFinishedQty(
+                context, "3302001139", null);
 
         assertEquals(Integer.valueOf(0), latestFinishedQty,
                 "最近一次非空完成量为0时必须停止回溯，不能继续取更早的大于0记录");
@@ -3096,13 +3097,12 @@ class NewSpecProductionStrategyRegressionTest {
 
     @Test
     void resolveLatestPreviousFinishedQty_shouldNotUsePreviousMonthValue() {
-        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         LhScheduleContext context = buildContext();
         context.setScheduleDate(dateTime(2026, 6, 1, 0, 0));
         context.getMaterialMonthDailyFinishedQtyMap().put("3302001139_2026-05-31", 64);
 
-        Integer latestFinishedQty = ReflectionTestUtils.invokeMethod(strategy,
-                "resolveLatestPreviousFinishedQty", context, "3302001139");
+        Integer latestFinishedQty = PendingSkuUnscheduledRule.resolveLatestPreviousFinishedQty(
+                context, "3302001139", null);
 
         assertNull(latestFinishedQty, "最近一次完成量只能在当前月月初至T-1范围内查找");
     }
@@ -3144,6 +3144,55 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(Integer.valueOf(2), context.getUnscheduledResultList().get(0).getUnscheduledQty());
         assertEquals("收尾余量小于等于允许欠产偏差值，且前日 T+1 夜班未排满，本次不排产",
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldPreferSmallEndingSurplusWhenBothUnscheduledRulesMatched() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, true);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 6, 14, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001320");
+        sku.setMaterialDesc("同时命中收尾小余量和仅历史欠产物料");
+        sku.setProductStatus("S");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(13);
+        sku.setDailyPlanQty(0);
+        sku.setTargetScheduleQty(13);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(1);
+        sku.setEmbryoStock(-1);
+        sku.setMonthlyHistoryShortageQty(13);
+        sku.setFutureMonthPlanQtyAfterWindow(0);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+        context.getMaterialMonthDailyFinishedQtyMap().put(
+                MonthPlanDateResolver.buildMaterialStatusKey(sku.getMaterialCode(), sku.getProductStatus())
+                        + "_2026-06-12", 18);
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(
+                        buildMachine("K1105", dateTime(2026, 6, 14, 6, 0))),
+                defaultMouldChangeBalance(), defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(), "同时命中两项规则时不应生成排程结果");
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "命中前置未排规则后应移出新增待排队列");
+        assertEquals(1, context.getUnscheduledResultList().size(), "同时命中两项规则时只写一条未排结果");
+        assertEquals(Integer.valueOf(1), context.getUnscheduledResultList().get(0).getUnscheduledQty(),
+                "收尾小余量优先时未排数量应取硫化余量，而不是历史欠产量");
+        assertEquals("收尾余量小于等于允许欠产偏差值，且前日 T+1 夜班未排满，本次不排产",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason(),
+                "收尾小余量规则必须优先于仅历史欠产规则");
     }
 
     @Test
@@ -6752,6 +6801,10 @@ class NewSpecProductionStrategyRegressionTest {
         Field targetResolverField = NewSpecProductionStrategy.class.getDeclaredField("targetScheduleQtyResolver");
         targetResolverField.setAccessible(true);
         targetResolverField.set(strategy, new TargetScheduleQtyResolver());
+
+        Field decrementCheckerField = NewSpecProductionStrategy.class.getDeclaredField("skuDecrementChecker");
+        decrementCheckerField.setAccessible(true);
+        decrementCheckerField.set(strategy, new SkuDecrementChecker());
 
         Field localSearchField = NewSpecProductionStrategy.class.getDeclaredField("localSearchMachineAllocator");
         localSearchField.setAccessible(true);
