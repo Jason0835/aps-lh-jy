@@ -2045,7 +2045,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return mouldChangeLimitBlockedReason;
         }
         if (isTypeRuleBlocked(context, sku) && isTrialConstructionStage(sku)) {
-            return "试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产";
+            if (LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
+                return "试制SKU双模的单控L/R整组与普通机台均无法承接，无法排产";
+            }
+            return "试制SKU单模只能使用单控机台单边，但当前无可用单控机台或单控机台产能不足，无法排产";
         }
         if (isSpecialMaterialSupportBlocked(context, sku)) {
             return "特殊材料SKU无匹配特殊支持机台，无法排产";
@@ -2140,8 +2143,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             return mouldChangeLimitBlockedReason;
         }
         if (isTrialConstructionStage(sku)
+                && LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)
                 && NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW == failReason) {
-            return "试制SKU只能使用单控机台，但单控机台已被全局排序更靠前的SKU占用，或当前单控机台产能不足，无法排产";
+            return "试制SKU单模只能使用单控机台单边，但单控机台已被全局排序更靠前的SKU占用，或当前单控机台产能不足，无法排产";
+        }
+        if (isTrialConstructionStage(sku)
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)
+                && NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW == failReason) {
+            return "试制SKU双模的单控L/R整组与普通机台均无可用产能，无法排产";
         }
         return failReason.getDescription();
     }
@@ -2302,7 +2311,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 candidateCache.getNormalCandidates(), excludedMachineCodes);
         logNewSpecMachineTypeSplit(context, sku, singleControlCandidates, normalCandidates,
                 excludedMachineCodes, candidateCache);
-        if (shouldOnlyUseSingleControlCandidate(sku)) {
+        if (shouldOnlyUseSingleControlCandidate(context, sku)) {
             MachineScheduleDTO singleControlMachine = selectCandidateMachineFromScopedList(
                     context, sku, singleControlCandidates, machineMatch, preferredTrialMachine, quantityPolicy,
                     candidateCache);
@@ -2315,7 +2324,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     resolveNewSpecSkuType(sku), sku.getMaterialCode());
             return null;
         }
-        if (isMassTrialOrSmallBatchSku(sku) && !CollectionUtils.isEmpty(singleControlCandidates)) {
+        if (shouldPreferSingleControlBeforeNormalCandidate(context, sku)
+                && !CollectionUtils.isEmpty(singleControlCandidates)) {
             MachineScheduleDTO reusedSingleControlMachine = resolvePreferredSingleControlReuseMachine(
                     context, sku, singleControlCandidates);
             if (reusedSingleControlMachine != null) {
@@ -3051,18 +3061,36 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 判断当前SKU是否应仅尝试单控候选机台。
+     * <p>只有冻结为单模的试制SKU禁止普通机台；冻结为双模的试制SKU必须先尝试单控L/R整组，
+     * 整组均无法承接后允许进入普通机台候选组。快照缺失时保持原有从严行为，避免误落普通机台。</p>
      *
+     * @param context 排程上下文
      * @param sku SKU
      * @return true-仅尝试单控候选
      */
-    private boolean shouldOnlyUseSingleControlCandidate(SkuScheduleDTO sku) {
+    private boolean shouldOnlyUseSingleControlCandidate(LhScheduleContext context, SkuScheduleDTO sku) {
         if (sku == null) {
             return false;
         }
         if (isTrialConstructionStage(sku)) {
-            return true;
+            return !LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku);
         }
         return false;
+    }
+
+    /**
+     * 判断当前SKU是否必须先尝试完单控候选，再进入普通机台候选组。
+     * <p>复用量试、小批量已有的两阶段选机链，并将冻结为双模的试制SKU纳入该链路，
+     * 防止单控整组与普通机台混合后被局部搜索、单机收完等通用规则提前选中普通机台。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待排SKU
+     * @return true-单控候选组优先，全部失败后才允许普通机台
+     */
+    private boolean shouldPreferSingleControlBeforeNormalCandidate(LhScheduleContext context, SkuScheduleDTO sku) {
+        return isMassTrialOrSmallBatchSku(sku)
+                || (isTrialConstructionStage(sku)
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku));
     }
 
     private void logNewSpecMachineCandidateSnapshot(LhScheduleContext context,
@@ -6343,8 +6371,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     /**
      * 优先选择窗口内可单机收完剩余量的候选机台。
-     * <p>试制/量试 SKU 存在可用单控机台时，仅考虑单控候选，避免普通机台抢占，
-     * 迫使试制 SKU 等待单控机台收尾而非回落普通机台。</p>
+     * <p>该方法只在当前候选作用域内选机：试制单模仅传入单控单边，试制双模与量试/小批量
+     * 由上层先传入单控候选组，该组全部失败后再单独传入普通机台候选组，不会混合抢占。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -6366,7 +6394,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         if (remainingQty <= 0) {
             return null;
         }
-        // 试制/量试SKU有可用单控机台时，仅考虑单控候选，避免普通机台抢占
+        // 当前作用域同时包含单控候选时，试制/量试SKU只在该单控组内执行单机收完判断。
         boolean trialStickToSingleControl = false;
         if (shouldPreferTrialMachine(sku)) {
             for (MachineScheduleDTO candidate : candidates) {

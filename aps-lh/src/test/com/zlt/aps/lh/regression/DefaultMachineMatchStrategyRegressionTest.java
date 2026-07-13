@@ -551,6 +551,7 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         SkuScheduleDTO sku = sku("3302001575", "SPEC-A", "19.5");
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
@@ -704,7 +705,7 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
-    void matchMachines_shouldRequirePairedCandidateForTrialConstructionSkuWhenInitialTargetIsFive() {
+    void matchMachines_shouldRequirePairedCandidateAndRetainNormalFallbackForTrialWholePair() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();
         enableSingleControlMachines(context);
@@ -712,14 +713,36 @@ class DefaultMachineMatchStrategyRegressionTest {
                 "K1501L", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-SINGLE"));
         context.getMachineScheduleMap().put("K1501R", machine(
                 "K1501R", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-SINGLE"));
+        context.getMachineScheduleMap().put("K1111", machine(
+                "K1111", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-NORMAL"));
         SkuScheduleDTO trialSku = singleControlModeSku("TRIAL-FIVE", "SPEC-A", "22.5", 5);
         trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
         freezeSingleControlMode(context, trialSku, SingleControlMachineModeEnum.WHOLE_PAIR);
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, trialSku);
 
-        assertEquals(1, candidates.size(), "试制SKU初始目标量5条时必须按双模收敛L/R候选");
+        assertEquals(2, candidates.size(), "试制SKU双模应保留L/R整组及普通机台第二阶段候选");
         assertEquals("K1501L", candidates.get(0).getMachineCode());
+        assertEquals("K1111", candidates.get(1).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldAllowNormalFallbackWhenTrialWholePairHasOnlyOneEligibleSide() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        enableSingleControlMachines(context);
+        context.getMachineScheduleMap().put("K1501L", machine(
+                "K1501L", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-SINGLE"));
+        context.getMachineScheduleMap().put("K1111", machine(
+                "K1111", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-NORMAL"));
+        SkuScheduleDTO trialSku = singleControlModeSku("TRIAL-FIVE", "SPEC-A", "22.5", 5);
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        freezeSingleControlMode(context, trialSku, SingleControlMachineModeEnum.WHOLE_PAIR);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(context, trialSku);
+
+        assertEquals(1, candidates.size(), "试制SKU双模缺少完整L/R整组时应保留普通机台候选");
+        assertEquals("K1111", candidates.get(0).getMachineCode());
     }
 
     @Test

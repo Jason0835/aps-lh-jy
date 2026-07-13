@@ -237,7 +237,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             }
         }
 
-        // 单控/普通机台约束是类型规则：试制强约束单控，量试/小批量优先单边单控，正规单控必须L/R成组。
+        // 单控/普通机台约束是类型规则：试制单模强约束单控单边，试制双模先单控L/R整组后普通机台，
+        // 量试/小批量优先单边单控，正规单控必须L/R成组。
         // 该规则只处理候选集合，不在此消费机台；最终是否占用仍由 S4.5 换模、首检和产能结果决定。
         candidates = applySingleControlReservationRule(context, sku, candidates, trace);
 
@@ -262,7 +263,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
 
     /**
      * 对单控拆分机台执行SKU类型约束。
-     * <p>试制只保留单边单控候选；量试/小批量优先单边单控、无单控时回落普通；
+     * <p>试制单模只保留单边单控候选；试制双模优先保留L/R整组、整组无法承接时允许普通机台；
+     * 量试/小批量优先单边单控、无单控时回落普通；
      * 正规优先普通，单控候选必须先收敛成L/R整机候选后才能作为普通机台后的回落。</p>
      *
      * <p>业务边界：这里不做新增排序重排，不让后续试制/量试反向抢占当前 SKU 的全局顺序；
@@ -487,8 +489,17 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                                                                 List<MachineScheduleDTO> singleControlCandidates,
                                                                 List<MachineScheduleDTO> normalCandidates) {
         if (isTrialConstructionStage(sku)) {
-            // 试制SKU只能使用单控机台，无单控候选时不回落普通机台。
-            return singleControlCandidates;
+            if (!LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
+                // 试制单模只能使用单控单边；快照缺失时保持原有从严口径，不允许误落普通机台。
+                return singleControlCandidates;
+            }
+            // 试制双模保留已收敛的L/R整组和普通机台。这里只生成候选，
+            // 新增选机阶段会先尝试完全部单控整组，再进入普通机台候选组。
+            List<MachineScheduleDTO> retainedCandidates = new ArrayList<>(
+                    singleControlCandidates.size() + normalCandidates.size());
+            retainedCandidates.addAll(singleControlCandidates);
+            retainedCandidates.addAll(normalCandidates);
+            return retainedCandidates;
         }
         if (isMassTrialSku(sku) || isSmallBatchSku(sku)) {
             // 量试/小批量优先单控，但允许普通机台兜住可排性，具体顺序由后续排序控制。
@@ -565,8 +576,15 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                                                       MachineScheduleDTO machine) {
         boolean singleControlMachine = machine != null
                 && LhSingleControlMachineUtil.isSingleMouldMachine(machine.getMachineCode());
-        if (isTrialConstructionStage(sku) && !singleControlMachine) {
-            return "试制SKU禁止使用普通机台";
+        if (isTrialConstructionStage(sku)
+                && LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)
+                && !singleControlMachine) {
+            return "试制SKU单模禁止使用普通机台";
+        }
+        if (isTrialConstructionStage(sku)
+                && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)
+                && singleControlMachine) {
+            return "试制SKU双模使用单控机台时必须L/R整组通过";
         }
         if (isMassTrialSku(sku) && !singleControlMachine) {
             return "量试SKU优先使用单控机台，单控候选不足时允许普通机台";
@@ -2698,7 +2716,14 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                                                   MachineScheduleDTO machine) {
         boolean singleControlMachine = isSingleControlMachine(context, machine.getMachineCode());
         if (isTrialConstructionStage(sku)) {
-            return singleControlMachine ? "试制SKU只能使用单控机台" : "试制SKU禁止使用普通机台";
+            if (LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
+                return singleControlMachine
+                        ? "试制SKU双模优先使用单控L/R整组"
+                        : "试制SKU双模在单控整组无法承接后使用普通机台";
+            }
+            return singleControlMachine
+                    ? "试制SKU单模只能使用单控机台单边"
+                    : "试制SKU单模禁止使用普通机台";
         }
         if (isMassTrialSku(sku)) {
             return singleControlMachine ? "量试SKU优先使用单控机台" : "量试SKU单控不足时允许使用普通机台";

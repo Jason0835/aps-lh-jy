@@ -1,9 +1,9 @@
 package com.zlt.aps.lh.component;
 
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
-import com.zlt.aps.lh.api.enums.TrialStatusEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
@@ -35,8 +35,8 @@ import java.util.Set;
 @Component
 public class SingleControlModeSnapshotInitializer {
 
-    /** 试验SKU强制单模的不同SKU数量阈值 */
-    private static final int TRIAL_SINGLE_SIDE_THRESHOLD = 3;
+    /** 试制SKU强制单模的不同SKU数量阈值 */
+    private static final int TRIAL_SINGLE_SIDE_THRESHOLD = 2;
     /** 通用单模最大初始目标量 */
     private static final int SINGLE_SIDE_MAX_TARGET_QTY = 4;
 
@@ -67,12 +67,14 @@ public class SingleControlModeSnapshotInitializer {
             initialTargetQtyMap.putIfAbsent(skuKey, resolveInitialTargetQty(context, sku));
         }
 
+        // 试制SKU统一按月计划施工阶段01识别，产品状态X仅用于示方匹配和结果落库，
+        // 不再作为单控模式的第二套试制判断口径。
         Set<String> eligibleTrialSkuKeySet = new LinkedHashSet<String>(4);
         for (Map.Entry<String, SkuScheduleDTO> entry : uniqueSkuMap.entrySet()) {
             SkuScheduleDTO sku = entry.getValue();
             int initialTargetQty = initialTargetQtyMap.getOrDefault(entry.getKey(), 0);
             if (initialTargetQty > 0
-                    && StringUtils.equals(TrialStatusEnum.TRIAL.getCode(), sku.getProductStatus())
+                    && isTrialProductionSku(sku)
                     && machineMatchStrategy.hasEligibleSingleControlSide(context, sku)) {
                 eligibleTrialSkuKeySet.add(entry.getKey());
             }
@@ -84,20 +86,33 @@ public class SingleControlModeSnapshotInitializer {
             SkuScheduleDTO sku = entry.getValue();
             int initialTargetQty = initialTargetQtyMap.getOrDefault(entry.getKey(), 0);
             boolean trialSingleSide = forceTrialSingleSide
-                    && StringUtils.equals(TrialStatusEnum.TRIAL.getCode(), sku.getProductStatus());
+                    && isTrialProductionSku(sku);
             SingleControlMachineModeEnum mode = trialSingleSide || initialTargetQty <= SINGLE_SIDE_MAX_TARGET_QTY
                     ? SingleControlMachineModeEnum.SINGLE_SIDE
                     : SingleControlMachineModeEnum.WHOLE_PAIR;
             context.getSingleControlModeSnapshotMap().put(entry.getKey(), mode);
-            log.info("单控机台模式冻结, factoryCode: {}, batchNo: {}, materialCode: {}, productStatus: {}, "
+            log.info("单控机台模式冻结, factoryCode: {}, batchNo: {}, materialCode: {}, constructionStage: {}, "
                             + "initialTargetQty: {}, eligibleTrialSkuCount: {}, mode: {}, rule: {}",
-                    context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(),
+                    context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getConstructionStage(),
                     initialTargetQty, eligibleTrialSkuKeySet.size(), mode.getDescription(),
-                    trialSingleSide ? "不同试验SKU数量不少于3" : "初始目标量4条边界");
+                    trialSingleSide ? "不同试制SKU数量不少于2" : "初始待排量4条边界");
         }
         context.setSingleControlModeSnapshotInitialized(true);
         log.info("单控机台模式快照初始化完成, factoryCode: {}, batchNo: {}, skuCount: {}, eligibleTrialSkuCount: {}",
                 context.getFactoryCode(), context.getBatchNo(), uniqueSkuMap.size(), eligibleTrialSkuKeySet.size());
+    }
+
+    /**
+     * 判断SKU是否为单控规则中的试制SKU。
+     * <p>试制生产、严格控量、换模和首检链路均以施工阶段01为准，
+     * 此处复用同一字段，禁止再按产品状态X建立独立判断。</p>
+     *
+     * @param sku 待判断SKU
+     * @return true-施工阶段为试制
+     */
+    private boolean isTrialProductionSku(SkuScheduleDTO sku) {
+        return Objects.nonNull(sku)
+                && StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage());
     }
 
     /**

@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
@@ -32,6 +33,7 @@ import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmMaterialInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
@@ -972,6 +974,7 @@ class NewSpecProductionStrategyRegressionTest {
         SkuScheduleDTO sku = buildSku();
         sku.setMaterialCode("3302001575");
         sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.SINGLE_SIDE);
         context.getNewSpecSkuList().add(sku);
 
         MachineScheduleDTO singleControlMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
@@ -1164,6 +1167,166 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(1, context.getScheduleResultList().size(), "所有单控机台都失败后，量试才允许回落普通机台");
         assertEquals(0, context.getUnscheduledResultList().size(), "普通机台可承接时，不应保留未排记录");
         assertEquals("K1111", context.getScheduleResultList().get(0).getLhMachineCode());
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldFallbackTrialWholePairToNormalAfterAllSingleControlGroupsFailed() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        injectTrialProductionStrategy(strategy, alwaysSchedulableTrialStrategy());
+
+        LhScheduleContext context = buildContext();
+        Map<String, String> paramMap = new HashMap<String, String>(4);
+        paramMap.put(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES, "K1501,K1502");
+        paramMap.put(LhScheduleParamConstant.ENABLE_CHANGEOVER_BALANCE, "1");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001575");
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        sku.setTargetScheduleQty(10);
+        sku.setPendingQty(10);
+        sku.setDailyPlanQty(10);
+        sku.setWindowPlanQty(10);
+        sku.setSurplusQty(10);
+        sku.setShiftCapacity(8);
+        freezeSingleControlMode(context, sku, SingleControlMachineModeEnum.WHOLE_PAIR);
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001575");
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO firstLeftMachine = buildMachine("K1501L", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO firstRightMachine = buildMachine("K1501R", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO secondLeftMachine = buildMachine("K1502L", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO secondRightMachine = buildMachine("K1502R", dateTime(2026, 4, 17, 6, 0));
+        MachineScheduleDTO normalMachine = buildMachine("K1111", dateTime(2026, 4, 17, 6, 0));
+        context.getMachineScheduleMap().put(firstLeftMachine.getMachineCode(), firstLeftMachine);
+        context.getMachineScheduleMap().put(firstRightMachine.getMachineCode(), firstRightMachine);
+        context.getMachineScheduleMap().put(secondLeftMachine.getMachineCode(), secondLeftMachine);
+        context.getMachineScheduleMap().put(secondRightMachine.getMachineCode(), secondRightMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                // 单控候选使用左侧代表L/R整组，普通机台属于第二阶段候选。
+                return Arrays.asList(firstLeftMachine, secondLeftMachine, normalMachine);
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                for (MachineScheduleDTO candidate : candidates) {
+                    if (!excludedMachineCodes.contains(candidate.getMachineCode())) {
+                        return candidate;
+                    }
+                }
+                return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext context) {
+                // 测试桩，无需实现。
+            }
+        };
+        IMouldChangeBalanceStrategy mouldChangeBalanceStrategy = new IMouldChangeBalanceStrategy() {
+            @Override
+            public boolean hasCapacity(LhScheduleContext ctx, Date targetDate) {
+                return true;
+            }
+
+            @Override
+            public Date allocateMouldChange(LhScheduleContext ctx, String machineCode, Date endingTime) {
+                if ("K1501L".equals(machineCode) || "K1502L".equals(machineCode)) {
+                    return null;
+                }
+                return endingTime;
+            }
+
+            @Override
+            public int getRemainingCapacity(LhScheduleContext ctx, Date targetDate) {
+                return 99;
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, mouldChangeBalanceStrategy,
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(1, context.getScheduleResultList().size(),
+                "试制双模必须在全部单控L/R整组失败后回落普通机台");
+        LhScheduleResult normalMachineResult = context.getScheduleResultList().get(0);
+        assertEquals("K1111", normalMachineResult.getLhMachineCode());
+        assertEquals(context.getScheduleWindowShifts().get(1).getShiftStartDateTime(),
+                normalMachineResult.getClass2StartTime(),
+                "普通机台承接试制双模时仍必须从中班开始生产");
+        assertEquals(6, normalMachineResult.getClass2PlanQty().intValue(),
+                "中班8小时产能必须先固定扣减2小时首检产能，仅余6条可排");
+        assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    @Test
+    void findReverseMatchSku_shouldExcludeTrialWholePairAndKeepOtherFrozenSingleSideSku() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+        LhScheduleContext context = buildContext();
+
+        SkuScheduleDTO currentTrial = buildSku();
+        currentTrial.setMaterialCode("TRIAL-CURRENT");
+        currentTrial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        currentTrial.setSpecCode("SPEC-A");
+        currentTrial.setTargetScheduleQty(3);
+        freezeSingleControlMode(context, currentTrial, SingleControlMachineModeEnum.SINGLE_SIDE);
+
+        SkuScheduleDTO wholePairTrial = buildSku();
+        wholePairTrial.setMaterialCode("TRIAL-WHOLE-PAIR");
+        wholePairTrial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        wholePairTrial.setSpecCode("SPEC-A");
+        wholePairTrial.setTargetScheduleQty(10);
+        freezeSingleControlMode(context, wholePairTrial, SingleControlMachineModeEnum.WHOLE_PAIR);
+
+        SkuScheduleDTO massTrialSingleSide = buildSku();
+        massTrialSingleSide.setMaterialCode("MASS-TRIAL-SINGLE");
+        massTrialSingleSide.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSingleSide.setSpecCode("SPEC-A");
+        massTrialSingleSide.setTargetScheduleQty(3);
+        context.getSkuProductionRemainingQtyMap().put(massTrialSingleSide.getMaterialCode(), 3);
+        freezeSingleControlMode(context, massTrialSingleSide, SingleControlMachineModeEnum.SINGLE_SIDE);
+
+        context.getNewSpecSkuList().add(currentTrial);
+        context.getNewSpecSkuList().add(wholePairTrial);
+        context.getNewSpecSkuList().add(massTrialSingleSide);
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO sku) {
+                return Collections.emptyList();
+            }
+
+            @Override
+            public boolean isEligibleSingleControlSide(LhScheduleContext ctx,
+                                                       SkuScheduleDTO sku,
+                                                       String machineCode) {
+                return true;
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx,
+                                                        SkuScheduleDTO sku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext ctx) {
+                // 测试桩，无需实现。
+            }
+        };
+
+        SkuScheduleDTO matchedSku = ReflectionTestUtils.invokeMethod(
+                strategy, "findReverseMatchSku", context, currentTrial, "K1501R", machineMatchStrategy);
+
+        assertEquals(massTrialSingleSide, matchedSku,
+                "试制双模不得参与反向匹配，其他类型已冻结单模的既有参与资格必须保留");
     }
 
     @Test
@@ -2393,6 +2556,7 @@ class NewSpecProductionStrategyRegressionTest {
         SkuScheduleDTO trialSku = buildSku();
         trialSku.setMaterialCode("3302001575");
         trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        freezeSingleControlMode(context, trialSku, SingleControlMachineModeEnum.SINGLE_SIDE);
         context.getNewSpecSkuList().add(trialSku);
 
         MachineScheduleDTO normalMachine = buildMachine("K1111", dateTime(2026, 4, 17, 6, 0));
@@ -2401,7 +2565,7 @@ class NewSpecProductionStrategyRegressionTest {
         strategy.scheduleNewSpecs(context, new DefaultMachineMatchStrategy(), defaultMouldChangeBalance(),
                 defaultInspectionBalance(), defaultCapacityCalculate());
 
-        assertEquals("试制SKU只能使用单控机台，但当前无可用单控机台或单控机台产能不足，无法排产",
+        assertEquals("试制SKU单模只能使用单控机台单边，但当前无可用单控机台或单控机台产能不足，无法排产",
                 findUnscheduledResultByMaterialCode(context.getUnscheduledResultList(), "3302001575").getUnscheduledReason(),
                 "试制SKU仅剩普通机台候选时，应返回单控专属未排原因");
     }
@@ -6007,6 +6171,21 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setPendingQty(1);
         sku.setDailyPlanQty(1);
         return sku;
+    }
+
+    /**
+     * 写入单控模式快照，模拟S4.3在新增排产前完成的模式冻结。
+     *
+     * @param context 排程上下文
+     * @param sku 待冻结SKU
+     * @param mode 冻结后的单模或双模模式
+     */
+    private void freezeSingleControlMode(LhScheduleContext context,
+                                         SkuScheduleDTO sku,
+                                         SingleControlMachineModeEnum mode) {
+        context.getSingleControlModeSnapshotMap().put(
+                LhSingleControlMachineUtil.buildSkuModeKey(sku), mode);
+        context.setSingleControlModeSnapshotInitialized(true);
     }
 
     private LhScheduleResult buildNewSpecResult(String materialCode, String machineCode) {

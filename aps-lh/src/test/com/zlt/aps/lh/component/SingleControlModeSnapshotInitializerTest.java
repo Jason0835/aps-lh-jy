@@ -22,73 +22,67 @@ import java.util.Set;
 class SingleControlModeSnapshotInitializerTest {
 
     /**
-     * 三个不同试验SKU即使初始目标量都大于4，也必须全部冻结为单模。
+     * 两个不同试制SKU即使初始待排量都大于4，也必须全部冻结为单模。
      */
     @Test
-    void initialize_shouldFreezeAllEligibleTrialSkusToSingleSideWhenCountReachesThree() {
+    void initialize_shouldFreezeAllEligibleTrialSkusToSingleSideWhenCountReachesTwo() {
         LhScheduleContext context = new LhScheduleContext();
-        SkuScheduleDTO trialA = sku("TRIAL-A", TrialStatusEnum.TRIAL.getCode(), 20);
-        SkuScheduleDTO trialB = sku("TRIAL-B", TrialStatusEnum.TRIAL.getCode(), 10);
-        SkuScheduleDTO trialC = sku("TRIAL-C", TrialStatusEnum.TRIAL.getCode(), 6);
+        SkuScheduleDTO trialA = sku("TRIAL-A", ConstructionStageEnum.TRIAL.getCode(), 20);
+        SkuScheduleDTO trialB = sku("TRIAL-B", ConstructionStageEnum.TRIAL.getCode(), 10);
         context.getNewSpecSkuList().add(trialA);
         context.getNewSpecSkuList().add(trialB);
-        context.getNewSpecSkuList().add(trialC);
-        putProductionLedger(context, trialA, trialB, trialC);
-
-        initializer(true).initialize(context);
-
-        Assertions.assertEquals(3, context.getSingleControlEligibleTrialSkuKeySet().size());
-        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, trialA));
-        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, trialB));
-        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, trialC));
-    }
-
-    /**
-     * 不足三个试验SKU时统一按4条边界判断，施工阶段“试制”不得冒充产品状态“试验”。
-     */
-    @Test
-    void initialize_shouldUseInitialTargetBoundaryAndOnlyCountProductStatusTrial() {
-        LhScheduleContext context = new LhScheduleContext();
-        SkuScheduleDTO trialA = sku("TRIAL-A", TrialStatusEnum.TRIAL.getCode(), 10);
-        SkuScheduleDTO trialB = sku("TRIAL-B", TrialStatusEnum.TRIAL.getCode(), 5);
-        SkuScheduleDTO constructionTrial = sku("CONSTRUCTION-TRIAL", TrialStatusEnum.FORMAL.getCode(), 3);
-        constructionTrial.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
-        context.getNewSpecSkuList().add(trialA);
-        context.getNewSpecSkuList().add(trialB);
-        context.getNewSpecSkuList().add(constructionTrial);
-        putProductionLedger(context, trialA, trialB, constructionTrial);
+        putProductionLedger(context, trialA, trialB);
 
         initializer(true).initialize(context);
 
         Assertions.assertEquals(2, context.getSingleControlEligibleTrialSkuKeySet().size());
-        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, trialA));
-        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, trialB));
-        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, constructionTrial));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, trialA));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isSingleSideGranularitySku(context, trialB));
     }
 
     /**
-     * 目标量为0的试验SKU不计数；快照生成后修改目标量并再次调用初始化也不得改变模式。
+     * 单控规则只按施工阶段识别试制SKU，产品状态X不得独立计入试制SKU数量。
+     */
+    @Test
+    void initialize_shouldUseConstructionStageAsOnlyTrialProductionType() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO constructionTrial = sku(
+                "CONSTRUCTION-TRIAL", ConstructionStageEnum.TRIAL.getCode(), 5);
+        SkuScheduleDTO productStatusOnlyTrial = sku(
+                "PRODUCT-STATUS-X", ConstructionStageEnum.FORMAL.getCode(), 20);
+        productStatusOnlyTrial.setProductStatus(TrialStatusEnum.TRIAL.getCode());
+        context.getNewSpecSkuList().add(constructionTrial);
+        context.getNewSpecSkuList().add(productStatusOnlyTrial);
+        putProductionLedger(context, constructionTrial, productStatusOnlyTrial);
+
+        initializer(true).initialize(context);
+
+        Assertions.assertEquals(1, context.getSingleControlEligibleTrialSkuKeySet().size());
+        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, constructionTrial));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, productStatusOnlyTrial));
+    }
+
+    /**
+     * 初始待排量为0的试制SKU不计数；快照生成后修改数量和待排队列也不得改变模式。
      */
     @Test
     void initialize_shouldExcludeZeroTargetAndKeepModeFrozenAfterQuantityChanges() {
         LhScheduleContext context = new LhScheduleContext();
-        SkuScheduleDTO trialA = sku("TRIAL-A", TrialStatusEnum.TRIAL.getCode(), 20);
-        SkuScheduleDTO trialB = sku("TRIAL-B", TrialStatusEnum.TRIAL.getCode(), 20);
-        SkuScheduleDTO trialC = sku("TRIAL-C", TrialStatusEnum.TRIAL.getCode(), 20);
-        SkuScheduleDTO zeroTrial = sku("TRIAL-ZERO", TrialStatusEnum.TRIAL.getCode(), 0);
+        SkuScheduleDTO trialA = sku("TRIAL-A", ConstructionStageEnum.TRIAL.getCode(), 20);
+        SkuScheduleDTO trialB = sku("TRIAL-B", ConstructionStageEnum.TRIAL.getCode(), 20);
+        SkuScheduleDTO zeroTrial = sku("TRIAL-ZERO", ConstructionStageEnum.TRIAL.getCode(), 0);
         context.getNewSpecSkuList().add(trialA);
         context.getNewSpecSkuList().add(trialB);
-        context.getNewSpecSkuList().add(trialC);
         context.getNewSpecSkuList().add(zeroTrial);
-        putProductionLedger(context, trialA, trialB, trialC, zeroTrial);
+        putProductionLedger(context, trialA, trialB, zeroTrial);
         SingleControlModeSnapshotInitializer initializer = initializer(true);
 
         initializer.initialize(context);
         trialA.setTargetScheduleQty(1);
-        context.getNewSpecSkuList().remove(trialC);
+        context.getNewSpecSkuList().remove(trialB);
         initializer.initialize(context);
 
-        Assertions.assertEquals(3, context.getSingleControlEligibleTrialSkuKeySet().size());
+        Assertions.assertEquals(2, context.getSingleControlEligibleTrialSkuKeySet().size());
         Assertions.assertEquals(20, context.getSingleControlInitialTargetQtyMap().get(
                 LhSingleControlMachineUtil.buildSkuModeKey(trialA)));
         Assertions.assertEquals(SingleControlMachineModeEnum.SINGLE_SIDE,
@@ -97,13 +91,51 @@ class SingleControlModeSnapshotInitializerTest {
     }
 
     /**
+     * 同一项目统一SKU键出现多次时只统计一次，不能因续作和新增对象重复而误触发多试制规则。
+     */
+    @Test
+    void initialize_shouldCountDuplicateTrialSkuKeyOnlyOnce() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO continuousTrial = sku("TRIAL-SAME", ConstructionStageEnum.TRIAL.getCode(), 10);
+        SkuScheduleDTO newTrial = sku("TRIAL-SAME", ConstructionStageEnum.TRIAL.getCode(), 10);
+        context.getContinuousSkuList().add(continuousTrial);
+        context.getNewSpecSkuList().add(newTrial);
+        putProductionLedger(context, continuousTrial);
+
+        initializer(true).initialize(context);
+
+        Assertions.assertEquals(1, context.getSingleControlEligibleTrialSkuKeySet().size());
+        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, continuousTrial));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, newTrial));
+    }
+
+    /**
+     * 未通过单控静态准入的试制SKU不计入本轮有效试制SKU数量。
+     */
+    @Test
+    void initialize_shouldExcludeTrialSkusWithoutStaticSingleControlEligibility() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO trialA = sku("TRIAL-A", ConstructionStageEnum.TRIAL.getCode(), 20);
+        SkuScheduleDTO trialB = sku("TRIAL-B", ConstructionStageEnum.TRIAL.getCode(), 20);
+        context.getNewSpecSkuList().add(trialA);
+        context.getNewSpecSkuList().add(trialB);
+        putProductionLedger(context, trialA, trialB);
+
+        initializer(false).initialize(context);
+
+        Assertions.assertTrue(context.getSingleControlEligibleTrialSkuKeySet().isEmpty());
+        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, trialA));
+        Assertions.assertTrue(LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, trialB));
+    }
+
+    /**
      * 满排理论目标量不得覆盖进入排产链路时已冻结的实际消费账本。
      */
     @Test
     void initialize_shouldUseProductionLedgerInsteadOfTheoreticalFullProductionTarget() {
         LhScheduleContext context = new LhScheduleContext();
-        SkuScheduleDTO singleSideSku = sku("LEDGER-THREE", TrialStatusEnum.FORMAL.getCode(), 160);
-        SkuScheduleDTO wholePairSku = sku("LEDGER-FIVE", TrialStatusEnum.FORMAL.getCode(), 160);
+        SkuScheduleDTO singleSideSku = sku("LEDGER-THREE", ConstructionStageEnum.FORMAL.getCode(), 160);
+        SkuScheduleDTO wholePairSku = sku("LEDGER-FIVE", ConstructionStageEnum.FORMAL.getCode(), 160);
         context.getNewSpecSkuList().add(singleSideSku);
         context.getNewSpecSkuList().add(wholePairSku);
         context.getSkuProductionRemainingQtyMap().put(singleSideSku.getMaterialCode(), 3);
@@ -127,8 +159,7 @@ class SingleControlModeSnapshotInitializerTest {
     @Test
     void initialize_shouldUseSurplusQtyForTrialSkuEvenWhenStrictTargetQtyIsTrue() {
         LhScheduleContext context = new LhScheduleContext();
-        SkuScheduleDTO trialSku = sku("TRIAL-STRICT", TrialStatusEnum.TRIAL.getCode(), 160);
-        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        SkuScheduleDTO trialSku = sku("TRIAL-STRICT", ConstructionStageEnum.TRIAL.getCode(), 160);
         trialSku.setStrictTargetQty(true);
         trialSku.setSurplusQty(3);
         context.getNewSpecSkuList().add(trialSku);
@@ -149,7 +180,7 @@ class SingleControlModeSnapshotInitializerTest {
     @Test
     void resolveFrozenMode_shouldReturnNullWhenSnapshotMissing() {
         LhScheduleContext context = new LhScheduleContext();
-        SkuScheduleDTO sku = sku("SNAPSHOT-MISSING", TrialStatusEnum.FORMAL.getCode(), 10);
+        SkuScheduleDTO sku = sku("SNAPSHOT-MISSING", ConstructionStageEnum.FORMAL.getCode(), 10);
 
         Assertions.assertNull(LhSingleControlMachineUtil.resolveFrozenMode(context, sku));
         Assertions.assertNull(LhSingleControlMachineUtil.resolveFrozenMode(null, sku));
@@ -198,15 +229,16 @@ class SingleControlModeSnapshotInitializerTest {
      * 构建测试SKU。
      *
      * @param materialCode 物料编码
-     * @param productStatus 产品状态
+     * @param constructionStage 施工阶段
      * @param targetQty 初始目标量
      * @return SKU排程DTO
      */
-    private SkuScheduleDTO sku(String materialCode, String productStatus, int targetQty) {
+    private SkuScheduleDTO sku(String materialCode, String constructionStage, int targetQty) {
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode(materialCode);
-        sku.setProductStatus(productStatus);
-        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        // 产品状态继续作为统一SKU键的一部分，但不参与试制类型判断。
+        sku.setProductStatus(TrialStatusEnum.FORMAL.getCode());
+        sku.setConstructionStage(constructionStage);
         sku.setTargetScheduleQty(targetQty);
         sku.setPendingQty(targetQty);
         return sku;

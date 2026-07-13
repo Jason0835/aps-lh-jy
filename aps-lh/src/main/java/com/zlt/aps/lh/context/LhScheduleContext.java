@@ -253,7 +253,7 @@ public class LhScheduleContext {
     private Map<String, Integer> singleControlInitialTargetQtyMap = new LinkedHashMap<>();
     /** 单控模式快照，key=materialCode_productStatus；统一供新增、续作、换活字块、降模和校验消费 */
     private Map<String, SingleControlMachineModeEnum> singleControlModeSnapshotMap = new LinkedHashMap<>();
-    /** 冻结时满足单控静态准入且仍有目标量的不同试验SKU键集合 */
+    /** 冻结时满足单控静态准入且初始待排量大于0的不同试制SKU键集合 */
     private Set<String> singleControlEligibleTrialSkuKeySet = new LinkedHashSet<>();
     /** 单控模式快照是否已完成初始化；完成后禁止再次按动态运行态覆盖 */
     private boolean singleControlModeSnapshotInitialized;
