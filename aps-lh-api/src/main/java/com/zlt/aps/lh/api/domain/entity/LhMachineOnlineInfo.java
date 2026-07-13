@@ -39,6 +39,10 @@ public class LhMachineOnlineInfo extends BaseEntity implements Serializable {
     @TableField(value = "MES_MATERIAL_CODE")
     private String mesMaterialCode;
 
+    @ApiModelProperty(value = "产品状态", name = "productStatus")
+    @TableField(value = "PRODUCT_STATUS")
+    private String productStatus;
+
     @ApiModelProperty(value = "在机物料描述", name = "specDesc")
     @TableField(value = "SPEC_DESC")
     private String specDesc;

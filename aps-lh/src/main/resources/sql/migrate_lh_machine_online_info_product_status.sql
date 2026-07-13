@@ -1,0 +1,3 @@
+-- MES硫化在机信息增加产品状态，用于按“物料编码+产品状态”准确匹配续作SKU。
+ALTER TABLE T_LH_MACHINE_ONLINE_INFO
+    ADD COLUMN PRODUCT_STATUS varchar(30) DEFAULT NULL COMMENT '产品状态 X-试验示方 T-量试示方 S-正规示方' AFTER MES_MATERIAL_CODE;

@@ -1789,17 +1789,24 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                     || !schedulableMachineMap.containsKey(entry.getKey())) {
                 continue;
             }
-            String materialCode = resolveContinuousMaterialCode(
-                    context, entry.getKey(), schedulableMachineMap.get(entry.getKey()), entry.getValue());
-            assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap,
+            LhScheduleResult rollingResult = resolveRollingContinuousResult(
+                    context, entry.getKey(), schedulableMachineMap.get(entry.getKey()));
+            String materialCode = Objects.nonNull(rollingResult)
+                    ? rollingResult.getMaterialCode() : entry.getValue().getMaterialCode();
+            String productStatus = Objects.nonNull(rollingResult)
+                    ? rollingResult.getProductStatus() : entry.getValue().getProductStatus();
+            assignContinuousSku(entry.getKey(), materialCode, productStatus, skuByMaterialMap,
                     materialSkuCountMap, continuousSkuList);
         }
 
         if (context.isRollingScheduleHandoff() && !CollectionUtils.isEmpty(schedulableMachineMap)) {
             for (Map.Entry<String, MachineScheduleDTO> entry : schedulableMachineMap.entrySet()) {
-                String materialCode = resolveRollingContinuousMaterialCode(context, entry.getKey(), entry.getValue());
-                assignContinuousSku(entry.getKey(), materialCode, skuByMaterialMap,
-                        materialSkuCountMap, continuousSkuList);
+                LhScheduleResult rollingResult = resolveRollingContinuousResult(
+                        context, entry.getKey(), entry.getValue());
+                assignContinuousSku(entry.getKey(),
+                        Objects.nonNull(rollingResult) ? rollingResult.getMaterialCode() : null,
+                        Objects.nonNull(rollingResult) ? rollingResult.getProductStatus() : null,
+                        skuByMaterialMap, materialSkuCountMap, continuousSkuList);
             }
         }
 
@@ -1927,7 +1934,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 按物料编码归集待排SKU，保持原有归集顺序供机台依次消费
+     * 按物料编码归集待排SKU，保持原有归集顺序供机台依次消费。
+     * <p>匹配时先在同物料列表中查找产品状态一致的SKU，未命中再按列表顺序降级承接同物料SKU。</p>
      *
      * @param context 排程上下文
      * @return 物料编码 -> 待匹配SKU列表
@@ -1938,41 +1946,63 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             for (SkuScheduleDTO sku : skuList) {
                 sku.setScheduleType(null);
                 sku.setContinuousMachineCode(null);
-                if (StringUtils.isEmpty(sku.getMaterialCode())) {
+                String materialCode = StringUtils.trim(sku.getMaterialCode());
+                if (StringUtils.isEmpty(materialCode)) {
                     continue;
                 }
-                skuByMaterialMap.computeIfAbsent(sku.getMaterialCode(), k -> new ArrayList<>()).add(sku);
+                skuByMaterialMap.computeIfAbsent(materialCode, key -> new ArrayList<>()).add(sku);
             }
         }
         return skuByMaterialMap;
     }
 
     /**
-     * 按机台最近MES在机记录匹配续作SKU
+     * 按机台最近在机记录匹配续作SKU。
+     * <p>先按物料编码与产品状态精确匹配；精确匹配失败后，再降级按物料编码匹配。</p>
      *
-     * @param machineCode      机台编码
-     * @param onlineInfo       机台最近MES在机记录
+     * @param machineCode 机台编码
+     * @param materialCode 在机物料编码
+     * @param productStatus 在机产品状态
      * @param skuByMaterialMap 物料编码 -> 待匹配SKU列表
+     * @param materialSkuCountMap 物料编码 -> 原始SKU数量
      * @param continuousSkuList 续作SKU列表
      */
     private void assignContinuousSku(String machineCode,
                                      String materialCode,
+                                     String productStatus,
                                      Map<String, List<SkuScheduleDTO>> skuByMaterialMap,
                                      Map<String, Integer> materialSkuCountMap,
                                      List<SkuScheduleDTO> continuousSkuList) {
-        if (StringUtils.isEmpty(machineCode) || StringUtils.isEmpty(materialCode)) {
+        String normalizedMaterialCode = StringUtils.trim(materialCode);
+        if (StringUtils.isEmpty(machineCode) || StringUtils.isEmpty(normalizedMaterialCode)) {
             return;
         }
-        List<SkuScheduleDTO> matchedSkuList = skuByMaterialMap.get(materialCode);
+        // MES快照循环已完成分配时，滚动衔接循环不得再次为同一机台降级匹配其他状态SKU。
+        for (SkuScheduleDTO continuousSku : continuousSkuList) {
+            if (Objects.nonNull(continuousSku)
+                    && StringUtils.equals(machineCode, continuousSku.getContinuousMachineCode())) {
+                return;
+            }
+        }
+        List<SkuScheduleDTO> matchedSkuList = skuByMaterialMap.get(normalizedMaterialCode);
         if (CollectionUtils.isEmpty(matchedSkuList)) {
             return;
         }
-        // 同一物料存在多条SKU时，按归集顺序逐条消费，且仅允许有效机台占用。
+        int matchedSkuIndex = resolveProductStatusMatchedSkuIndex(matchedSkuList, productStatus);
+        if (matchedSkuIndex < 0) {
+            // MES产品状态缺失或同状态月计划不存在时，按原归集顺序降级承接同物料SKU。
+            matchedSkuIndex = 0;
+            log.warn("续作SKU产品状态未精确匹配，降级按物料编码匹配, machineCode: {}, materialCode: {}, "
+                            + "onlineProductStatus: {}, fallbackProductStatus: {}",
+                    machineCode, normalizedMaterialCode, productStatus,
+                    matchedSkuList.get(matchedSkuIndex).getProductStatus());
+        }
+        // 同一物料存在多条SKU时，优先消费产品状态一致的SKU；未命中时按归集顺序消费。
         // 仅有一条SKU但多台MES在机同物料时，不移除模板SKU，通过副本支持多机台续作。
         // 副本共享原SKU的dailyPlanQuotaMap，确保多机台同物料排产时共用同一日计划额度账本。
         SkuScheduleDTO matchedSku;
         if (matchedSkuList.size() > 1) {
-            matchedSku = matchedSkuList.remove(0);
+            matchedSku = matchedSkuList.remove(matchedSkuIndex);
         } else {
             // 单SKU多机台：首台机台直接取原始SKU，后续机台创建副本
             SkuScheduleDTO originalSku = matchedSkuList.get(0);
@@ -1982,7 +2012,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             } else if (StringUtils.equals(machineCode, originalSku.getContinuousMachineCode())) {
                 // 同一机台已在MES循环分配过（滚动衔接循环再次命中），跳过避免重复
                 return;
-            } else if (materialSkuCountMap.getOrDefault(materialCode, 0) > 1) {
+            } else if (materialSkuCountMap.getOrDefault(normalizedMaterialCode, 0) > 1) {
                 // 同物料存在多条月计划SKU时，仅允许逐条消费真实SKU，不再为额外机台复制模板SKU。
                 return;
             } else {
@@ -1993,6 +2023,28 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         matchedSku.setScheduleType(ScheduleTypeEnum.CONTINUOUS.getCode());
         matchedSku.setContinuousMachineCode(machineCode);
         continuousSkuList.add(matchedSku);
+    }
+
+    /**
+     * 查找同物料SKU列表中产品状态一致的候选位置。
+     *
+     * @param matchedSkuList 同物料待匹配SKU列表
+     * @param productStatus MES在机或滚动继承产品状态
+     * @return 状态一致的SKU位置；未匹配返回-1
+     */
+    private int resolveProductStatusMatchedSkuIndex(List<SkuScheduleDTO> matchedSkuList, String productStatus) {
+        String normalizedProductStatus = StringUtils.trim(productStatus);
+        if (CollectionUtils.isEmpty(matchedSkuList) || StringUtils.isEmpty(normalizedProductStatus)) {
+            return -1;
+        }
+        for (int index = 0; index < matchedSkuList.size(); index++) {
+            SkuScheduleDTO sku = matchedSkuList.get(index);
+            if (Objects.nonNull(sku) && StringUtils.equals(
+                    normalizedProductStatus, StringUtils.trim(sku.getProductStatus()))) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     /**
@@ -2088,37 +2140,16 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 解析机台本轮续作应承接的物料编码。
-     * <p>滚动衔接已继承且未收尾时，以继承后的机台当前物料为准；否则沿用 MES 在机物料。</p>
+     * 解析滚动衔接后机台应继续承接的最新未收尾结果。
      *
      * @param context 排程上下文
      * @param machineCode 机台编码
      * @param machine 机台状态
-     * @param onlineInfo MES 在机快照
-     * @return 续作物料编码
+     * @return 最新未收尾继承结果；不存在时返回null
      */
-    private String resolveContinuousMaterialCode(LhScheduleContext context,
-                                                 String machineCode,
-                                                 MachineScheduleDTO machine,
-                                                 LhMachineOnlineInfo onlineInfo) {
-        String rollingMaterialCode = resolveRollingContinuousMaterialCode(context, machineCode, machine);
-        if (StringUtils.isNotEmpty(rollingMaterialCode)) {
-            return rollingMaterialCode;
-        }
-        return onlineInfo != null ? onlineInfo.getMaterialCode() : null;
-    }
-
-    /**
-     * 解析滚动衔接后机台应继续承接的当前物料。
-     *
-     * @param context 排程上下文
-     * @param machineCode 机台编码
-     * @param machine 机台状态
-     * @return 未收尾的继承当前物料；不存在时返回 null
-     */
-    private String resolveRollingContinuousMaterialCode(LhScheduleContext context,
-                                                        String machineCode,
-                                                        MachineScheduleDTO machine) {
+    private LhScheduleResult resolveRollingContinuousResult(LhScheduleContext context,
+                                                            String machineCode,
+                                                            MachineScheduleDTO machine) {
         if (context == null
                 || !context.isRollingScheduleHandoff()
                 || machine == null
@@ -2148,7 +2179,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         if (latestInheritedResult == null || StringUtils.equals("1", latestInheritedResult.getIsEnd())) {
             return null;
         }
-        return machine.getCurrentMaterialCode();
+        return latestInheritedResult;
     }
 
     /**

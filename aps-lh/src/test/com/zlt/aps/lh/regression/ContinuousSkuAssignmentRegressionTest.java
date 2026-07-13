@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.handler.DataInitHandler;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
@@ -29,7 +30,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class ContinuousSkuAssignmentRegressionTest {
 
-    private final ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+    private final ScheduleAdjustHandler handler = buildHandler();
+
+    /**
+     * 构建续作分类处理器，并补齐当前分类入口必需的减量清单组件。
+     *
+     * @return 可直接执行续作分类私有方法的处理器
+     */
+    private ScheduleAdjustHandler buildHandler() {
+        ScheduleAdjustHandler scheduleAdjustHandler = new ScheduleAdjustHandler();
+        ReflectionTestUtils.setField(scheduleAdjustHandler, "skuDecrementChecker", new SkuDecrementChecker());
+        return scheduleAdjustHandler;
+    }
 
     @Test
     void classifyContinuousAndNewSkus_shouldKeepPlannedRepairMachineAsContinuous() {
@@ -81,6 +93,7 @@ class ContinuousSkuAssignmentRegressionTest {
         sku.setMaterialCode("3302001316");
         sku.setMaterialDesc("测试物料");
         sku.setStructureName("STRUCT-1");
+        sku.setProductStatus("S");
 
         Map<String, java.util.List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
         structureSkuMap.put("STRUCT-1", new ArrayList<SkuScheduleDTO>());
@@ -155,6 +168,113 @@ class ContinuousSkuAssignmentRegressionTest {
         assertEquals("3302001002", context.getContinuousSkuList().get(0).getMaterialCode());
         assertEquals("K2003", context.getContinuousSkuList().get(0).getContinuousMachineCode());
         assertEquals(0, context.getNewSpecSkuList().size());
+    }
+
+    /**
+     * 滚动衔接优先于MES快照时，也必须按继承结果的物料编码与产品状态承接SKU。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldUseRollingInheritedProductStatus() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setRollingScheduleHandoff(true);
+        String materialCode = "3302002217";
+
+        SkuScheduleDTO normalSku = buildSku(materialCode, "STRUCT-1", "S");
+        SkuScheduleDTO trialSku = buildSku(materialCode, "STRUCT-1", "T");
+        context.setStructureSkuMap(new LinkedHashMap<String, java.util.List<SkuScheduleDTO>>());
+        context.getStructureSkuMap().put("STRUCT-1",
+                new ArrayList<SkuScheduleDTO>(Arrays.asList(normalSku, trialSku)));
+
+        context.setMachineOnlineInfoMap(new LinkedHashMap<String, LhMachineOnlineInfo>());
+        context.getMachineOnlineInfoMap().put("K1101", buildOnlineInfo("K1101", materialCode, "S"));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("K1101", buildMachine("K1101", "1"));
+        context.getMachineScheduleMap().get("K1101").setCurrentMaterialCode(materialCode);
+        context.getRollingInheritedScheduleResultList().add(
+                buildInheritedResult("K1101", materialCode, "T", "0"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
+        assertEquals("T", context.getContinuousSkuList().get(0).getProductStatus());
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertEquals("S", context.getNewSpecSkuList().get(0).getProductStatus());
+    }
+
+    /**
+     * 同一物料存在不同产品状态时，MES在机只能承接状态一致的月计划SKU。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldMatchMesSkuByMaterialAndProductStatus() {
+        LhScheduleContext context = new LhScheduleContext();
+        String materialCode = "3302002217";
+
+        SkuScheduleDTO normalSku = buildSku(materialCode, "STRUCT-1", "S");
+        SkuScheduleDTO trialSku = buildSku(materialCode, "STRUCT-1", "T");
+        Map<String, java.util.List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("STRUCT-1", new ArrayList<SkuScheduleDTO>(Arrays.asList(normalSku, trialSku)));
+        context.setStructureSkuMap(structureSkuMap);
+
+        context.setMachineOnlineInfoMap(new LinkedHashMap<String, LhMachineOnlineInfo>());
+        context.getMachineOnlineInfoMap().put("K1101", buildOnlineInfo("K1101", materialCode, "T"));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("K1101", buildMachine("K1101", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
+        assertEquals("T", context.getContinuousSkuList().get(0).getProductStatus());
+        assertEquals("K1101", context.getContinuousSkuList().get(0).getContinuousMachineCode());
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertEquals("S", context.getNewSpecSkuList().get(0).getProductStatus());
+    }
+
+    /**
+     * MES在机产品状态缺失时，降级按物料编码承接月计划SKU。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldFallbackToMaterialWhenMesProductStatusMissing() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = buildSku("3302002217", "STRUCT-1", "S");
+        Map<String, java.util.List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("STRUCT-1", new ArrayList<SkuScheduleDTO>(Collections.singletonList(sku)));
+        context.setStructureSkuMap(structureSkuMap);
+
+        LhMachineOnlineInfo onlineInfo = buildOnlineInfo("K1101", "3302002217", null);
+        context.setMachineOnlineInfoMap(new LinkedHashMap<String, LhMachineOnlineInfo>());
+        context.getMachineOnlineInfoMap().put("K1101", onlineInfo);
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("K1101", buildMachine("K1101", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
+        assertEquals("S", context.getContinuousSkuList().get(0).getProductStatus());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+    }
+
+    /**
+     * MES在机产品状态在月计划中不存在时，降级按物料编码承接归集顺序中的首个SKU。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldFallbackToMaterialWhenProductStatusNotMatched() {
+        LhScheduleContext context = new LhScheduleContext();
+        String materialCode = "3302002217";
+        SkuScheduleDTO normalSku = buildSku(materialCode, "STRUCT-1", "S");
+        context.setStructureSkuMap(new LinkedHashMap<String, java.util.List<SkuScheduleDTO>>());
+        context.getStructureSkuMap().put("STRUCT-1",
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(normalSku)));
+
+        context.setMachineOnlineInfoMap(new LinkedHashMap<String, LhMachineOnlineInfo>());
+        context.getMachineOnlineInfoMap().put("K1101", buildOnlineInfo("K1101", materialCode, "X"));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("K1101", buildMachine("K1101", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
+        assertEquals("S", context.getContinuousSkuList().get(0).getProductStatus());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
     }
 
     @Test
@@ -247,17 +367,29 @@ class ContinuousSkuAssignmentRegressionTest {
     }
 
     private LhMachineOnlineInfo buildOnlineInfo(String machineCode, String materialCode) {
+        return buildOnlineInfo(machineCode, materialCode, "S");
+    }
+
+    private LhMachineOnlineInfo buildOnlineInfo(String machineCode,
+                                                String materialCode,
+                                                String productStatus) {
         LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
         onlineInfo.setLhCode(machineCode);
         onlineInfo.setMaterialCode(materialCode);
+        onlineInfo.setProductStatus(productStatus);
         return onlineInfo;
     }
 
     private SkuScheduleDTO buildSku(String materialCode, String structureName) {
+        return buildSku(materialCode, structureName, "S");
+    }
+
+    private SkuScheduleDTO buildSku(String materialCode, String structureName, String productStatus) {
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode(materialCode);
         sku.setMaterialDesc("测试物料-" + materialCode);
         sku.setStructureName(structureName);
+        sku.setProductStatus(productStatus);
         return sku;
     }
 
@@ -269,9 +401,17 @@ class ContinuousSkuAssignmentRegressionTest {
     }
 
     private LhScheduleResult buildInheritedResult(String machineCode, String materialCode, String isEnd) {
+        return buildInheritedResult(machineCode, materialCode, "S", isEnd);
+    }
+
+    private LhScheduleResult buildInheritedResult(String machineCode,
+                                                  String materialCode,
+                                                  String productStatus,
+                                                  String isEnd) {
         LhScheduleResult result = new LhScheduleResult();
         result.setLhMachineCode(machineCode);
         result.setMaterialCode(materialCode);
+        result.setProductStatus(productStatus);
         result.setIsEnd(isEnd);
         result.setSpecEndTime(new Date());
         result.setRollingInherited(true);
