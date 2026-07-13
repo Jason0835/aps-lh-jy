@@ -79,6 +79,12 @@ public final class DailyMachineCapacitySimulationUtil {
             carryShortage = decision.getDayShortageQty();
             totalUnmetQty = Math.max(totalUnmetQty, decision.getUnmetQty());
             forcedShortageWindowTriggered = forcedShortageWindowTriggered || decision.isShortageThresholdExceeded();
+            // 当前日已满足且未增机台时，不再后看下一日
+            // （spec: 当前日已满足时，当前日不加机台，且不再后看下一日）
+            if (decision.getUnmetQty() <= 0 && decision.getAddedMachineCount() == 0
+                    && MODE_CURRENT_DAY_PLAN_SATISFIED.equals(decision.getDecisionMode())) {
+                break;
+            }
         }
         result.setFinalActiveMachines(activeMachines);
         int totalAdded = 0;
@@ -318,7 +324,11 @@ public final class DailyMachineCapacitySimulationUtil {
         if (Objects.isNull(quota)) {
             return 0;
         }
-        return Math.max(0, quota.getRemainingQty() - Math.max(0, quota.getDayPlanQty()));
+        // carryShortage 只应反映本月历史欠产追加到首日账本的差额，
+        // 不应包含收尾目标量同步到 remainingQty 的部分，否则会误放大窗口末日缺口导致不该增机台。
+        int rawCarryShortage = Math.max(0, quota.getRemainingQty() - Math.max(0, quota.getDayPlanQty()));
+        int historyShortageQty = Math.max(0, request.getMonthlyHistoryShortageQty());
+        return Math.min(rawCarryShortage, historyShortageQty);
     }
 
     private static int sumWindowPlanQty(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,

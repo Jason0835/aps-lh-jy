@@ -1736,7 +1736,9 @@ public class TargetScheduleQtyResolver {
         SkuDailyPlanQuotaDTO quota = firstEntry.getValue();
         quota.setProductionDate(firstEntry.getKey());
         // 收尾清量允许突破原 dayN，把差额补入首日运行态账本，后续统一由账本消费链路扣减。
-        quota.setDayPlanQty(Math.max(0, quota.getDayPlanQty()) + appendQty);
+        // 注意：只补入 remainingQty（运行态账本剩余额度），不修改 dayPlanQty（月计划日产量节奏）。
+        // dayPlanQty 仅用于 dayN 增机台逐日后看判断，被收尾目标量放大后会误判当前日不满足，
+        // 导致不该增机台的收尾 SKU 错误触发增机台。
         quota.setRemainingQty(Math.max(0, quota.getRemainingQty()) + appendQty);
         quota.setCompleted(false);
         SkuDailyPlanQuotaUtil.refreshRollingFields(quotaMap);

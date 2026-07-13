@@ -321,7 +321,10 @@ public final class DailyMachineExpansionPlanner {
                         sku.getMaterialCode(), productionDate, activeMachineCount, currentDayCapacityQty,
                         dayPlanQty, currentDayPlanQty, resolveFirstDayFinishQty(sku, productionDate, firstProductionDate),
                         true, false, false);
-                continue;
+                // spec: 当前日已满足时，当前日不加机台，且不再后看下一日。
+                // 使用 break 而非 continue，避免已满足的首日（含 T-1 滚动日）后仍继续检查后续日计划，
+                // 导致日计划略高于单机日产能的收尾 SKU 被误判为需要增机台。
+                break;
             }
             LocalDate nextProductionDate = resolveNextProductionDate(sku.getDailyPlanQuotaMap(), productionDate);
             if (Objects.isNull(nextProductionDate)) {

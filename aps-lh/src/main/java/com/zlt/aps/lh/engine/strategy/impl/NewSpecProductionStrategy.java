@@ -1215,11 +1215,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         ? Math.max(0, baseTargetScheduleQty) : dynamicTargetQty;
                 /*
                  * dayN 模拟已确认当前机台数满足节奏时，剩余业务目标不能再驱动普通空闲机台开机；
-                 * 后续是否继续只交给尾部产能判断，保留续作收尾释放机台的承接能力。
+                 * 也不再因业务目标剩余继续消费释放尾部产能，剩余量由后续窗口滚动承接。
                  */
                 boolean needMoreMachineForTailDecision = needMoreMachine(context, sku)
                         && !segment.isStopAfterCurrentForSmallShortage();
-                boolean continueForTailCapacityBeforeRemaining = shouldContinueForTailCapacity(
+                // dayN 已确认满足时直接阻断尾部产能增机，不再调用 shouldContinueForTailCapacity。
+                boolean continueForTailCapacityBeforeRemaining = !segment.isStopAfterCurrentForSmallShortage()
+                        && shouldContinueForTailCapacity(
                         context, sku, candidates, excludedMachineCodes, machineCode,
                         dynamicTargetQty, totalScheduledQty, businessTargetQty, needMoreMachineForTailDecision);
                 if (segment.isStopAfterCurrentForSmallShortage() && !continueForTailCapacityBeforeRemaining) {
@@ -1251,7 +1253,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 // 同一口径用于本机台落地后的退出判断，避免前后两次判断结果不一致。
                 boolean needMoreMachineAfterCurrent = needMoreMachine(context, sku)
                         && !segment.isStopAfterCurrentForSmallShortage();
-                boolean continueForTailCapacity = shouldContinueForTailCapacity(
+                // dayN 已确认满足时直接阻断尾部产能增机，不再调用 shouldContinueForTailCapacity。
+                boolean continueForTailCapacity = !segment.isStopAfterCurrentForSmallShortage()
+                        && shouldContinueForTailCapacity(
                         context, sku, candidates, excludedMachineCodes, machineCode,
                         dynamicTargetQty, totalScheduledQty, businessTargetQty, needMoreMachineAfterCurrent);
                 if (continueForTailCapacity && !needMoreMachineAfterCurrent) {
