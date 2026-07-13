@@ -3283,6 +3283,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (Objects.isNull(context) || Objects.isNull(sourceSku) || Objects.isNull(result)) {
             return;
         }
+        // 开关关闭时不保存错峰专用释放快照，保证正常降模释放后不会被后续错峰链恢复。
+        if (!isEndingAutoFillEnabled(context)) {
+            return;
+        }
         int endingShiftIndex = resolveLastPlannedShiftIndex(result);
         if (endingShiftIndex <= 0 || endingShiftIndex >= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT) {
             return;
@@ -3310,6 +3314,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private void applySharedEmbryoEndingStaggerPostpone(LhScheduleContext context, List<LhShiftConfigVO> shifts) {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(shifts)
                 || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        // 在收集候选和修改班次前统一拦截，避免产生“只延后收尾时间但没有对应产量”的不一致结果。
+        if (!isEndingAutoFillEnabled(context)) {
+            log.info("共用胎胚收尾错峰后延跳过, scheduleDate: {}, 原因: 收尾自动补量开关已关闭",
+                    context.getScheduleDate());
             return;
         }
         Map<Integer, List<LhScheduleResult>> shiftCandidateMap =
@@ -5613,6 +5623,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (!isEndingFillCandidate(context, result, sku, shifts)) {
             return;
         }
+        // 只在确认属于主销/常规收尾补满候选后检查开关，关闭时不修改班次量、结构机台统计和允许超量。
+        if (!isEndingAutoFillEnabled(context)) {
+            log.info("SKU收尾补满跳过, materialCode: {}, machineCode: {}, productionType: {}, "
+                            + "embryoCode: {}, 原因: 收尾自动补量开关已关闭",
+                    sku.getMaterialCode(), result.getLhMachineCode(), sku.getProductionType(), sku.getEmbryoCode());
+            return;
+        }
         // 收尾补满只允许运行态共用胎胚触发，单胎胚或动态剔除后转单胎胚的SKU继续严格按收尾目标量控制。
         if (!isRuntimeSharedEmbryoForEndingFill(context, sku)) {
             log.info("SKU收尾补满跳过, materialCode: {}, machineCode: {}, productionType: {}, embryoCode: {}, "
@@ -5733,6 +5750,25 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private boolean isEndingFillProductionType(String productionType) {
         return StringUtils.equals(MAIN_SALE_PRODUCTION_TYPE, productionType)
                 || StringUtils.equals(REGULAR_PRODUCTION_TYPE, productionType);
+    }
+
+    /**
+     * 统一判断收尾自动补量开关。
+     * <p>生产入口优先使用已经严格校验的配置快照；单元测试等未挂载快照的上下文，</p>
+     * <p>则复用上下文参数读取并按默认1处理，保持原有行为。</p>
+     *
+     * @param context 排程上下文
+     * @return true-允许自动补量；false-不允许自动补量
+     */
+    private boolean isEndingAutoFillEnabled(LhScheduleContext context) {
+        if (Objects.isNull(context)) {
+            return LhScheduleConstant.ENDING_AUTO_FILL_ENABLED == 1;
+        }
+        if (Objects.nonNull(context.getScheduleConfig())) {
+            return context.getScheduleConfig().isEndingAutoFillEnabled();
+        }
+        return context.getParamIntValue(LhScheduleParamConstant.ENDING_AUTO_FILL_ENABLED,
+                LhScheduleConstant.ENDING_AUTO_FILL_ENABLED) != 0;
     }
 
     /**

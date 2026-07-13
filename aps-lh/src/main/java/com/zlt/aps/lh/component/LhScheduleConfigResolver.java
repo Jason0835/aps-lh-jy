@@ -218,6 +218,8 @@ public class LhScheduleConfigResolver {
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD,
                 LhScheduleConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, 0);
         putEarlyProductionDaysThreshold(resolvedParamMap, lhParamsMap);
+        // 收尾自动补量只允许0/1，在配置快照入口统一校验，避免两条补量链各自解析。
+        putEndingAutoFillEnabled(resolvedParamMap, lhParamsMap);
         putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE,
                 LhScheduleConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE,
@@ -335,6 +337,34 @@ public class LhScheduleConfigResolver {
             resolvedValue = LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD;
         }
         resolvedParamMap.put(paramCode, String.valueOf(resolvedValue));
+    }
+
+    /**
+     * 解析收尾自动补量开关。
+     * <p>只有0和1是合法值；未配置、空值或非法值均按默认1生效，保持现有排程行为兼容。</p>
+     *
+     * @param resolvedParamMap 解析后参数
+     * @param lhParamsMap 原始参数
+     */
+    private void putEndingAutoFillEnabled(Map<String, String> resolvedParamMap,
+                                          Map<String, String> lhParamsMap) {
+        String paramCode = LhScheduleParamConstant.ENDING_AUTO_FILL_ENABLED;
+        int defaultValue = LhScheduleConstant.ENDING_AUTO_FILL_ENABLED;
+        String value = lhParamsMap.get(paramCode);
+        if (StringUtils.isEmpty(value)) {
+            log.warn("收尾自动补量开关未配置或为空，使用默认值, paramCode={}, defaultValue={}",
+                    paramCode, defaultValue);
+            resolvedParamMap.put(paramCode, String.valueOf(defaultValue));
+            return;
+        }
+        String trimmedValue = value.trim();
+        if (StringUtils.equals("0", trimmedValue) || StringUtils.equals("1", trimmedValue)) {
+            resolvedParamMap.put(paramCode, trimmedValue);
+            return;
+        }
+        log.warn("收尾自动补量开关配置非法，使用默认值, paramCode={}, value={}, defaultValue={}",
+                paramCode, value, defaultValue);
+        resolvedParamMap.put(paramCode, String.valueOf(defaultValue));
     }
 
     /**

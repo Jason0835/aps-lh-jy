@@ -1338,6 +1338,9 @@ public class ContinuousProductionStrategyTest {
     public void applyNoMouldChangeNightFillBeforeRelease_shouldFillCurrentAfternoonBeforeNightShift() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = new LhScheduleContext();
+        // 收尾自动补量开关不得影响续作降模前的不可换模夜班补满规则。
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.ENDING_AUTO_FILL_ENABLED, "0")));
         context.setFactoryCode("116");
         context.setBatchNo("LHPC-TEST-CONTINUATION-NIGHT-FILL");
         context.setScheduleDate(toDate(2026, 6, 14, 0, 0, 0));

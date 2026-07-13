@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.regression;
 
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
@@ -9,6 +10,7 @@ import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.component.OrderNoGenerator;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
@@ -332,6 +334,34 @@ class ContinuousProductionResultQtyRegressionTest {
 
         assertEquals(18, result.getClass5PlanQty().intValue(), "常规收尾SKU胎胚在机且20点后应补满当天中班");
         assertEquals(18, result.getClass6PlanQty().intValue(), "常规收尾SKU胎胚在机且20点后应补满下一个晚班");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldKeepOriginalEndingQtyWhenAutoFillDisabled() {
+        LhScheduleContext context = newContext();
+        setEndingAutoFillEnabled(context, false);
+        LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
+        LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
+        context.addStructurePlanMachineCount(businessDate, "PCR-01", 2);
+        SkuScheduleDTO sku = buildMainSaleEndingSku("330200DISABLED", "PCR-01", "01");
+        markRuntimeSharedEmbryo(context, sku, "330200DISABLED-SHARED");
+        context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);
+        LhScheduleResult result = buildMainSaleEndingResult(
+                context, afternoonShift, "K1912", "330200DISABLED", 8);
+        Date originalEndingTime = result.getSpecEndTime();
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(Integer.valueOf(8), result.getClass5PlanQty(),
+                "开关关闭时应保留SKU原收尾目标量");
+        assertNull(result.getClass6PlanQty(), "开关关闭时不得新增下一夜班计划量");
+        assertEquals(originalEndingTime, result.getSpecEndTime(), "开关关闭时不得延后收尾时间");
+        assertEquals(0, context.getStructureScheduledMachineCount(businessDate, "PCR-01"),
+                "开关关闭时不得登记收尾补满机台");
+        assertEquals(0, context.getEndingFillAllowedOverQtyMap().size(),
+                "开关关闭时不得登记收尾补满允许超量");
     }
 
     @Test
@@ -736,6 +766,65 @@ class ContinuousProductionResultQtyRegressionTest {
     }
 
     @Test
+    void sharedEmbryoEndingStagger_shouldKeepOriginalShiftWhenAutoFillDisabled() {
+        LhScheduleContext context = newContext();
+        setEndingAutoFillEnabled(context, false);
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        List<String> materialCodes = new ArrayList<>();
+        for (int index = 1; index <= 2; index++) {
+            String materialCode = "MAT-STAGGER-DISABLED-" + index;
+            String machineCode = "KSD0" + index;
+            materialCodes.add(materialCode);
+            registerMachine(context, machineCode);
+            SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(materialCode, "EMB-STAGGER-DISABLED", "01");
+            LhScheduleResult result = buildSharedEmbryoStaggerResult(context, machineCode, sku, firstShift, 8);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+        context.getActiveEmbryoSkuMap().put("EMB-STAGGER-DISABLED", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-STAGGER-DISABLED", 0);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostpone", context, context.getScheduleWindowShifts());
+
+        assertSharedEmbryoStaggerKept(context, "KSD01", 8);
+        assertSharedEmbryoStaggerKept(context, "KSD02", 8);
+        assertEquals(firstShift.getShiftEndDateTime(), findResultByMachine(context, "KSD01").getSpecEndTime(),
+                "开关关闭时收尾时间应保持原班次结束时间");
+        assertEquals(0, context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().size(),
+                "开关关闭时不得登记错峰允许超量");
+    }
+
+    @Test
+    void sharedEmbryoEndingStagger_shouldNotRecordOrRestoreReleasedCandidateWhenAutoFillDisabled() {
+        LhScheduleContext context = newContext();
+        setEndingAutoFillEnabled(context, false);
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        registerMachine(context, "KRD-DISABLED");
+        SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(
+                "MAT-RELEASE-DISABLED", "EMB-RELEASE-DISABLED", "01");
+        LhScheduleResult result = buildSharedEmbryoStaggerResult(
+                context, "KRD-DISABLED", sku, firstShift, 8);
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "recordSharedEmbryoEndingStaggerReleaseCandidate", context, sku, result);
+        ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 0, null, null);
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostpone", context, context.getScheduleWindowShifts());
+
+        assertEquals(0, context.getSharedEmbryoEndingStaggerReleaseShiftIndexMap().size(),
+                "开关关闭时不得保存错峰释放班次快照");
+        assertEquals(0, context.getSharedEmbryoEndingStaggerReleaseShiftQtyMap().size(),
+                "开关关闭时不得保存错峰释放产量快照");
+        assertEquals(0, result.getDailyPlanQty().intValue(),
+                "开关关闭时已按正常降模释放的机台不得恢复产量");
+        assertNull(result.getClass2PlanQty(), "开关关闭时不得生成延后班次计划量");
+    }
+
+    @Test
     void scheduleReduceMould_shouldSortSharedEmbryoEndingStaggerByMouldCommonalityAndCapsuleUsage() {
         LhScheduleContext context = newContext();
         LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
@@ -1125,6 +1214,12 @@ class ContinuousProductionResultQtyRegressionTest {
         sku.setEmbryoStock(8);
         sku.setMouldQty(2);
         return sku;
+    }
+
+    private void setEndingAutoFillEnabled(LhScheduleContext context, boolean enabled) {
+        Map<String, String> paramMap = new LinkedHashMap<>();
+        paramMap.put(LhScheduleParamConstant.ENDING_AUTO_FILL_ENABLED, enabled ? "1" : "0");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
     }
 
     private void markRuntimeSharedEmbryo(LhScheduleContext context, SkuScheduleDTO sku, String sharedMaterialCode) {

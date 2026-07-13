@@ -220,4 +220,6 @@ public final class LhScheduleParamConstant {
     public static final String FULL_SKU_SORT_LOG_BEGIN_DAY_THRESHOLD = "SYS0304027";
     /** SKU提前生产天数阈值 */
     public static final String EARLY_PRODUCTION_DAYS_THRESHOLD = "SYS0304028";
+    /** 收尾落在夜班或错开模具交替是否自动补量（0-关闭，1-开启） */
+    public static final String ENDING_AUTO_FILL_ENABLED = "SYS0304029";
 }

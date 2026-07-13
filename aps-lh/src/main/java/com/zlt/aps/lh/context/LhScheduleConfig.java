@@ -573,6 +573,18 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 判断是否允许收尾场景自动补量。
+     * <p>该开关只控制主销/常规SKU收尾补满和共用胎胚SKU收尾错峰后延，</p>
+     * <p>不影响普通排产、续作降模补满夜班、奇数余量修正和其他允许超量规则。</p>
+     *
+     * @return true-允许自动补量；false-不允许自动补量
+     */
+    public boolean isEndingAutoFillEnabled() {
+        return getParamIntValue(LhScheduleParamConstant.ENDING_AUTO_FILL_ENABLED,
+                LhScheduleConstant.ENDING_AUTO_FILL_ENABLED) == 1;
+    }
+
+    /**
      * 获取奇数班产计划量加一班别配置。
      * <p>空值表示不启用；合法性由产能计算入口按 1/2/3 判断，非法值保持原班产口径。</p>
      *

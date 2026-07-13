@@ -351,6 +351,9 @@ public final class LhScheduleConstant {
     /** 收尾小余量允许欠产偏差值默认值 */
     public static final int CONTINUOUS_ENDING_SURPLUS_TOLERANCE_QTY = 2;
 
+    /** 收尾落在夜班或错开模具交替自动补量开关默认值（0-关闭，1-开启） */
+    public static final int ENDING_AUTO_FILL_ENABLED = 1;
+
     /** 奇数班产计划量加一班别默认值，空值表示不启用 */
     public static final String ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE = "";
 
