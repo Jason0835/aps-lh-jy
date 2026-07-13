@@ -47,6 +47,7 @@ import com.zlt.aps.lh.service.ILhBaseDataService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
+import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.MonthPlanStatisticsDayUtil;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
@@ -125,6 +126,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     /** 胎胚收尾标识：非收尾 */
     private static final int EMBRYO_ENDING_FLAG_NO = 0;
+
+    @Resource
+    private SkuDecrementChecker skuDecrementChecker;
 
     @Resource
     private FactoryMonthPlanProductionFinalResultMapper monthPlanMapper;
@@ -344,7 +348,11 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         () -> sizeOf(context.getSkuConstructionRefMap())),
                 runDataInitTaskAsync("硫化示方历史排程结果",
                         () -> loadHistoryCureFormulaResults(context, factoryCode, targetDate),
-                        () -> sizeOf(context.getPreviousCureFormulaResultList()))
+                        () -> sizeOf(context.getPreviousCureFormulaResultList())),
+                // SKU减量清单：按工厂批量加载并构建四维索引，供S4.3归集后统一前置过滤命中SKU
+                runDataInitTaskAsync("SKU减量清单",
+                        () -> skuDecrementChecker.loadAndAttachDecrementIndex(context),
+                        () -> sizeOf(context.getSkuDecrementKeySet()))
         );
 
         // 4. 胎胚收尾标识：依赖月计划、胎胚库存、月累计完成量、T日班次完成量、前日排程结果等均已就绪，

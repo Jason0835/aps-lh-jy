@@ -327,6 +327,10 @@ public class LhScheduleContext {
     private Map<String, String> substitutionRemarkMap;
     /** 全量SKU排程信息索引Map，key=物料编码，value=SkuScheduleDTO。在S4.3创建SKU时填充，永不清空，供S4.5.1置换等后置阶段按物料编码查找SKU排程信息 */
     private Map<String, SkuScheduleDTO> allSkuScheduleDtoMap = new LinkedHashMap<>();
+    /** SKU减量清单索引集合，key=year+SEP+month+SEP+materialCode+SEP+productStatus（归一化）。S4.2批量加载，S4.3归集后统一过滤命中SKU */
+    private Set<String> skuDecrementKeySet = new HashSet<>();
+    /** 已处理减量命中SKU去重集合，key=materialCode+SEP+productStatus+SEP+yearMonth，保证同一SKU多入口只写一次未排结果 */
+    private Set<String> decrementHandledSkuKeySet = new HashSet<>();
 
     // ========== 流程控制 ==========
 

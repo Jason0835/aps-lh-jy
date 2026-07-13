@@ -203,6 +203,11 @@ public class SkuScheduleDTO {
     /** 产品状态（来自月计划），后续用于匹配硫化示方类型和结果字段 PRODUCT_STATUS */
     private String productStatus;
 
+    /** 月计划所属年份（来自月计划 FactoryMonthPlanProductionFinalResult.year），用于SKU减量清单按年月精确匹配 */
+    private Integer monthPlanYear;
+    /** 月计划所属月份（来自月计划 FactoryMonthPlanProductionFinalResult.month），用于SKU减量清单按年月精确匹配 */
+    private Integer monthPlanMonth;
+
     /**
      * 解析本轮排产目标量。
      * <p>主流程优先使用显式写入的新口径，旧测试/旧构造场景未赋值时回退到待排量口径。</p>

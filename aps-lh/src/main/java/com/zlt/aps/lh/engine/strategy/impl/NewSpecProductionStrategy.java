@@ -11,6 +11,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SpecialMaterialMatchResult;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
@@ -120,6 +121,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
     private static final String NEW_SPEC_SCHEDULE_TYPE = "02";
     private static final String AUTO_DATA_SOURCE = "0";
+    /** 命中SKU减量清单的未排备注（与SkuDecrementChecker文案保持一致） */
+    private static final String SKU_DECREMENT_UNSCHEDULED_REASON = "命中SKU减量清单，不进行排产";
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
     private static final String HISTORY_SHORTAGE_NO_FUTURE_PREVIOUS_PRODUCED_UNSCHEDULED_REASON =
             "仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排";
@@ -148,6 +151,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private LocalSearchMachineAllocatorStrategy localSearchMachineAllocator;
     @Resource
     private TargetScheduleQtyResolver targetScheduleQtyResolver;
+    @Resource
+    private SkuDecrementChecker skuDecrementChecker;
     @Resource
     private LhMaintenanceScheduleService maintenanceScheduleService;
     @Resource
@@ -575,6 +580,17 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         while (iterator.hasNext()) {
             SkuScheduleDTO sku = iterator.next();
             boolean currentSkuRemoved = false;
+            // 兜底校验：动态生成的补偿SKU若命中减量清单，写未排并跳过（去重set保证不重复写未排）
+            if (skuDecrementChecker.isDecrementHit(context, sku)) {
+                boolean written = skuDecrementChecker.handleDecrementHit(context, sku);
+                if (written) {
+                    unscheduledReasonCountMap.merge(SKU_DECREMENT_UNSCHEDULED_REASON, 1, Integer::sum);
+                }
+                removeCurrentNewSpecSku(context, iterator, sku);
+                progressed = true;
+                log.info("新增主循环兜底拦截命中减量清单SKU, materialCode: {}, 已写入未排: {}", sku.getMaterialCode(), written);
+                continue;
+            }
             // 续作、换活字块未消费完的 SKU 在此继续参与 S4.5，不因来源不同提前拦截。
             boolean isEnding = endingJudgmentStrategy.isCurrentWindowEnding(context, sku);
             Integer latestPreviousFinishedQty = resolveLatestPreviousFinishedQty(context, sku.getMaterialCode(),
