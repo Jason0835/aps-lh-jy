@@ -3081,6 +3081,75 @@ class NewSpecProductionStrategyRegressionTest {
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
+    /**
+     * 用例说明：本月计划已经完成，但有效上月欠产仍形成净余量时，也属于仅历史欠产，已有完成量后不得再次上机。
+     */
+    @Test
+    void scheduleNewSpecs_shouldSkipEffectiveLastMonthShortageOnlyRemainingQty() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 7, 14, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002317");
+        sku.setMaterialDesc("仅有效上月欠产形成净余量物料");
+        sku.setProductStatus("S");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(13);
+        sku.setDailyPlanQty(0);
+        sku.setTargetScheduleQty(128);
+        sku.setWindowPlanQty(0);
+        sku.setWindowRemainingPlanQty(0);
+        sku.setSurplusQty(13);
+        sku.setEmbryoStock(0);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setEffectiveLastMonthOverdueQty(15);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+        context.getMaterialMonthDailyFinishedQtyMap().put(
+                MonthPlanDateResolver.buildMaterialStatusKey(sku.getMaterialCode(), sku.getProductStatus())
+                        + "_2026-07-02", 50);
+
+        IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
+            @Override
+            public List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
+                throw new AssertionError("仅有效上月欠产形成净余量时，不应进入新增选机");
+            }
+
+            @Override
+            public MachineScheduleDTO selectBestMachine(LhScheduleContext ctx, SkuScheduleDTO scheduleSku,
+                                                        List<MachineScheduleDTO> candidates,
+                                                        Set<String> excludedMachineCodes) {
+                return null;
+            }
+
+            @Override
+            public void traceEnabledMachineSort(LhScheduleContext ctx) {
+                // 测试桩，无需实现。
+            }
+        };
+
+        strategy.scheduleNewSpecs(context, machineMatchStrategy, defaultMouldChangeBalance(),
+                defaultInspectionBalance(), defaultCapacityCalculate());
+
+        assertEquals(0, context.getScheduleResultList().size(), "仅有效上月欠产时不应生成新增排程结果");
+        assertTrue(context.getNewSpecSkuList().isEmpty(), "命中规则后应移出新增待排队列");
+        assertEquals(1, context.getUnscheduledResultList().size(), "命中规则后应写入一条未排结果");
+        assertEquals(Integer.valueOf(13), context.getUnscheduledResultList().get(0).getUnscheduledQty(),
+                "未排数量必须取净硫化余量，不能取原始上月欠产15");
+        assertEquals("仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
     @Test
     void resolveLatestPreviousFinishedQty_shouldStopAtLatestZeroValue() {
         LhScheduleContext context = buildContext();

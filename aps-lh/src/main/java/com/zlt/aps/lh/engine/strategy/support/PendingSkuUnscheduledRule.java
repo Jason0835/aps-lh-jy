@@ -72,11 +72,14 @@ public final class PendingSkuUnscheduledRule {
         if (!shouldSkipHistoryShortage(context, sku, latestPreviousFinishedQty)) {
             return null;
         }
-        log.info("待排SKU仅历史欠产规则命中, materialCode: {}, historyShortageQty: {}, scheduleDate: {}, "
+        int historyShortageRemainingQty = resolveHistoryShortageRemainingQty(sku);
+        log.info("待排SKU仅历史欠产规则命中, materialCode: {}, monthlyHistoryShortageQty: {}, "
+                        + "effectiveLastMonthOverdueQty: {}, historyShortageRemainingQty: {}, scheduleDate: {}, "
                         + "latestPreviousFinishedQty: {}, reason: {}",
-                sku.getMaterialCode(), sku.getMonthlyHistoryShortageQty(), context.getScheduleDate(),
-                latestPreviousFinishedQty, HISTORY_SHORTAGE_UNSCHEDULED_REASON);
-        return buildUnscheduledResult(context, sku, Math.max(0, sku.getMonthlyHistoryShortageQty()),
+                sku.getMaterialCode(), sku.getMonthlyHistoryShortageQty(), sku.getEffectiveLastMonthOverdueQty(),
+                historyShortageRemainingQty, context.getScheduleDate(), latestPreviousFinishedQty,
+                HISTORY_SHORTAGE_UNSCHEDULED_REASON);
+        return buildUnscheduledResult(context, sku, historyShortageRemainingQty,
                 HISTORY_SHORTAGE_UNSCHEDULED_REASON);
     }
 
@@ -94,7 +97,8 @@ public final class PendingSkuUnscheduledRule {
         if (Objects.isNull(context) || Objects.isNull(sku) || sku.isContinuousCompensationSku()) {
             return false;
         }
-        if (Math.max(0, sku.getMonthlyHistoryShortageQty()) <= 0 || !isWindowDayPlanEmpty(sku)) {
+        // 本月历史欠产和有效上月欠产都属于历史欠产来源，统一按当前净硫化余量判断是否仍需补排。
+        if (resolveHistoryShortageRemainingQty(sku) <= 0 || !isWindowDayPlanEmpty(sku)) {
             return false;
         }
         if (resolveCurrentMonthPlanQtyFromScheduleDate(context, sku) > 0) {
@@ -102,6 +106,23 @@ public final class PendingSkuUnscheduledRule {
         }
         // 最近一次完成量为0是有效数据，但不能触发跳过，也不得继续向更早日期回溯。
         return Objects.nonNull(latestPreviousFinishedQty) && latestPreviousFinishedQty > 0;
+    }
+
+    /**
+     * 解析仅历史欠产形成的当前净余量。
+     * <p>本月历史欠产或有效上月欠产任一为正时，说明当前余量存在历史欠产来源；未排数量必须使用
+     * 已扣除本月累计完成量后的净硫化余量，不能直接使用原始上月欠产量，避免未排数量虚增。</p>
+     *
+     * @param sku 新增待排SKU
+     * @return 仅历史欠产净余量；不存在正向历史欠产来源时返回0
+     */
+    private static int resolveHistoryShortageRemainingQty(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        boolean hasHistoryShortageSource = Math.max(0, sku.getMonthlyHistoryShortageQty()) > 0
+                || Math.max(0, sku.getEffectiveLastMonthOverdueQty()) > 0;
+        return hasHistoryShortageSource ? Math.max(0, sku.getSurplusQty()) : 0;
     }
 
     /**

@@ -127,6 +127,56 @@ public class TypeBlockProductionStrategyTest {
     }
 
     /**
+     * 用例说明：换活字块候选仅由有效上月欠产形成净余量时，应在候选落地前统一拦截。
+     */
+    @Test
+    public void handlePendingSkuUnscheduledRule_shouldSkipEffectiveLastMonthShortageOnlyRemainingQty() {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        ReflectionTestUtils.setField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("TEST-TYPE-BLOCK-LAST-MONTH-SHORTAGE");
+        Date scheduleDate = Date.from(LocalDate.of(2026, 7, 14)
+                .atStartOfDay(ZoneId.systemDefault()).toInstant());
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002317");
+        sku.setMaterialDesc("换活字块仅有效上月欠产物料");
+        sku.setProductStatus("S");
+        sku.setMouldQty(1);
+        sku.setSurplusQty(13);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setEffectiveLastMonthOverdueQty(15);
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setMaterialCode(sku.getMaterialCode());
+        quota.setProductionDate(LocalDate.of(2026, 7, 14));
+        quota.setDayPlanQty(0);
+        sku.setDailyPlanQuotaMap(new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(2));
+        sku.getDailyPlanQuotaMap().put(quota.getProductionDate(), quota);
+        context.getMaterialMonthDailyFinishedQtyMap().put("3302002317_S_2026-07-02", 50);
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1216");
+        StringBuilder failureReason = new StringBuilder(128);
+        Boolean handled = ReflectionTestUtils.invokeMethod(strategy,
+                "handlePendingSkuUnscheduledRuleIfNecessary",
+                context, machine, sku, false, false, failureReason);
+
+        Assertions.assertTrue(Boolean.TRUE.equals(handled));
+        Assertions.assertTrue(context.getNewSpecSkuList().isEmpty());
+        Assertions.assertEquals(1, context.getUnscheduledResultList().size());
+        Assertions.assertEquals(Integer.valueOf(13),
+                context.getUnscheduledResultList().get(0).getUnscheduledQty());
+        Assertions.assertEquals("仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排",
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+        Assertions.assertTrue(failureReason.toString().contains("仅历史欠产"));
+    }
+
+    /**
      * 构建单侧换活字块结果。
      *
      * @param machineCode 机台编码
