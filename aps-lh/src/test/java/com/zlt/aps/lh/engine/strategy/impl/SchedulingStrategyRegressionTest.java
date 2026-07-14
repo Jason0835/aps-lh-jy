@@ -1,10 +1,12 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -49,6 +51,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -725,9 +728,10 @@ public class SchedulingStrategyRegressionTest {
 
         strategy.scheduleReduceMould(context);
 
-        int thirdDayMachineCount = countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts,
-                resolveShiftWorkDate(shifts, 3));
-        Assertions.assertEquals(1, thirdDayMachineCount);
+        LocalDate thirdDay = resolveShiftWorkDate(shifts, 3);
+        Assertions.assertEquals(1,
+                countPositiveMachineByWorkDateExcludingNight(context.getScheduleResultList(), shifts, thirdDay),
+                "降模机台允许完成边界晚班，但后续早班和中班必须只保留一台");
     }
 
     /**
@@ -881,6 +885,77 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 三台续作的 dayN 从 150 降到 100 时，第二天必须按日标准量 50 降为两台。
+     * <p>班产 16 导致两台完整日产能只有 96，且其中一台存在部分清洗；这些实际损失只能进入
+     * 既有日计划欠产账本，不能反向保留或补回第三台。</p>
+     */
+    @Test
+    public void shouldReduceToDailyStandardMachineCountWhenPhysicalCapacityIsLower() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        LocalDate secondProductionDate = resolveShiftWorkDate(shifts, 2);
+        LocalDate thirdProductionDate = resolveShiftWorkDate(shifts, 3);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 150, 100, 100);
+        SkuScheduleDTO sku = buildContinuousSku("3302002218", 16, 350, quotaMap);
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 150, 100, 100);
+        // T-1 与 T 日原始计划量相等，只保护首日三台，T+1 必须重新按日标准量判断。
+        setMonthPlanDayQty(context.getMonthPlanList().get(0), firstProductionDate.minusDays(1), 150);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(50);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        LhScheduleResult firstResult = buildContinuousResult(
+                sku.getMaterialCode(), "K1514", 16, shifts, "0");
+        LhScheduleResult secondResult = buildContinuousResult(
+                sku.getMaterialCode(), "K1712", 16, shifts, "0");
+        secondResult.setMouldSurplusQty(350);
+        secondResult.setStandardCapacity(50);
+        LhScheduleResult thirdResult = buildContinuousResult(
+                sku.getMaterialCode(), "K1915", 16, shifts, "0");
+        context.getScheduleResultList().add(firstResult);
+        context.getScheduleResultList().add(secondResult);
+        context.getScheduleResultList().add(thirdResult);
+        context.getScheduleResultSourceSkuMap().put(firstResult, sku);
+        context.getScheduleResultSourceSkuMap().put(secondResult, sku);
+        context.getScheduleResultSourceSkuMap().put(thirdResult, sku);
+
+        // 复刻真实排序快照：K1514 胶囊次数最低，应作为冗余机台释放。
+        putCapsuleUsage(context, "K1514", 0);
+        putCapsuleUsage(context, "K1712", 196);
+        putCapsuleUsage(context, "K1915", 86);
+        appendCleaningWindow(context, "K1712",
+                secondProductionDate.atTime(14, 0), secondProductionDate.atTime(17, 0));
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(3,
+                countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, firstProductionDate),
+                "T 日相等保护必须保留三台续作机台");
+        Assertions.assertEquals(2,
+                countPositiveMachineByWorkDateExcludingNight(
+                        context.getScheduleResultList(), shifts, secondProductionDate),
+                "T+1 边界晚班结束后必须只保留两台续作机台");
+        Assertions.assertEquals(2,
+                countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, thirdProductionDate),
+                "T+2 必须继续按日标准量保留两台续作机台");
+        Assertions.assertTrue(
+                sumPlanQtyByWorkDate(java.util.Collections.singletonList(secondResult), shifts, secondProductionDate)
+                        < sumPlanQtyByWorkDate(
+                        java.util.Collections.singletonList(thirdResult), shifts, secondProductionDate),
+                "K1712 部分清洗必须扣减实际排量，但不能增加续作机台数");
+        Assertions.assertEquals(0, sumPlanQtyByWorkDate(
+                java.util.Collections.singletonList(firstResult), shifts, thirdProductionDate),
+                "释放机台不得被同物料后续补量链路重新补回");
+        Assertions.assertTrue(context.getReducedContinuationGroupKeySet().contains(sku.getMaterialCode()),
+                "实际释放后必须登记续作降模分组，阻断同物料补偿回流");
+    }
+
+    /**
      * 多机台续作窗口内日计划仍有需求且后续下降时，即使前置收尾标记命中，也必须按天降模。
      */
     @Test
@@ -927,7 +1002,8 @@ public class SchedulingStrategyRegressionTest {
 
         LocalDate secondDay = resolveShiftWorkDate(shifts, 2);
         Assertions.assertEquals(4,
-                countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, secondDay));
+                countPositiveMachineByWorkDateExcludingNight(
+                        context.getScheduleResultList(), shifts, secondDay));
     }
 
     /**
@@ -959,7 +1035,8 @@ public class SchedulingStrategyRegressionTest {
 
         LocalDate thirdDay = resolveShiftWorkDate(shifts, 3);
         Assertions.assertEquals(4,
-                countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, thirdDay));
+                countPositiveMachineByWorkDateExcludingNight(
+                        context.getScheduleResultList(), shifts, thirdDay));
         Assertions.assertTrue(context.getNewSpecSkuList().isEmpty());
     }
 
@@ -2469,6 +2546,45 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 写入测试机台胶囊使用次数，复刻续作降模保留排序输入。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param usageCount 胶囊最大使用次数
+     */
+    private void putCapsuleUsage(LhScheduleContext context, String machineCode, int usageCount) {
+        LhRepairCapsule capsule = new LhRepairCapsule();
+        capsule.setLhCode(machineCode);
+        capsule.setReplaceCapsuleCount(usageCount);
+        capsule.setReplaceCapsuleCount2(usageCount);
+        context.getCapsuleUsageMap().put(machineCode, capsule);
+    }
+
+    /**
+     * 写入机台清洗窗口，用于验证部分清洗只扣实际排量、不反向增加续作机台数。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param startTime 清洗开始时间
+     * @param endTime 清洗结束时间
+     */
+    private void appendCleaningWindow(LhScheduleContext context,
+                                      String machineCode,
+                                      LocalDateTime startTime,
+                                      LocalDateTime endTime) {
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setLhCode(machineCode);
+        cleaningWindow.setCleanType("01");
+        cleaningWindow.setCleanStartTime(Date.from(startTime.atZone(ZoneId.systemDefault()).toInstant()));
+        cleaningWindow.setCleanEndTime(Date.from(endTime.atZone(ZoneId.systemDefault()).toInstant()));
+        cleaningWindow.setReadyTime(cleaningWindow.getCleanEndTime());
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.getCleaningWindowList().add(cleaningWindow);
+        context.getMachineScheduleMap().put(machineCode, machine);
+    }
+
+    /**
      * 注入测试用原始月计划，用于区分运行态dayN账本剩余额度和月计划原始日计划量。
      *
      * @param context 排程上下文
@@ -2539,6 +2655,37 @@ public class SchedulingStrategyRegressionTest {
                 }
                 Integer shiftPlanQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
                 qty += shiftPlanQty == null ? 0 : Math.max(0, shiftPlanQty);
+            }
+            if (qty > 0) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 统计指定业务日早班、中班仍有排量的机台数。
+     * <p>降模机台允许完成中班后紧接的不可换模边界晚班，因此真实下机状态应从后续早班、中班核对。</p>
+     *
+     * @param results 排程结果
+     * @param shifts 排程窗口班次
+     * @param workDate 业务日
+     * @return 早班、中班有排量的机台数
+     */
+    private int countPositiveMachineByWorkDateExcludingNight(List<LhScheduleResult> results,
+                                                             List<LhShiftConfigVO> shifts,
+                                                             LocalDate workDate) {
+        int count = 0;
+        for (LhScheduleResult result : results) {
+            int qty = 0;
+            for (LhShiftConfigVO shift : shifts) {
+                LocalDate currentDate = shift.getWorkDate().toInstant()
+                        .atZone(ZoneId.systemDefault()).toLocalDate();
+                if (shift.isNightShift() || !workDate.equals(currentDate)) {
+                    continue;
+                }
+                Integer shiftPlanQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                qty += Objects.isNull(shiftPlanQty) ? 0 : Math.max(0, shiftPlanQty);
             }
             if (qty > 0) {
                 count++;
