@@ -490,38 +490,34 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 已有同物料机台满足 dayN 节奏时，即使业务目标仍有剩余，也不能继续新增候选机台。
+     * 换活字块机台已覆盖 0/24/48 节奏时，即使存在续作释放尾部候选，也不能新增第二台机台。
      */
     @Test
-    public void shouldSkipAddingMachineWhenExistingSameMaterialSatisfiesDayNButTargetRemains() throws Exception {
+    public void shouldKeepSingleTypeBlockMachineForZeroTwentyFourFortyEightDailyPlan() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
 
-        SkuScheduleDTO sourceSku = buildSkuForTypeBlockExpansion();
-        SkuScheduleDTO compensationSku = buildSkuForTypeBlockExpansion();
-        compensationSku.setTargetScheduleQty(240);
-        compensationSku.setRemainingScheduleQty(240);
-        compensationSku.setShiftCapacity(16);
-        Map<LocalDate, SkuDailyPlanQuotaDTO> sharedQuotaMap = buildQuotaMapByShifts(shifts, 10, 10, 10);
-        sourceSku.setDailyPlanQuotaMap(sharedQuotaMap);
-        compensationSku.setDailyPlanQuotaMap(sharedQuotaMap);
+        SkuScheduleDTO sku = buildContinuousSku("3302001375", 16, 454,
+                buildQuotaMapByShifts(shifts, 0, 24, 48));
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(48);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
 
-        LhScheduleResult existingResult = new LhScheduleResult();
-        existingResult.setMaterialCode(compensationSku.getMaterialCode());
-        existingResult.setLhMachineCode("K2024");
-        existingResult.setScheduleType(ScheduleTypeEnum.CONTINUOUS.getCode());
-        for (LhShiftConfigVO shift : shifts) {
-            ShiftFieldUtil.setShiftPlanQty(existingResult, shift.getShiftIndex(), 80, new Date(), new Date());
-        }
-        ShiftFieldUtil.syncDailyPlanQty(existingResult);
+        LhScheduleResult existingResult = buildContinuousResult(
+                sku.getMaterialCode(), "K2015", 16, shifts, "0");
+        existingResult.setScheduleType(ScheduleTypeEnum.TYPE_BLOCK.getCode());
+        existingResult.setIsTypeBlock("1");
         context.getScheduleResultList().add(existingResult);
-        context.getScheduleResultSourceSkuMap().put(existingResult, sourceSku);
 
         MachineScheduleDTO candidateMachine = new MachineScheduleDTO();
-        candidateMachine.setMachineCode("K1110");
+        candidateMachine.setMachineCode("K1715");
+        // 构造续作在窗口内释放后的尾部候选，验证其不能覆盖 dayN 已满足的停止结论。
+        candidateMachine.setEstimatedEndTime(shifts.get(1).getShiftStartDateTime());
         MachineScheduleDTO secondCandidateMachine = new MachineScheduleDTO();
-        secondCandidateMachine.setMachineCode("K1111");
+        secondCandidateMachine.setMachineCode("K1716");
         List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
         candidates.add(candidateMachine);
         candidates.add(secondCandidateMachine);
@@ -531,12 +527,12 @@ public class SchedulingStrategyRegressionTest {
         segment.setMachineCode(candidateMachine.getMachineCode());
         segment.setRole(MachineScheduleRole.TAIL_MACHINE);
         segment.setShiftCapacity(16);
-        segment.setMaxQtyToWindowEnd(120);
+        segment.setMaxQtyToWindowEnd(116);
         segment.setStartProductionShiftIndex(1);
-        Map<Integer, Integer> shiftCapacityMap = new LinkedHashMap<Integer, Integer>(3);
-        shiftCapacityMap.put(1, 40);
-        shiftCapacityMap.put(2, 40);
-        shiftCapacityMap.put(3, 40);
+        Map<Integer, Integer> shiftCapacityMap = new LinkedHashMap<Integer, Integer>(shifts.size());
+        for (LhShiftConfigVO shift : shifts) {
+            shiftCapacityMap.put(shift.getShiftIndex(), 16);
+        }
         segment.setShiftCapacityMap(shiftCapacityMap);
 
         Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
@@ -545,11 +541,12 @@ public class SchedulingStrategyRegressionTest {
                 ProductionQuantityPolicy.class, MachineProductionSegment.class, MachineScheduleDTO.class,
                 List.class, ICapacityCalculateStrategy.class, int.class, int.class, int.class);
         method.setAccessible(true);
-        int planQty = (Integer) method.invoke(strategy, context, compensationSku, candidates, excludedMachineCodes,
-                ProductionQuantityPolicy.from(compensationSku, false), segment, candidateMachine, shifts,
-                buildFixedCapacityCalculateStrategy(), 240, 0, 120);
+        int planQty = (Integer) method.invoke(strategy, context, sku, candidates, excludedMachineCodes,
+                ProductionQuantityPolicy.from(sku, false), segment, candidateMachine, shifts,
+                buildFixedCapacityCalculateStrategy(), 454, 0, 116);
 
         Assertions.assertEquals(0, planQty);
+        Assertions.assertTrue(segment.isExistingSameMaterialSatisfied());
     }
 
     /**
@@ -654,59 +651,6 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(96, ShiftFieldUtil.resolveScheduledQty(result));
         Assertions.assertEquals(Integer.valueOf(32),
                 context.getSkuProductionRemainingQtyMap().get(sku.getMaterialCode()));
-    }
-
-    /**
-     * dayN 节奏已满足但业务目标仍有剩余时，仅续作收尾释放的机台尾部产能允许继续承接新增SKU。
-     */
-    @Test
-    public void shouldContinueForTailCapacityWhenDailyRhythmSatisfiedButCandidateRemains() throws Exception {
-        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
-        LhScheduleContext context = buildContinuousReduceContext();
-        SkuScheduleDTO sku = buildContinuousSku("3302002661", 16, 128, buildQuotaMap(8, 60, 60));
-        MachineScheduleDTO firstMachine = buildNewSpecMachine("K1110");
-        MachineScheduleDTO tailMachine = buildNewSpecMachine("K1614");
-        tailMachine.setEstimatedEndTime(context.getScheduleWindowShifts().get(1).getShiftStartDateTime());
-        List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
-        candidates.add(firstMachine);
-        candidates.add(tailMachine);
-        Set<String> excludedMachineCodes = new HashSet<String>(2);
-
-        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
-                "shouldContinueForTailCapacity",
-                LhScheduleContext.class, SkuScheduleDTO.class, List.class, Set.class,
-                String.class, int.class, int.class, int.class, boolean.class);
-        method.setAccessible(true);
-        boolean continueForTailCapacity = (Boolean) method.invoke(strategy, context, sku, candidates,
-                excludedMachineCodes, firstMachine.getMachineCode(), 64, 64, 128, false);
-
-        Assertions.assertTrue(continueForTailCapacity);
-    }
-
-    /**
-     * dayN 节奏已满足后，普通整窗空闲机台不能再因为业务目标剩余被继续打开。
-     */
-    @Test
-    public void shouldStopWhenDailyRhythmSatisfiedAndOnlyIdleCandidateRemains() throws Exception {
-        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
-        LhScheduleContext context = buildContinuousReduceContext();
-        SkuScheduleDTO sku = buildContinuousSku("3302002176", 46, 682, buildQuotaMap(46, 46, 46));
-        MachineScheduleDTO firstMachine = buildNewSpecMachine("K2027");
-        MachineScheduleDTO idleMachine = buildNewSpecMachine("k1001");
-        List<MachineScheduleDTO> candidates = new ArrayList<MachineScheduleDTO>(2);
-        candidates.add(firstMachine);
-        candidates.add(idleMachine);
-        Set<String> excludedMachineCodes = new HashSet<String>(2);
-
-        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
-                "shouldContinueForTailCapacity",
-                LhScheduleContext.class, SkuScheduleDTO.class, List.class, Set.class,
-                String.class, int.class, int.class, int.class, boolean.class);
-        method.setAccessible(true);
-        boolean continueForTailCapacity = (Boolean) method.invoke(strategy, context, sku, candidates,
-                excludedMachineCodes, firstMachine.getMachineCode(), 46, 46, 682, false);
-
-        Assertions.assertFalse(continueForTailCapacity);
     }
 
     /**
@@ -1041,20 +985,20 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 续作现有机台数不满足后续 dayN 最小机台数时，必须生成续作增机台补偿SKU进入新增排产统一排序。
+     * 排程滚动后续作现有机台数不满足当前日及下一日最小机台数时，必须生成增机台补偿SKU。
      */
     @Test
-    public void shouldAppendContinuationAddMachineCompensationWhenDayNNeedsMoreMachines() throws Exception {
+    public void shouldAppendContinuationAddMachineCompensationWhenRolledDayNNeedsMoreMachines() throws Exception {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         injectContinuousEndingDependencies(strategy);
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
-        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 96, 128, 144);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 128, 144, 0);
         for (SkuDailyPlanQuotaDTO quota : quotaMap.values()) {
             quota.setRemainingQty(0);
         }
         SkuScheduleDTO sku = buildContinuousSku("3302001078", 16, 256, quotaMap);
-        sku.setScheduleDayFinishQty(32);
+        sku.setScheduleDayFinishQty(0);
         sku.setStrictTargetQty(true);
         sku.setRemainingScheduleQty(0);
         context.getContinuousSkuList().add(sku);
@@ -1079,7 +1023,7 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertSame(sku.getDailyPlanQuotaMap(), compensationSku.getDailyPlanQuotaMap());
         Assertions.assertTrue(compensationSku.resolveTargetScheduleQty() > 0);
         Method getter = SkuScheduleDTO.class.getMethod("getFirstAddMachineProductionDate");
-        Assertions.assertEquals(resolveShiftWorkDate(shifts, 2), getter.invoke(compensationSku));
+        Assertions.assertEquals(resolveShiftWorkDate(shifts, 1), getter.invoke(compensationSku));
     }
 
     /**
@@ -1338,17 +1282,17 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 续作小欠产逐日判断首日应扣减T日晚班已完成量，避免首日计划实际已满足时提前转新增加机台。
+     * 续作小欠产滚动到 96/96 业务日后，当前日和下一日均不足时必须转新增加机台。
      */
     @Test
-    public void shouldStillRequireContinuousCompensationWhenSecondDayPlanNotCovered() {
+    public void shouldRequireContinuousCompensationWhenRolledCurrentAndNextDayNotCovered() {
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
         SkuScheduleDTO sku = buildContinuousSku("3302001589", 16, 128,
-                buildQuotaMapByShifts(shifts, 48, 96, 96));
+                buildQuotaMapByShifts(shifts, 96, 96, 0));
         sku.setMonthlyHistoryShortageQty(32);
-        sku.setWindowPlanQty(240);
-        sku.setScheduleDayFinishQty(16);
+        sku.setWindowPlanQty(192);
+        sku.setScheduleDayFinishQty(0);
 
         boolean satisfied = DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
                 context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
@@ -1356,7 +1300,7 @@ public class SchedulingStrategyRegressionTest {
                 context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
 
         Assertions.assertFalse(satisfied);
-        Assertions.assertEquals(new ArrayList<LocalDate>(sku.getDailyPlanQuotaMap().keySet()).get(1), addMachineDate);
+        Assertions.assertEquals(new ArrayList<LocalDate>(sku.getDailyPlanQuotaMap().keySet()).get(0), addMachineDate);
     }
 
     /**
@@ -1366,21 +1310,23 @@ public class SchedulingStrategyRegressionTest {
     public void shouldRequireAddMachineWhenWindowLastDayPlanNotCovered() {
         LhScheduleContext context = buildContinuousReduceContext();
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
-        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 48, 48, 96);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(1);
+        LocalDate windowLastProductionDate = resolveShiftWorkDate(shifts, 3);
+        quotaMap.put(windowLastProductionDate, buildQuota(96));
         SkuScheduleDTO sku = buildContinuousSku("3302000745", 16, 128,
                 quotaMap);
         sku.setMonthlyHistoryShortageQty(32);
-        sku.setWindowPlanQty(192);
+        sku.setWindowPlanQty(96);
         sku.setScheduleDayFinishQty(0);
 
-        Assertions.assertEquals(3, sku.getDailyPlanQuotaMap().size());
+        Assertions.assertEquals(1, sku.getDailyPlanQuotaMap().size());
         boolean satisfied = DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
                 context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
         LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
                 context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
 
         Assertions.assertFalse(satisfied);
-        Assertions.assertEquals(new ArrayList<LocalDate>(sku.getDailyPlanQuotaMap().keySet()).get(2), addMachineDate);
+        Assertions.assertEquals(windowLastProductionDate, addMachineDate);
     }
 
     /**
@@ -2032,20 +1978,20 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 欠产未超过阈值且当前日计划未满足时，T+2 仍需后看 T+3 日计划量决定是否保留/新增机台。
+     * 排程滚动到窗口最后一天后，当前日不足时仍需后看下一生产日决定是否增机台。
      */
     @Test
     public void shouldLookAheadNextDayPlanOnWindowLastDayWhenSmallShortage() {
         DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
         request.setMaterialCode("3302001236");
-        request.setDailyPlanQuotaMap(buildQuotaMap(0, 8, 64, 96));
+        request.setDailyPlanQuotaMap(buildQuotaMap(64, 96, 0));
         request.setMachineDailyCapacityList(buildDailyCapacityMaps(2));
         request.setInitialActiveMachines(1);
         request.setShiftCapacity(16);
         request.setShortageLookAheadDays(1);
         request.setShortageAddMachineThreshold(150);
         request.setMonthlyHistoryShortageQty(0);
-        request.setWindowEndDate(LocalDate.of(2026, 5, 3));
+        request.setWindowEndDate(LocalDate.of(2026, 5, 1));
         request.setWindowLastDayNextPlanLookAheadEnabled(true);
         request.setSceneType("newSpec");
 
@@ -2053,9 +1999,9 @@ public class SchedulingStrategyRegressionTest {
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
 
         Assertions.assertEquals(2, result.getFinalActiveMachines());
-        DailyMachineCapacityDayDecision windowLastDayDecision = result.getDayDecisionList().get(2);
-        Assertions.assertEquals(LocalDate.of(2026, 5, 3), windowLastDayDecision.getProductionDate());
-        Assertions.assertEquals(LocalDate.of(2026, 5, 4), windowLastDayDecision.getLookAheadEndDate());
+        DailyMachineCapacityDayDecision windowLastDayDecision = result.getDayDecisionList().get(0);
+        Assertions.assertEquals(LocalDate.of(2026, 5, 1), windowLastDayDecision.getProductionDate());
+        Assertions.assertEquals(LocalDate.of(2026, 5, 2), windowLastDayDecision.getLookAheadEndDate());
         Assertions.assertEquals(96, windowLastDayDecision.getNextDayPlanQty());
         Assertions.assertEquals(1, windowLastDayDecision.getAddedMachineCount());
     }
@@ -2086,14 +2032,15 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertTrue(firstDayDecision.isCurrentDayPlanSatisfied());
         Assertions.assertFalse(firstDayDecision.isNextDayLookAheadEntered());
         Assertions.assertEquals(0, firstDayDecision.getAddedMachineCount());
+        Assertions.assertEquals(1, result.getDayDecisionList().size());
     }
 
     /**
-     * 欠产未超过阈值时，首日小计划已满足不加机台；滚动到次日后，当前日和下一日均超过单机日标准才加机台。
+     * 欠产未超过阈值时，滚动到 60/60 对应业务日后，当前日和下一日均超过单机日标准才加机台。
      */
     @Test
-    public void shouldAddMachineOnSecondDayWhenCurrentAndNextDayExceedDailyStandardForSixtyPlan() {
-        DailyMachineCapacitySimulationRequest request = buildDailyStandardRhythmRequest("3302002661", 8, 60, 60);
+    public void shouldAddMachineWhenRolledCurrentAndNextDayExceedDailyStandardForSixtyPlan() {
+        DailyMachineCapacitySimulationRequest request = buildDailyStandardRhythmRequest("3302002661", 60, 60, 0);
 
         DailyMachineCapacitySimulationResult result =
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
@@ -2102,32 +2049,28 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(1, result.getTotalAddedMachineCount());
         DailyMachineCapacityDayDecision firstDayDecision = result.getDayDecisionList().get(0);
         Assertions.assertEquals(LocalDate.of(2026, 5, 1), firstDayDecision.getProductionDate());
-        Assertions.assertTrue(firstDayDecision.isCurrentDayPlanSatisfied());
-        Assertions.assertEquals(0, firstDayDecision.getAddedMachineCount());
-        DailyMachineCapacityDayDecision secondDayDecision = result.getDayDecisionList().get(1);
-        Assertions.assertEquals(LocalDate.of(2026, 5, 2), secondDayDecision.getProductionDate());
-        Assertions.assertEquals(60, secondDayDecision.getCurrentDayPlanQty());
-        Assertions.assertEquals(60, secondDayDecision.getNextDayPlanQty());
-        Assertions.assertEquals(1, secondDayDecision.getAddedMachineCount());
+        Assertions.assertEquals(60, firstDayDecision.getCurrentDayPlanQty());
+        Assertions.assertEquals(60, firstDayDecision.getNextDayPlanQty());
+        Assertions.assertEquals(1, firstDayDecision.getAddedMachineCount());
     }
 
     /**
-     * 欠产未超过阈值时，50/50 连续两日均超过单机日标准48，也必须在当前业务日补一台机台。
+     * 欠产未超过阈值时，滚动到 50/50 对应业务日后，连续两日超过单机日标准48应补一台机台。
      */
     @Test
-    public void shouldAddMachineOnSecondDayWhenCurrentAndNextDayExceedDailyStandardForFiftyPlan() {
-        DailyMachineCapacitySimulationRequest request = buildDailyStandardRhythmRequest("3302001555", 8, 50, 50);
+    public void shouldAddMachineWhenRolledCurrentAndNextDayExceedDailyStandardForFiftyPlan() {
+        DailyMachineCapacitySimulationRequest request = buildDailyStandardRhythmRequest("3302001555", 50, 50, 0);
 
         DailyMachineCapacitySimulationResult result =
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
 
         Assertions.assertEquals(2, result.getFinalActiveMachines());
         Assertions.assertEquals(1, result.getTotalAddedMachineCount());
-        DailyMachineCapacityDayDecision secondDayDecision = result.getDayDecisionList().get(1);
-        Assertions.assertEquals(LocalDate.of(2026, 5, 2), secondDayDecision.getProductionDate());
-        Assertions.assertEquals(50, secondDayDecision.getCurrentDayPlanQty());
-        Assertions.assertEquals(50, secondDayDecision.getNextDayPlanQty());
-        Assertions.assertEquals(1, secondDayDecision.getAddedMachineCount());
+        DailyMachineCapacityDayDecision currentDayDecision = result.getDayDecisionList().get(0);
+        Assertions.assertEquals(LocalDate.of(2026, 5, 1), currentDayDecision.getProductionDate());
+        Assertions.assertEquals(50, currentDayDecision.getCurrentDayPlanQty());
+        Assertions.assertEquals(50, currentDayDecision.getNextDayPlanQty());
+        Assertions.assertEquals(1, currentDayDecision.getAddedMachineCount());
     }
 
     /**
@@ -2137,7 +2080,7 @@ public class SchedulingStrategyRegressionTest {
     public void shouldKeepSingleMachineWhenCurrentDayMissesButNextDayIsCovered() {
         DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
         request.setMaterialCode("3302001074");
-        request.setDailyPlanQuotaMap(buildQuotaMap(8, 92, 46, 46));
+        request.setDailyPlanQuotaMap(buildQuotaMap(92, 46, 46));
         request.setMachineDailyCapacityList(buildDailyCapacityMaps(2));
         request.setInitialActiveMachines(1);
         request.setShiftCapacity(16);
@@ -2152,12 +2095,12 @@ public class SchedulingStrategyRegressionTest {
                 DailyMachineCapacitySimulationUtil.simulateExpansion(request);
 
         Assertions.assertEquals(1, result.getFinalActiveMachines());
-        DailyMachineCapacityDayDecision secondDayDecision = result.getDayDecisionList().get(1);
-        Assertions.assertFalse(secondDayDecision.isCurrentDayPlanSatisfied());
-        Assertions.assertTrue(secondDayDecision.isNextDayLookAheadEntered());
-        Assertions.assertEquals(LocalDate.of(2026, 5, 3), secondDayDecision.getNextProductionDate());
-        Assertions.assertEquals(46, secondDayDecision.getNextDayPlanQty());
-        Assertions.assertEquals(0, secondDayDecision.getAddedMachineCount());
+        DailyMachineCapacityDayDecision currentDayDecision = result.getDayDecisionList().get(0);
+        Assertions.assertFalse(currentDayDecision.isCurrentDayPlanSatisfied());
+        Assertions.assertTrue(currentDayDecision.isNextDayLookAheadEntered());
+        Assertions.assertEquals(LocalDate.of(2026, 5, 2), currentDayDecision.getNextProductionDate());
+        Assertions.assertEquals(46, currentDayDecision.getNextDayPlanQty());
+        Assertions.assertEquals(0, currentDayDecision.getAddedMachineCount());
     }
 
     /**

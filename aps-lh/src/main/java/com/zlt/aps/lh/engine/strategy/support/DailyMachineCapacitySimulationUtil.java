@@ -168,13 +168,6 @@ public final class DailyMachineCapacitySimulationUtil {
             capacityQty = windowEffectiveCapacityQty;
             windowRemainingShortageQty = Math.max(0, demandQty - capacityQty);
             decisionMode = MODE_FORCED_SHORTAGE_WINDOW;
-        } else if (legacyWindowDemandMode) {
-            // 未配置阈值的老调用保持原后看窗口模拟口径，避免影响既有扩机节奏。
-            demandQty = currentShortageQty + sumDemandQty(request.getDailyPlanQuotaMap(),
-                    decision.getProductionDate(), decision.getLookAheadEndDate());
-            capacityQty = sumCapacityQty(request, decision.getProductionDate(),
-                    decision.getLookAheadEndDate(), activeMachines);
-            decisionMode = MODE_WINDOW_DEMAND;
         } else if (currentDayPlanSatisfied) {
             /*
              * 欠产未超过阈值时，每个业务日先判断当前机台数是否已满足当前日月计划量。
@@ -185,6 +178,16 @@ public final class DailyMachineCapacitySimulationUtil {
             demandQty = currentDayPlanQty;
             capacityQty = currentDayThreeShiftCapacityQty;
             decisionMode = MODE_CURRENT_DAY_PLAN_SATISFIED;
+        } else if (legacyWindowDemandMode) {
+            /*
+             * 未配置阈值的老调用只在当前日不足时沿用窗口模拟口径。
+             * 当前日已满足的中心停止规则优先级更高，不能被旧窗口后看分支覆盖。
+             */
+            demandQty = currentShortageQty + sumDemandQty(request.getDailyPlanQuotaMap(),
+                    decision.getProductionDate(), decision.getLookAheadEndDate());
+            capacityQty = sumCapacityQty(request, decision.getProductionDate(),
+                    decision.getLookAheadEndDate(), activeMachines);
+            decisionMode = MODE_WINDOW_DEMAND;
         } else if (Objects.nonNull(nextProductionDate)) {
             /*
              * 欠产未超过阈值时，只有当前机台数同时无法满足当前日和后一天计划，才允许增加机台。
