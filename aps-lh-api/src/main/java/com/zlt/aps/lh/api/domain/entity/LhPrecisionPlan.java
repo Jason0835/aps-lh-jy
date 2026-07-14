@@ -64,17 +64,6 @@ public class LhPrecisionPlan extends BaseEntity implements Serializable {
     @TableField("ACTUAL_DATE")
     private Date actualDate;
 
-    /**
-     * 实际完成时间。
-     * <p>由设备或 MES 业务端在精度计划实际完成后回写；字段非空表示精度保养已实际完成，
-     * 即使完成状态尚未同步，硫化排程也不得再加载该计划并占用机台生产时间。</p>
-     */
-    @Excel(name = "ui.data.column.lhPrecisionPlan.actualFinishDate", width = 30,
-            dateFormat = "yyyy-MM-dd HH:mm:ss")
-    @ApiModelProperty(value = "实际完成时间:yyyy-MM-dd HH:mm:ss")
-    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-    @TableField("ACTUAL_FINISH_DATE")
-    private Date actualFinishDate;
 
     @Excel(name = "ui.data.column.lhPrecisionPlan.daysToDue")
     @ApiModelProperty(value = "距离到期日剩余天数")

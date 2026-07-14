@@ -2326,7 +2326,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .eq(LhPrecisionPlan::getFactoryCode, factoryCode)
                         .eq(LhPrecisionPlan::getYear, BigDecimal.valueOf(scheduleYear))
                         .eq(LhPrecisionPlan::getCompletionStatus, "0")
-                        .isNull(LhPrecisionPlan::getActualFinishDate)
+                        .isNull(LhPrecisionPlan::getActualDate)
                         .eq(LhPrecisionPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>(32);
         if (maintenancePlanList != null) {
