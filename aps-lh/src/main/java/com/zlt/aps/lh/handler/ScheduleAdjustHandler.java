@@ -1837,6 +1837,10 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                     context, blockedSku, WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON);
         }
 
+        // 续作匹配完成后，在机物料本次不需要排程（余量为0/共用胎胚零余量/未排等）的机台，
+        // 收尾时间重置为排程窗口首班开始时间，使该机台从窗口起点即可参与新增排产换模。
+        resetIdleMachineEndingTimeToWindowStart(context, continuousSkuList);
+
         context.setContinuousSkuList(continuousSkuList);
         context.setNewSpecSkuList(newSpecSkuList);
         // 填充全量SKU排程信息索引，供S4.5.1置换等后置阶段按物料编码查找SKU
@@ -1859,6 +1863,102 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // SKU减量清单统一前置过滤：命中减量清单的SKU不进入任何排产入口，写未排并从排产集合移除
         skuDecrementChecker.filterDecrementSkus(context);
         log.info("续作/新增SKU区分完成, 续作: {}个, 新增: {}个", continuousSkuList.size(), newSpecSkuList.size());
+    }
+
+    /**
+     * 在机物料不需要排程的机台，收尾时间重置为排程窗口首班开始时间。
+     * <p>续作SKU匹配完成后，如果机台在机物料本次不需要排产（余量为0、共用胎胚零余量、
+     * 列入未排等），该机台不应被在机物料的规格结束时间锚定，而应从窗口首班开始
+     * 即可参与新增排产选机和换模。</p>
+     *
+     * @param context 排程上下文
+     * @param continuousSkuList 已匹配的续作SKU列表
+     */
+    private void resetIdleMachineEndingTimeToWindowStart(LhScheduleContext context,
+                                                         List<SkuScheduleDTO> continuousSkuList) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleConfig())
+                || !context.getScheduleConfig().isForceRescheduleEnabled()
+                || CollectionUtils.isEmpty(context.getMachineScheduleMap())
+                || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return;
+        }
+        // 收集已分配续作SKU的机台编码
+        Set<String> continuousMachineCodeSet = new HashSet<String>(8);
+        if (!CollectionUtils.isEmpty(continuousSkuList)) {
+            for (SkuScheduleDTO sku : continuousSkuList) {
+                if (Objects.nonNull(sku) && StringUtils.isNotEmpty(sku.getContinuousMachineCode())) {
+                    continuousMachineCodeSet.add(sku.getContinuousMachineCode());
+                }
+            }
+        }
+        // 排程窗口首班开始时间
+        Date windowStartTime = context.getScheduleWindowShifts().stream()
+                .map(LhShiftConfigVO::getShiftStartDateTime)
+                .filter(Objects::nonNull)
+                .min(Date::compareTo)
+                .orElse(null);
+        if (Objects.isNull(windowStartTime)) {
+            return;
+        }
+        for (Map.Entry<String, MachineScheduleDTO> entry : context.getMachineScheduleMap().entrySet()) {
+            MachineScheduleDTO machine = entry.getValue();
+            if (Objects.isNull(machine) || StringUtils.isEmpty(machine.getCurrentMaterialCode())) {
+                continue;
+            }
+            // 已分配续作SKU的机台保留在机物料的收尾时间
+            if (continuousMachineCodeSet.contains(entry.getKey())) {
+                continue;
+            }
+            // 在机物料不需要排程，收尾时间重置为窗口首班开始时间，
+            // 使机台从窗口起点即可参与新增排产换模，不被在机物料的规格结束时间锚定。
+            Date originalEndTime = machine.getEstimatedEndTime();
+            machine.setEstimatedEndTime(windowStartTime);
+            // 同步更新初始机台快照，避免续作策略 restoreMachineStateFromInitial 回退到旧收尾时间。
+            MachineScheduleDTO initialMachine = context.getInitialMachineScheduleMap().get(entry.getKey());
+            if (Objects.nonNull(initialMachine)) {
+                initialMachine.setEstimatedEndTime(windowStartTime);
+            }
+            // 同步修正滚动衔接继承结果的结束时间，避免 resolveLatestAssignedEndTime 仍取旧时间；
+            // 保留继承结果用于识别机台当前物料和前规格，不能直接删除导致换模匹配画像丢失。
+            alignInheritedMachineAssignmentEndTime(context, entry.getKey(),
+                    machine.getCurrentMaterialCode(), windowStartTime);
+            log.info("在机物料不需要排程，机台收尾时间重置为窗口首班开始, 机台: {}, 在机物料: {}, "
+                            + "原收尾时间: {}, 窗口首班: {}",
+                    entry.getKey(), machine.getCurrentMaterialCode(),
+                    LhScheduleTimeUtil.formatDateTime(originalEndTime),
+                    LhScheduleTimeUtil.formatDateTime(windowStartTime));
+        }
+    }
+
+    /**
+     * 将不再续作的在机物料继承结果结束时间对齐到排程窗口起点。
+     * <p>强制重排会继承目标日前一日结果到机台分配账本。当前在机SKU本次无需排程时，
+     * 继承结果只用于保留前规格识别，不再代表本窗口内的真实占用，因此仅修正结束时间，
+     * 不删除继承结果。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param materialCode 当前在机物料编码
+     * @param windowStartTime 排程窗口首班开始时间
+     */
+    private void alignInheritedMachineAssignmentEndTime(LhScheduleContext context,
+                                                        String machineCode,
+                                                        String materialCode,
+                                                        Date windowStartTime) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)
+                || StringUtils.isEmpty(materialCode) || Objects.isNull(windowStartTime)) {
+            return;
+        }
+        List<LhScheduleResult> assignedResultList = context.getMachineAssignmentMap().get(machineCode);
+        if (CollectionUtils.isEmpty(assignedResultList)) {
+            return;
+        }
+        for (LhScheduleResult assignedResult : assignedResultList) {
+            if (Objects.nonNull(assignedResult)
+                    && StringUtils.equals(materialCode, assignedResult.getMaterialCode())) {
+                assignedResult.setSpecEndTime(windowStartTime);
+            }
+        }
     }
 
     /**

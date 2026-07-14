@@ -1,10 +1,13 @@
 package com.zlt.aps.lh.handler;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.component.SingleControlModeSnapshotInitializer;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
@@ -34,6 +37,70 @@ import java.util.Objects;
  * @author APS
  */
 public class ScheduleAdjustHandlerTest {
+
+    /**
+     * 用例说明：强制重排时，在机SKU本次不排程，机台和继承结果的结束时间都应回到窗口首班，
+     * 同时必须保留继承结果，避免丢失前规格识别依据。
+     */
+    @Test
+    public void shouldResetIdleOnlineMachineEndTimeAndKeepInheritedAssignment() {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = buildIdleOnlineMachineContext();
+        Date windowStartTime = context.getScheduleWindowShifts().get(0).getShiftStartDateTime();
+
+        ReflectionTestUtils.invokeMethod(handler, "resetIdleMachineEndingTimeToWindowStart",
+                context, Collections.<SkuScheduleDTO>emptyList());
+
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get("K1116");
+        LhScheduleResult inheritedResult = context.getMachineAssignmentMap().get("K1116").get(0);
+        Assertions.assertEquals(windowStartTime, machine.getEstimatedEndTime());
+        Assertions.assertEquals(windowStartTime,
+                context.getInitialMachineScheduleMap().get("K1116").getEstimatedEndTime());
+        Assertions.assertEquals(windowStartTime, inheritedResult.getSpecEndTime());
+        Assertions.assertEquals("3302001311", inheritedResult.getMaterialCode());
+    }
+
+    /**
+     * 用例说明：在机SKU本次仍作为续作排程时，必须保留原收尾时间，不得提前释放机台。
+     */
+    @Test
+    public void shouldKeepOnlineMachineEndTimeWhenContinuousSkuNeedsScheduling() {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = buildIdleOnlineMachineContext();
+        Date originalEndTime = context.getMachineScheduleMap().get("K1116").getEstimatedEndTime();
+        SkuScheduleDTO continuousSku = new SkuScheduleDTO();
+        continuousSku.setMaterialCode("3302001311");
+        continuousSku.setContinuousMachineCode("K1116");
+
+        ReflectionTestUtils.invokeMethod(handler, "resetIdleMachineEndingTimeToWindowStart",
+                context, Collections.singletonList(continuousSku));
+
+        Assertions.assertEquals(originalEndTime,
+                context.getMachineScheduleMap().get("K1116").getEstimatedEndTime());
+        Assertions.assertEquals(originalEndTime,
+                context.getMachineAssignmentMap().get("K1116").get(0).getSpecEndTime());
+    }
+
+    /**
+     * 用例说明：非强制重排继续沿用原滚动衔接规则，不得执行本次强制重排专用的收尾时间归一化。
+     */
+    @Test
+    public void shouldNotResetIdleOnlineMachineEndTimeWithoutForceReschedule() {
+        ScheduleAdjustHandler handler = new ScheduleAdjustHandler();
+        LhScheduleContext context = buildIdleOnlineMachineContext();
+        Map<String, String> paramMap = new HashMap<String, String>(2);
+        paramMap.put(LhScheduleParamConstant.FORCE_RESCHEDULE, "0");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+        Date originalEndTime = context.getMachineScheduleMap().get("K1116").getEstimatedEndTime();
+
+        ReflectionTestUtils.invokeMethod(handler, "resetIdleMachineEndingTimeToWindowStart",
+                context, Collections.<SkuScheduleDTO>emptyList());
+
+        Assertions.assertEquals(originalEndTime,
+                context.getMachineScheduleMap().get("K1116").getEstimatedEndTime());
+        Assertions.assertEquals(originalEndTime,
+                context.getMachineAssignmentMap().get("K1116").get(0).getSpecEndTime());
+    }
 
     /**
      * 用例说明：不同 SKU 共用胎胚但不是同一天收尾时，不进入共用胎胚库存分摊。
@@ -568,6 +635,43 @@ public class ScheduleAdjustHandlerTest {
         plan.setDay2(day2Qty);
         plan.setDay3(day3Qty);
         return plan;
+    }
+
+    private LhScheduleContext buildIdleOnlineMachineContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.<String, String>emptyMap()));
+        Date windowBaseDate = toDate(LocalDate.of(2026, 7, 11));
+        Date originalEndTime = Date.from(LocalDate.of(2026, 7, 11).atTime(22, 0)
+                .atZone(ZoneId.systemDefault()).toInstant());
+
+        LhShiftConfigVO firstShift = new LhShiftConfigVO();
+        firstShift.setScheduleBaseDate(windowBaseDate);
+        firstShift.setDateOffset(0);
+        firstShift.setShiftType("02");
+        firstShift.setStartTime("06:00");
+        firstShift.setEndTime("14:00");
+        context.setScheduleWindowShifts(Collections.singletonList(firstShift));
+
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1116");
+        machine.setCurrentMaterialCode("3302001311");
+        machine.setEstimatedEndTime(originalEndTime);
+        context.getMachineScheduleMap().put("K1116", machine);
+
+        MachineScheduleDTO initialMachine = new MachineScheduleDTO();
+        initialMachine.setMachineCode("K1116");
+        initialMachine.setCurrentMaterialCode("3302001311");
+        initialMachine.setEstimatedEndTime(originalEndTime);
+        context.getInitialMachineScheduleMap().put("K1116", initialMachine);
+
+        LhScheduleResult inheritedResult = new LhScheduleResult();
+        inheritedResult.setLhMachineCode("K1116");
+        inheritedResult.setMaterialCode("3302001311");
+        inheritedResult.setDailyPlanQty(144);
+        inheritedResult.setSpecEndTime(originalEndTime);
+        context.getMachineAssignmentMap().put("K1116",
+                Collections.singletonList(inheritedResult));
+        return context;
     }
 
     private LhScheduleContext buildEmbryoAllocationContext() {
