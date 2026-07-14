@@ -1410,6 +1410,56 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void traceMachinePriorityOrder_shouldUseProvidedFullOrderAndWriteCurrentSortMetrics() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildTraceContext();
+        SkuScheduleDTO sku = sku("MAT-TRACE", "SPEC-A", "22.5");
+        sku.setProductStatus("01");
+        sku.setEmbryoCode("EMBRYO-A");
+
+        MachineScheduleDTO firstSelectedMachine = machine("M-SECOND", dateTime(2026, 4, 21, 8, 15),
+                "SPEC-X", "22.0", "MAT-B");
+        MachineScheduleDTO remainingMachine = machine("M-FIRST", dateTime(2026, 4, 21, 8, 0),
+                "SPEC-A", "22.5", "MAT-A");
+        material(context, "MAT-A", "EMBRYO-A", "胎胚-A");
+        material(context, "MAT-B", "EMBRYO-B", "胎胚-B");
+
+        // 调用处直接传入本次实际选机使用的顺序，日志方法不得重新按收尾时间或排序得分改写。
+        strategy.traceMachinePriorityOrder(context, sku,
+                Arrays.asList(firstSelectedMachine, remainingMachine));
+
+        assertEquals(1, context.getScheduleLogList().size());
+        LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
+        assertEquals("【MAT-TRACE】【01】选机优先级顺序", processLog.getTitle());
+        String detail = processLog.getLogDetail();
+        assertTrue(detail.indexOf("1. M-SECOND") < detail.indexOf("2. M-FIRST"),
+                "日志必须保持调用方实际选机使用的完整顺序");
+        assertTrue(detail.contains("收尾时间：2026-04-21 08:15:00（T日早班）"));
+        assertTrue(detail.contains("单控拆分：否（排序值：3）"));
+        assertTrue(detail.contains("同胎胚：否"));
+        assertTrue(detail.contains("同模壳：是"));
+        assertTrue(detail.contains("同规格：否"));
+        assertTrue(detail.contains("胶囊共用性：1（否）"));
+        assertTrue(detail.contains("同英寸：否"));
+        assertTrue(detail.contains("相近英寸：0.5"));
+    }
+
+    @Test
+    void traceMachinePriorityOrder_shouldWriteEmptyCandidateDetail() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildTraceContext();
+        SkuScheduleDTO sku = sku("MAT-EMPTY", "SPEC-A", "22.5");
+        sku.setProductStatus("X");
+
+        strategy.traceMachinePriorityOrder(context, sku, Collections.<MachineScheduleDTO>emptyList());
+
+        assertEquals(1, context.getScheduleLogList().size());
+        LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
+        assertEquals("【MAT-EMPTY】【X】选机优先级顺序", processLog.getTitle());
+        assertEquals("无可用候选机台", processLog.getLogDetail());
+    }
+
+    @Test
     void matchMachines_shouldExcludeMachineWhenPlanStopExceedsTimeoutHours() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildContext();

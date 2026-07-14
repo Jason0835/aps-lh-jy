@@ -75,6 +75,21 @@ public interface IMachineMatchStrategy {
                                          Set<String> excludedMachineCodes);
 
     /**
+     * 记录当前新增 SKU 实际使用的候选机台优先级顺序。
+     * <p>调用方必须传入已经完成过滤、排序及动态选机调整的最终列表，
+     * 本方法只负责输出日志，不得重新过滤、排序或修改候选集合。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待选机 SKU
+     * @param orderedCandidates 本次实际选机使用的有序候选列表
+     */
+    default void traceMachinePriorityOrder(LhScheduleContext context,
+                                           SkuScheduleDTO sku,
+                                           List<MachineScheduleDTO> orderedCandidates) {
+        // 测试替身和非默认策略不具备完整排序指标，保持空实现；生产默认策略负责写入明细日志。
+    }
+
+    /**
      * 输出续作排产后全量启用机台排序日志（不依赖具体SKU）。
      * <p>排除续作排满机台、保留续作收尾机台，按"单控优先->收尾时间->普通机台优先->特殊支持能力数"排序。</p>
      *

@@ -674,6 +674,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             List<MachineScheduleDTO> candidates = machineMatch.matchMachines(context, sku);
             logNewSpecMachineCandidateSnapshot(context, sku, candidates, EMPTY_STRING_SET, null);
             if (candidates.isEmpty()) {
+                // 初始候选为空时仍记录本次实际选机使用的空列表，便于按 SKU 对账失败原因。
+                machineMatch.traceMachinePriorityOrder(context, sku, Collections.<MachineScheduleDTO>emptyList());
                 String noCandidateReason = resolveNoCandidateMachineReason(context, sku);
                 log.warn("新增SKU无候选机台, materialCode: {}, 结构: {}, 规格: {}, 寸口: {}, 目标量: {}, 原因: {}",
                         sku.getMaterialCode(), sku.getStructureName(), sku.getSpecCode(),
@@ -737,6 +739,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             while (true) {
                 logNewSpecMachineCandidateSnapshot(context, sku, candidates, excludedMachineCodes, excludedMachineReasonMap);
                 MachineScheduleDTO candidateMachine = null;
+                List<MachineScheduleDTO> orderedCandidates = new ArrayList<>(candidates.size());
                 // 单控反向匹配推荐机台优先:当前SKU为反向匹配目标且推荐机台在候选中时,优先选择配对侧
                 String reverseMatchSkuKey = LhSingleControlMachineUtil.buildSkuModeKey(sku);
                 String preferredPairMachineCode = reverseMatchPreferredMachineMap.get(reverseMatchSkuKey);
@@ -750,6 +753,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     reverseMatchReservedMachineCodes.remove(preferredPairMachineCode);
                     log.info("单控反向匹配推荐机台优先选择, materialCode: {}, machineCode: {}",
                             sku.getMaterialCode(), preferredPairMachineCode);
+                    List<MachineScheduleDTO> availableCandidates =
+                            filterExcludedCandidates(candidates, excludedMachineCodes);
+                    fillSelectedCandidateOrder(availableCandidates, candidateMachine, orderedCandidates);
                 }
                 if (candidateMachine == null) {
                     // 非反向匹配推荐目标SKU选机时,排除被反向匹配预留的单控机台,使配对侧留给推荐目标SKU
@@ -763,9 +769,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     }
                     candidateMachine = selectCandidateMachine(
                             context, sku, candidateCache, excludedMachineCodes, machineMatch,
-                            preferredTrialMachine, quantityPolicy);
+                            preferredTrialMachine, quantityPolicy, orderedCandidates);
                 }
-                if (candidateMachine == null) {
+                // 直接记录本次实际用于取首台机台的同一有序列表，不为日志重新过滤或排序。
+                machineMatch.traceMachinePriorityOrder(context, sku, orderedCandidates);
+                // 实际排产也直接读取该列表第一台，确保日志序号与后续选机使用的数据完全一致。
+                candidateMachine = CollectionUtils.isEmpty(orderedCandidates) ? null : orderedCandidates.get(0);
+                if (Objects.isNull(candidateMachine)) {
                     break;
                 }
                 String machineCode = candidateMachine.getMachineCode();
@@ -2118,6 +2128,31 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                       IMachineMatchStrategy machineMatch,
                                                       MachineScheduleDTO preferredTrialMachine,
                                                       ProductionQuantityPolicy quantityPolicy) {
+        return selectCandidateMachine(context, sku, candidateCache, excludedMachineCodes, machineMatch,
+                preferredTrialMachine, quantityPolicy, new ArrayList<MachineScheduleDTO>(0));
+    }
+
+    /**
+     * 选择当前实际尝试的机台，并同步回传同一次选机使用的候选顺序。
+     *
+     * @param context 排程上下文
+     * @param sku 当前待选机SKU
+     * @param candidateCache 当前SKU候选缓存
+     * @param excludedMachineCodes 已排除机台编码
+     * @param machineMatch 机台匹配策略
+     * @param preferredTrialMachine 试制、量试或小批量预选机台
+     * @param quantityPolicy 排产量策略
+     * @param orderedCandidates 本次实际使用的候选顺序输出参数
+     * @return 当前实际尝试的机台；无候选时返回null
+     */
+    private MachineScheduleDTO selectCandidateMachine(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       NewSpecCandidateCache candidateCache,
+                                                       Set<String> excludedMachineCodes,
+                                                       IMachineMatchStrategy machineMatch,
+                                                       MachineScheduleDTO preferredTrialMachine,
+                                                       ProductionQuantityPolicy quantityPolicy,
+                                                       List<MachineScheduleDTO> orderedCandidates) {
         List<MachineScheduleDTO> singleControlCandidates = filterExcludedCandidates(
                 candidateCache.getSingleControlCandidates(), excludedMachineCodes);
         List<MachineScheduleDTO> normalCandidates = filterExcludedCandidates(
@@ -2131,6 +2166,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (singleControlMachine != null) {
                 log.info("新增排产{}SKU仅尝试单控机台, materialCode: {}, machineCode: {}",
                         resolveNewSpecSkuType(sku), sku.getMaterialCode(), singleControlMachine.getMachineCode());
+                fillSelectedCandidateOrder(singleControlCandidates, singleControlMachine, orderedCandidates);
                 return singleControlMachine;
             }
             log.info("新增排产{}SKU单控候选均已排除，不回落普通机台, materialCode: {}",
@@ -2144,6 +2180,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (reusedSingleControlMachine != null) {
                 log.info("新增排产{}SKU优先复用高优先级SKU刚占用的单控机台, materialCode: {}, machineCode: {}",
                         resolveNewSpecSkuType(sku), sku.getMaterialCode(), reusedSingleControlMachine.getMachineCode());
+                fillSelectedCandidateOrder(singleControlCandidates, reusedSingleControlMachine, orderedCandidates);
                 return reusedSingleControlMachine;
             }
             MachineScheduleDTO singleControlMachine = selectCandidateMachineFromScopedList(
@@ -2153,23 +2190,54 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 log.info("新增排产{}SKU优先消化单控机台, materialCode: {}, machineCode: {}, remainingSingleControlCount: {}, normalCandidateCount: {}",
                         resolveNewSpecSkuType(sku), sku.getMaterialCode(), singleControlMachine.getMachineCode(),
                         singleControlCandidates.size(), normalCandidates.size());
+                fillSelectedCandidateOrder(singleControlCandidates, singleControlMachine, orderedCandidates);
                 return singleControlMachine;
             }
             log.info("新增排产{}SKU单控机台均无法承接，开始尝试普通机台, materialCode: {}, normalCandidateCount: {}",
                     resolveNewSpecSkuType(sku), sku.getMaterialCode(), normalCandidates.size());
-            return selectCandidateMachineFromScopedList(
-                    context, sku, normalCandidates, machineMatch, null, quantityPolicy,
-                    candidateCache);
+            MachineScheduleDTO normalMachine = selectCandidateMachineFromScopedList(
+                    context, sku, normalCandidates, machineMatch, null, quantityPolicy, candidateCache);
+            fillSelectedCandidateOrder(normalCandidates, normalMachine, orderedCandidates);
+            return normalMachine;
         }
         MachineScheduleDTO normalMachine = selectCandidateMachineFromScopedList(
                 context, sku, normalCandidates, machineMatch, null, quantityPolicy,
                 candidateCache);
         if (normalMachine != null) {
+            fillSelectedCandidateOrder(normalCandidates, normalMachine, orderedCandidates);
             return normalMachine;
         }
-        return selectCandidateMachineFromScopedList(
+        MachineScheduleDTO singleControlMachine = selectCandidateMachineFromScopedList(
                 context, sku, singleControlCandidates, machineMatch, null, quantityPolicy,
                 candidateCache);
+        fillSelectedCandidateOrder(singleControlCandidates, singleControlMachine, orderedCandidates);
+        return singleControlMachine;
+    }
+
+    /**
+     * 将当前选机逻辑确定的实际首选机台放到候选列表首位。
+     * <p>该方法只复制当前有效作用域并移动已选机台，不重新过滤或排序；实际排产和日志都直接读取
+     * 该列表第一台，保证日志首选机台与后续实际尝试机台一致。</p>
+     *
+     * @param scopedCandidates 当前已完成动态过滤的候选作用域
+     * @param selectedMachine 当前选机逻辑确定的首选机台
+     * @param orderedCandidates 本次实际使用的候选顺序输出参数
+     */
+    private void fillSelectedCandidateOrder(List<MachineScheduleDTO> scopedCandidates,
+                                            MachineScheduleDTO selectedMachine,
+                                            List<MachineScheduleDTO> orderedCandidates) {
+        orderedCandidates.clear();
+        if (Objects.isNull(selectedMachine) || CollectionUtils.isEmpty(scopedCandidates)) {
+            return;
+        }
+        orderedCandidates.add(selectedMachine);
+        for (MachineScheduleDTO candidate : scopedCandidates) {
+            if (Objects.isNull(candidate)
+                    || StringUtils.equals(candidate.getMachineCode(), selectedMachine.getMachineCode())) {
+                continue;
+            }
+            orderedCandidates.add(candidate);
+        }
     }
 
     /**

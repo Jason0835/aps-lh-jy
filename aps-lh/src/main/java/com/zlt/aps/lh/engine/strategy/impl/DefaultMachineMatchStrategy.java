@@ -808,6 +808,118 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
+     * 记录当前新增 SKU 实际使用的候选机台优先级顺序。
+     * <p>候选列表由新增排产主链完成动态过滤和选机顺序调整，本方法只复用现有排序得分与
+     * 收尾窗口画像生成日志，禁止重新执行候选过滤或排序。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待选机 SKU
+     * @param orderedCandidates 本次实际选机使用的有序候选列表
+     */
+    @Override
+    public void traceMachinePriorityOrder(LhScheduleContext context,
+                                          SkuScheduleDTO sku,
+                                          List<MachineScheduleDTO> orderedCandidates) {
+        if (!PriorityTraceLogHelper.isEnabled(context) || Objects.isNull(sku)) {
+            return;
+        }
+        String title = "【" + resolvePriorityTraceTitleValue(sku.getMaterialCode())
+                + "】【" + resolvePriorityTraceTitleValue(sku.getProductStatus()) + "】选机优先级顺序";
+        if (CollectionUtils.isEmpty(orderedCandidates)) {
+            PriorityTraceLogHelper.logSortSummary(log, context, title, "无可用候选机台");
+            return;
+        }
+
+        Map<String, CandidateWindowProfile> profileCache =
+                new HashMap<>(Math.max(4, orderedCandidates.size() * 2));
+        StringBuilder detailBuilder = new StringBuilder(Math.max(256, orderedCandidates.size() * 180));
+        for (int i = 0; i < orderedCandidates.size(); i++) {
+            MachineScheduleDTO machine = orderedCandidates.get(i);
+            if (Objects.isNull(machine)) {
+                continue;
+            }
+            // 复用当前选机比较器使用的得分，保证日志指标与真实排序口径一致。
+            CandidateWindowProfile profile = resolveCandidateWindowProfile(context, sku, machine, profileCache);
+            int singleControlScore = resolveSingleControlScore(context, sku, machine);
+            int embryoMatchScore = resolveEmbryoMatchScore(context, sku, machine);
+            int mouldShellMatchScore = resolveMouldShellMatchScore(context, sku, machine);
+            int specMatchScore = resolveSpecMatchScore(sku, machine);
+            int capsuleScore = resolveCapsuleAffinityScore(context, sku, machine);
+            int proSizeMatchScore = resolveProSizeMatchScore(sku, machine);
+            double inchDistance = resolveInchDistance(sku, machine);
+
+            detailBuilder.append(i + 1).append(". ")
+                    .append(resolvePriorityTraceTitleValue(machine.getMachineCode()))
+                    .append("｜收尾时间：").append(resolveEndingTimeShiftText(context, profile.getReferenceTime()))
+                    .append("｜单控拆分：").append(resolveYesNo(isSingleControlMachine(context, machine.getMachineCode())))
+                    .append("（排序值：").append(singleControlScore).append("）")
+                    .append("｜同胎胚：").append(resolveYesNo(embryoMatchScore == 0))
+                    .append("｜同模壳：").append(resolveYesNo(mouldShellMatchScore == 0))
+                    .append("｜同规格：").append(resolveYesNo(specMatchScore == 0))
+                    .append("｜胶囊共用性：").append(capsuleScore)
+                    .append("（").append(resolveYesNo(capsuleScore == 0)).append("）")
+                    .append("｜同英寸：").append(resolveYesNo(proSizeMatchScore == 0))
+                    .append("｜相近英寸：").append(resolvePriorityInchDistance(inchDistance));
+            if (i < orderedCandidates.size() - 1) {
+                detailBuilder.append('\n');
+            }
+        }
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detailBuilder.toString());
+    }
+
+    /**
+     * 解析选机优先级日志标题字段。
+     *
+     * @param value 原始字段值
+     * @return 非空字段值，缺失时返回“未知”
+     */
+    private String resolvePriorityTraceTitleValue(String value) {
+        return StringUtils.isEmpty(value) ? "未知" : value;
+    }
+
+    /**
+     * 解析参考收尾时间及其所在班次。
+     *
+     * @param context 排程上下文
+     * @param referenceTime 当前排序使用的参考收尾时间
+     * @return “时间（班次）”格式文本
+     */
+    private String resolveEndingTimeShiftText(LhScheduleContext context, Date referenceTime) {
+        if (Objects.isNull(referenceTime)) {
+            return "无（未知班次）";
+        }
+        if (Objects.isNull(context.getScheduleDate())) {
+            return PriorityTraceLogHelper.formatDateTime(referenceTime) + "（未知班次）";
+        }
+        int shiftIndex = LhScheduleTimeUtil.getShiftIndex(context, context.getScheduleDate(), referenceTime);
+        LhShiftConfigVO shift = shiftIndex < 0
+                ? null : LhScheduleTimeUtil.getShiftByIndex(context, context.getScheduleDate(), shiftIndex);
+        String shiftName = Objects.nonNull(shift) && StringUtils.isNotEmpty(shift.getShiftName())
+                ? shift.getShiftName() : "未知班次";
+        return PriorityTraceLogHelper.formatDateTime(referenceTime) + "（" + shiftName + "）";
+    }
+
+    /**
+     * 将布尔排序结果转换为统一中文文本。
+     *
+     * @param matched 是否命中
+     * @return 是/否
+     */
+    private String resolveYesNo(boolean matched) {
+        return matched ? "是" : "否";
+    }
+
+    /**
+     * 格式化相近英寸排序指标。
+     *
+     * @param inchDistance 当前排序使用的英寸差值
+     * @return 英寸差值；无法计算时返回“未知”
+     */
+    private String resolvePriorityInchDistance(double inchDistance) {
+        return inchDistance >= Double.MAX_VALUE ? "未知" : String.format("%.1f", inchDistance);
+    }
+
+    /**
      * 获取SKU对应的模具号列表
      */
     private List<String> getSkuMouldCodes(LhScheduleContext context, String materialCode) {

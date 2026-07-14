@@ -50,6 +50,7 @@ import java.math.BigDecimal;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
@@ -66,6 +67,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -4293,14 +4295,33 @@ class NewSpecProductionStrategyRegressionTest {
         NewSpecCandidateCache candidateCache = NewSpecCandidateCache.from(candidates,
                 machine -> StringUtils.startsWith(machine.getMachineCode(), "K1501"));
 
+        List<MachineScheduleDTO> orderedCandidates = new ArrayList<>(3);
         MachineScheduleDTO selectedMachine = ReflectionTestUtils.invokeMethod(strategy,
                 "selectCandidateMachine", context, sku, candidateCache, Collections.emptySet(),
                 orderedMachineMatch(normalMachine, occupiedSingleControlMachine, singleControlMachine), null,
-                ProductionQuantityPolicy.from(sku, false));
+                ProductionQuantityPolicy.from(sku, false), orderedCandidates);
 
         assertNotNull(selectedMachine);
         assertEquals("K1105", selectedMachine.getMachineCode(),
                 "补偿SKU提前生产准入通过时仍应保持正规SKU选机顺序，非单控机台优先于单控机台");
+        assertFalse(orderedCandidates.isEmpty());
+        assertSame(selectedMachine, orderedCandidates.get(0),
+                "日志候选列表第一台必须与本次实际选中的机台使用同一个对象");
+
+        Set<String> excludedMachineCodes = Collections.singleton(normalMachine.getMachineCode());
+        List<MachineScheduleDTO> retryOrderedCandidates = new ArrayList<>(2);
+        MachineScheduleDTO retrySelectedMachine = ReflectionTestUtils.invokeMethod(strategy,
+                "selectCandidateMachine", context, sku, candidateCache, excludedMachineCodes,
+                orderedMachineMatch(normalMachine, occupiedSingleControlMachine, singleControlMachine), null,
+                ProductionQuantityPolicy.from(sku, false), retryOrderedCandidates);
+
+        assertNotNull(retrySelectedMachine);
+        assertFalse(retryOrderedCandidates.isEmpty());
+        assertSame(retrySelectedMachine, retryOrderedCandidates.get(0),
+                "失败排除后重新选机时，日志第一台必须同步为本次实际选中的机台");
+        assertTrue(retryOrderedCandidates.stream()
+                        .noneMatch(machine -> StringUtils.equals("K1105", machine.getMachineCode())),
+                "失败排除后的动态候选列表不得继续包含已排除机台");
     }
 
     @Test
