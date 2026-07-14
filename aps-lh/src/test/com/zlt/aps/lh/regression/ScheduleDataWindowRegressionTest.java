@@ -217,6 +217,32 @@ class ScheduleDataWindowRegressionTest {
         assertWrapperContainsValue(precisionPlanWrapper, "0");
     }
 
+    /**
+     * 清洗来源隔离：普通停机查询排除 07/08，清洗专用查询只承载清洗候选。
+     */
+    @Test
+    void loadDevicePlanShutShouldSeparateCleaningFromNormalStopPlans() {
+        String factoryCode = "FC01";
+        Date scheduleDate = date(2026, 4, 2);
+        Date windowEndDate = LhScheduleTimeUtil.addDays(scheduleDate, LhScheduleConstant.SCHEDULE_DAYS);
+        LhScheduleContext context = newScheduleContext();
+        context.setFactoryCode(factoryCode);
+        context.setScheduleDate(scheduleDate);
+        when(devicePlanShutMapper.selectList(any())).thenReturn(Collections.emptyList());
+
+        ReflectionTestUtils.invokeMethod(lhBaseDataService, "loadDevicePlanShut",
+                context, factoryCode, scheduleDate, windowEndDate);
+
+        List<LambdaQueryWrapper<MdmDevicePlanShut>> wrappers = captureDevicePlanShutWrappers();
+        LambdaQueryWrapper<MdmDevicePlanShut> normalStopWrapper = wrappers.get(0);
+        LambdaQueryWrapper<MdmDevicePlanShut> cleaningStopWrapper = wrappers.get(1);
+        assertWrapperExcludesCleaningTypes(normalStopWrapper);
+        assertWrapperContainsValue(cleaningStopWrapper, MachineStopTypeEnum.DRY_ICE_CLEANING.getCode());
+        assertWrapperContainsValue(cleaningStopWrapper, MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode());
+        assertWrapperFiltersUnfinishedActualFinishDate(normalStopWrapper);
+        assertWrapperFiltersUnfinishedActualFinishDate(cleaningStopWrapper);
+    }
+
     @Test
     void loadAllBaseData_forceRescheduleShouldLoadPreviousDataFromTMinusOne() {
         String factoryCode = "FC01";
@@ -788,6 +814,19 @@ class ScheduleDataWindowRegressionTest {
                 .anyMatch(value -> expectedValue.equals(value)
                         || (value instanceof java.util.Collection
                         && ((java.util.Collection<?>) value).contains(expectedValue))));
+    }
+
+    /**
+     * 校验普通设备停机查询明确排除干冰、喷砂清洗类型。
+     *
+     * @param wrapper 普通设备停机查询条件
+     */
+    private void assertWrapperExcludesCleaningTypes(LambdaQueryWrapper<?> wrapper) {
+        String sqlSegment = wrapper.getSqlSegment().toLowerCase(Locale.ROOT);
+        assertTrue(sqlSegment.contains("machine_stop_type"));
+        assertTrue(sqlSegment.contains("not in"));
+        assertWrapperContainsValue(wrapper, MachineStopTypeEnum.DRY_ICE_CLEANING.getCode());
+        assertWrapperContainsValue(wrapper, MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode());
     }
 
     /**

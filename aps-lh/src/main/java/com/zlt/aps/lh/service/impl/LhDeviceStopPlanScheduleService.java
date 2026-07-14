@@ -41,12 +41,12 @@ public class LhDeviceStopPlanScheduleService {
 
     /**
      * 从设备停机计划中过滤干冰/喷砂清洗候选，并按计划开始时间、机台编码升序返回。
-     * <p>清洗计划加载口径与普通设备停机不同：计划开始时间只用于候选排序，
-     * 不要求落在 T～T+2 排程窗口内，也不限制计划开始时间必须晚于 T 日；
+     * <p>清洗计划加载口径与普通设备停机不同：只加载计划开始时间不早于 T 日的候选，
+     * 但不要求计划开始时间落在 T～T+2 排程窗口内；T 日及之后的候选按计划时间排序后，
      * 实际清洗开始/结束时间由清洗排程服务按 T～T+2 窗口班次重新安排。</p>
      *
      * @param context 排程上下文
-     * @return 全部清洗类设备停机候选（按计划开始时间、机台编码升序）
+     * @return T 日及之后的清洗类设备停机候选（按计划开始时间、机台编码升序）
      */
     public List<MdmDevicePlanShut> queryCleaningStopPlans(LhScheduleContext context) {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getDevicePlanShutList())) {
@@ -55,11 +55,19 @@ public class LhDeviceStopPlanScheduleService {
         List<MdmDevicePlanShut> cleaningStopPlans = new ArrayList<>(context.getDevicePlanShutList().size());
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
             // 清洗类停机计划的实际时长由配置参数决定（干冰3h/喷砂含首检12h），不依赖计划 begin/end 时长，
-            // 因此允许 begin=end 的清洗计划纳入候选；计划开始时间只用于排序，不作为 T 日下限过滤条件。
+            // 因此允许 begin=end 的清洗计划纳入候选。
             if (Objects.isNull(planShut) || !isCleaningStopType(planShut.getMachineStopType())) {
                 continue;
             }
             if (!isValidCleaningStopPlan(planShut)) {
+                continue;
+            }
+            // 服务层再次执行 T 日边界校验，防止其他初始化入口误把历史清洗计划放入上下文并占用本次名额。
+            if (!isPlanBeginOnOrAfterScheduleDate(context, planShut.getBeginDate())) {
+                log.info("清洗计划早于T日，本次不纳入候选, T日: {}, 机台: {}, 停机类型: {}, 计划开始: {}",
+                        LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                        planShut.getMachineCode(), planShut.getMachineStopType(),
+                        LhScheduleTimeUtil.formatDateTime(planShut.getBeginDate()));
                 continue;
             }
             cleaningStopPlans.add(planShut);

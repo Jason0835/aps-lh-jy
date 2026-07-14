@@ -1492,10 +1492,12 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param endDate     结束日期
      */
     private void loadDevicePlanShut(LhScheduleContext context, String factoryCode, Date startDate, Date endDate) {
-        // 普通设备停机只加载与排程窗口相交且尚未实际完成的数据，避免已完成停机重复扣减产能。
+        // 普通设备停机只加载与排程窗口相交且尚未实际完成的非清洗数据；
+        // 干冰/喷砂必须由下方清洗专用查询按 T 日边界加载，避免 T-1 清洗混入后重复占用本次清洗名额。
         List<MdmDevicePlanShut> normalDevicePlanShutList = devicePlanShutMapper.selectList(
                 new LambdaQueryWrapper<MdmDevicePlanShut>()
                         .eq(MdmDevicePlanShut::getFactoryCode, factoryCode)
+                        .notIn(MdmDevicePlanShut::getMachineStopType, resolveCleaningStopTypeList())
                         .le(MdmDevicePlanShut::getBeginDate, endDate)
                         .ge(MdmDevicePlanShut::getEndDate, startDate)
                         .isNull(MdmDevicePlanShut::getActualFinishDate)
