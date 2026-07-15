@@ -172,6 +172,7 @@ public class SkuDecrementChecker {
         unscheduled.setMonthPlanVersion(sku.getMonthPlanVersion());
         unscheduled.setProductionVersion(sku.getProductionVersion());
         unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setProductStatus(sku.getProductStatus());
         unscheduled.setMaterialDesc(sku.getMaterialDesc());
         unscheduled.setStructureName(sku.getStructureName());
         unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
@@ -213,7 +214,9 @@ public class SkuDecrementChecker {
             iterator.remove();
             // 从结构SKU集合和全量索引移除，避免换活字块、置换等后置阶段重新选入
             context.removePendingSkuFromStructureMap(sku);
-            context.getAllSkuScheduleDtoMap().remove(sku.getMaterialCode());
+            context.getAllSkuScheduleDtoMap().remove(
+                    MonthPlanDateResolver.buildMaterialStatusKey(
+                            sku.getMaterialCode(), sku.getProductStatus()));
             // 命中后不再占用胎胚库存内部分摊额度，剩余额度回流给同胎胚有效SKU
             targetScheduleQtyResolver.removeActiveEmbryoSku(context, sku, SKU_DECREMENT_UNSCHEDULED_REASON);
             log.info("SKU命中减量清单，排产准入拦截, 工厂: {}, 批次号: {}, 物料: {}, 产品状态: {}, 月计划年月: {}-{}, 未排数量: {}",

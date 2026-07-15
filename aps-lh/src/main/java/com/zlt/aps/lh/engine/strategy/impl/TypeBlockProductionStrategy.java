@@ -22,6 +22,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
@@ -223,7 +224,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 SkuScheduleDTO specifySku = isTypeBlockCandidate(context, machine, limitSpecifySku)
                         ? limitSpecifySku : null;
                 if (specifySku != null && StringUtils.isNotEmpty(specifySku.getMaterialCode())
-                        && returnedToNewSpecMaterialCodes.contains(specifySku.getMaterialCode())) {
+                        && returnedToNewSpecMaterialCodes.contains(
+                        MonthPlanDateResolver.buildMaterialStatusKey(
+                                specifySku.getMaterialCode(), specifySku.getProductStatus()))) {
                     completedMachineMap.put(machineCode, true);
                     log.info("定点换活字块SKU已回流新增排产，跳过S4.4二次承接, machineCode: {}, materialCode: {}",
                             machineCode, specifySku.getMaterialCode());
@@ -638,7 +641,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         List<SkuScheduleDTO> candidateList = new ArrayList<>(context.getNewSpecSkuList().size());
         for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
             if (sku != null && !CollectionUtils.isEmpty(returnedToNewSpecMaterialCodes)
-                    && returnedToNewSpecMaterialCodes.contains(sku.getMaterialCode())) {
+                    && returnedToNewSpecMaterialCodes.contains(
+                    MonthPlanDateResolver.buildMaterialStatusKey(
+                            sku.getMaterialCode(), sku.getProductStatus()))) {
                 continue;
             }
             if (isTypeBlockCandidate(context, machine, sku, false)) {
@@ -649,7 +654,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
-     * 记录已由换活字块首台承接但仍需回流 S4.5 的物料，避免 S4.4 再次按换活字块扩机。
+     * 记录已由换活字块首台承接但仍需回流 S4.5 的业务SKU，避免 S4.4 再次按换活字块扩机。
      *
      * @param returnedToNewSpecMaterialCodes 回流新增排产物料集合
      * @param context 排程上下文
@@ -663,7 +668,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             return;
         }
         if (context.getNewSpecSkuList().contains(sku) && sku.getRemainingScheduleQty() > 0) {
-            returnedToNewSpecMaterialCodes.add(sku.getMaterialCode());
+            returnedToNewSpecMaterialCodes.add(MonthPlanDateResolver.buildMaterialStatusKey(
+                    sku.getMaterialCode(), sku.getProductStatus()));
         }
     }
 
@@ -1399,7 +1405,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     LhScheduleTimeUtil.formatDateTime(startTime), quotaTrimmedQty);
         }
         int scheduledQty = quotaTrimmedQty;
-        int remainingQty = Math.max(0, adoptedTargetQty - scheduledQty);
+        // 换活字块结果可能被“物料+产品状态”实际消费账本裁剪，回流量必须同时受原目标缺口和账本剩余约束。
+        // 若本状态账本已扣完，不得按裁剪前目标量再次回流 S4.5，否则会出现同状态已排满后仍生成未排记录。
+        int remainingQty = resolveRemainingQtyForNewSchedule(
+                context, sku, adoptedTargetQty, scheduledQty);
         if (remainingQty > 0) {
             // 换活字块只在当前衔接机台落一段产能；单台不足时，不在 S4.4 继续扩第二台，
             // 而是把剩余量写回 SKU，交给 S4.5 新增排产重新选机、换模和扣账。
@@ -1415,6 +1424,24 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         log.debug("换活字块排产完成, 机台: {}, SKU: {}, 已排: {}, 剩余: {}",
                 machine.getMachineCode(), sku.getMaterialCode(), scheduledQty, remainingQty);
         return true;
+    }
+
+    /**
+     * 计算换活字块完成后可回流新增排产的剩余量。
+     *
+     * @param context 排程上下文
+     * @param sku 当前业务SKU
+     * @param adoptedTargetQty 换活字块采用的目标量
+     * @param scheduledQty 本次实际排产量
+     * @return 同时受目标缺口和本产品状态实际消费账本约束的回流量
+     */
+    private int resolveRemainingQtyForNewSchedule(LhScheduleContext context,
+                                                   SkuScheduleDTO sku,
+                                                   int adoptedTargetQty,
+                                                   int scheduledQty) {
+        int targetRemainingQty = Math.max(0, adoptedTargetQty - scheduledQty);
+        int ledgerRemainingQty = targetScheduleQtyResolver.resolveProductionRemainingQty(context, sku);
+        return Math.min(targetRemainingQty, ledgerRemainingQty);
     }
 
     /**
@@ -1483,6 +1510,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         unscheduled.setFactoryCode(context.getFactoryCode());
         unscheduled.setBatchNo(context.getBatchNo());
         unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setProductStatus(sku.getProductStatus());
         unscheduled.setMaterialDesc(sku.getMaterialDesc());
         unscheduled.setScheduleDate(context.getScheduleTargetDate());
         unscheduled.setUnscheduledReason(SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
@@ -1537,6 +1565,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 continue;
             }
             if (StringUtils.equals(sku.getMaterialCode(), result.getMaterialCode())
+                    && StringUtils.equals(StringUtils.trimToEmpty(sku.getProductStatus()),
+                    StringUtils.trimToEmpty(result.getProductStatus()))
                     && StringUtils.equals(ScheduleTypeEnum.TYPE_BLOCK.getCode(), result.getScheduleType())
                     && StringUtils.equals(YES_FLAG, result.getIsTypeBlock())) {
                 return true;
@@ -3923,7 +3953,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         if (totalShiftFillOverQty > 0) {
             sku.setShiftFillOverQty(sku.getShiftFillOverQty() + totalShiftFillOverQty);
-            context.getSkuShiftFillOverQtyMap().merge(sku.getMaterialCode(), totalShiftFillOverQty, Integer::sum);
+            String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                    sku.getMaterialCode(), sku.getProductStatus());
+            context.getSkuShiftFillOverQtyMap().merge(skuKey, totalShiftFillOverQty, Integer::sum);
         }
         refreshResultSummary(context, result, shifts);
         int actualQty = result.getDailyPlanQty() != null ? result.getDailyPlanQty() : 0;

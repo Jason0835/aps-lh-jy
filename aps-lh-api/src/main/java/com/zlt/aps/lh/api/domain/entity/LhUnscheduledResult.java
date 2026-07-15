@@ -82,6 +82,14 @@ public class LhUnscheduledResult extends BaseEntity implements Serializable {
     private String materialCode;
 
     /**
+     * 产品状态：X-试验示方，T-量试示方，S-正规示方
+     */
+    @Excel(name = "ui.data.column.lhUnscheduledResult.productStatus")
+    @ApiModelProperty(value = "产品状态：X-试验示方，T-量试示方，S-正规示方", name = "productStatus")
+    @TableField(value = "PRODUCT_STATUS")
+    private String productStatus;
+
+    /**
      * 产品结构
      */
     @Excel(name = "ui.data.column.lhUnscheduledResult.structureName")

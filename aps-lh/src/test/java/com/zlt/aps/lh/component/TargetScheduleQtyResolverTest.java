@@ -348,6 +348,70 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
+     * 用例说明：同物料不同产品状态必须使用独立实际消费账本。
+     */
+    @Test
+    public void shouldIsolateProductionLedgerByProductStatus() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO formalSku = buildSku("3302001404", "EMB-MULTI", 10, 0, 10);
+        formalSku.setProductStatus("S");
+        SkuScheduleDTO trialSku = buildSku("3302001404", "EMB-MULTI", 4, 0, 4);
+        trialSku.setProductStatus("T");
+        resolver.resolveProductionRemainingQty(context, formalSku);
+        resolver.resolveProductionRemainingQty(context, trialSku);
+
+        int deductedQty = resolver.deductProductionRemainingQty(
+                context, formalSku, 3, "新增排产", "K1210");
+
+        Assertions.assertEquals(3, deductedQty);
+        Assertions.assertEquals(7, resolver.resolveProductionRemainingQty(context, formalSku));
+        Assertions.assertEquals(4, resolver.resolveProductionRemainingQty(context, trialSku));
+        Assertions.assertEquals(Integer.valueOf(7),
+                context.getSkuProductionRemainingQtyMap().get("3302001404_S"));
+        Assertions.assertEquals(Integer.valueOf(4),
+                context.getSkuProductionRemainingQtyMap().get("3302001404_T"));
+    }
+
+    /**
+     * 用例说明：同物料多产品状态独立分配SKU额度，但必须共同消费同一胎胚组级库存。
+     */
+    @Test
+    public void shouldShareEmbryoStockLedgerAcrossProductStatuses() {
+        LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-MULTI", 1);
+        context.getEmbryoRealtimeStockMap().put("EMB-MULTI", 100);
+        SkuScheduleDTO formalSku = buildEndingSku("3302001404", "EMB-MULTI", 1, 100, 1);
+        formalSku.setProductStatus("S");
+        SkuScheduleDTO trialSku = buildEndingSku("3302001404", "EMB-MULTI", 1, 100, 1);
+        trialSku.setProductStatus("T");
+        context.setNewSpecSkuList(Arrays.asList(formalSku, trialSku));
+        resolver.refreshActiveEmbryoSkuMap(context);
+        resolver.refreshAllSharedEmbryoStockAllocations(context, "多状态胎胚库存测试");
+        LhShiftConfigVO shift = new LhShiftConfigVO();
+        shift.setShiftIndex(1);
+
+        LhScheduleResult formalResult = buildResult("3302001404", "EMB-MULTI", "K1210", 80);
+        int formalCappedQty = resolver.capResultByProductionRemainingQty(
+                context, formalSku, formalResult, Collections.singletonList(shift), "续作排产");
+        resolver.deductProductionRemainingQty(context, formalSku, formalCappedQty, "续作排产", "K1210");
+        LhScheduleResult trialResult = buildResult("3302001404", "EMB-MULTI", "K1211", 80);
+        int trialCappedQty = resolver.capResultByProductionRemainingQty(
+                context, trialSku, trialResult, Collections.singletonList(shift), "新增排产");
+        resolver.deductProductionRemainingQty(context, trialSku, trialCappedQty, "新增排产", "K1211");
+
+        Assertions.assertEquals(Integer.valueOf(50),
+                context.getEmbryoStockSkuQuotaMap().get("3302001404_S"));
+        Assertions.assertEquals(Integer.valueOf(50),
+                context.getEmbryoStockSkuQuotaMap().get("3302001404_T"));
+        Assertions.assertEquals(50, formalCappedQty);
+        Assertions.assertEquals(50, trialCappedQty);
+        EmbryoStockConsumeLedger ledger = context.getEmbryoStockConsumeLedgerMap().values().iterator().next();
+        Assertions.assertEquals(100, ledger.getConsumedQty().intValue());
+        Assertions.assertEquals(0, ledger.getRemainQty().intValue());
+    }
+
+    /**
      * 用例说明：结果行超过SKU实际消费账本剩余量时，应裁剪到剩余额度。
      */
     @Test

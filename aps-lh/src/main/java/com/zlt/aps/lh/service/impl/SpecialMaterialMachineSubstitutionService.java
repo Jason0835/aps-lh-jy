@@ -13,6 +13,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SubstitutionTypeEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
@@ -161,8 +162,8 @@ public class SpecialMaterialMachineSubstitutionService {
             return result;
         }
 
-        // 收集当前已排上机台的物料编码集合，用于排除已排上的特殊材料SKU
-        Set<String> scheduledMaterialCodeSet = collectScheduledMaterialCodes(context);
+        // 收集当前已排上机台的物料状态复合键，用于仅排除同一业务SKU。
+        Set<String> scheduledSkuKeySet = collectScheduledSkuKeys(context);
 
         for (LhUnscheduledResult unscheduled : context.getUnscheduledResultList()) {
             // 未排数量不大于0的跳过
@@ -170,7 +171,9 @@ public class SpecialMaterialMachineSubstitutionService {
                 continue;
             }
             // 已排上机台的特殊材料SKU不再参与置换
-            if (scheduledMaterialCodeSet.contains(unscheduled.getMaterialCode())) {
+            String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                    unscheduled.getMaterialCode(), unscheduled.getProductStatus());
+            if (scheduledSkuKeySet.contains(skuKey)) {
                 continue;
             }
             // 判断是否命中特殊材料清单
@@ -187,14 +190,15 @@ public class SpecialMaterialMachineSubstitutionService {
      * @param context 排程上下文
      * @return 已排物料编码集合
      */
-    private Set<String> collectScheduledMaterialCodes(LhScheduleContext context) {
-        Set<String> materialCodeSet = new HashSet<String>(64);
+    private Set<String> collectScheduledSkuKeys(LhScheduleContext context) {
+        Set<String> skuKeySet = new HashSet<String>(64);
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (StringUtils.isNotEmpty(result.getMaterialCode())) {
-                materialCodeSet.add(result.getMaterialCode());
+                skuKeySet.add(MonthPlanDateResolver.buildMaterialStatusKey(
+                        result.getMaterialCode(), result.getProductStatus()));
             }
         }
-        return materialCodeSet;
+        return skuKeySet;
     }
 
     /**
@@ -250,7 +254,8 @@ public class SpecialMaterialMachineSubstitutionService {
      */
     private boolean substituteOneSku(LhScheduleContext context, LhUnscheduledResult unscheduled) {
         // 构建 SKU DTO 用于机台匹配和排产
-        SkuScheduleDTO sku = resolveSkuScheduleDto(context, unscheduled.getMaterialCode());
+        SkuScheduleDTO sku = resolveSkuScheduleDto(
+                context, unscheduled.getMaterialCode(), unscheduled.getProductStatus());
         if (Objects.isNull(sku)) {
             log.warn("特殊材料置换：未找到SKU排程信息, materialCode: {}", unscheduled.getMaterialCode());
             return false;
@@ -303,7 +308,8 @@ public class SpecialMaterialMachineSubstitutionService {
         // 处理置换结果
         if (successCount > 0) {
             // 检查特殊材料SKU是否真正排上机台
-            if (isSpecialMaterialSkuScheduled(context, unscheduled.getMaterialCode())) {
+            if (isSpecialMaterialSkuScheduled(
+                    context, unscheduled.getMaterialCode(), unscheduled.getProductStatus())) {
                 // 置换成功后从未排结果中移除该特殊材料SKU
                 removeUnscheduledResult(context, unscheduled);
                 // 置换不足时记录未排原因
@@ -733,7 +739,8 @@ public class SpecialMaterialMachineSubstitutionService {
         String machineCode = targetResult.getLhMachineCode();
 
         // 记录置换前特殊材料SKU的排程结果数，用于判断本次置换是否真正新增了结果
-        int beforeResultCount = countSkuResults(context, sku.getMaterialCode());
+        int beforeResultCount = countSkuResults(
+                context, sku.getMaterialCode(), sku.getProductStatus());
 
         // 0. 置换前快照：保存被置换机台的排程结果、来源SKU映射、机台分配列表和机台状态，用于置换失败时恢复
         List<LhScheduleResult> snapshotResults = new ArrayList<LhScheduleResult>();
@@ -768,10 +775,11 @@ public class SpecialMaterialMachineSubstitutionService {
         }
 
         // 1. 收集被置换机台上所有结果的物料编码，用于下机后逐个记录未排原因
-        Set<String> replacedMaterialCodeSet = new LinkedHashSet<String>(4);
+        Set<String> replacedSkuKeySet = new LinkedHashSet<String>(4);
         for (LhScheduleResult machineResult : snapshotResults) {
             if (StringUtils.isNotEmpty(machineResult.getMaterialCode())) {
-                replacedMaterialCodeSet.add(machineResult.getMaterialCode());
+                replacedSkuKeySet.add(MonthPlanDateResolver.buildMaterialStatusKey(
+                        machineResult.getMaterialCode(), machineResult.getProductStatus()));
             }
         }
 
@@ -779,8 +787,8 @@ public class SpecialMaterialMachineSubstitutionService {
         removeReplacedSkuFromMachine(context, machineCode);
 
         // 3. 逐个被置换SKU记录未排原因
-        for (String replacedCode : replacedMaterialCodeSet) {
-            SkuScheduleDTO replacedSku = resolveSkuScheduleDto(context, replacedCode);
+        for (String replacedSkuKey : replacedSkuKeySet) {
+            SkuScheduleDTO replacedSku = context.getAllSkuScheduleDtoMap().get(replacedSkuKey);
             if (Objects.nonNull(replacedSku)) {
                 String reason = UNSCHEDULED_REASON_REPLACED + "，机台 " + machineCode;
                 addSubstitutionUnscheduledResult(context, replacedSku, reason);
@@ -796,7 +804,8 @@ public class SpecialMaterialMachineSubstitutionService {
         reScheduleSpecialMaterialSku(context);
 
         // 6. 通过对比置换前后的结果数判断是否真正新增了排产结果
-        int afterResultCount = countSkuResults(context, sku.getMaterialCode());
+        int afterResultCount = countSkuResults(
+                context, sku.getMaterialCode(), sku.getProductStatus());
         boolean scheduled = afterResultCount > beforeResultCount;
 
         // 7. 从待排列表中移除特殊材料SKU
@@ -931,7 +940,7 @@ public class SpecialMaterialMachineSubstitutionService {
         }
         for (LocalDate businessDate : recordedDateSet) {
             context.recordScheduledMachine(businessDate, result.getStructureName(),
-                    result.getMaterialCode(), result.getLhMachineCode());
+                    result.getMaterialCode(), result.getProductStatus(), result.getLhMachineCode());
         }
     }
 
@@ -953,12 +962,17 @@ public class SpecialMaterialMachineSubstitutionService {
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
+     * @param productStatus 产品状态
      * @return 结果数
      */
-    private int countSkuResults(LhScheduleContext context, String materialCode) {
+    private int countSkuResults(LhScheduleContext context,
+                                String materialCode,
+                                String productStatus) {
         int count = 0;
         for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (StringUtils.equals(materialCode, result.getMaterialCode())) {
+            if (StringUtils.equals(materialCode, result.getMaterialCode())
+                    && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
+                    StringUtils.trimToEmpty(result.getProductStatus()))) {
                 count++;
             }
         }
@@ -1099,8 +1113,10 @@ public class SpecialMaterialMachineSubstitutionService {
         }
         // 从各业务日的机台集合中移除该机台
         for (LocalDate businessDate : recordedDateSet) {
+            String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                    result.getMaterialCode(), result.getProductStatus());
             removeMachineFromScheduledMap(context.getSkuScheduledMachineCodeMap(),
-                    businessDate, result.getMaterialCode(), result.getLhMachineCode());
+                    businessDate, skuKey, result.getLhMachineCode());
             removeMachineFromScheduledMap(context.getStructureScheduledMachineCodeMap(),
                     businessDate, result.getStructureName(), result.getLhMachineCode());
         }
@@ -1149,7 +1165,8 @@ public class SpecialMaterialMachineSubstitutionService {
         if (Objects.isNull(result) || StringUtils.isEmpty(result.getMaterialCode())) {
             return;
         }
-        SkuScheduleDTO replacedSku = resolveSkuScheduleDto(context, result.getMaterialCode());
+        SkuScheduleDTO replacedSku = resolveSkuScheduleDto(
+                context, result.getMaterialCode(), result.getProductStatus());
         if (Objects.isNull(replacedSku)) {
             return;
         }
@@ -1278,11 +1295,16 @@ public class SpecialMaterialMachineSubstitutionService {
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
+     * @param productStatus 产品状态
      * @return true-已排上机台，false-未排上
      */
-    private boolean isSpecialMaterialSkuScheduled(LhScheduleContext context, String materialCode) {
+    private boolean isSpecialMaterialSkuScheduled(LhScheduleContext context,
+                                                  String materialCode,
+                                                  String productStatus) {
         return context.getScheduleResultList().stream()
-                .anyMatch(r -> StringUtils.equals(materialCode, r.getMaterialCode()));
+                .anyMatch(r -> StringUtils.equals(materialCode, r.getMaterialCode())
+                        && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
+                        StringUtils.trimToEmpty(r.getProductStatus())));
     }
 
     /**
@@ -1360,13 +1382,18 @@ public class SpecialMaterialMachineSubstitutionService {
     }
 
     /**
-     * 从未排结果中移除指定记录。
+     * 从未排结果中移除指定业务SKU的全部记录。
+     * <p>特殊物料重新调用新增策略时可能生成新的未排记录；置换成功后必须按
+     * “物料+产品状态”统一清理，避免同一状态同时存在已排结果和未排结果。</p>
      *
      * @param context 排程上下文
      * @param unscheduled 待移除的未排结果
      */
     private void removeUnscheduledResult(LhScheduleContext context, LhUnscheduledResult unscheduled) {
-        context.getUnscheduledResultList().remove(unscheduled);
+        context.getUnscheduledResultList().removeIf(result -> StringUtils.equals(
+                unscheduled.getMaterialCode(), result.getMaterialCode())
+                && StringUtils.equals(StringUtils.trimToEmpty(unscheduled.getProductStatus()),
+                StringUtils.trimToEmpty(result.getProductStatus())));
     }
 
     /**
@@ -1394,6 +1421,7 @@ public class SpecialMaterialMachineSubstitutionService {
         unscheduled.setFactoryCode(context.getFactoryCode());
         unscheduled.setBatchNo(context.getBatchNo());
         unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setProductStatus(sku.getProductStatus());
         unscheduled.setMaterialDesc(sku.getMaterialDesc());
         unscheduled.setStructureName(sku.getStructureName());
         unscheduled.setSpecCode(sku.getSpecCode());
@@ -1414,30 +1442,33 @@ public class SpecialMaterialMachineSubstitutionService {
      * @param materialCode 物料编码
      * @return SKU排程信息，未找到返回null
      */
-    private SkuScheduleDTO resolveSkuScheduleDto(LhScheduleContext context, String materialCode) {
+    private SkuScheduleDTO resolveSkuScheduleDto(LhScheduleContext context,
+                                                 String materialCode,
+                                                 String productStatus) {
         if (StringUtils.isEmpty(materialCode)) {
             return null;
         }
         // 优先从全量SKU索引Map查找（S4.3填充，永不清空，包含被阻塞的SKU）
-        SkuScheduleDTO indexedSku = context.getAllSkuScheduleDtoMap().get(materialCode);
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(materialCode, productStatus);
+        SkuScheduleDTO indexedSku = context.getAllSkuScheduleDtoMap().get(skuKey);
         if (Objects.nonNull(indexedSku)) {
             return indexedSku;
         }
         // 优先从新增待排列表查找
         for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
-            if (materialCode.equals(sku.getMaterialCode())) {
+            if (isSameSku(materialCode, productStatus, sku)) {
                 return sku;
             }
         }
         // 从续作列表查找
         for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
-            if (materialCode.equals(sku.getMaterialCode())) {
+            if (isSameSku(materialCode, productStatus, sku)) {
                 return sku;
             }
         }
         // 从排程结果来源SKU映射中查找
         for (SkuScheduleDTO sku : context.getScheduleResultSourceSkuMap().values()) {
-            if (materialCode.equals(sku.getMaterialCode())) {
+            if (isSameSku(materialCode, productStatus, sku)) {
                 return sku;
             }
         }
@@ -1448,13 +1479,28 @@ public class SpecialMaterialMachineSubstitutionService {
                     continue;
                 }
                 for (SkuScheduleDTO sku : skuList) {
-                    if (materialCode.equals(sku.getMaterialCode())) {
+                    if (isSameSku(materialCode, productStatus, sku)) {
                         return sku;
                     }
                 }
             }
         }
         return null;
+    }
+
+    /**
+     * 判断SKU是否与指定物料状态一致。
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param sku 待比较SKU
+     * @return true-物料和产品状态均一致
+     */
+    private boolean isSameSku(String materialCode, String productStatus, SkuScheduleDTO sku) {
+        return Objects.nonNull(sku)
+                && StringUtils.equals(materialCode, sku.getMaterialCode())
+                && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
+                StringUtils.trimToEmpty(sku.getProductStatus()));
     }
 
     /**

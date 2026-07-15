@@ -26,6 +26,29 @@ import java.util.LinkedHashMap;
 public class TypeBlockProductionStrategyTest {
 
     /**
+     * 用例说明：换活字块排产已耗尽本产品状态账本时，不得按裁剪前目标量回流新增排产。
+     */
+    @Test
+    public void resolveRemainingQtyForNewSchedule_shouldStopWhenStatusLedgerExhausted() {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver();
+        ReflectionTestUtils.setField(strategy, "targetScheduleQtyResolver", resolver);
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001897");
+        sku.setProductStatus("X");
+        sku.setSurplusQty(4);
+        sku.setTargetScheduleQty(112);
+        resolver.initializeProductionRemainingQty(context, sku, 112, "换活字块多状态回流测试");
+        resolver.deductProductionRemainingQty(context, sku, 4, "换活字块测试", "K2001");
+
+        Integer remainingQty = ReflectionTestUtils.invokeMethod(strategy,
+                "resolveRemainingQtyForNewSchedule", context, sku, 112, 4);
+
+        Assertions.assertEquals(Integer.valueOf(0), remainingQty);
+    }
+
+    /**
      * 用例说明：成型胎胚库存收尾时，不能因共用胎胚硫化余量为0提前进入未排。
      */
     @Test

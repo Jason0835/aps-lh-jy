@@ -74,6 +74,10 @@ public class LhScheFinishQty extends BaseEntity implements Serializable {
     @TableField(value = "CLASS1_PERSON")
     private String class1Person;
 
+    @ApiModelProperty(value = "一班(夜班)产品状态")
+    @TableField(value = "CLASS1_LH_TYPE")
+    private String class1LhType;
+
     @ApiModelProperty(value = "二班(早班)作业人员")
     @TableField(value = "CLASS2_PERSON")
     private String class2Person;

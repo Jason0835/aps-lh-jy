@@ -250,7 +250,7 @@ public class ScheduleAdjustHandlerTest {
     }
 
     /**
-     * 用例说明：LhDayFinishQty 来源的月累计完成量必须按月计划产品状态读取，T日晚班完成量仍按物料编码读取。
+     * 用例说明：月累计完成量和T日晚班完成量都必须按物料与产品状态读取，不得串用其他状态完成量。
      *
      * @throws Exception 反射调用异常
      */
@@ -266,13 +266,14 @@ public class ScheduleAdjustHandlerTest {
         context.setMonthPlanList(Collections.singletonList(plan));
         context.getMaterialMonthFinishedQtyMap().put("3302001575_S", 70);
         context.getMaterialMonthFinishedQtyMap().put("3302001575_T", 15);
-        context.getMaterialScheDayFinishQtyMap().put("3302001575", 20);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575_S", 20);
+        context.getMaterialScheDayFinishQtyMap().put("3302001575_T", 99);
 
         invokeGatherSkuByStructure(handler, context);
 
         SkuScheduleDTO sku = getFirstGatheredSku(context);
-        Assertions.assertEquals(90, sku.getFinishedQty(), "月累计完成量应取S状态70，再叠加T日晚班20");
-        Assertions.assertEquals(20, sku.getScheduleDayFinishQty(), "T日晚班完成量仍按物料编码读取");
+        Assertions.assertEquals(90, sku.getFinishedQty(), "月累计和T日晚班完成量都应仅取S状态");
+        Assertions.assertEquals(20, sku.getScheduleDayFinishQty(), "不得串用T状态晚班完成量99");
         Assertions.assertEquals(10, sku.getSurplusQty());
         Assertions.assertEquals(10, sku.getPendingQty());
     }

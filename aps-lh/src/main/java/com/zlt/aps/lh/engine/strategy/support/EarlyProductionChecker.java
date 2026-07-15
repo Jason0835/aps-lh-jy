@@ -75,7 +75,7 @@ public final class EarlyProductionChecker {
         if (Objects.isNull(firstFuturePlanDate)) {
             logEarlyProductionDecision(context, sku, currentDate, null, 0,
                     context.getStructureScheduledMachineCount(currentDate, sku.getStructureName()),
-                    context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode()),
+                    context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode(), sku.getProductStatus()),
                     shortageThreshold, earlyProductionDaysThreshold, 0, 0, false,
                     "未来" + earlyProductionDaysThreshold + "天无日计划量");
             return EarlyProductionDecision.notEarlyProduction(false,
@@ -90,7 +90,7 @@ public final class EarlyProductionChecker {
         if (historyShortageQty > threshold) {
             logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, 0,
                     context.getStructureScheduledMachineCount(currentDate, sku.getStructureName()),
-                    context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode()),
+                    context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode(), sku.getProductStatus()),
                     threshold, earlyProductionDaysThreshold, earlyDays, futurePlanQty, true,
                     "本月前日累计欠产超过阈值，复用原强制加机台逻辑");
             return EarlyProductionDecision.earlyProduction(true, EarlyProductionDecision.SCENE_NORMAL,
@@ -103,7 +103,8 @@ public final class EarlyProductionChecker {
                 context, sku, currentDate, firstFuturePlanDate);
         int scheduledStructureCount = context.getStructureScheduledMachineCount(
                 currentDate, sku.getStructureName());
-        int scheduledSkuCount = context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode());
+        int scheduledSkuCount = context.getSkuScheduledMachineCount(
+                currentDate, sku.getMaterialCode(), sku.getProductStatus());
         if (planMachineCount > 0) {
             boolean allowed = scheduledStructureCount < planMachineCount;
             logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, planMachineCount,
@@ -174,7 +175,8 @@ public final class EarlyProductionChecker {
             return false;
         }
         int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
-        int scheduledSkuCount = context.getSkuScheduledMachineCount(currentDate, sku.getMaterialCode());
+        int scheduledSkuCount = context.getSkuScheduledMachineCount(
+                currentDate, sku.getMaterialCode(), sku.getProductStatus());
         int dailyCapacity = Math.max(0, sku.getDailyCapacity());
         // 结构已收尾时，用本月前日累计欠产与当前已排SKU机台的日硫化量对比，判断是否仍需进入强制扩机。
         long scheduledDailyCapacity = (long) scheduledSkuCount * dailyCapacity;

@@ -155,7 +155,9 @@ public class SingleControlModeSnapshotInitializer {
         if (sku.isStrictTargetQty() || context.isStopProductionMode()) {
             return Math.max(0, sku.resolveTargetScheduleQty());
         }
-        Integer productionRemainingQty = context.getSkuProductionRemainingQtyMap().get(sku.getMaterialCode());
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                sku.getMaterialCode(), sku.getProductStatus());
+        Integer productionRemainingQty = context.getSkuProductionRemainingQtyMap().get(skuKey);
         if (Objects.nonNull(productionRemainingQty)) {
             return Math.max(0, productionRemainingQty);
         }
@@ -164,6 +166,7 @@ public class SingleControlModeSnapshotInitializer {
         throw new ScheduleException(ScheduleStepEnum.S4_3_ADJUST_AND_GATHER,
                 ScheduleErrorCode.SURPLUS_CALCULATION_ERROR,
                 context.getFactoryCode(), context.getBatchNo(),
-                "单控模式冻结失败，SKU实际消费账本缺失，materialCode=" + sku.getMaterialCode());
+                "单控模式冻结失败，SKU实际消费账本缺失，materialCode=" + sku.getMaterialCode()
+                        + ", productStatus=" + sku.getProductStatus());
     }
 }

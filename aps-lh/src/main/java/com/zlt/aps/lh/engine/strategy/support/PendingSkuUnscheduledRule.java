@@ -234,6 +234,7 @@ public final class PendingSkuUnscheduledRule {
         unscheduled.setFactoryCode(context.getFactoryCode());
         unscheduled.setBatchNo(context.getBatchNo());
         unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setProductStatus(sku.getProductStatus());
         unscheduled.setMaterialDesc(sku.getMaterialDesc());
         unscheduled.setScheduleDate(context.getScheduleTargetDate());
         unscheduled.setUnscheduledReason(reason);

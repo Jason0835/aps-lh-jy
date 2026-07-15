@@ -264,7 +264,9 @@ public class SchedulePersistenceService {
                 resultGroups.add(singleResultGroup);
                 continue;
             }
-            String resultFieldKey = buildClassEndPhaseKey(result) + "#" + result.getMaterialCode();
+            String resultFieldKey = buildClassEndPhaseKey(result) + "#"
+                    + MonthPlanDateResolver.buildMaterialStatusKey(
+                    result.getMaterialCode(), result.getProductStatus());
             resultFieldGroupMap.computeIfAbsent(resultFieldKey, key -> new ArrayList<LhScheduleResult>(2))
                     .add(result);
         }
@@ -652,7 +654,8 @@ public class SchedulePersistenceService {
             }
             if (StringUtils.isNotEmpty(result.getMaterialCode())) {
                 result.setSkuScheduledMachineCountRange(
-                        buildSkuScheduledMachineCountRange(context, dates, result.getMaterialCode()));
+                        buildSkuScheduledMachineCountRange(
+                                context, dates, result.getMaterialCode(), result.getProductStatus()));
             }
         }
     }
@@ -701,15 +704,18 @@ public class SchedulePersistenceService {
      * @param context 排程上下文
      * @param dates T/T+1/T+2 三天 LocalDate
      * @param materialCode 物料编码
+     * @param productStatus 产品状态
      * @return 形如 {@code T=2,T+1=2,T+2=3}
      */
     private String buildSkuScheduledMachineCountRange(LhScheduleContext context,
                                                       LocalDate[] dates,
-                                                      String materialCode) {
+                                                      String materialCode,
+                                                      String productStatus) {
         StringBuilder sb = new StringBuilder(24);
         for (int offset = 0; offset < dates.length; offset++) {
             appendDayKey(sb, offset);
-            sb.append('=').append(context.getSkuScheduledMachineCount(dates[offset], materialCode));
+            sb.append('=').append(context.getSkuScheduledMachineCount(
+                    dates[offset], materialCode, productStatus));
         }
         return sb.toString();
     }

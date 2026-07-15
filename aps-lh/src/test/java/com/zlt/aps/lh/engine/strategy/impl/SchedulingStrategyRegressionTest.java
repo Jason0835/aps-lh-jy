@@ -15,6 +15,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -895,7 +896,9 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(0, sumPlanQtyByWorkDate(
                 java.util.Collections.singletonList(firstResult), shifts, thirdProductionDate),
                 "释放机台不得被同物料后续补量链路重新补回");
-        Assertions.assertTrue(context.getReducedContinuationGroupKeySet().contains(sku.getMaterialCode()),
+        Assertions.assertTrue(context.getReducedContinuationGroupKeySet().contains(
+                        MonthPlanDateResolver.buildMaterialStatusKey(
+                                sku.getMaterialCode(), sku.getProductStatus())),
                 "实际释放后必须登记续作降模分组，阻断同物料补偿回流");
     }
 

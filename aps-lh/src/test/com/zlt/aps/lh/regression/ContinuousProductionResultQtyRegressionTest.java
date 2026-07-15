@@ -540,7 +540,7 @@ class ContinuousProductionResultQtyRegressionTest {
         LhShiftConfigVO afternoonShift = context.getScheduleWindowShifts().get(4);
         LocalDate businessDate = resolveShiftBusinessDate(afternoonShift);
         context.addStructurePlanMachineCount(businessDate, "PCR-01", 1);
-        context.recordScheduledMachine(businessDate, "PCR-01", "330200OTHER", "K1801");
+        context.recordScheduledMachine(businessDate, "PCR-01", "330200OTHER", null, "K1801");
         SkuScheduleDTO sku = buildMainSaleEndingSku("330200MAIN", "PCR-01", "01");
         markRuntimeSharedEmbryo(context, sku, "330200MAIN-SHARED");
         context.getEmbryoEndingFlagMap().put(sku.getEmbryoCode(), 0);

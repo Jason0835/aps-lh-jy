@@ -1995,8 +1995,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载T日排程班次完成量（来自LhScheFinishQty表），按物料编号汇总class1FinishQty。
-     * <p>同一物料在同一T日可能有多条记录（不同机台），需按materialCode汇总。</p>
+     * 加载T日排程班次完成量（来自LhScheFinishQty表），按物料编码和一班产品状态汇总class1FinishQty。
+     * <p>同一业务SKU在同一T日可能有多条机台记录，需要共享本状态完成量账本；
+     * 同物料其他产品状态的完成量不得参与本状态月计划及日计划扣减。</p>
      *
      * @param context       排程上下文
      * @param factoryCode   分厂编号
@@ -2022,7 +2023,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                     continue;
                 }
                 materialScheDayFinishQtyMap.merge(
-                        scheFinishQty.getMaterialCode(),
+                        buildMaterialStatusKey(scheFinishQty.getMaterialCode(), scheFinishQty.getClass1LhType()),
                         resolveFinishQtyValue(scheFinishQty.getClass1FinishQty()),
                         Integer::sum);
             }

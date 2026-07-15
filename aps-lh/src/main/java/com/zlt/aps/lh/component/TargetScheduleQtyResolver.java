@@ -138,13 +138,15 @@ public class TargetScheduleQtyResolver {
             return initialQty;
         }
         Map<String, Integer> ledgerMap = context.getSkuProductionRemainingQtyMap();
-        Integer oldQty = ledgerMap.get(sku.getMaterialCode());
+        String skuKey = buildSkuKey(sku);
+        Integer oldQty = ledgerMap.get(skuKey);
         if (Objects.nonNull(oldQty)) {
             return Math.max(0, oldQty);
         }
-        ledgerMap.put(sku.getMaterialCode(), initialQty);
-        log.info("SKU实际消费账本初始化, materialCode: {}, reason: {}, surplusQty: {}, targetQty: {}, strictTargetQty: {}, ledgerQty: {}",
-                sku.getMaterialCode(), reason, Math.max(0, sku.getSurplusQty()), Math.max(0, targetQty),
+        ledgerMap.put(skuKey, initialQty);
+        log.info("SKU实际消费账本初始化, materialCode: {}, productStatus: {}, reason: {}, surplusQty: {}, targetQty: {}, strictTargetQty: {}, ledgerQty: {}",
+                sku.getMaterialCode(), sku.getProductStatus(), reason,
+                Math.max(0, sku.getSurplusQty()), Math.max(0, targetQty),
                 sku.isStrictTargetQty(), initialQty);
         return initialQty;
     }
@@ -164,7 +166,7 @@ public class TargetScheduleQtyResolver {
             return resolveInitialProductionRemainingQty(sku, sku.resolveTargetScheduleQty());
         }
         Map<String, Integer> ledgerMap = context.getSkuProductionRemainingQtyMap();
-        Integer remainingQty = ledgerMap.get(sku.getMaterialCode());
+        Integer remainingQty = ledgerMap.get(buildSkuKey(sku));
         if (Objects.isNull(remainingQty)) {
             return initializeProductionRemainingQty(context, sku, sku.resolveTargetScheduleQty(), "懒加载初始化");
         }
@@ -189,9 +191,9 @@ public class TargetScheduleQtyResolver {
         if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
             return resolvedTargetQty;
         }
-        Integer oldQty = context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), resolvedTargetQty);
-        log.info("SKU实际消费账本同步, materialCode: {}, reason: {}, 原账本剩余: {}, 同步后剩余: {}",
-                sku.getMaterialCode(), reason, oldQty, resolvedTargetQty);
+        Integer oldQty = context.getSkuProductionRemainingQtyMap().put(buildSkuKey(sku), resolvedTargetQty);
+        log.info("SKU实际消费账本同步, materialCode: {}, productStatus: {}, reason: {}, 原账本剩余: {}, 同步后剩余: {}",
+                sku.getMaterialCode(), sku.getProductStatus(), reason, oldQty, resolvedTargetQty);
         return resolvedTargetQty;
     }
 
@@ -221,7 +223,9 @@ public class TargetScheduleQtyResolver {
                 || StringUtils.isEmpty(result.getMaterialCode())) {
             return false;
         }
-        return context.getEmbryoStockHardTargetMaterialSet().contains(result.getMaterialCode());
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                result.getMaterialCode(), result.getProductStatus());
+        return context.getEmbryoStockHardTargetMaterialSet().contains(skuKey);
     }
 
     /**
@@ -280,18 +284,19 @@ public class TargetScheduleQtyResolver {
             return targetQty;
         }
         Map<String, Integer> remainingQtyMap = context.getSkuProductionRemainingQtyMap();
-        Integer oldQty = remainingQtyMap.get(sku.getMaterialCode());
+        String skuKey = buildSkuKey(sku);
+        Integer oldQty = remainingQtyMap.get(skuKey);
         EmbryoStockConsumeLedger ledger = resolveEmbryoStockLedgerByEmbryoCode(context, sku.getEmbryoCode());
         boolean ledgerConsumed = Objects.nonNull(ledger)
                 && Objects.nonNull(ledger.getConsumedQty()) && ledger.getConsumedQty() > 0;
         int remainingQty = Objects.isNull(oldQty) || !ledgerConsumed
                 ? targetQty : Math.min(Math.max(0, oldQty), targetQty);
-        remainingQtyMap.put(sku.getMaterialCode(), remainingQty);
-        context.getEmbryoStockHardTargetMaterialSet().add(sku.getMaterialCode());
-        context.getEmbryoStockSkuQuotaMap().put(sku.getMaterialCode(), targetQty);
-        log.info("成型胎胚库存T日收尾SKU实际消费账本同步, materialCode: {}, SKU内部额度: {}, 原账本剩余: {}, "
+        remainingQtyMap.put(skuKey, remainingQty);
+        context.getEmbryoStockHardTargetMaterialSet().add(skuKey);
+        context.getEmbryoStockSkuQuotaMap().put(skuKey, targetQty);
+        log.info("成型胎胚库存T日收尾SKU实际消费账本同步, materialCode: {}, productStatus: {}, SKU内部额度: {}, 原账本剩余: {}, "
                         + "组级账本已消费: {}, 同步后剩余: {}",
-                sku.getMaterialCode(), targetQty, oldQty, ledgerConsumed, remainingQty);
+                sku.getMaterialCode(), sku.getProductStatus(), targetQty, oldQty, ledgerConsumed, remainingQty);
         return remainingQty;
     }
 
@@ -448,7 +453,7 @@ public class TargetScheduleQtyResolver {
         if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())) {
             return Math.max(0, originalEmbryoStock);
         }
-        Integer existingQuota = context.getEmbryoStockSkuQuotaMap().get(sku.getMaterialCode());
+        Integer existingQuota = context.getEmbryoStockSkuQuotaMap().get(buildSkuKey(sku));
         if (Objects.nonNull(existingQuota)) {
             return Math.max(0, existingQuota);
         }
@@ -459,7 +464,7 @@ public class TargetScheduleQtyResolver {
             allocateSharedEmbryoStockByCapacity(
                     context, sku.getEmbryoCode(), originalEmbryoStock, activeSkuList,
                     T_DAY_ENDING_DAYS, scene);
-            Integer allocatedQuota = context.getEmbryoStockSkuQuotaMap().get(sku.getMaterialCode());
+            Integer allocatedQuota = context.getEmbryoStockSkuQuotaMap().get(buildSkuKey(sku));
             return Math.max(0, Objects.isNull(allocatedQuota) ? 0 : allocatedQuota);
         }
         applyEmbryoStockSkuQuota(context, sku, originalEmbryoStock, originalEmbryoStock, "单胎胚T日收尾");
@@ -511,8 +516,9 @@ public class TargetScheduleQtyResolver {
         }
         for (SkuScheduleDTO sku : skuList) {
             if (Objects.nonNull(sku) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
-                context.getEmbryoStockSkuQuotaMap().remove(sku.getMaterialCode());
-                context.getEmbryoStockHardTargetMaterialSet().remove(sku.getMaterialCode());
+                String skuKey = buildSkuKey(sku);
+                context.getEmbryoStockSkuQuotaMap().remove(skuKey);
+                context.getEmbryoStockHardTargetMaterialSet().remove(skuKey);
             }
         }
     }
@@ -554,10 +560,10 @@ public class TargetScheduleQtyResolver {
      */
     private int resolveEmbryoStockSkuQuotaLimit(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getMaterialCode())
-                || !context.getEmbryoStockHardTargetMaterialSet().contains(sku.getMaterialCode())) {
+                || !context.getEmbryoStockHardTargetMaterialSet().contains(buildSkuKey(sku))) {
             return NO_EMBRYO_STOCK_LEDGER_LIMIT;
         }
-        Integer quotaQty = context.getEmbryoStockSkuQuotaMap().get(sku.getMaterialCode());
+        Integer quotaQty = context.getEmbryoStockSkuQuotaMap().get(buildSkuKey(sku));
         return Math.max(0, Objects.isNull(quotaQty) ? 0 : quotaQty);
     }
 
@@ -571,7 +577,7 @@ public class TargetScheduleQtyResolver {
     private EmbryoStockConsumeLedger resolveEmbryoStockLedger(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getEmbryoCode())
                 || StringUtils.isEmpty(sku.getMaterialCode())
-                || !context.getEmbryoStockHardTargetMaterialSet().contains(sku.getMaterialCode())) {
+                || !context.getEmbryoStockHardTargetMaterialSet().contains(buildSkuKey(sku))) {
             return null;
         }
         return resolveEmbryoStockLedgerByEmbryoCode(context, sku.getEmbryoCode());
@@ -683,7 +689,7 @@ public class TargetScheduleQtyResolver {
         int deductedQty = Math.min(effectiveRemainingQty, scheduledQty);
         if (Objects.nonNull(context) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
             context.getSkuProductionRemainingQtyMap().put(
-                    sku.getMaterialCode(), Math.max(0, currentRemainingQty - deductedQty));
+                    buildSkuKey(sku), Math.max(0, currentRemainingQty - deductedQty));
         }
         deductEmbryoStockLedger(context, sku, deductedQty, scene, machineCode);
         log.info("SKU实际消费账本扣减, scene: {}, materialCode: {}, machineCode: {}, 本次排产量: {}, "
@@ -813,7 +819,7 @@ public class TargetScheduleQtyResolver {
             restoredRemainingQty = Math.min(restoredRemainingQty, quotaLimitQty);
         }
         if (Objects.nonNull(context) && StringUtils.isNotEmpty(sku.getMaterialCode())) {
-            context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), restoredRemainingQty);
+            context.getSkuProductionRemainingQtyMap().put(buildSkuKey(sku), restoredRemainingQty);
         }
         restoreEmbryoStockLedger(context, sku, restoredQty, reason, machineCode);
         log.info("SKU实际消费账本恢复, materialCode: {}, machineCode: {}, reason: {}, 恢复量: {}, "
@@ -839,7 +845,7 @@ public class TargetScheduleQtyResolver {
             return false;
         }
         if (Objects.nonNull(context)
-                && context.getSkuProductionRemainingQtyMap().containsKey(sku.getMaterialCode())) {
+                && context.getSkuProductionRemainingQtyMap().containsKey(buildSkuKey(sku))) {
             return true;
         }
         return sku.getSurplusQty() > 0 || sku.resolveTargetScheduleQty() > 0 || sku.getPendingQty() > 0;
@@ -1799,8 +1805,9 @@ public class TargetScheduleQtyResolver {
             }
             List<String> activeSkuList = activeEmbryoSkuMap.computeIfAbsent(
                     candidateSku.getEmbryoCode(), key -> new ArrayList<String>(4));
-            if (!activeSkuList.contains(candidateSku.getMaterialCode())) {
-                activeSkuList.add(candidateSku.getMaterialCode());
+            String skuKey = buildSkuKey(candidateSku);
+            if (!activeSkuList.contains(skuKey)) {
+                activeSkuList.add(skuKey);
             }
         }
         context.setActiveEmbryoSkuMap(activeEmbryoSkuMap);
@@ -1852,14 +1859,14 @@ public class TargetScheduleQtyResolver {
         if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(sku.getEmbryoCode())) {
             return 0;
         }
-        Set<String> materialSet = new HashSet<>(8);
+        Set<String> skuKeySet = new HashSet<>(8);
         for (SkuScheduleDTO candidateSku : collectCandidateSkus(context)) {
             if (candidateSku != null && StringUtils.equals(sku.getEmbryoCode(), candidateSku.getEmbryoCode())
                     && StringUtils.isNotEmpty(candidateSku.getMaterialCode())) {
-                materialSet.add(candidateSku.getMaterialCode());
+                skuKeySet.add(buildSkuKey(candidateSku));
             }
         }
-        return materialSet.size();
+        return skuKeySet.size();
     }
 
     /**
@@ -1883,9 +1890,10 @@ public class TargetScheduleQtyResolver {
             return;
         }
         // SKU进入未排或已完成后，不再占用胎胚库存内部分摊额度，剩余额度立即回流给同胎胚有效SKU。
-        context.getEmbryoStockSkuQuotaMap().remove(sku.getMaterialCode());
-        context.getEmbryoStockHardTargetMaterialSet().remove(sku.getMaterialCode());
-        activeSkuList.remove(sku.getMaterialCode());
+        String skuKey = buildSkuKey(sku);
+        context.getEmbryoStockSkuQuotaMap().remove(skuKey);
+        context.getEmbryoStockHardTargetMaterialSet().remove(skuKey);
+        activeSkuList.remove(skuKey);
         if (activeSkuList.isEmpty()) {
             context.getActiveEmbryoSkuMap().remove(sku.getEmbryoCode());
         }
@@ -1968,14 +1976,14 @@ public class TargetScheduleQtyResolver {
     }
 
     private List<SkuScheduleDTO> collectActiveSkusByEmbryo(LhScheduleContext context, String embryoCode) {
-        List<String> activeMaterialList = context.getActiveEmbryoSkuMap().get(embryoCode);
-        if (CollectionUtils.isEmpty(activeMaterialList)) {
+        List<String> activeSkuKeyList = context.getActiveEmbryoSkuMap().get(embryoCode);
+        if (CollectionUtils.isEmpty(activeSkuKeyList)) {
             return new ArrayList<SkuScheduleDTO>(0);
         }
-        Set<String> activeMaterialSet = new HashSet<String>(activeMaterialList);
-        List<SkuScheduleDTO> activeSkuList = new ArrayList<SkuScheduleDTO>(activeMaterialList.size());
+        Set<String> activeSkuKeySet = new HashSet<String>(activeSkuKeyList);
+        List<SkuScheduleDTO> activeSkuList = new ArrayList<SkuScheduleDTO>(activeSkuKeyList.size());
         for (SkuScheduleDTO sku : collectCandidateSkus(context)) {
-            if (Objects.nonNull(sku) && activeMaterialSet.contains(sku.getMaterialCode())
+            if (Objects.nonNull(sku) && activeSkuKeySet.contains(buildSkuKey(sku))
                     && StringUtils.equals(embryoCode, sku.getEmbryoCode())) {
                 activeSkuList.add(sku);
             }
@@ -2033,17 +2041,17 @@ public class TargetScheduleQtyResolver {
             if (index == skuList.size() - 1) {
                 allocatedStock = rawEmbryoStock - allocatedSum;
             } else {
-                int weight = Math.max(0, weightMap.getOrDefault(sku.getMaterialCode(), 0));
+                int weight = Math.max(0, weightMap.getOrDefault(buildSkuKey(sku), 0));
                 allocatedStock = (int) (rawEmbryoStock * (long) weight / totalWeight);
                 allocatedSum += allocatedStock;
             }
             sku.setEmbryoStock(rawEmbryoStock);
-            allocatedMap.put(sku.getMaterialCode(), Math.max(0, allocatedStock));
+            allocatedMap.put(buildSkuKey(sku), Math.max(0, allocatedStock));
         }
         Map<String, Integer> adjustedMap = adjustSharedEmbryoQuotaByFeasibility(
                 context, embryoCode, rawEmbryoStock, skuList, allocatedMap, reason);
         for (SkuScheduleDTO sku : skuList) {
-            int quotaQty = Math.max(0, adjustedMap.getOrDefault(sku.getMaterialCode(), 0));
+            int quotaQty = Math.max(0, adjustedMap.getOrDefault(buildSkuKey(sku), 0));
             applyEmbryoStockSkuQuota(context, sku, rawEmbryoStock, quotaQty, "共用胎胚T日同日收尾");
         }
         log.info("共用胎胚库存按标准产能分摊完成, embryoCode: {}, embryoDesc: {}, 当前SKU列表: {}, "
@@ -2079,11 +2087,12 @@ public class TargetScheduleQtyResolver {
         Map<String, Integer> feasibleQtyMap = new LinkedHashMap<String, Integer>(skuList.size());
         int transferQty = 0;
         for (SkuScheduleDTO sku : skuList) {
-            int initialQuota = Math.max(0, initialQuotaMap.getOrDefault(sku.getMaterialCode(), 0));
+            String skuKey = buildSkuKey(sku);
+            int initialQuota = Math.max(0, initialQuotaMap.getOrDefault(skuKey, 0));
             int feasibleQty = resolveSharedEmbryoTDayFeasibleQty(context, sku, rawEmbryoStock);
-            feasibleQtyMap.put(sku.getMaterialCode(), feasibleQty);
+            feasibleQtyMap.put(skuKey, feasibleQty);
             int cappedQuota = Math.min(initialQuota, feasibleQty);
-            adjustedQuotaMap.put(sku.getMaterialCode(), cappedQuota);
+            adjustedQuotaMap.put(skuKey, cappedQuota);
             transferQty += Math.max(0, initialQuota - cappedQuota);
         }
         if (transferQty <= 0) {
@@ -2096,14 +2105,15 @@ public class TargetScheduleQtyResolver {
             if (remainingTransferQty <= 0) {
                 break;
             }
-            int currentQuota = Math.max(0, adjustedQuotaMap.getOrDefault(sku.getMaterialCode(), 0));
-            int feasibleQty = Math.max(0, feasibleQtyMap.getOrDefault(sku.getMaterialCode(), 0));
+            String skuKey = buildSkuKey(sku);
+            int currentQuota = Math.max(0, adjustedQuotaMap.getOrDefault(skuKey, 0));
+            int feasibleQty = Math.max(0, feasibleQtyMap.getOrDefault(skuKey, 0));
             int extraCapacityQty = Math.max(0, feasibleQty - currentQuota);
             if (extraCapacityQty <= 0) {
                 continue;
             }
             int acceptedQty = Math.min(remainingTransferQty, extraCapacityQty);
-            adjustedQuotaMap.put(sku.getMaterialCode(), currentQuota + acceptedQty);
+            adjustedQuotaMap.put(skuKey, currentQuota + acceptedQty);
             remainingTransferQty -= acceptedQty;
         }
         if (remainingTransferQty > 0) {
@@ -2257,7 +2267,7 @@ public class TargetScheduleQtyResolver {
     private Map<String, Integer> buildAllocationWeightMap(LhScheduleContext context, List<SkuScheduleDTO> skuList) {
         Map<String, Integer> weightMap = new LinkedHashMap<String, Integer>(skuList.size());
         for (SkuScheduleDTO sku : skuList) {
-            weightMap.put(sku.getMaterialCode(), resolveAllocationWeight(context, sku));
+            weightMap.put(buildSkuKey(sku), resolveAllocationWeight(context, sku));
         }
         return weightMap;
     }
@@ -2344,10 +2354,11 @@ public class TargetScheduleQtyResolver {
         if (Objects.nonNull(currentSku) && sku != currentSku && sku.resolveTargetScheduleQty() <= 0) {
             return false;
         }
-        if (unscheduledMaterialSet.contains(sku.getMaterialCode())) {
+        String skuKey = buildSkuKey(sku);
+        if (unscheduledMaterialSet.contains(skuKey)) {
             return false;
         }
-        return !completedEndingMaterialSet.contains(sku.getMaterialCode());
+        return !completedEndingMaterialSet.contains(skuKey);
     }
 
     private Set<String> collectUnscheduledMaterialSet(LhScheduleContext context) {
@@ -2357,7 +2368,8 @@ public class TargetScheduleQtyResolver {
         }
         context.getUnscheduledResultList().forEach(result -> {
             if (result != null && StringUtils.isNotEmpty(result.getMaterialCode())) {
-                materialSet.add(result.getMaterialCode());
+                materialSet.add(MonthPlanDateResolver.buildMaterialStatusKey(
+                        result.getMaterialCode(), result.getProductStatus()));
             }
         });
         return materialSet;
@@ -2371,10 +2383,25 @@ public class TargetScheduleQtyResolver {
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (result != null && "1".equals(result.getIsEnd())
                     && StringUtils.isNotEmpty(result.getMaterialCode())) {
-                materialSet.add(result.getMaterialCode());
+                materialSet.add(MonthPlanDateResolver.buildMaterialStatusKey(
+                        result.getMaterialCode(), result.getProductStatus()));
             }
         }
         return materialSet;
+    }
+
+    /**
+     * 构建SKU运行态复合键。
+     *
+     * @param sku SKU排程信息
+     * @return 物料编码与产品状态复合键
+     */
+    private String buildSkuKey(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return null;
+        }
+        return MonthPlanDateResolver.buildMaterialStatusKey(
+                sku.getMaterialCode(), sku.getProductStatus());
     }
 
     /**

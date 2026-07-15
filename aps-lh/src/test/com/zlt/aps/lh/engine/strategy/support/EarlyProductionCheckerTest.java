@@ -49,7 +49,7 @@ class EarlyProductionCheckerTest {
         LocalDate day2 = LocalDate.of(2026, 6, 13);
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 90, 40,
                 quotaMap(day1, day2, day3, 0, 60, 0));
 
@@ -103,7 +103,7 @@ class EarlyProductionCheckerTest {
         LocalDate day2 = LocalDate.of(2026, 6, 13);
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
                 quotaMap(day1, day2, day3, 0, 60, 0));
 
@@ -119,7 +119,7 @@ class EarlyProductionCheckerTest {
         LocalDate day2 = LocalDate.of(2026, 6, 13);
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
                 quotaMap(day1, day2, day3, 0, 0, 60));
 
@@ -136,7 +136,7 @@ class EarlyProductionCheckerTest {
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LocalDate day4 = LocalDate.of(2026, 6, 15);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
                 quotaMap(new LocalDate[]{day1, day2, day3, day4}, new int[]{0, 0, 0, 60}));
 
@@ -154,7 +154,7 @@ class EarlyProductionCheckerTest {
         LocalDate day4 = LocalDate.of(2026, 6, 15);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 2);
         context.setScheduleConfig(scheduleConfigWithEarlyProductionDays(3));
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
                 quotaMap(new LocalDate[]{day1, day2, day3, day4}, new int[]{0, 0, 0, 60}));
 
@@ -171,7 +171,7 @@ class EarlyProductionCheckerTest {
         LocalDate day2 = LocalDate.of(2026, 6, 13);
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 1);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
                 quotaMap(day1, day2, day3, 0, 60, 0));
 
@@ -188,7 +188,7 @@ class EarlyProductionCheckerTest {
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
         context.addStructurePlanMachineCount(day2, "L1", 2);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 100, 40,
                 quotaMap(day1, day2, day3, 0, 60, 0));
 
@@ -222,7 +222,7 @@ class EarlyProductionCheckerTest {
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
         context.addStructurePlanMachineCount(day2, "L1", 0);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 90, 40,
                 quotaMap(day1, day2, day3, 0, 60, 0));
 
@@ -256,7 +256,7 @@ class EarlyProductionCheckerTest {
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
         context.addStructurePlanMachineCount(day2, "L1", 2);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
         SkuScheduleDTO sku = sku("3302001001", "L1", 90, 40,
                 quotaMap(day1, day2, day3, 0, 60, 0));
 
@@ -273,8 +273,8 @@ class EarlyProductionCheckerTest {
         LocalDate day3 = LocalDate.of(2026, 6, 14);
         LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
         context.addStructurePlanMachineCount(day2, "L1", 0);
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1101");
-        context.recordScheduledMachine(day1, "L1", "3302001001", "K1102");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1101");
+        context.recordScheduledMachine(day1, "L1", "3302001001", null, "K1102");
         SkuScheduleDTO sku = sku("3302001001", "L1", Integer.MAX_VALUE, Integer.MAX_VALUE,
                 quotaMap(day1, day2, day3, 0, 60, 0));
 
