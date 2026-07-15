@@ -199,6 +199,9 @@ public class TargetScheduleQtyResolver {
 
     /**
      * 判断当前SKU是否命中成型胎胚库存收尾。
+     * <p>单胎胚（非共用胎胚）：只需胎胚收尾标记为1且SKU为收尾SKU，不再强制要求T日收尾。</p>
+     * <p>共用胎胚：保持原有T日收尾判断（胎胚收尾标记为1 + SKU收尾 + endingDaysRemaining==1），
+     * 确保共用胎胚同日收尾分摊口径不变。</p>
      *
      * @param context 排程上下文
      * @param sku SKU
@@ -208,7 +211,18 @@ public class TargetScheduleQtyResolver {
         if (Objects.isNull(context) || Objects.isNull(sku)) {
             return false;
         }
-        return isEmbryoStockEndingFlagYes(context, sku.getEmbryoCode()) && isTDayEndingSku(sku);
+        // 条件3：胎胚收尾标记必须为1
+        if (!isEmbryoStockEndingFlagYes(context, sku.getEmbryoCode())) {
+            return false;
+        }
+        // 确保胎胚有效SKU集合已初始化，用于判断单胎胚/共用胎胚
+        ensureActiveEmbryoSkuMap(context, sku);
+        if (!isSharedEmbryoInWindow(context, sku)) {
+            // 单胎胚：仅需SKU收尾标记（条件2），不再要求T日收尾
+            return isEndingSku(sku);
+        }
+        // 共用胎胚：保持原有T日收尾判断，确保同日收尾分摊逻辑不变
+        return isTDayEndingSku(sku);
     }
 
     /**
@@ -229,7 +243,7 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
-     * 命中成型胎胚库存T日收尾时，直接按胎胚库存内部额度设置排产目标量。
+     * 命中成型胎胚库存收尾时，直接按胎胚库存内部额度设置排产目标量。
      * <p>单胎胚额度等于原始胎胚库存；共用胎胚额度来自同胎胚组SKU级分摊和可行性修正。</p>
      * <p>该规则不取MAX，不做模台数/奇偶修正；最终排产仍由SKU额度和组级胎胚库存账本共同硬控。</p>
      *
@@ -258,7 +272,7 @@ public class TargetScheduleQtyResolver {
         int ledgerRemainQty = Objects.isNull(ledger) ? NO_EMBRYO_STOCK_LEDGER_LIMIT : Math.max(0, ledger.getRemainQty());
         sku.setRemainingScheduleQty(ledgerRemainQty < 0 ? remainingQty : Math.min(remainingQty, ledgerRemainQty));
         String direction = targetQty > currentTargetQty ? "上调" : targetQty < currentTargetQty ? "下调" : "保持";
-        log.info("成型胎胚库存T日收尾目标量{}, scene: {}, materialCode: {}, 胎胚编码: {}, 原目标量: {}, "
+        log.info("成型胎胚库存收尾目标量{}, scene: {}, materialCode: {}, 胎胚编码: {}, 原目标量: {}, "
                         + "原始胎胚库存: {}, SKU内部额度: {}, 当前可排剩余: {}, 组级账本剩余: {}, "
                         + "月计划余量: {}, 窗口日计划剩余: {}, rule: 胎胚库存账本硬控且不做奇偶修正",
                 direction, scene, sku.getMaterialCode(), sku.getEmbryoCode(), currentTargetQty,
@@ -268,7 +282,7 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
-     * 同步成型胎胚库存T日收尾的SKU实际消费账本。
+     * 同步成型胎胚库存收尾的SKU实际消费账本。
      * <p>首次命中按SKU内部分摊额度初始化；若前序入口已消费过账本，则只保留已扣减后的剩余额度，避免跨入口重复放大。</p>
      *
      * @param context 排程上下文
@@ -294,7 +308,7 @@ public class TargetScheduleQtyResolver {
         remainingQtyMap.put(skuKey, remainingQty);
         context.getEmbryoStockHardTargetMaterialSet().add(skuKey);
         context.getEmbryoStockSkuQuotaMap().put(skuKey, targetQty);
-        log.info("成型胎胚库存T日收尾SKU实际消费账本同步, materialCode: {}, productStatus: {}, SKU内部额度: {}, 原账本剩余: {}, "
+        log.info("成型胎胚库存收尾SKU实际消费账本同步, materialCode: {}, productStatus: {}, SKU内部额度: {}, 原账本剩余: {}, "
                         + "组级账本已消费: {}, 同步后剩余: {}",
                 sku.getMaterialCode(), sku.getProductStatus(), targetQty, oldQty, ledgerConsumed, remainingQty);
         return remainingQty;
@@ -316,7 +330,22 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 判断SKU是否为收尾SKU（按硫化余量判断为收尾）。
+     * <p>仅判断skuTag是否为收尾标记，不校验T日收尾天数。</p>
+     *
+     * @param sku SKU
+     * @return true-收尾SKU；false-非收尾SKU
+     */
+    private boolean isEndingSku(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return false;
+        }
+        return StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag());
+    }
+
+    /**
      * 判断SKU是否为T日收尾。
+     * <p>在isEndingSku基础上额外校验endingDaysRemaining==1，仅供共用胎胚T日同日收尾判断使用。</p>
      *
      * @param sku SKU
      * @return true-T日收尾；false-非T日收尾
@@ -325,8 +354,7 @@ public class TargetScheduleQtyResolver {
         if (Objects.isNull(sku)) {
             return false;
         }
-        return StringUtils.equals(SkuTagEnum.ENDING.getCode(), sku.getSkuTag())
-                && sku.getEndingDaysRemaining() == T_DAY_ENDING_DAYS;
+        return isEndingSku(sku) && sku.getEndingDaysRemaining() == T_DAY_ENDING_DAYS;
     }
 
     /**
@@ -467,7 +495,7 @@ public class TargetScheduleQtyResolver {
             Integer allocatedQuota = context.getEmbryoStockSkuQuotaMap().get(buildSkuKey(sku));
             return Math.max(0, Objects.isNull(allocatedQuota) ? 0 : allocatedQuota);
         }
-        applyEmbryoStockSkuQuota(context, sku, originalEmbryoStock, originalEmbryoStock, "单胎胚T日收尾");
+        applyEmbryoStockSkuQuota(context, sku, originalEmbryoStock, originalEmbryoStock, "单胎胚胎胚收尾");
         return Math.max(0, originalEmbryoStock);
     }
 
@@ -1664,7 +1692,7 @@ public class TargetScheduleQtyResolver {
         int surplusQty = Math.max(0, sku.getSurplusQty());
         int windowPlanQty = Math.max(0, sku.getWindowPlanQty());
 
-        // 共用胎胚收尾只按硫化余量排，不按胎胚库存排；单胎胚仍按 MAX(余量, 胎胚库存)
+        // 共用胎胚收尾只按硫化余量排，不按胎胚库存排；单胎胚未命中胎胚收尾标记时按 MAX(余量, 胎胚库存)
         int originalSkuCount = countOriginalSkusSharingEmbryo(context, sku);
         int activeSkuCount = countActiveSkusSharingEmbryo(context, sku);
         boolean sharedEmbryo = activeSkuCount > 1;

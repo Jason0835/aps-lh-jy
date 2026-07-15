@@ -202,7 +202,7 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
-     * 用例说明：成型胎胚库存收尾必须同时满足SKU在T日收尾；非T日收尾不按库存硬目标排产。
+     * 用例说明：未标记收尾的SKU（skuTag为空），即使胎胚收尾标记为1也不按库存硬目标排产。
      */
     @Test
     public void shouldNotApplyEmbryoStockEndingTargetForNonTDayEndingSku() {
@@ -680,6 +680,107 @@ public class TargetScheduleQtyResolverTest {
         Assertions.assertFalse(context.getEmbryoStockHardTargetMaterialSet().contains("3302002655"));
         Assertions.assertEquals(Integer.valueOf(17), context.getEmbryoStockSkuQuotaMap().get("3302002654"));
         Assertions.assertEquals(Integer.valueOf(18), context.getEmbryoStockSkuQuotaMap().get("3302002177"));
+    }
+
+    /**
+     * 用例说明：单胎胚非T日收尾但满足胎胚收尾标记=1且SKU为收尾SKU时，目标量必须直接取胎胚库存（非MAX）。
+     */
+    @Test
+    public void shouldApplyEmbryoStockEndingForSingleEmbryoNonTDayEnding() {
+        LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-SINGLE", 1);
+        // 单胎胚，endingDaysRemaining=2（非T日收尾），skuTag=收尾
+        SkuScheduleDTO sku = buildSku("3302004001", "EMB-SINGLE", 30, 50, 30);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(2);
+        sku.setMouldQty(2);
+        resolver.refreshActiveEmbryoSkuMap(context);
+
+        boolean applied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
+
+        Assertions.assertTrue(applied);
+        // 目标量=胎胚库存=50，不是MAX(50,30)=50，也不是硫化余量30
+        Assertions.assertEquals(50, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(50, sku.getRemainingScheduleQty());
+        Assertions.assertTrue(sku.isStrictTargetQty());
+        Assertions.assertTrue(context.getEmbryoStockHardTargetMaterialSet().contains("3302004001"));
+    }
+
+    /**
+     * 用例说明：单胎胚胎胚收尾标记=1且SKU为收尾SKU时，即使胎胚库存小于硫化余量，目标量仍取胎胚库存。
+     */
+    @Test
+    public void shouldUseEmbryoStockWhenLessThanSurplusForSingleEmbryo() {
+        LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-LESS", 1);
+        // 胎胚库存=5 < 硫化余量=80，单胎胚收尾
+        SkuScheduleDTO sku = buildSku("3302004002", "EMB-LESS", 80, 5, 80);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(3);
+        sku.setMouldQty(2);
+        resolver.refreshActiveEmbryoSkuMap(context);
+
+        boolean applied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "续作收尾");
+
+        Assertions.assertTrue(applied);
+        // 目标量=胎胚库存=5，不是MAX(5,80)=80
+        Assertions.assertEquals(5, sku.resolveTargetScheduleQty());
+        Assertions.assertEquals(5, sku.getRemainingScheduleQty());
+        Assertions.assertTrue(sku.isStrictTargetQty());
+    }
+
+    /**
+     * 用例说明：单胎胚胎胚收尾标记不为1时，即使SKU为收尾SKU，仍沿用原有MAX逻辑。
+     */
+    @Test
+    public void shouldKeepMaxLogicWhenEmbryoEndingFlagIsZero() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getEmbryoEndingFlagMap().put("EMB-ZERO", 0);
+        // 胎胚收尾标记=0，单胎胚收尾SKU
+        SkuScheduleDTO sku = buildSku("3302004003", "EMB-ZERO", 3, 7, 3);
+        sku.setSkuTag("02");
+        sku.setEndingDaysRemaining(2);
+        sku.setMouldQty(2);
+        resolver.refreshActiveEmbryoSkuMap(context);
+
+        int targetQty = resolver.upsizeEndingTargetQty(context, sku);
+
+        // 未命中胎胚收尾标记，走原有MAX逻辑：MAX(7,3)=7，模台数2向上取整=8
+        Assertions.assertEquals(8, targetQty);
+        Assertions.assertFalse(context.getEmbryoStockHardTargetMaterialSet().contains("3302004003"));
+    }
+
+    /**
+     * 用例说明：共用胎胚非T日收尾时，不命中isEmbryoStockEnding，仍按共用胎胚仅硫化余量排产。
+     */
+    @Test
+    public void shouldNotApplyEmbryoStockEndingForSharedEmbryoNonTDayEnding() {
+        LhScheduleContext context = new LhScheduleContext();
+        setScheduleDate(context);
+        context.getEmbryoEndingFlagMap().put("EMB-SHARED", 1);
+        // 两个同胎胚SKU，endingDaysRemaining=2（非T日收尾），skuTag=收尾
+        SkuScheduleDTO firstSku = buildSku("3302004004", "EMB-SHARED", 20, 50, 20);
+        firstSku.setSkuTag("02");
+        firstSku.setEndingDaysRemaining(2);
+        firstSku.setMouldQty(2);
+        SkuScheduleDTO secondSku = buildSku("3302004005", "EMB-SHARED", 15, 50, 15);
+        secondSku.setSkuTag("02");
+        secondSku.setEndingDaysRemaining(2);
+        secondSku.setMouldQty(2);
+        context.setNewSpecSkuList(Arrays.asList(firstSku, secondSku));
+        context.getMaterialSharedEmbryoMap().put("3302004004", true);
+        context.getMaterialSharedEmbryoMap().put("3302004005", true);
+        resolver.refreshActiveEmbryoSkuMap(context);
+
+        // 共用胎胚非T日收尾，isEmbryoStockEnding应返回false
+        boolean applied = resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, firstSku, "新增排产");
+
+        Assertions.assertFalse(applied);
+        // 走upsizeEndingTargetQty后，共用胎胚只按硫化余量排产
+        int targetQty = resolver.upsizeEndingTargetQty(context, firstSku);
+        Assertions.assertEquals(20, targetQty);
     }
 
     private boolean invokeHandleSharedEmbryoZeroSurplusEnding(NewSpecProductionStrategy strategy,
