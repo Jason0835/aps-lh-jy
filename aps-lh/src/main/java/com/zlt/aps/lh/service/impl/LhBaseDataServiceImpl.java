@@ -1512,6 +1512,11 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .in(MdmDevicePlanShut::getMachineStopType, resolveCleaningStopTypeList())
                         .isNull(MdmDevicePlanShut::getActualFinishDate)
                         .eq(MdmDevicePlanShut::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
+        // 保留本次已加载的原始清洗候选快照。后续清洗排程会从普通停机列表剥离 07/08 数据，
+        // 续作降模仍需按“已加载且计划开始时间不早于 T 日”的业务口径判断机台是否有清洗计划。
+        context.setLoadedCleaningPlanShutList(CollectionUtils.isEmpty(futureCleaningPlanList)
+                ? new ArrayList<MdmDevicePlanShut>(0)
+                : new ArrayList<MdmDevicePlanShut>(futureCleaningPlanList));
         List<MdmDevicePlanShut> devicePlanShutList = mergeDevicePlanShutList(
                 normalDevicePlanShutList, futureCleaningPlanList);
         context.setDevicePlanShutList(devicePlanShutList);

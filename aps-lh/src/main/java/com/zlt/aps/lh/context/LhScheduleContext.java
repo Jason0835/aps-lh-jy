@@ -134,6 +134,13 @@ public class LhScheduleContext {
     private Map<String, MdmSkuLhCapacity> skuLhCapacityMap = new HashMap<>();
     /** 设备停机计划列表 */
     private List<MdmDevicePlanShut> devicePlanShutList = new ArrayList<>();
+    /**
+     * 本次排程已加载的清洗类设备停机候选列表。
+     * <p>仅保存计划开始时间不早于排程日期 T 日、尚未实际完成且未删除的干冰/喷砂清洗候选。
+     * 清洗候选转换为运行态清洗窗口后会从 {@link #devicePlanShutList} 剥离，但该只读快照仍供续作降模
+     * 判断“机台是否存在有效清洗计划”使用，不参与普通停机产能扣减，也不改变清洗每日上限和班次安排。</p>
+     */
+    private List<MdmDevicePlanShut> loadedCleaningPlanShutList = new ArrayList<>();
     /** SKU与模具关系Map, key=materialCode */
     private Map<String, List<MdmSkuMouldRel>> skuMouldRelMap = new HashMap<>();
     /** 模具台账Map, key=mouldCode */

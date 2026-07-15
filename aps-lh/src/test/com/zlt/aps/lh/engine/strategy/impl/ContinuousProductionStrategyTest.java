@@ -22,6 +22,7 @@ import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
@@ -30,6 +31,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.util.CollectionUtils;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -45,6 +47,7 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -1447,12 +1450,99 @@ public class ContinuousProductionStrategyTest {
         addSkuMouldRel(context, "MAT-SHARED-A", "M-SHARED");
         addSkuMouldRel(context, "MAT-SHARED-B", "M-SHARED");
         addSkuMouldRel(context, "MAT-MULTI", "M-DEDICATED");
+        addOriginalMonthPlan(context, 2026, 5, 31, 48);
 
         strategy.scheduleReduceMould(context);
 
         assertEquals(1, context.getScheduleResultList().size());
         assertEquals("K1102", context.getScheduleResultList().get(0).getLhMachineCode(),
                 "模具共用性更好的K1101应优先下机，即使胶囊最大使用次数更高");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldEnableMouldSharedSortWhenCurrentSkuHasPlanBeforeMonthEnd() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
+        addMouldSharedSortFixture(context, "K1101", "K1102");
+        addOriginalMonthPlan(context, 2026, 5, 1, 48);
+        addLoadedCleaningPlan(context, "K1102", toDate(2026, 5, 1, 8, 0, 0));
+
+        List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
+
+        assertEquals("K1101", removeOrder.get(0).getLhMachineCode(),
+                "当前SKU从T日至月底有正月计划时，模具共用性必须优先于清洗计划和胶囊次数");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldSkipMouldSharedSortWhenCurrentSkuHasNoPlanBeforeMonthEnd() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
+        addMouldSharedSortFixture(context, "K1101", "K1102");
+        addLoadedCleaningPlan(context, "K1102", toDate(2026, 5, 1, 8, 0, 0));
+
+        List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
+
+        assertEquals("K1102", removeOrder.get(0).getLhMachineCode(),
+                "当前SKU从T日至月底无正月计划时必须跳过模具共用性，直接按清洗计划优先下机");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldEnableMouldSharedSortOnMonthEndDate() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
+        context.setScheduleDate(toDate(2026, 5, 31, 0, 0, 0));
+        addMouldSharedSortFixture(context, "K1101", "K1102");
+        addOriginalMonthPlan(context, 2026, 5, 31, 48);
+        addLoadedCleaningPlan(context, "K1102", toDate(2026, 5, 31, 8, 0, 0));
+
+        List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
+
+        assertEquals("K1101", removeOrder.get(0).getLhMachineCode(),
+                "T日为月底时应只读取DAY_31，并在当天有计划量时启用模具共用性排序");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldPreferMachineWithValidCleaningPlan() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 1, 20, "K1501L", "K1601");
+        addLoadedCleaningPlan(context, "K1501", toDate(2026, 5, 1, 8, 0, 0));
+
+        List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
+
+        assertEquals("K1501L", removeOrder.get(0).getLhMachineCode(),
+                "清洗计划应复用物理机台编码匹配，并优先于胶囊使用次数下机");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldIgnoreCleaningPlanBeforeScheduleDate() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 1, 5, "K1101", "K1102");
+        addLoadedCleaningPlan(context, "K1102", toDate(2026, 4, 30, 23, 59, 59));
+
+        List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
+
+        assertEquals("K1101", removeOrder.get(0).getLhMachineCode(),
+                "计划开始时间早于T日的清洗数据不得命中，应继续按胶囊次数排序");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldHandleMissingCleaningAndCapsuleData() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 0, 0, "K1101", "K1102");
+        context.setLoadedCleaningPlanShutList(null);
+        context.getCapsuleUsageMap().clear();
+
+        List<LhScheduleResult> removeOrder = assertDoesNotThrow(
+                () -> selectAllMachinesToRemove(strategy, context));
+
+        assertEquals("K1102", removeOrder.get(0).getLhMachineCode(),
+                "清洗和胶囊数据缺失时不得报错，并沿用机台编码降序下机兜底");
     }
 
     @Test
@@ -2525,6 +2615,92 @@ public class ContinuousProductionStrategyTest {
         context.getSkuMouldRelMap()
                 .computeIfAbsent(materialCode, key -> new ArrayList<MdmSkuMouldRel>(2))
                 .add(rel);
+    }
+
+    /**
+     * 写入一组“第一台模具共用性高、第二台模具共用性低”的测试数据。
+     *
+     * @param context 排程上下文
+     * @param sharedMachineCode 共用性较高的机台
+     * @param dedicatedMachineCode 共用性较低的机台
+     */
+    private void addMouldSharedSortFixture(LhScheduleContext context,
+                                           String sharedMachineCode,
+                                           String dedicatedMachineCode) {
+        addMachineOnlineMould(context, sharedMachineCode, "M-SHARED");
+        addMachineOnlineMould(context, dedicatedMachineCode, "M-DEDICATED");
+        addSkuMouldRel(context, "MAT-MULTI", "M-SHARED");
+        addSkuMouldRel(context, "MAT-SHARED-A", "M-SHARED");
+        addSkuMouldRel(context, "MAT-SHARED-B", "M-SHARED");
+        addSkuMouldRel(context, "MAT-MULTI", "M-DEDICATED");
+    }
+
+    /**
+     * 写入续作降模排序使用的原始月计划。
+     *
+     * @param context 排程上下文
+     * @param year 年份
+     * @param month 月份
+     * @param dayOfMonth 月内日序；当前测试仅覆盖月初和月末边界
+     * @param planQty 日计划量
+     */
+    private void addOriginalMonthPlan(LhScheduleContext context,
+                                      int year,
+                                      int month,
+                                      int dayOfMonth,
+                                      int planQty) {
+        FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("MAT-MULTI");
+        plan.setYear(year);
+        plan.setMonth(month);
+        if (dayOfMonth == 1) {
+            plan.setDay1(planQty);
+        } else if (dayOfMonth == 31) {
+            plan.setDay31(planQty);
+        } else {
+            throw new IllegalArgumentException("测试月计划仅支持DAY_1或DAY_31");
+        }
+        context.setMonthPlanList(Collections.singletonList(plan));
+    }
+
+    /**
+     * 写入本次已加载的原始清洗候选快照。
+     *
+     * @param context 排程上下文
+     * @param machineCode 清洗计划机台编码
+     * @param beginDate 清洗计划开始时间
+     */
+    private void addLoadedCleaningPlan(LhScheduleContext context, String machineCode, Date beginDate) {
+        MdmDevicePlanShut cleaningPlan = new MdmDevicePlanShut();
+        cleaningPlan.setMachineCode(machineCode);
+        cleaningPlan.setBeginDate(beginDate);
+        if (Objects.isNull(context.getLoadedCleaningPlanShutList())) {
+            context.setLoadedCleaningPlanShutList(new ArrayList<MdmDevicePlanShut>(2));
+        }
+        context.getLoadedCleaningPlanShutList().add(cleaningPlan);
+    }
+
+    /**
+     * 调用续作降模下机排序，返回全部候选的下机顺序。
+     *
+     * @param strategy 续作排产策略
+     * @param context 排程上下文
+     * @return 下机顺序
+     */
+    @SuppressWarnings("unchecked")
+    private List<LhScheduleResult> selectAllMachinesToRemove(ContinuousProductionStrategy strategy,
+                                                             LhScheduleContext context) {
+        SkuScheduleDTO sourceSku = context.getContinuousSkuList().get(0);
+        try {
+            Method selectMethod = ContinuousProductionStrategy.class.getDeclaredMethod(
+                    "selectMachinesToRemoveForContinuation", LhScheduleContext.class, SkuScheduleDTO.class,
+                    List.class, List.class);
+            selectMethod.setAccessible(true);
+            return (List<LhScheduleResult>) selectMethod.invoke(strategy, context, sourceSku,
+                    context.getScheduleResultList(), Collections.<LhScheduleResult>emptyList());
+        } catch (ReflectiveOperationException exception) {
+            throw new IllegalStateException("调用续作降模下机排序失败", exception);
+        }
     }
 
     private SkuScheduleDTO buildContinuationSku(String materialCode,
