@@ -104,9 +104,27 @@ public final class LhMouldCodeUtil {
      * @return 模具号到关联 SKU 数量的映射
      */
     public static Map<String, Integer> buildMouldSharedSkuCountMap(LhScheduleContext context) {
+        return buildMouldSharedSkuCountMap(context, null);
+    }
+
+    /**
+     * 按指定 SKU 范围统计每个模具号关联的 SKU 数量。
+     *
+     * <p>该重载只负责复用既有“模具号归一化、同模具关联 SKU 去重、按模具分别计数”口径，
+     * 不负责判断 SKU 是否满足具体业务条件。调用方可先根据月计划等业务数据生成允许计数的
+     * SKU 集合，避免把续作降模的未来计划规则扩散到模具资源分配、换活字块等其他链路。</p>
+     *
+     * @param context 排程上下文
+     * @param includedMaterialCodeSet 允许纳入共用性统计的 SKU 编码集合；传入 null 表示不做过滤，
+     *                                空集合表示没有 SKU 可以纳入统计
+     * @return 模具号到过滤后关联 SKU 数量的映射
+     */
+    public static Map<String, Integer> buildMouldSharedSkuCountMap(LhScheduleContext context,
+                                                                   Set<String> includedMaterialCodeSet) {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getSkuMouldRelMap())) {
             return new HashMap<String, Integer>(0);
         }
+        boolean needFilterMaterialCode = Objects.nonNull(includedMaterialCodeSet);
         Map<String, Set<String>> mouldSkuSetMap = new HashMap<String, Set<String>>(16);
         for (Map.Entry<String, List<MdmSkuMouldRel>> entry : context.getSkuMouldRelMap().entrySet()) {
             if (CollectionUtils.isEmpty(entry.getValue())) {
@@ -119,6 +137,10 @@ public final class LhMouldCodeUtil {
                 }
                 String materialCode = StringUtils.isNotEmpty(entry.getKey()) ? entry.getKey() : rel.getMaterialCode();
                 if (StringUtils.isEmpty(materialCode)) {
+                    continue;
+                }
+                // 续作降模传入未来有计划的关联 SKU 集合时，只统计集合内 SKU；原有调用传 null 保持既有口径。
+                if (needFilterMaterialCode && !includedMaterialCodeSet.contains(materialCode)) {
                     continue;
                 }
                 mouldSkuSetMap.computeIfAbsent(mouldCode, key -> new LinkedHashSet<String>(4)).add(materialCode);

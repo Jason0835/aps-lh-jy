@@ -1450,7 +1450,8 @@ public class ContinuousProductionStrategyTest {
         addSkuMouldRel(context, "MAT-SHARED-A", "M-SHARED");
         addSkuMouldRel(context, "MAT-SHARED-B", "M-SHARED");
         addSkuMouldRel(context, "MAT-MULTI", "M-DEDICATED");
-        addOriginalMonthPlan(context, 2026, 5, 31, 48);
+        addOriginalMonthPlan(context, "MAT-SHARED-A", 2026, 5, 31, 48);
+        addOriginalMonthPlan(context, "MAT-SHARED-B", 2026, 5, 31, 48);
 
         strategy.scheduleReduceMould(context);
 
@@ -1460,7 +1461,7 @@ public class ContinuousProductionStrategyTest {
     }
 
     @Test
-    public void selectMachinesToRemove_shouldEnableMouldSharedSortWhenCurrentSkuHasPlanBeforeMonthEnd() {
+    public void selectMachinesToRemove_shouldExcludeCurrentSkuAndUnplannedRelatedSkusFromMouldSharedCount() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiMachineContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
@@ -1470,38 +1471,71 @@ public class ContinuousProductionStrategyTest {
 
         List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
 
-        assertEquals("K1101", removeOrder.get(0).getLhMachineCode(),
-                "当前SKU从T日至月底有正月计划时，模具共用性必须优先于清洗计划和胶囊次数");
+        assertEquals("K1102", removeOrder.get(0).getLhMachineCode(),
+                "当前续作SKU本身及无未来计划的其他关联SKU均不得计入共用性，应继续按清洗计划下机");
     }
 
     @Test
-    public void selectMachinesToRemove_shouldSkipMouldSharedSortWhenCurrentSkuHasNoPlanBeforeMonthEnd() {
+    public void selectMachinesToRemove_shouldCountRelatedSkuWithFuturePlanBeforeMonthEnd() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiMachineContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
         addMouldSharedSortFixture(context, "K1101", "K1102");
+        addOriginalMonthPlan(context, "MAT-SHARED-A", 2026, 5, 31, 48);
         addLoadedCleaningPlan(context, "K1102", toDate(2026, 5, 1, 8, 0, 0));
 
         List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
 
-        assertEquals("K1102", removeOrder.get(0).getLhMachineCode(),
-                "当前SKU从T日至月底无正月计划时必须跳过模具共用性，直接按清洗计划优先下机");
+        assertEquals("K1101", removeOrder.get(0).getLhMachineCode(),
+                "其他关联SKU从T日至月底有正计划时必须计入共用性，并优先于清洗计划和胶囊次数");
     }
 
     @Test
-    public void selectMachinesToRemove_shouldEnableMouldSharedSortOnMonthEndDate() {
+    public void selectMachinesToRemove_shouldCountRelatedSkuPlanOnMonthEndDate() {
         ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
         LhScheduleContext context = buildMultiMachineContinuationContext(
                 ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
         context.setScheduleDate(toDate(2026, 5, 31, 0, 0, 0));
         addMouldSharedSortFixture(context, "K1101", "K1102");
-        addOriginalMonthPlan(context, 2026, 5, 31, 48);
+        addOriginalMonthPlan(context, "MAT-SHARED-A", 2026, 5, 31, 48);
         addLoadedCleaningPlan(context, "K1102", toDate(2026, 5, 31, 8, 0, 0));
 
         List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
 
         assertEquals("K1101", removeOrder.get(0).getLhMachineCode(),
-                "T日为月底时应只读取DAY_31，并在当天有计划量时启用模具共用性排序");
+                "T日为月底时应只读取关联SKU的DAY_31，并在当天有计划量时纳入模具共用性");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldIgnoreRelatedSkuPlanBeforeScheduleDate() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
+        context.setScheduleDate(toDate(2026, 5, 15, 0, 0, 0));
+        addMouldSharedSortFixture(context, "K1101", "K1102");
+        addOriginalMonthPlan(context, "MAT-SHARED-A", 2026, 5, 1, 48);
+        addLoadedCleaningPlan(context, "K1102", toDate(2026, 5, 15, 8, 0, 0));
+
+        List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
+
+        assertEquals("K1102", removeOrder.get(0).getLhMachineCode(),
+                "其他关联SKU只有T日前日计划时不得计入共用性，应继续按有效清洗计划优先下机");
+    }
+
+    @Test
+    public void selectMachinesToRemove_shouldCountFuturePlanFromAnyRelatedSkuProductStatus() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
+        addMouldSharedSortFixture(context, "K1101", "K1102");
+        addOriginalMonthPlan(context, "MAT-SHARED-A", "S", 2026, 5, 31, 0);
+        addOriginalMonthPlan(context, "MAT-SHARED-A", "T", 2026, 5, 31, 48);
+        addLoadedCleaningPlan(context, "K1102", toDate(2026, 5, 1, 8, 0, 0));
+
+        List<LhScheduleResult> removeOrder = selectAllMachinesToRemove(strategy, context);
+
+        assertEquals("K1101", removeOrder.get(0).getLhMachineCode(),
+                "模具关系不带产品状态时，其他关联SKU任一产品状态有未来正计划都必须纳入共用性");
     }
 
     @Test
@@ -2649,8 +2683,49 @@ public class ContinuousProductionStrategyTest {
                                       int month,
                                       int dayOfMonth,
                                       int planQty) {
+        addOriginalMonthPlan(context, "MAT-MULTI", year, month, dayOfMonth, planQty);
+    }
+
+    /**
+     * 写入指定 SKU 的续作降模排序原始月计划。
+     *
+     * @param context 排程上下文
+     * @param materialCode 月计划 SKU 编码
+     * @param year 年份
+     * @param month 月份
+     * @param dayOfMonth 月内日序；当前测试仅覆盖月初和月末边界
+     * @param planQty 日计划量
+     */
+    private void addOriginalMonthPlan(LhScheduleContext context,
+                                      String materialCode,
+                                      int year,
+                                      int month,
+                                      int dayOfMonth,
+                                      int planQty) {
+        addOriginalMonthPlan(context, materialCode, null, year, month, dayOfMonth, planQty);
+    }
+
+    /**
+     * 写入指定 SKU、产品状态的续作降模排序原始月计划。
+     *
+     * @param context 排程上下文
+     * @param materialCode 月计划 SKU 编码
+     * @param productStatus 产品状态
+     * @param year 年份
+     * @param month 月份
+     * @param dayOfMonth 月内日序；当前测试仅覆盖月初和月末边界
+     * @param planQty 日计划量
+     */
+    private void addOriginalMonthPlan(LhScheduleContext context,
+                                      String materialCode,
+                                      String productStatus,
+                                      int year,
+                                      int month,
+                                      int dayOfMonth,
+                                      int planQty) {
         FactoryMonthPlanProductionFinalResult plan = new FactoryMonthPlanProductionFinalResult();
-        plan.setMaterialCode("MAT-MULTI");
+        plan.setMaterialCode(materialCode);
+        plan.setProductStatus(productStatus);
         plan.setYear(year);
         plan.setMonth(month);
         if (dayOfMonth == 1) {
@@ -2660,7 +2735,10 @@ public class ContinuousProductionStrategyTest {
         } else {
             throw new IllegalArgumentException("测试月计划仅支持DAY_1或DAY_31");
         }
-        context.setMonthPlanList(Collections.singletonList(plan));
+        if (Objects.isNull(context.getMonthPlanList())) {
+            context.setMonthPlanList(new ArrayList<FactoryMonthPlanProductionFinalResult>(4));
+        }
+        context.getMonthPlanList().add(plan);
     }
 
     /**
