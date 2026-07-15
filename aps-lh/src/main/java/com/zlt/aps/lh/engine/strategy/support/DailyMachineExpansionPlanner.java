@@ -3,7 +3,6 @@ package com.zlt.aps.lh.engine.strategy.support;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
-import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -298,20 +297,16 @@ public final class DailyMachineExpansionPlanner {
         if (threshold <= 0 || historyShortageQty > threshold) {
             return null;
         }
-        Map<LocalDate, Integer> singleMachineDailyCapacityMap = new LinkedHashMap<LocalDate, Integer>(4);
-        if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleDate())) {
-            List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
-            singleMachineDailyCapacityMap.putAll(ShiftCapacityResolverUtil.sumActualShiftPlanQtyByWorkDate(
-                    shifts, Math.max(0, sku.getShiftCapacity()),
-                    ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context), scheduleType));
-        }
+        // dayN 仅用于判断是否需要增加机台，T 日及后续业务日统一按 SKU 正式日硫化标准计算单机理论产能。
+        // 实际剩余班次产能仍由各排产策略和班次产能工具负责，不在此处改变实际排产量及时间窗口语义。
+        int singleMachineDailyTheoryCapacityQty = resolveAddMachineDailyTheoryCapacityQty(context, sku);
         LocalDate firstProductionDate = sku.getDailyPlanQuotaMap().keySet().iterator().next();
         for (LocalDate productionDate : sku.getDailyPlanQuotaMap().keySet()) {
             SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(productionDate);
             int dayPlanQty = quota == null ? 0 : Math.max(0, quota.getDayPlanQty());
             int currentDayPlanQty = resolveCurrentDayPlanQty(sku, productionDate, firstProductionDate, dayPlanQty);
             int currentDayCapacityQty = resolveDailyTheoryCapacityQty(
-                    singleMachineDailyCapacityMap, productionDate, activeMachineCount, sku.getShiftCapacity());
+                    singleMachineDailyTheoryCapacityQty, activeMachineCount);
             boolean currentDayPlanSatisfied = currentDayPlanQty <= currentDayCapacityQty;
             if (currentDayPlanSatisfied) {
                 log.info("小欠产加机台逐日判断当前日已满足，不进入后看, materialCode: {}, productionDate: {}, "
@@ -341,8 +336,7 @@ public final class DailyMachineExpansionPlanner {
                 SkuDailyPlanQuotaDTO nextQuota = sku.getDailyPlanQuotaMap().get(nextProductionDate);
                 int nextDayPlanQty = nextQuota == null ? 0 : Math.max(0, nextQuota.getDayPlanQty());
                 int nextDayCapacityQty = resolveDailyTheoryCapacityQty(
-                        singleMachineDailyCapacityMap, nextProductionDate,
-                        activeMachineCount, sku.getShiftCapacity());
+                        singleMachineDailyTheoryCapacityQty, activeMachineCount);
                 boolean addMachine = nextDayPlanQty > nextDayCapacityQty;
                 log.info("小欠产加机台逐日后看判断, materialCode: {}, productionDate: {}, "
                                 + "activeMachineCount: {}, currentDayCapacityQty: {}, dayPlanQty: {}, "
@@ -380,16 +374,41 @@ public final class DailyMachineExpansionPlanner {
         return Math.max(0, sku.getScheduleDayFinishQty());
     }
 
-    private static int resolveDailyTheoryCapacityQty(Map<LocalDate, Integer> singleMachineDailyCapacityMap,
-                                                     LocalDate productionDate,
-                                                     int activeMachineCount,
-                                                     int shiftCapacity) {
-        int singleMachineDailyCapacityQty = CollectionUtils.isEmpty(singleMachineDailyCapacityMap)
-                ? 0 : singleMachineDailyCapacityMap.getOrDefault(productionDate, 0);
-        if (singleMachineDailyCapacityQty <= 0) {
-            singleMachineDailyCapacityQty = Math.max(0, shiftCapacity) * LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY;
+    /**
+     * 解析加机台判断使用的单机日理论产能。
+     * <p>优先使用 SKU 日硫化产能主数据的正式日标准；主数据缺失时沿用 DTO 日产能和班产兜底口径。
+     * 本方法只服务 dayN 加机台决策，不得用于计算 T 日实际剩余班次可排量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前 SKU
+     * @return 加机台判断使用的单机日理论产能
+     */
+    private static int resolveAddMachineDailyTheoryCapacityQty(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 0;
         }
-        return Math.max(0, activeMachineCount) * singleMachineDailyCapacityQty;
+        int dailyTheoryCapacityQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(
+                context, sku.getMaterialCode());
+        if (dailyTheoryCapacityQty <= 0) {
+            dailyTheoryCapacityQty = Math.max(0, sku.getDailyCapacity());
+        }
+        if (dailyTheoryCapacityQty <= 0) {
+            dailyTheoryCapacityQty = Math.max(0, sku.getShiftCapacity())
+                    * LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY;
+        }
+        return dailyTheoryCapacityQty;
+    }
+
+    /**
+     * 按正式日硫化标准计算当前机台数的 dayN 理论产能。
+     *
+     * @param singleMachineDailyTheoryCapacityQty 单机正式日硫化标准
+     * @param activeMachineCount 当前已承接机台数
+     * @return 当前机台数对应的 dayN 理论产能
+     */
+    private static int resolveDailyTheoryCapacityQty(int singleMachineDailyTheoryCapacityQty,
+                                                     int activeMachineCount) {
+        return Math.max(0, activeMachineCount) * Math.max(0, singleMachineDailyTheoryCapacityQty);
     }
 
     private static LocalDate resolveNextProductionDate(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,

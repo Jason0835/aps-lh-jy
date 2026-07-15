@@ -5967,6 +5967,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         int plannedRepairFixedQty = context.getParamIntValue(
                 LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
+        String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
+        int remainShiftCapacityUpperLimit =
+                ShiftCapacityResolverUtil.resolveDailyStandardRemainShiftCapacityUpperLimit(
+                        context, result.getMaterialCode(), shiftCapacity);
+        boolean singleControlMachine = LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
+                context, result.getLhMachineCode());
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
             if (!started) {
@@ -5980,6 +5986,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             if (control == null || !control.isCanSchedule()) {
                 continue;
             }
+            // 日标准量高于“班产×3”时，仅剩余班次使用独立理论上限计算真实可排量。
+            int currentShiftCapacity = !singleControlMachine
+                    && ShiftCapacityResolverUtil.isDailyStandardRemainShift(shift, remainShiftType)
+                    ? remainShiftCapacityUpperLimit : shiftCapacity;
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
@@ -5987,7 +5997,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     result.getLhMachineCode(),
                     control.getEffectiveStartTime(),
                     control.getEffectiveEndTime(),
-                    shiftCapacity,
+                    currentShiftCapacity,
                     lhTimeSeconds,
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
@@ -6001,18 +6011,18 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             rawShiftCapacityMap.put(shift.getShiftIndex(), Math.max(0, shiftMaxQty));
         }
         int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(context, result.getMaterialCode());
-        String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
-        boolean singleControlMachine = LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
-                context, result.getLhMachineCode());
         Map<Integer, Integer> adjustedMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
-                shifts, rawShiftCapacityMap, dailyStandardQty, shiftCapacity, remainShiftType,
+                shifts, rawShiftCapacityMap, rawShiftCapacityMap, dailyStandardQty, shiftCapacity,
+                remainShiftCapacityUpperLimit, remainShiftType,
                 singleControlMachine, ScheduleTypeEnum.CONTINUOUS.getCode());
         if (!Objects.equals(rawShiftCapacityMap, adjustedMap)) {
             log.info("日标准产量班次计划量修正, 当前流程: {}, materialCode: {}, machineCode: {}, "
-                            + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 日标准产量剩余班次参数值: {}, "
+                            + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 剩余班次理论上限: {}, "
+                            + "日标准产量剩余班次参数值: {}, "
                             + "修正前班次计划量: {}, 修正后班次计划量: {}",
                     processName, result.getMaterialCode(), result.getLhMachineCode(), singleControlMachine,
-                    dailyStandardQty, shiftCapacity, remainShiftType, rawShiftCapacityMap, adjustedMap);
+                    dailyStandardQty, shiftCapacity, remainShiftCapacityUpperLimit,
+                    remainShiftType, rawShiftCapacityMap, adjustedMap);
         }
         return adjustedMap;
     }
@@ -6050,10 +6060,25 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(
                     context, result.getMaterialCode());
             String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
+            int remainShiftCapacityUpperLimit =
+                    ShiftCapacityResolverUtil.resolveDailyStandardRemainShiftCapacityUpperLimit(
+                            context, result.getMaterialCode(), shiftCapacity);
             boolean singleControlMachine = LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
                     context, result.getLhMachineCode());
+            int lhTimeSeconds = Objects.isNull(result.getLhTime()) ? 0 : Math.max(0, result.getLhTime());
+            int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(
+                    Objects.isNull(result.getMouldQty()) ? 0 : result.getMouldQty());
+            List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
+                    context, result, resolveFirstPlannedShiftStartTime(result));
+            List<MachineMaintenanceWindowDTO> maintenanceWindowList = resolveMachineMaintenanceWindowList(
+                    context, result.getLhMachineCode());
+            // 最终结果中的残班量不是物理上限，需重算剩余班次真实可排产能后再执行向上修正。
+            Map<Integer, Integer> remainShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
+                    context, result, shifts, resolveFirstPlannedShiftStartTime(result), shiftCapacity,
+                    lhTimeSeconds, mouldQty, cleaningWindowList, maintenanceWindowList, "续作结果收敛");
             Map<Integer, Integer> adjustedPlanQtyMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
-                    shifts, rawPlanQtyMap, dailyStandardQty, shiftCapacity, remainShiftType,
+                    shifts, rawPlanQtyMap, remainShiftCapacityMap, dailyStandardQty, shiftCapacity,
+                    remainShiftCapacityUpperLimit, remainShiftType,
                     singleControlMachine, ScheduleTypeEnum.CONTINUOUS.getCode());
             SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
             if (Objects.equals(rawPlanQtyMap, adjustedPlanQtyMap)) {
@@ -6064,10 +6089,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             refreshResultSummary(context, result, shifts);
             applyEndingFillIfNecessary(context, result, sourceSku, shifts);
             log.info("日标准产量结果计划量收敛, 当前流程: 续作排产, materialCode: {}, machineCode: {}, "
-                            + "SKU日标准产量: {}, 班产: {}, 日标准产量剩余班次参数值: {}, "
+                            + "SKU日标准产量: {}, 班产: {}, 剩余班次理论上限: {}, "
+                            + "日标准产量剩余班次参数值: {}, "
                             + "修正前班次计划量: {}, 修正后班次计划量: {}",
                     result.getMaterialCode(), result.getLhMachineCode(), dailyStandardQty, shiftCapacity,
-                    remainShiftType, rawPlanQtyMap, adjustedPlanQtyMap);
+                    remainShiftCapacityUpperLimit, remainShiftType, rawPlanQtyMap, adjustedPlanQtyMap);
         }
     }
 
@@ -6938,6 +6964,16 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             int requiredMachineCount = resolveContinuationDayMinimumMachineCount(
                     context, sourceSku, addMachineDayPlanQty, continuousMachineResults);
             int shortageMachineCount = Math.max(0, requiredMachineCount - activeMachineCount);
+            // 小欠产场景下，正式日硫化标准计算出的最小机台数已被续作机台满足时，禁止再生成新增补偿。
+            // 该一致性拦截只约束增机决策，不影响历史欠产超阈值时的强制增机台规则。
+            if (isContinuationMachineCountSatisfiedWithoutForcedShortage(
+                    context, sourceSku, activeMachineCount, requiredMachineCount)) {
+                log.info("续作加机台需求跳过，已有续作机台满足正式日硫化标准最小机台数, materialCode: {}, "
+                                + "当前续作机台数: {}, dayN最小机台数: {}, 缺口机台数: {}, 首次增机日: {}",
+                        sourceSku.getMaterialCode(), activeMachineCount, requiredMachineCount,
+                        shortageMachineCount, firstAddMachineProductionDate);
+                continue;
+            }
             int dayNShortageCompensationQty = resolveContinuationAddMachineCompensationQty(
                     context, sourceSku, firstAddMachineProductionDate, activeMachineCount);
             // remainingQty 是 S4.4 结果扣账后仍需由 S4.5 新增链路补齐的缺口。
@@ -6971,6 +7007,30 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     compensationSku.getSourceType(),
                     formatDailyPlanQuotaSummary(sourceSku));
         }
+    }
+
+    /**
+     * 判断小欠产场景下已有续作机台是否已满足正式日硫化标准最小机台数。
+     * <p>仅用于阻止加机台判断口径与补偿生成口径发生分歧；历史欠产超过阈值时继续由强制增机台规则处理。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作 SKU
+     * @param activeMachineCount 当前续作机台数
+     * @param requiredMachineCount 正式日硫化标准计算出的 dayN 最小机台数
+     * @return true-已有续作机台满足且不得生成新增补偿；false-继续原补偿判断
+     */
+    private boolean isContinuationMachineCountSatisfiedWithoutForcedShortage(LhScheduleContext context,
+                                                                               SkuScheduleDTO sourceSku,
+                                                                               int activeMachineCount,
+                                                                               int requiredMachineCount) {
+        if (Objects.isNull(context) || Objects.isNull(sourceSku)
+                || activeMachineCount <= 0 || requiredMachineCount <= 0) {
+            return false;
+        }
+        int threshold = Math.max(0, DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context));
+        int historyShortageQty = Math.max(0, sourceSku.getMonthlyHistoryShortageQty());
+        return threshold > 0 && historyShortageQty <= threshold
+                && requiredMachineCount <= activeMachineCount;
     }
 
     /**
@@ -7652,19 +7712,22 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         int scheduledQty = resolveScheduledQtyBySourceSku(context, sourceSku);
         int quotaRemainingQty = SkuDailyPlanQuotaUtil.sumRemainingQty(sourceSku.getDailyPlanQuotaMap());
-        boolean needMoreMachine = DailyMachineExpansionPlanner.needMoreMachine(context, sourceSku);
+        // remainingDemandExists 仅表示业务目标或日计划账本仍有余量；是否真正增加机台以补偿量为准。
+        boolean remainingDemandExists = DailyMachineExpansionPlanner.needMoreMachine(context, sourceSku);
+        boolean addMachineDecision = compensationQty > 0;
         log.info("续作增机台补偿判断, scheduleDate: {}, materialCode: {}, skuType: {}, continuousMachines: {}, "
                         + "noWindowPlan: {}, forceEndingByNoFuturePlan: {}, strictShortageOnly: {}, "
                         + "historyShortageQty: {}, threshold: {}, windowDayPlanQty: {}, "
                         + "futurePlanQtyAfterWindow: {}, scheduledQty: {}, quotaRemainingQty: {}, "
-                        + "needMoreMachine: {}, compensationQty: {}, strictTargetQty: {}, allowFullShift: {}",
+                        + "remainingDemandExists: {}, addMachineDecision: {}, compensationQty: {}, "
+                        + "strictTargetQty: {}, allowFullShift: {}",
                 LhScheduleTimeUtil.formatDate(context.getScheduleDate()), sourceSku.getMaterialCode(),
                 sourceSku.getConstructionStage(), resolveContinuousMachineCodes(context, sourceSku),
                 shortageQuotaPlan.isNoWindowPlan(), shortageQuotaPlan.isForceEndingByNoFuturePlan(),
                 sourceSku.isStrictNewSpecShortageOnly(), shortageQuotaPlan.getHistoryShortageQty(),
                 shortageQuotaPlan.getShortageAddMachineThreshold(), shortageQuotaPlan.getWindowDayPlanQty(),
                 shortageQuotaPlan.getFutureMonthPlanQtyAfterWindow(), scheduledQty, quotaRemainingQty,
-                needMoreMachine, compensationQty, sourceSku.isStrictTargetQty(),
+                remainingDemandExists, addMachineDecision, compensationQty, sourceSku.isStrictTargetQty(),
                 ProductionQuantityPolicy.from(sourceSku, sourceSku.isStrictTargetQty()).isAllowFillStartedShift());
     }
 

@@ -201,6 +201,37 @@ public final class ShiftCapacityResolverUtil {
                                                            Map<Integer, Integer> sameDayShiftPlanQtyMap,
                                                            boolean singleControlMachine,
                                                            String scheduleType) {
+        return calculateShiftPlanQtyByDailyStandard(
+                dailyStandardQty, classCapacity, classCapacity, currentShiftPlanQty, currentShift,
+                remainShiftType, sameDayShiftPlanQtyMap, singleControlMachine, scheduleType);
+    }
+
+    /**
+     * 按日标准产量修正当前班次计划量，并使用独立的剩余班次理论上限约束公式结果。
+     * <p>日标准产量仍只取 {@link MdmSkuLhCapacity#getStandardCapacity()}；当日标准量高于
+     * {@code 班产 × 3} 时，剩余班次可在 APS 日产折算的单班理论上限内补足差额，
+     * 非剩余班次和班产落库字段继续保持原班产语义。</p>
+     *
+     * @param dailyStandardQty SKU日标准产量
+     * @param classCapacity 原始班产
+     * @param remainShiftCapacityUpperLimit 剩余班次理论上限
+     * @param currentShiftPlanQty 当前班次原计划量
+     * @param currentShift 当前班次
+     * @param remainShiftType 剩余班次配置，1-晚班，2-早班，3-中班
+     * @param sameDayShiftPlanQtyMap 同一业务日班次计划量，key=班次序号，value=计划量
+     * @param singleControlMachine 是否单控机台
+     * @param scheduleType 排程类型
+     * @return 修正后的当前班次计划量
+     */
+    public static int calculateShiftPlanQtyByDailyStandard(int dailyStandardQty,
+                                                           int classCapacity,
+                                                           int remainShiftCapacityUpperLimit,
+                                                           int currentShiftPlanQty,
+                                                           LhShiftConfigVO currentShift,
+                                                           String remainShiftType,
+                                                           Map<Integer, Integer> sameDayShiftPlanQtyMap,
+                                                           boolean singleControlMachine,
+                                                           String scheduleType) {
         if (singleControlMachine || !isSupportedScheduleType(scheduleType)) {
             return currentShiftPlanQty;
         }
@@ -231,8 +262,13 @@ public final class ShiftCapacityResolverUtil {
              */
             return currentPlanQty;
         }
-        if (remainderQty > classCapacity) {
+        int formulaUpperLimit = Math.max(classCapacity, remainShiftCapacityUpperLimit);
+        if (remainderQty > formulaUpperLimit) {
             return currentPlanQty;
+        }
+        if (remainderQty > classCapacity) {
+            // 日标准量高于“班产×3”时，仅剩余班次可在独立理论上限内补足差额。
+            return remainderQty;
         }
         if (continuousSchedule) {
             // 续作剩余班次按日标准产量公式取值，既允许向下回裁，也允许补足原结果中的残班。
@@ -260,6 +296,63 @@ public final class ShiftCapacityResolverUtil {
                                                                              String remainShiftType,
                                                                              boolean singleControlMachine,
                                                                              String scheduleType) {
+        return adjustShiftPlanQtyMapByDailyStandard(
+                shifts, rawShiftPlanQtyMap, dailyStandardQty, classCapacity, classCapacity,
+                remainShiftType, singleControlMachine, scheduleType);
+    }
+
+    /**
+     * 按日标准产量批量修正同一窗口内的班次计划量，并独立约束剩余班次理论上限。
+     *
+     * @param shifts 班次列表
+     * @param rawShiftPlanQtyMap 原班次计划量，key=班次序号
+     * @param dailyStandardQty SKU日标准产量
+     * @param classCapacity 原始班产
+     * @param remainShiftCapacityUpperLimit 剩余班次理论上限
+     * @param remainShiftType 剩余班次配置
+     * @param singleControlMachine 是否单控机台
+     * @param scheduleType 排程类型
+     * @return 修正后的班次计划量
+     */
+    public static Map<Integer, Integer> adjustShiftPlanQtyMapByDailyStandard(List<LhShiftConfigVO> shifts,
+                                                                             Map<Integer, Integer> rawShiftPlanQtyMap,
+                                                                             int dailyStandardQty,
+                                                                             int classCapacity,
+                                                                             int remainShiftCapacityUpperLimit,
+                                                                             String remainShiftType,
+                                                                             boolean singleControlMachine,
+                                                                             String scheduleType) {
+        return adjustShiftPlanQtyMapByDailyStandard(
+                shifts, rawShiftPlanQtyMap, null, dailyStandardQty, classCapacity,
+                remainShiftCapacityUpperLimit, remainShiftType, singleControlMachine, scheduleType);
+    }
+
+    /**
+     * 按日标准产量批量修正班次计划量，并使用独立的剩余班次可排产能图。
+     * <p>最终结果收敛时，原结果量可能只是目标残量而不是物理上限；调用方应传入按停机、
+     * 清洗、保养和班次管控重新计算的剩余班次可排产能，避免把真实受限班次误补满。</p>
+     *
+     * @param shifts 班次列表
+     * @param rawShiftPlanQtyMap 原班次计划量，其他班次公式取值以此为准
+     * @param remainShiftCapacityMap 剩余班次可排产能图
+     * @param dailyStandardQty SKU日标准产量
+     * @param classCapacity 原始班产
+     * @param remainShiftCapacityUpperLimit 剩余班次理论上限
+     * @param remainShiftType 剩余班次配置
+     * @param singleControlMachine 是否单控机台
+     * @param scheduleType 排程类型
+     * @return 修正后的班次计划量
+     */
+    public static Map<Integer, Integer> adjustShiftPlanQtyMapByDailyStandard(
+            List<LhShiftConfigVO> shifts,
+            Map<Integer, Integer> rawShiftPlanQtyMap,
+            Map<Integer, Integer> remainShiftCapacityMap,
+            int dailyStandardQty,
+            int classCapacity,
+            int remainShiftCapacityUpperLimit,
+            String remainShiftType,
+            boolean singleControlMachine,
+            String scheduleType) {
         Map<Integer, Integer> adjustedMap = new LinkedHashMap<Integer, Integer>(
                 CollectionUtils.isEmpty(rawShiftPlanQtyMap) ? 0 : rawShiftPlanQtyMap.size());
         if (CollectionUtils.isEmpty(rawShiftPlanQtyMap)) {
@@ -279,11 +372,45 @@ public final class ShiftCapacityResolverUtil {
                     ? rawShiftPlanQtyMap : sameDayPlanQtyMap.get(workDate);
             int currentPlanQty = rawShiftPlanQtyMap.get(shift.getShiftIndex()) == null
                     ? 0 : rawShiftPlanQtyMap.get(shift.getShiftIndex());
-            adjustedMap.put(shift.getShiftIndex(), calculateShiftPlanQtyByDailyStandard(
-                    dailyStandardQty, classCapacity, currentPlanQty, shift, remainShiftType,
-                    currentDayPlanQtyMap, singleControlMachine, scheduleType));
+            boolean remainShift = isDailyStandardRemainShift(shift, remainShiftType);
+            if (dailyStandardQty > 0 && remainShift
+                    && !CollectionUtils.isEmpty(remainShiftCapacityMap)
+                    && remainShiftCapacityMap.containsKey(shift.getShiftIndex())) {
+                Integer remainShiftCapacity = remainShiftCapacityMap.get(shift.getShiftIndex());
+                currentPlanQty = Objects.isNull(remainShiftCapacity)
+                        ? currentPlanQty : Math.max(0, remainShiftCapacity);
+            }
+            int adjustedQty = calculateShiftPlanQtyByDailyStandard(
+                    dailyStandardQty, classCapacity, remainShiftCapacityUpperLimit,
+                    currentPlanQty, shift, remainShiftType,
+                    currentDayPlanQtyMap, singleControlMachine, scheduleType);
+            if (dailyStandardQty > 0 && remainShift
+                    && !CollectionUtils.isEmpty(remainShiftCapacityMap)
+                    && remainShiftCapacityMap.containsKey(shift.getShiftIndex())) {
+                Integer remainShiftCapacity = remainShiftCapacityMap.get(shift.getShiftIndex());
+                if (Objects.nonNull(remainShiftCapacity)) {
+                    adjustedQty = Math.min(adjustedQty, Math.max(0, remainShiftCapacity));
+                }
+            }
+            adjustedMap.put(shift.getShiftIndex(), adjustedQty);
         }
         return adjustedMap;
+    }
+
+    /**
+     * 判断当前班次是否为日标准产量剩余班次。
+     *
+     * @param shift 当前班次
+     * @param remainShiftType 剩余班次配置
+     * @return true-当前班次承担日标准产量余量；false-否
+     */
+    public static boolean isDailyStandardRemainShift(LhShiftConfigVO shift, String remainShiftType) {
+        if (Objects.isNull(shift) || !isValidPlusShiftType(remainShiftType)) {
+            return false;
+        }
+        Integer currentShiftType = resolveShiftTypeValue(shift.resolveShiftTypeEnum());
+        return Objects.nonNull(currentShiftType)
+                && currentShiftType == Integer.parseInt(remainShiftType.trim());
     }
 
     /**
@@ -312,6 +439,32 @@ public final class ShiftCapacityResolverUtil {
             return 0;
         }
         return Math.max(0, capacity.getStandardCapacity());
+    }
+
+    /**
+     * 解析日标准产量剩余班次的理论上限。
+     * <p>日标准量负责确定业务日目标，APS 日产只用于约束剩余班次最多可补到多少，
+     * 两者不得混用。主数据缺失或 APS 日产不足时保持原班产上限。</p>
+     *
+     * @param context 排程上下文
+     * @param materialCode 物料编码
+     * @param classCapacity 原始班产
+     * @return 剩余班次理论上限
+     */
+    public static int resolveDailyStandardRemainShiftCapacityUpperLimit(LhScheduleContext context,
+                                                                         String materialCode,
+                                                                         int classCapacity) {
+        int baseCapacity = Math.max(0, classCapacity);
+        if (Objects.isNull(context) || StringUtils.isEmpty(materialCode)) {
+            return baseCapacity;
+        }
+        MdmSkuLhCapacity capacity = context.getSkuLhCapacityMap().get(materialCode);
+        if (Objects.isNull(capacity) || Objects.isNull(capacity.getApsCapacity())
+                || capacity.getApsCapacity() <= 0) {
+            return baseCapacity;
+        }
+        int apsShiftCapacity = capacity.getApsCapacity() / LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY;
+        return Math.max(baseCapacity, apsShiftCapacity);
     }
 
     /**

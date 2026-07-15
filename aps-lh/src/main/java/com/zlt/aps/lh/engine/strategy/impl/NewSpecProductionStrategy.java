@@ -3469,6 +3469,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         int plannedRepairFixedQty = context.getParamIntValue(
                 LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
+        String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
+        int remainShiftCapacityUpperLimit =
+                ShiftCapacityResolverUtil.resolveDailyStandardRemainShiftCapacityUpperLimit(
+                        context, sku.getMaterialCode(), shiftCapacity);
+        boolean singleControlMachine = isSingleControlMachine(context, machine.getMachineCode());
         boolean started = false;
         for (LhShiftConfigVO shift : shifts) {
             if (!started) {
@@ -3482,10 +3487,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (control == null || !control.isCanSchedule()) {
                 continue;
             }
+            // 日标准量高于“班产×3”时，仅剩余班次使用独立理论上限计算真实可排量。
+            int currentShiftCapacity = !singleControlMachine
+                    && ShiftCapacityResolverUtil.isDailyStandardRemainShift(shift, remainShiftType)
+                    ? remainShiftCapacityUpperLimit : shiftCapacity;
             int actualShiftPlanQty = ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
-                    shiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
+                    currentShiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
             boolean oddShiftAdjustEnabled = ShiftCapacityResolverUtil.isOddShiftCapacityAdjustEnabled(
-                    shiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
+                    currentShiftCapacity, shift, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode());
             log.debug("奇数班产修正检查, 当前流程: 新增排程, materialCode: {}, machineCode: {}, 参数是否配置: {}, "
                             + "参数值: {}, 配置值是否合法: {}, 是否启用: {}, 未启用原因: {}, 原始班产: {}, "
                             + "班次序号: {}, 当前班别: {}, 当前班次修正后的计划量: {}, 班产落库字段值: {}",
@@ -3504,7 +3513,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     machine.getMachineCode(),
                     control.getEffectiveStartTime(),
                     control.getEffectiveEndTime(),
-                    shiftCapacity,
+                    currentShiftCapacity,
                     sku.getLhTimeSeconds(),
                     mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
@@ -3567,15 +3576,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
         boolean singleControlMachine = isSingleControlMachine(context, machineCode);
         int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(context, sku.getMaterialCode());
+        int remainShiftCapacityUpperLimit =
+                ShiftCapacityResolverUtil.resolveDailyStandardRemainShiftCapacityUpperLimit(
+                        context, sku.getMaterialCode(), runtimeShiftCapacity);
         Map<Integer, Integer> adjustedMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
-                shifts, shiftCapacityMap, dailyStandardQty, runtimeShiftCapacity,
+                shifts, shiftCapacityMap, shiftCapacityMap, dailyStandardQty, runtimeShiftCapacity,
+                remainShiftCapacityUpperLimit,
                 remainShiftType, singleControlMachine, ScheduleTypeEnum.NEW_SPEC.getCode());
         if (!Objects.equals(shiftCapacityMap, adjustedMap)) {
             log.info("日标准产量班次计划量修正, 当前流程: 新增排程, materialCode: {}, machineCode: {}, "
-                            + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 日标准产量剩余班次参数值: {}, "
+                            + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 剩余班次理论上限: {}, "
+                            + "日标准产量剩余班次参数值: {}, "
                             + "修正前班次计划量: {}, 修正后班次计划量: {}",
                     sku.getMaterialCode(), machineCode, singleControlMachine, dailyStandardQty,
-                    runtimeShiftCapacity, remainShiftType, shiftCapacityMap, adjustedMap);
+                    runtimeShiftCapacity, remainShiftCapacityUpperLimit, remainShiftType,
+                    shiftCapacityMap, adjustedMap);
         }
         return adjustedMap;
     }
@@ -4798,18 +4813,23 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         // 冻结为单模的SKU使用单控机台时，单台日硫化标准量折半，
         // 避免扩机台模拟高估单控单侧机台产能，导致加机台数量不足
         int simulationShiftCapacity = Math.max(0, sku.getShiftCapacity());
-        if (LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)
+        int simulationDailyStandardQty = resolveNewSpecDailyStandardQty(context, sku);
+        boolean singleControlSideCapacity = LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)
                 && Objects.nonNull(candidateMachine)
                 && LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
-                        context, candidateMachine.getMachineCode())) {
+                        context, candidateMachine.getMachineCode());
+        if (singleControlSideCapacity) {
             simulationShiftCapacity = Math.max(1, simulationShiftCapacity / 2);
+            simulationDailyStandardQty = Math.max(1, simulationDailyStandardQty / 2);
         }
         request.setShiftCapacity(simulationShiftCapacity);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         request.setSingleMachineWindowCapacityQty(ShiftCapacityResolverUtil.sumActualShiftPlanQty(
                 shifts, simulationShiftCapacity, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
-        request.setSingleMachineDailyCapacityMap(ShiftCapacityResolverUtil.sumActualShiftPlanQtyByWorkDate(
-                shifts, simulationShiftCapacity, configPlusShiftType, ScheduleTypeEnum.NEW_SPEC.getCode()));
+        // 该产能图只用于 dayN 是否增加机台判断，T 日和后续业务日统一使用正式日硫化标准。
+        // 候选机台的真实可排量仍由 machineDailyCapacityList 和窗口班次产能计算，不改变实际排产语义。
+        request.setSingleMachineDailyCapacityMap(buildAddMachineDailyTheoryCapacityMap(
+                request.getDailyPlanQuotaMap(), simulationDailyStandardQty));
         request.setShortageLookAheadDays(resolveNewSpecShortageLookAheadDays(context));
         int monthlyHistoryShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
         request.setMonthlyHistoryShortageQty(monthlyHistoryShortageQty);
@@ -5132,6 +5152,30 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     * LhScheduleConstant.DEFAULT_SHIFTS_PER_DAY;
         }
         return dailyStandardQty;
+    }
+
+    /**
+     * 构建新增扩机判断专用的正式日硫化标准产能图。
+     * <p>T 日、T+1、T+2 及后看业务日使用相同单机日标准；该产能图不得用于实际班次排产。</p>
+     *
+     * @param quotaMap dayN 日计划账本
+     * @param dailyStandardQty 单机正式日硫化标准
+     * @return 按业务日展开的加机台判断产能图
+     */
+    private Map<LocalDate, Integer> buildAddMachineDailyTheoryCapacityMap(
+            Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+            int dailyStandardQty) {
+        Map<LocalDate, Integer> capacityMap = new LinkedHashMap<LocalDate, Integer>(
+                CollectionUtils.isEmpty(quotaMap) ? 0 : Math.max(4, quotaMap.size() * 2));
+        if (CollectionUtils.isEmpty(quotaMap) || dailyStandardQty <= 0) {
+            return capacityMap;
+        }
+        for (LocalDate productionDate : quotaMap.keySet()) {
+            if (Objects.nonNull(productionDate)) {
+                capacityMap.put(productionDate, dailyStandardQty);
+            }
+        }
+        return capacityMap;
     }
 
     /**
@@ -5969,7 +6013,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             + "当日欠产: {}, 当前日计划满足: {}, 是否进入后看: {}, 后看日期: {}, "
                             + "决策模式: {}, 是否超过阈值: {}, 窗口8班产能: {}, "
                             + "窗口计划总量: {}, 欠产阈值: {}, T日晚班完成: {}, 窗口有效产能: {}, "
-                            + "窗口后剩余欠产: {}, 后一天计划: {}, 后一天3班产能: {}, 累计需求: {}, "
+                            + "窗口后剩余欠产: {}, 后一天计划: {}, 后一天正式日硫化标准产能: {}, 累计需求: {}, "
                             + "累计产能: {}, 启用机台: {}, 新增机台: {}, 是否加机台: {}, 未满足: {}, 原因: {}",
                     sku.getMaterialCode(), segment.getMachineCode(), decision.getProductionDate(),
                     decision.getLookAheadEndDate(), decision.getTodayPlanQty(), decision.getCurrentDayPlanQty(),

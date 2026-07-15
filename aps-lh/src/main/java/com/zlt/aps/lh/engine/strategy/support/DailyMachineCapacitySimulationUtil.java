@@ -21,7 +21,7 @@ public final class DailyMachineCapacitySimulationUtil {
     private static final String MODE_WINDOW_TOTAL_CAPACITY = "8班窗口总产能";
     private static final String MODE_CURRENT_DAY_PLAN_SATISFIED = "当前日计划已满足";
     private static final String MODE_CURRENT_DAY_CAPACITY = "当前日计划缺口";
-    private static final String MODE_NEXT_DAY_CAPACITY = "后一天3班产能";
+    private static final String MODE_NEXT_DAY_CAPACITY = "后一天正式日硫化标准";
     private static final String MODE_WINDOW_LAST_DAY = "窗口末日";
 
     private DailyMachineCapacitySimulationUtil() {
@@ -173,7 +173,8 @@ public final class DailyMachineCapacitySimulationUtil {
              * 欠产未超过阈值时，每个业务日先判断当前机台数是否已满足当前日月计划量。
              * 窗口首日按日计划账本口径扣除T日晚班已完成量，避免完成量已覆盖的首日计划继续后看。
              * 当前日已满足则不继续后看下一日，避免因为后续高日计划提前在当前日盲目加机台。
-             * dayN 只作节奏判断，容量必须使用当前机台数 * 单日理论产能，不能被真实换模后残班产能放大缺口。
+             * dayN 只作节奏判断，T 日和后续日容量均使用当前机台数 * 正式日硫化标准，
+             * 不能因真实换模或 T 日剩余班次较少而缩小加机台判断产能。
              */
             demandQty = currentDayPlanQty;
             capacityQty = currentDayThreeShiftCapacityQty;
@@ -384,6 +385,7 @@ public final class DailyMachineCapacitySimulationUtil {
                 && Objects.nonNull(productionDate)) {
             Integer singleMachineDailyCapacityQty = request.getSingleMachineDailyCapacityMap().get(productionDate);
             if (singleMachineDailyCapacityQty != null && singleMachineDailyCapacityQty > 0) {
+                // 该产能图只服务是否加机台判断，生产日期不区分 T 日残班与后续完整业务日。
                 return Math.max(0, activeMachines) * singleMachineDailyCapacityQty;
             }
         }

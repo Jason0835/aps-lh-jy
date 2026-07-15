@@ -418,6 +418,35 @@ class ShiftCapacityResolverUtilTest {
     }
 
     @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldUseIndependentRemainShiftUpperLimit() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 7, 15));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 1, 16, 2, 16, 3, 16);
+
+        int afternoonQty = ShiftCapacityResolverUtil.calculateShiftPlanQtyByDailyStandard(
+                50, 16, 18, 16, shifts.get(1), "3", sameDayPlanQtyMap, false,
+                ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        assertEquals(18, afternoonQty,
+                "日标准量50高于班产16的三班合计时，中班应在独立理论上限18内补足日标准差额");
+    }
+
+    @Test
+    void calculateShiftPlanQtyByDailyStandard_shouldNotRaiseRestrictedRemainShiftAboveRawCapacity() {
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                new LhScheduleContext(), date(2026, 7, 15));
+        Map<Integer, Integer> sameDayPlanQtyMap = sameDayPlanQtyMap(shifts, 1, 16, 2, 14, 3, 16);
+
+        Map<Integer, Integer> adjustedMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
+                shifts, sameDayPlanQtyMap, sameDayPlanQtyMap, 50, 16, 18, "3", false,
+                ScheduleTypeEnum.CONTINUOUS.getCode());
+        int afternoonQty = adjustedMap.get(shifts.get(1).getShiftIndex());
+
+        assertEquals(14, afternoonQty,
+                "中班已被停机清洗等约束压缩时，不得为了补足日标准量反向抬高实际可排量");
+    }
+
+    @Test
     void calculateShiftPlanQtyByDailyStandard_shouldNotCutSchedulableRemainShiftToZero() {
         List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
                 new LhScheduleContext(), date(2026, 7, 3));
@@ -473,6 +502,22 @@ class ShiftCapacityResolverUtilTest {
         int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(capacity);
 
         assertEquals(46, dailyStandardQty, "日标准产量修正规则必须取SKU日硫化产能的标准产能字段");
+    }
+
+    @Test
+    void resolveDailyStandardRemainShiftCapacityUpperLimit_shouldUseApsCapacityOnlyAsUpperLimit() {
+        LhScheduleContext context = new LhScheduleContext();
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002177");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(50);
+        capacity.setApsCapacity(54);
+        context.getSkuLhCapacityMap().put("3302002177", capacity);
+
+        int upperLimit = ShiftCapacityResolverUtil.resolveDailyStandardRemainShiftCapacityUpperLimit(
+                context, "3302002177", 16);
+
+        assertEquals(18, upperLimit, "APS日产54只应折算为中班理论上限18，日标准量仍由标准产能50决定");
     }
 
     private int actualQty(List<LhShiftConfigVO> shifts, int shiftIndex, String configPlusShiftType) {

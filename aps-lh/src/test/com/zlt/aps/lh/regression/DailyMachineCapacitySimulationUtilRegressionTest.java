@@ -326,6 +326,40 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
     }
 
     @Test
+    void simulateExpansion_shouldUseDailyStandardForTDayEvenWhenActualShiftCapacityIsLower() {
+        LocalDate day1 = LocalDate.of(2026, 7, 15);
+        LocalDate day2 = LocalDate.of(2026, 7, 16);
+        LocalDate day3 = LocalDate.of(2026, 7, 17);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302002177");
+        request.setDailyPlanQuotaMap(quotaMap(day1, day2, day3, 50, 50, 50));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 32, 48, 48, 2));
+        request.setInitialActiveMachines(1);
+        request.setShiftCapacity(16);
+        request.setSingleMachineWindowCapacityQty(128);
+        Map<LocalDate, Integer> dailyStandardCapacityMap = new LinkedHashMap<LocalDate, Integer>(4);
+        dailyStandardCapacityMap.put(day1, 50);
+        dailyStandardCapacityMap.put(day2, 50);
+        dailyStandardCapacityMap.put(day3, 50);
+        request.setSingleMachineDailyCapacityMap(dailyStandardCapacityMap);
+        request.setScheduleDayFinishQty(12);
+        request.setShortageLookAheadDays(1);
+        request.setShortageAddMachineThreshold(100);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(day3);
+        request.setSceneType("newSpec");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(1, result.getFinalActiveMachines(),
+                "T日加机判断必须按正式日硫化标准50，不能按实际残班产能32新增第二台");
+        assertEquals(0, result.getTotalAddedMachineCount());
+        assertEquals(50, result.getDayDecisionList().get(0).getCapacityQty());
+        assertEquals("当前日计划已满足", result.getDayDecisionList().get(0).getDecisionMode());
+    }
+
+    @Test
     void simulateExpansion_shouldAddMachineWhenRolledCurrentAndNextDayPlanExceedDailyStandard() {
         LocalDate day1 = LocalDate.of(2026, 5, 9);
         LocalDate day2 = LocalDate.of(2026, 5, 10);
@@ -401,7 +435,7 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
                 "当前日未满足但下一日计划已被当前机台理论日产能覆盖时，不应增加机台");
         assertEquals(0, result.getTotalAddedMachineCount());
         assertEquals(0, result.getDayDecisionList().get(0).getAddedMachineCount());
-        assertEquals("后一天3班产能", result.getDayDecisionList().get(0).getDecisionMode());
+        assertEquals("后一天正式日硫化标准", result.getDayDecisionList().get(0).getDecisionMode());
     }
 
     @Test

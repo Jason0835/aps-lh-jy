@@ -1307,6 +1307,65 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * T 日加机台判断必须使用 SKU 正式日硫化标准，不能因窗口只剩部分班次而缩小单机日理论产能。
+     */
+    @Test
+    public void shouldUseDailyStandardCapacityForTDayAddMachineDecision() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002177", 16, 754,
+                buildQuotaMapByShifts(shifts, 50, 50, 50));
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(150);
+        sku.setScheduleDayFinishQty(12);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002177");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(50);
+        context.getSkuLhCapacityMap().put("3302002177", capacity);
+
+        boolean satisfied = DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        Assertions.assertTrue(satisfied);
+        Assertions.assertNull(addMachineDate);
+    }
+
+    /**
+     * 严格收尾目标仍有余量时，只要一台续作机台已满足正式日硫化标准，就不得生成新增补偿机台。
+     */
+    @Test
+    public void shouldNotGenerateStrictEndingCompensationWhenDailyStandardNeedsOneMachine() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302002177", 16, 754,
+                buildQuotaMapByShifts(shifts, 50, 50, 50));
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(150);
+        sku.setScheduleDayFinishQty(12);
+        sku.setStrictTargetQty(true);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002177");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(50);
+        context.getSkuLhCapacityMap().put("3302002177", capacity);
+        LhScheduleResult result = buildContinuousResult("3302002177", "K1611", 16, shifts, "1");
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+        context.getContinuousSkuList().add(sku);
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "appendContinuousCompensationSkuList", LhScheduleContext.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context);
+
+        Assertions.assertTrue(context.getNewSpecSkuList().isEmpty());
+    }
+
+    /**
      * 欠产未超过阈值时，窗口末日当前机台仍无法满足当日计划，必须判定需要加机台。
      */
     @Test
