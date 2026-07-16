@@ -18,6 +18,7 @@ import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
+import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -33,6 +34,7 @@ import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.DailyMachineShortageQuotaPlan;
 import com.zlt.aps.lh.engine.strategy.support.PendingSkuUnscheduledRule;
+import com.zlt.aps.lh.engine.strategy.support.SpecifiedMachineScheduleResult;
 import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
@@ -322,6 +324,148 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         log.info("换活字块排产结束, 新增结果数: {}, 剩余新增SKU: {}, 当前排程结果数: {}",
                 typeBlockScheduledCount, context.getNewSpecSkuList().size(),
                 context.getScheduleResultList().size());
+    }
+
+    /**
+     * 在历史指定机台上尝试换活字块排产。
+     *
+     * <p>历史计划的交替类型只用于检索范围，不直接继承。本方法先按当前机台物料、胎胚、
+     * 模具和活字块关系重新判断实际是否属于换活字块；不满足时返回“不适用”，由反选策略
+     * 转交新增换模主链。满足后继续复用现有切换资源、首检、班次产能、结果构建及账本更新。
+     * 历史映射班次是切换开始班次硬约束，历史具体时间不会参与计算。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 历史指定机台
+     * @param sku 当前实际账本选中的SKU状态
+     * @param mappedShiftIndex 历史班次映射后的当前班次
+     * @return 指定机台换活字块执行结果
+     */
+    @Override
+    public SpecifiedMachineScheduleResult tryScheduleSpecifiedMachine(
+            LhScheduleContext context,
+            MachineScheduleDTO machine,
+            SkuScheduleDTO sku,
+            int mappedShiftIndex) {
+        if (Objects.isNull(context) || Objects.isNull(machine) || Objects.isNull(sku)) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "排程上下文、指定机台或目标SKU为空");
+        }
+        if (!isTypeBlockCandidate(context, machine, sku)) {
+            return SpecifiedMachineScheduleResult.notApplicable("当前机台物料与目标SKU不满足换活字块条件");
+        }
+        LhShiftConfigVO mappedShift = LhScheduleTimeUtil.getShiftByIndex(
+                context, context.getScheduleDate(), mappedShiftIndex);
+        if (Objects.isNull(mappedShift) || Objects.isNull(mappedShift.getShiftStartDateTime())
+                || Objects.isNull(mappedShift.getShiftEndDateTime())) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "历史班次无法映射到本批次有效班次");
+        }
+        Date machineEndTime = machine.getEstimatedEndTime();
+        if (Objects.isNull(machineEndTime)) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "历史指定机台没有可用于重新计算的收尾时间");
+        }
+        Date alignedEndTime = machineEndTime.before(mappedShift.getShiftStartDateTime())
+                ? mappedShift.getShiftStartDateTime() : machineEndTime;
+        if (!alignedEndTime.before(mappedShift.getShiftEndDateTime())) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "历史指定机台在映射班次内已无可用切换时间");
+        }
+
+        List<LhShiftConfigVO> shifts =
+                LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
+        int resultStartIndex = context.getScheduleResultList().size();
+        int unscheduledStartIndex = context.getUnscheduledResultList().size();
+        boolean pendingBefore = context.getNewSpecSkuList().contains(sku);
+        Integer originalTargetQty = sku.getTargetScheduleQty();
+        Integer originalRemainingQty = sku.getRemainingScheduleQty();
+
+        Date switchStartTime = allocateTypeBlockSwitchStartTime(
+                context, machine, sku, alignedEndTime);
+        if (Objects.isNull(switchStartTime)
+                || switchStartTime.before(mappedShift.getShiftStartDateTime())
+                || !switchStartTime.before(mappedShift.getShiftEndDateTime())) {
+            if (Objects.nonNull(switchStartTime)) {
+                getMouldChangeBalanceStrategy().rollbackMouldChange(context, switchStartTime);
+            }
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "按本批机台状态重新分配后，换活字块开始时间未落在历史映射班次");
+        }
+        Date productionStartTime = resolveTypeBlockProductionStartTime(
+                context, machine, sku, alignedEndTime, switchStartTime, shifts);
+        StringBuilder failureReason = new StringBuilder(128);
+        boolean success = appendTypeBlockResultWithRollback(
+                context, machine, sku, productionStartTime, switchStartTime, shifts,
+                true, failureReason);
+        if (!success) {
+            /*
+             * 指定机台失败只代表本次反选失败，不得提前写入未排或把SKU移出普通新增队列。
+             * 换活字块主链已经回滚切换配额，这里只恢复其可能写入的待排上下文。
+             */
+            clearAddedUnscheduledResults(context, unscheduledStartIndex);
+            sku.setTargetScheduleQty(originalTargetQty);
+            sku.setRemainingScheduleQty(originalRemainingQty);
+            if (pendingBefore && !context.getNewSpecSkuList().contains(sku)) {
+                context.getNewSpecSkuList().add(sku);
+            }
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    StringUtils.isNotEmpty(failureReason.toString())
+                            ? failureReason.toString() : "换活字块主链未生成有效排程结果");
+        }
+        LhScheduleResult result = findSpecifiedTypeBlockResult(
+                context, machine, sku, resultStartIndex);
+        if (Objects.isNull(result)) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "换活字块主链返回成功但未找到对应排程结果");
+        }
+        return SpecifiedMachineScheduleResult.success(
+                result, MouldChangeTypeEnum.TYPE_BLOCK.getCode());
+    }
+
+    /**
+     * 清除指定机台尝试期间新增的未排结果。
+     *
+     * @param context 排程上下文
+     * @param originalSize 尝试前未排结果数量
+     */
+    private void clearAddedUnscheduledResults(LhScheduleContext context, int originalSize) {
+        if (context.getUnscheduledResultList().size() > originalSize) {
+            context.getUnscheduledResultList().subList(
+                    originalSize, context.getUnscheduledResultList().size()).clear();
+        }
+    }
+
+    /**
+     * 查找本次指定机台换活字块新生成的主结果。
+     *
+     * @param context 排程上下文
+     * @param machine 指定机台
+     * @param sku 目标SKU
+     * @param resultStartIndex 尝试前结果数量
+     * @return 对应排程结果；未找到返回null
+     */
+    private LhScheduleResult findSpecifiedTypeBlockResult(LhScheduleContext context,
+                                                          MachineScheduleDTO machine,
+                                                          SkuScheduleDTO sku,
+                                                          int resultStartIndex) {
+        for (int index = resultStartIndex; index < context.getScheduleResultList().size(); index++) {
+            LhScheduleResult result = context.getScheduleResultList().get(index);
+            if (Objects.nonNull(result)
+                    && StringUtils.equals(machine.getMachineCode(), result.getLhMachineCode())
+                    && StringUtils.equals(sku.getMaterialCode(), result.getMaterialCode())
+                    && StringUtils.equals(StringUtils.trimToEmpty(sku.getProductStatus()),
+                    StringUtils.trimToEmpty(result.getProductStatus()))) {
+                return result;
+            }
+        }
+        return null;
     }
 
     /**

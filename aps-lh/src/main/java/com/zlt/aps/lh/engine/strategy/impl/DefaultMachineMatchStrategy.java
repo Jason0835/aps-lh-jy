@@ -16,6 +16,7 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
+import com.zlt.aps.lh.engine.strategy.support.SpecifiedMachineMatchResult;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
@@ -210,6 +211,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         MachineFilterTrace trace = new MachineFilterTrace(context.getMachineScheduleMap().size());
 
         for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (isHistoricalReverseSelectedMachine(context, sku, machine.getMachineCode())) {
+                trace.recordFilteredMachine(machine, "同状态SKU已在该反选机台排产");
+                continue;
+            }
             if (isNotAllowedMachine(notAllowedMachineCodes, machine)) {
                 trace.notAllowedMachineFilteredCount++;
                 trace.recordFilteredMachine(machine, "定点机台不可作业");
@@ -259,6 +264,186 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 sku.getMaterialCode(), specialMaterialMatchResult.isSpecial(),
                 specialMaterialMatchResult.getCategoryDisplayText(), candidates.size());
         return candidates;
+    }
+
+    /**
+     * 校验历史交替计划指定的机台。
+     *
+     * <p>本方法只跳过普通选机的“最早收尾班次窗口”和候选优先级排序，定点不可作业、
+     * 机台状态、寸口、模套、特殊材料、模具占用以及单控整机/单边规则仍与普通新增选机一致。
+     * 正规双模SKU指定单控右侧时，单控规则以左侧作为物理整机代表返回，后续排产仍会同步占用
+     * L/R两侧，因此没有改变历史指定的物理机台关系。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待排产SKU
+     * @param machineCode 历史计划指定机台编码
+     * @return 指定机台硬约束匹配结果
+     */
+    @Override
+    public SpecifiedMachineMatchResult matchSpecifiedMachine(LhScheduleContext context,
+                                                             SkuScheduleDTO sku,
+                                                             String machineCode) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || StringUtils.isEmpty(machineCode)) {
+            return SpecifiedMachineMatchResult.failed("排程上下文、SKU或指定机台编码为空");
+        }
+        MachineScheduleDTO specifiedMachine = context.getMachineScheduleMap().get(machineCode);
+        if (Objects.isNull(specifiedMachine)) {
+            return SpecifiedMachineMatchResult.failed("本批次不存在历史指定机台");
+        }
+        if (isHistoricalReverseSelectedMachine(context, sku, machineCode)) {
+            return SpecifiedMachineMatchResult.failed("同状态SKU已在历史指定机台完成反选，不重复排产");
+        }
+        Set<String> notAllowedMachineCodes = LhSpecifyMachineUtil.resolveNotAllowedMachineCodes(
+                context, sku.getMaterialCode());
+        if (isNotAllowedMachine(notAllowedMachineCodes, specifiedMachine)) {
+            return SpecifiedMachineMatchResult.failed("历史指定机台命中SKU定点不可作业限制");
+        }
+
+        List<String> skuMouldCodes = getSkuMouldCodes(context, sku.getMaterialCode());
+        Set<String> occupiedMouldCodes = getOccupiedMouldCodes(context);
+        BigDecimal skuInch = parseInch(sku.getProSize());
+        SpecialMaterialMatchResult matchResult = LhSpecialMaterialUtil.resolveMatchResult(context, sku);
+        MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
+                context, sku, skuMouldCodes, occupiedMouldCodes, skuInch, matchResult, specifiedMachine);
+        if (MachineAvailabilityReason.AVAILABLE != availabilityReason) {
+            return SpecifiedMachineMatchResult.failed(
+                    resolveSpecifiedMachineFailureReason(availabilityReason));
+        }
+
+        /*
+         * 单控规则需要同时观察当前SKU的全部硬过滤候选，不能只校验单台。否则正规双模可能在
+         * 缺少配对侧时被错误放行，试制单模也可能错误落到普通机台。
+         */
+        List<MachineScheduleDTO> hardMatchedCandidates =
+                new ArrayList<MachineScheduleDTO>(context.getMachineScheduleMap().size());
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (Objects.isNull(machine)
+                    || isHistoricalReverseSelectedMachine(context, sku, machine.getMachineCode())
+                    || isNotAllowedMachine(notAllowedMachineCodes, machine)) {
+                continue;
+            }
+            if (MachineAvailabilityReason.AVAILABLE == resolveMachineAvailabilityReason(
+                    context, sku, skuMouldCodes, occupiedMouldCodes, skuInch, matchResult, machine)) {
+                hardMatchedCandidates.add(machine);
+            }
+        }
+        MachineFilterTrace trace = new MachineFilterTrace(context.getMachineScheduleMap().size());
+        List<MachineScheduleDTO> singleControlFiltered =
+                applySingleControlReservationRule(context, sku, hardMatchedCandidates, trace);
+        MachineScheduleDTO effectiveMachine = resolveSpecifiedMachineFromFilteredCandidates(
+                context, sku, machineCode, singleControlFiltered);
+        if (Objects.isNull(effectiveMachine)) {
+            return SpecifiedMachineMatchResult.failed("历史指定机台未通过单控整机/单边硬约束");
+        }
+        return SpecifiedMachineMatchResult.success(effectiveMachine);
+    }
+
+    /**
+     * 判断同一状态SKU是否已经在当前反选机台生成受保护结果。
+     *
+     * <p>普通机台和单边粒度按机台编码精确判断；正规双模SKU使用单控整机时按物理机台判断，
+     * 避免历史指定右侧、现有选机以左侧代表时再次重复占用同一物理整机。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param machineCode 待判断机台编码
+     * @return true-同状态SKU已完成该机台反选
+     */
+    private boolean isHistoricalReverseSelectedMachine(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       String machineCode) {
+        Set<String> selectedMachineCodes = context.getHistoricalReverseSelectedMachineCodes(
+                sku.getMaterialCode(), sku.getProductStatus());
+        if (CollectionUtils.isEmpty(selectedMachineCodes)) {
+            return false;
+        }
+        if (selectedMachineCodes.contains(machineCode)) {
+            return true;
+        }
+        if (!LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
+            return false;
+        }
+        String currentPhysicalMachineCode =
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode);
+        for (String selectedMachineCode : selectedMachineCodes) {
+            if (StringUtils.equals(currentPhysicalMachineCode,
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(selectedMachineCode))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 从单控规则过滤结果中解析指定机台。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param specifiedMachineCode 历史指定机台编码
+     * @param candidates 单控规则过滤后的候选
+     * @return 实际交给排产主链的候选机台
+     */
+    private MachineScheduleDTO resolveSpecifiedMachineFromFilteredCandidates(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            String specifiedMachineCode,
+            List<MachineScheduleDTO> candidates) {
+        if (CollectionUtils.isEmpty(candidates)) {
+            return null;
+        }
+        for (MachineScheduleDTO candidate : candidates) {
+            if (Objects.nonNull(candidate)
+                    && StringUtils.equals(specifiedMachineCode, candidate.getMachineCode())) {
+                return candidate;
+            }
+        }
+        if (!LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
+            return null;
+        }
+        String specifiedPhysicalMachine =
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(specifiedMachineCode);
+        for (MachineScheduleDTO candidate : candidates) {
+            if (Objects.nonNull(candidate)
+                    && StringUtils.equals(specifiedPhysicalMachine,
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(candidate.getMachineCode()))) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 将机台硬过滤枚举转换为可对账的中文失败原因。
+     *
+     * @param reason 机台不可用原因
+     * @return 中文失败原因
+     */
+    private String resolveSpecifiedMachineFailureReason(MachineAvailabilityReason reason) {
+        if (MachineAvailabilityReason.DISABLED == reason) {
+            return "历史指定机台已禁用";
+        }
+        if (MachineAvailabilityReason.INCH_MISMATCH == reason) {
+            return "SKU寸口超出历史指定机台范围";
+        }
+        if (MachineAvailabilityReason.MOULD_SET_MISMATCH == reason) {
+            return "SKU模套型号与历史指定机台不匹配";
+        }
+        if (MachineAvailabilityReason.SPECIAL_195_UNSUPPORTED == reason
+                || MachineAvailabilityReason.SPECIAL_225_UNSUPPORTED == reason
+                || MachineAvailabilityReason.SPECIAL_CHIP_UNSUPPORTED == reason
+                || MachineAvailabilityReason.SPECIAL_CATEGORY_UNSUPPORTED == reason) {
+            return "历史指定机台不支持SKU特殊材料分类";
+        }
+        if (MachineAvailabilityReason.CONTINUOUS_STOP_HOLD == reason) {
+            return "历史指定机台被续作停产保机计划占用";
+        }
+        if (MachineAvailabilityReason.MOULD_CONFLICT == reason) {
+            return "目标SKU可用模具已被占用";
+        }
+        if (MachineAvailabilityReason.STOP_TIMEOUT == reason) {
+            return "历史指定机台停机时间超过可排阈值";
+        }
+        return "历史指定机台未通过现有硬约束";
     }
 
     /**

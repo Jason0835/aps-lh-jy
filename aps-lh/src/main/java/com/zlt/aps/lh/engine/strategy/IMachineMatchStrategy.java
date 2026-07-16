@@ -6,6 +6,7 @@ package com.zlt.aps.lh.engine.strategy;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.engine.strategy.support.SpecifiedMachineMatchResult;
 
 import java.util.List;
 import java.util.Set;
@@ -30,6 +31,23 @@ public interface IMachineMatchStrategy {
      * @return 候选机台列表(按优先级排序)
      */
     List<MachineScheduleDTO> matchMachines(LhScheduleContext context, SkuScheduleDTO sku);
+
+    /**
+     * 校验并返回指定机台。
+     *
+     * <p>该入口复用普通新增选机的全部硬过滤和单控粒度规则，但不执行最早收尾班次筛选、
+     * 候选机台排序和最优机台选择。适用于业务已经固定“机台+SKU”关系的反选场景。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待排产SKU
+     * @param machineCode 历史计划指定的机台编码
+     * @return 指定机台匹配结果，失败时包含明确业务原因
+     */
+    default SpecifiedMachineMatchResult matchSpecifiedMachine(LhScheduleContext context,
+                                                              SkuScheduleDTO sku,
+                                                              String machineCode) {
+        return SpecifiedMachineMatchResult.failed("当前机台匹配策略不支持指定机台模式");
+    }
 
     /**
      * 判断 SKU 在单控模式冻结时是否至少存在一个满足静态硬约束的单控侧。

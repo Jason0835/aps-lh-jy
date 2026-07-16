@@ -13,6 +13,7 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
+import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
@@ -349,6 +350,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 runDataInitTaskAsync("前日模具交替计划",
                         () -> loadPreviousMouldChangePlans(context, factoryCode, targetDate),
                         () -> sizeOf(context.getPreviousMouldChangePlanList())),
+                runDataInitTaskAsync("反选历史模具交替计划",
+                        () -> loadHistoricalReverseMouldChangePlans(context, factoryCode, targetDate),
+                        () -> sizeOf(context.getHistoricalReverseMouldChangePlanList())),
                 runDataInitTaskAsync("SKU与示方书关系",
                         () -> loadSkuConstructionRef(context, factoryCode),
                         () -> sizeOf(context.getSkuConstructionRefMap())),
@@ -777,6 +781,39 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         context.setPreviousMouldChangePlanList(list != null ? list : new ArrayList<>());
         log.info("前日模具交替计划加载完成, 数量: {}, 日期: {}",
                 context.getPreviousMouldChangePlanList().size(), LhScheduleTimeUtil.formatDate(previousDate));
+    }
+
+    /**
+     * 加载前日交替计划机台反选使用的历史计划。
+     *
+     * <p>反选关系必须严格继承“业务目标日前一日”的换模、换活字块计划，因此这里直接使用
+     * {@code targetDate - 1}，不得复用滚动排程的前日日期解析。强制重排时，滚动衔接可能从
+     * 窗口起点回看历史结果，而反选业务仍只认目标日前一日，两种口径必须隔离。</p>
+     *
+     * @param context 排程上下文
+     * @param factoryCode 分厂编号
+     * @param targetDate 排程业务目标日
+     */
+    private void loadHistoricalReverseMouldChangePlans(LhScheduleContext context,
+                                                       String factoryCode,
+                                                       Date targetDate) {
+        Date historicalScheduleDate =
+                LhScheduleTimeUtil.clearTime(LhScheduleTimeUtil.addDays(targetDate, -1));
+        List<LhMouldChangePlan> list = lhMouldChangePlanMapper.selectList(
+                new LambdaQueryWrapper<LhMouldChangePlan>()
+                        .eq(LhMouldChangePlan::getFactoryCode, factoryCode)
+                        .eq(LhMouldChangePlan::getScheduleDate, historicalScheduleDate)
+                        .eq(LhMouldChangePlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
+                        .in(LhMouldChangePlan::getChangeMouldType,
+                                MouldChangeTypeEnum.REGULAR.getCode(),
+                                MouldChangeTypeEnum.TYPE_BLOCK.getCode()));
+        context.setHistoricalReverseMouldChangePlanList(
+                Objects.nonNull(list) ? list : new ArrayList<LhMouldChangePlan>(0));
+        log.info("反选历史模具交替计划加载完成, factoryCode: {}, scheduleTargetDate: {}, "
+                        + "historicalScheduleDate: {}, 数量: {}",
+                factoryCode, LhScheduleTimeUtil.formatDate(targetDate),
+                LhScheduleTimeUtil.formatDate(historicalScheduleDate),
+                context.getHistoricalReverseMouldChangePlanList().size());
     }
 
     /**
