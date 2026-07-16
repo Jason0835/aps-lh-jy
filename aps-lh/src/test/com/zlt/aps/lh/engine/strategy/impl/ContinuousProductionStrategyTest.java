@@ -11,6 +11,7 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -1473,6 +1474,29 @@ public class ContinuousProductionStrategyTest {
 
         assertEquals("K1102", removeOrder.get(0).getLhMachineCode(),
                 "当前续作SKU本身及无未来计划的其他关联SKU均不得计入共用性，应继续按清洗计划下机");
+    }
+
+    /**
+     * 续作降模统一选出下机机台时，应同步记录机台和前物料来源SKU，供 S4.6 读取最终剩余账本。
+     */
+    @Test
+    public void scheduleReduceMould_shouldRecordBeforeSkuForEndType() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectField(strategy, "endingJudgmentStrategy", new StubEndingJudgmentStrategy());
+        LhScheduleContext context = buildMultiMachineContinuationContext(
+                ConstructionStageEnum.FORMAL.getCode(), false, 48, 48, 20, 1, "K1101", "K1102");
+        SkuScheduleDTO sourceSku = context.getContinuousSkuList().get(0);
+        sourceSku.setSurplusQty(126);
+
+        strategy.scheduleReduceMould(context);
+
+        assertEquals(1, context.getScheduleResultList().size());
+        assertSame(sourceSku, context.getReducedContinuationMachineBeforeSkuMap()
+                .get("K1102").get(sourceSku.getMaterialCode()));
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                sourceSku.getMaterialCode(), sourceSku.getProductStatus());
+        assertEquals(Integer.valueOf(78), context.getSkuProductionRemainingQtyMap().get(skuKey),
+                "初始余量126扣除本次续作48后仍剩78，属于本次不能收尾");
     }
 
     @Test

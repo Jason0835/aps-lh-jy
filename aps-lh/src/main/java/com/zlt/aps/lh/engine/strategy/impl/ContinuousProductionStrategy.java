@@ -2462,6 +2462,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         List<LhScheduleResult> keptResults = Collections.singletonList(keptResult);
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(
                 context, sourceSku, skuResults, keptResults);
+        // 登记真实续作降模机台及前物料 SKU，供 S4.6 使用最终运行态余量判断是否按时间下机。
+        registerReducedContinuationMachineBeforeSku(context, sourceSku, removedResults);
         for (LhScheduleResult result : removedResults) {
             recordSharedEmbryoEndingStaggerReleaseCandidate(context, sourceSku, result);
             redistributeShiftQty(context, result, shifts, 0);
@@ -3296,6 +3298,46 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         removedResults.sort(buildContinuationReduceRemoveComparator(context, sourceSku));
         return removedResults;
+    }
+
+    /**
+     * 登记续作降模下机机台对应的前物料来源 SKU。
+     * <p>续作降模的各条实际释放入口在统一选出下机结果后调用本方法；只做排序预判的入口不得调用，
+     * 窗口无计划、首日无计划和收尾小余量阈值跳过等其他释放场景也不会进入该快照。这里保留来源
+     * SKU，而不是冻结降模时的初始余量，是为了让 S4.6 能按“物料+产品状态”读取本次排程所有入口
+     * 扣减完成后的实际剩余账本，准确区分本次可收尾和本次不能收尾。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 发生降模的续作前物料
+     * @param removedResults 本次降模选出的下机结果
+     */
+    private void registerReducedContinuationMachineBeforeSku(LhScheduleContext context,
+                                                              SkuScheduleDTO sourceSku,
+                                                              List<LhScheduleResult> removedResults) {
+        if (Objects.isNull(context) || Objects.isNull(sourceSku)
+                || StringUtils.isEmpty(sourceSku.getMaterialCode())
+                || CollectionUtils.isEmpty(removedResults)) {
+            return;
+        }
+        List<String> registeredMachineCodeList = new ArrayList<String>(removedResults.size());
+        for (LhScheduleResult result : removedResults) {
+            if (Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())) {
+                continue;
+            }
+            Map<String, SkuScheduleDTO> beforeSkuMap = context
+                    .getReducedContinuationMachineBeforeSkuMap()
+                    .computeIfAbsent(result.getLhMachineCode(), key -> new LinkedHashMap<String, SkuScheduleDTO>(2));
+            if (!beforeSkuMap.containsKey(sourceSku.getMaterialCode())) {
+                registeredMachineCodeList.add(result.getLhMachineCode());
+            }
+            beforeSkuMap.put(sourceSku.getMaterialCode(), sourceSku);
+        }
+        if (!CollectionUtils.isEmpty(registeredMachineCodeList)) {
+            log.info("登记续作降模下机END_TYPE判定前物料, materialCode: {}, productStatus: {}, "
+                            + "initialSurplusQty: {}, machineCodes: {}",
+                    sourceSku.getMaterialCode(), sourceSku.getProductStatus(),
+                    Math.max(0, sourceSku.getSurplusQty()), String.join(",", registeredMachineCodeList));
+        }
     }
 
     /**
@@ -4191,6 +4233,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(
                 context, sourceSku, skuResults, keptResults);
+        // 登记真实续作降模机台及前物料 SKU，供 S4.6 使用最终运行态余量判断是否按时间下机。
+        registerReducedContinuationMachineBeforeSku(context, sourceSku, removedResults);
         for (LhScheduleResult result : removedResults) {
             boolean nightShiftProtected = applyNoMouldChangeNightFillBeforeRelease(
                     context, sourceSku, result, shifts, ending);
@@ -4429,6 +4473,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 : selectDaySupplementMachines(context, sourceSku, activeResults, keptResults);
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(
                 context, sourceSku, activeResults, keptResults);
+        // 登记真实续作降模机台及前物料 SKU，供 S4.6 使用最终运行态余量判断是否按时间下机。
+        registerReducedContinuationMachineBeforeSku(context, sourceSku, removedResults);
         if (!CollectionUtils.isEmpty(removedResults)) {
             // 已按 dayN 节奏完成续作降模释放，后续补偿链路不能再把同物料释放机台补回。
             context.getReducedContinuationGroupKeySet().add(buildReducedContinuationKey(sourceSku));

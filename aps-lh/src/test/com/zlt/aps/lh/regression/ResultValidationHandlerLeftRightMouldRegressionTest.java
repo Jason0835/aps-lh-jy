@@ -11,6 +11,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.handler.ResultValidationHandler;
@@ -164,6 +165,170 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
         assertEquals("当前在机物料", plan.getBeforeMaterialDesc());
         assertEquals("MAT-NEW", plan.getAfterMaterialCode());
         assertEquals("排程物料", plan.getAfterMaterialDesc());
+    }
+
+    /**
+     * 续作降模机台仍有前物料余量，因正规换模生成交替计划时，应按时间下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldUseTimeEndTypeForReducedContinuationRegularChange() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1501", "MAT-BEFORE", "降模前物料");
+        registerReducedContinuationSnapshot(context, "K1501", "MAT-BEFORE", 18, 6);
+
+        LhScheduleResult result = buildChangeResult("K1501", "MAT-AFTER", "换模后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        // 后物料是否收尾不得影响 END_TYPE，本用例故意设为收尾，验证判断只读取前物料快照。
+        result.setIsEnd("1");
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals("1", context.getMouldChangePlanList().get(0).getEndType());
+    }
+
+    /**
+     * 续作降模机台仍有前物料余量，因换活字块生成交替计划时，应按时间下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldUseTimeEndTypeForReducedContinuationTypeBlockChange() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1502", "MAT-BEFORE", "降模前物料");
+        registerReducedContinuationSnapshot(context, "K1502", "MAT-BEFORE", 12, 4);
+
+        LhScheduleResult result = buildChangeResult("K1502", "MAT-AFTER", "换活字块后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        result.setIsTypeBlock("1");
+        result.setIsEnd("1");
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                context.getMouldChangePlanList().get(0).getChangeMouldType());
+        assertEquals("1", context.getMouldChangePlanList().get(0).getEndType());
+    }
+
+    /**
+     * 喷砂、干冰清洗只有在清洗时点的前物料属于续作降模且仍有余量时，才按时间下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldUseTimeEndTypeForReducedContinuationCleaningPlans() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        MachineScheduleDTO sandBlastMachine = buildCleaningMachine(
+                "K1503", "MAT-SAND", CleaningTypeEnum.SAND_BLAST.getCode(), dateTime(2026, 4, 17, 8, 0));
+        MachineScheduleDTO dryIceMachine = buildCleaningMachine(
+                "K1504", "MAT-DRY", CleaningTypeEnum.DRY_ICE.getCode(), dateTime(2026, 4, 17, 9, 0));
+        // 最终机台态故意设为收尾，验证清洗 END_TYPE 不再读取后置机台 ending 状态。
+        sandBlastMachine.setEnding(true);
+        dryIceMachine.setEnding(true);
+        context.getMachineScheduleMap().put("K1503", sandBlastMachine);
+        context.getInitialMachineScheduleMap().put("K1503", sandBlastMachine);
+        context.getMachineScheduleMap().put("K1504", dryIceMachine);
+        context.getInitialMachineScheduleMap().put("K1504", dryIceMachine);
+        registerReducedContinuationSnapshot(context, "K1503", "MAT-SAND", 9, 3);
+        registerReducedContinuationSnapshot(context, "K1504", "MAT-DRY", 7, 1);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(2, context.getMouldChangePlanList().size());
+        assertTrue(context.getMouldChangePlanList().stream().allMatch(plan -> "1".equals(plan.getEndType())));
+    }
+
+    /**
+     * 前物料正常按余量收尾而非续作降模释放时，即使后续换模也必须按余量收尾下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldUseRemainingQtyEndTypeForNormalEndingBeforeMaterial() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1505", "MAT-BEFORE", "正常收尾前物料");
+        LhScheduleResult result = buildChangeResult("K1505", "MAT-AFTER", "换模后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals("0", context.getMouldChangePlanList().get(0).getEndType());
+    }
+
+    /**
+     * 前物料虽然属于续作降模下机，但硫化余量已经为0时，仍应按余量收尾下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldUseRemainingQtyEndTypeWhenReducedContinuationHasNoSurplus() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1508", "MAT-BEFORE", "零余量降模前物料");
+        registerReducedContinuationSnapshot(context, "K1508", "MAT-BEFORE", 0, 0);
+        LhScheduleResult result = buildChangeResult("K1508", "MAT-AFTER", "换模后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals("0", context.getMouldChangePlanList().get(0).getEndType());
+    }
+
+    /**
+     * 前物料虽然由续作降模释放且排前余量大于0，但本次排程已将该SKU余量排完时，应按余量收尾下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldUseRemainingQtyEndTypeWhenBeforeMaterialCanFinishThisSchedule() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1509", "MAT-BEFORE", "本次可收尾前物料");
+        // 初始余量大于0，但运行态剩余账本已扣减为0，表示该前物料SKU可在本次排程中收尾。
+        registerReducedContinuationSnapshot(context, "K1509", "MAT-BEFORE", 18, 0);
+        LhScheduleResult result = buildChangeResult("K1509", "MAT-AFTER", "换模后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals("0", context.getMouldChangePlanList().get(0).getEndType());
+    }
+
+    /**
+     * 小余量阈值跳过只属于续作释放，不属于续作降模，后续交替计划必须按余量收尾下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldUseRemainingQtyEndTypeForSmallSurplusSkippedBeforeMaterial() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1506", "MAT-SMALL", "小余量跳过物料");
+        // 复刻小余量规则已有释放结果，但不登记续作降模快照。
+        context.getReleasedContinuousMachineCodeSet().add("K1506");
+        context.getTypeBlockReleasedContinuousMachineCodeSet().add("K1506");
+        LhScheduleResult result = buildChangeResult("K1506", "MAT-AFTER", "换活字块后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        result.setIsTypeBlock("1");
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals("0", context.getMouldChangePlanList().get(0).getEndType());
+    }
+
+    /**
+     * 后物料即使存在续作降模快照，只要交替计划前物料不满足条件，仍必须按余量收尾下机。
+     */
+    @Test
+    void generateMouldChangePlan_shouldIgnoreAfterMaterialWhenResolvingEndType() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1507", "MAT-BEFORE", "不满足条件的前物料");
+        registerReducedContinuationSnapshot(context, "K1507", "MAT-AFTER", 20, 8);
+        LhScheduleResult result = buildChangeResult("K1507", "MAT-AFTER", "满足条件的后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 14, 0));
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals("0", context.getMouldChangePlanList().get(0).getEndType());
     }
 
     @Test
@@ -700,6 +865,73 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
         SkuScheduleDTO sku = new SkuScheduleDTO();
         sku.setMaterialCode(materialCode);
         return sku;
+    }
+
+    /**
+     * 准备生成模具交替计划所需的机台初始前物料快照。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param materialCode 前物料编码
+     * @param materialDesc 前物料描述
+     */
+    private void prepareInitialMachine(LhScheduleContext context, String machineCode,
+                                       String materialCode, String materialDesc) {
+        context.setMachineScheduleMap(new LinkedHashMap<>());
+        context.setInitialMachineScheduleMap(new LinkedHashMap<>());
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setCurrentMaterialCode(materialCode);
+        machine.setCurrentMaterialDesc(materialDesc);
+        context.getMachineScheduleMap().put(machineCode, machine);
+        context.getInitialMachineScheduleMap().put(machineCode, machine);
+    }
+
+    /**
+     * 登记测试所需的续作降模前物料 SKU 及其本次排程剩余账本。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param materialCode 降模前物料编码
+     * @param surplusQty 排程前已计算的硫化余量
+     * @param remainingQty 本次排程全部入口扣减后的剩余量
+     */
+    private void registerReducedContinuationSnapshot(LhScheduleContext context, String machineCode,
+                                                     String materialCode, int surplusQty, int remainingQty) {
+        SkuScheduleDTO beforeSku = new SkuScheduleDTO();
+        beforeSku.setMaterialCode(materialCode);
+        beforeSku.setSurplusQty(surplusQty);
+        context.getReducedContinuationMachineBeforeSkuMap()
+                .computeIfAbsent(machineCode, key -> new LinkedHashMap<>())
+                .put(materialCode, beforeSku);
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(materialCode, beforeSku.getProductStatus());
+        context.getSkuProductionRemainingQtyMap().put(skuKey, remainingQty);
+    }
+
+    /**
+     * 构造带单个清洗窗口的机台。
+     *
+     * @param machineCode 机台编码
+     * @param materialCode 清洗时点前物料编码
+     * @param cleaningType 清洗类型
+     * @param cleanStartTime 清洗开始时间
+     * @return 清洗机台
+     */
+    private MachineScheduleDTO buildCleaningMachine(String machineCode, String materialCode,
+                                                    String cleaningType, Date cleanStartTime) {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setMachineName("华澳");
+        machine.setCurrentMaterialCode(materialCode);
+        machine.setCurrentMaterialDesc("清洗前物料");
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setLhCode(machineCode);
+        cleaningWindow.setCleanType(cleaningType);
+        cleaningWindow.setCleanStartTime(cleanStartTime);
+        cleaningWindow.setCleanEndTime(new Date(cleanStartTime.getTime() + 3 * 60 * 60 * 1000L));
+        cleaningWindow.setMouldCode("MOULD-" + machineCode);
+        machine.setCleaningWindowList(Collections.singletonList(cleaningWindow));
+        return machine;
     }
 
     private void invokeManualSundaySandBlastValidationWithoutException(ResultValidationHandler handler, LhScheduleContext context)

@@ -87,6 +87,10 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
     private static final AtomicInteger CHG_SEQ = new AtomicInteger(0);
     private static final int ENABLED = 1;
     private static final String CLEANING_DATA_SOURCE_MANUAL = "0";
+    /** 按余量收尾下机：除续作降模且前物料本次不能收尾的场景外统一使用该值。 */
+    private static final String END_TYPE_BY_REMAINING_QTY = "0";
+    /** 按时间下机：用于续作降模且前物料本次排程不能收尾的场景，与交替类型无关。 */
+    private static final String END_TYPE_BY_TIME = "1";
 
     @Override
     protected void doHandle(LhScheduleContext context) {
@@ -849,7 +853,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setIsRelease("0");
             plan.setMouldStatus("0");
             plan.setIsDelete(0);
-            plan.setEndType("1".equals(result.getIsEnd()) ? "0" : "1");
+            // END_TYPE 必须描述换模前物料的下机方式，不得读取当前准备上机的后物料 isEnd。
+            plan.setEndType(resolveMouldChangePlanEndType(context, result.getLhMachineCode(),
+                    state.getCurrentMaterialCode()));
             plan.setChangeTime(resolvePlanChangeTime(result, state));
 
             // 判断交替类型：普通换模、换活字块、干冰清洗、喷砂清洗在这里统一落数据字典值。
@@ -1033,6 +1039,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             String machineCode = resolveCleaningMachineCode(machine, cleaningWindow);
             RollingMachineState cleaningState = resolveCleaningMaterialState(context, changeResults,
                     machineCode, cleaningWindow.getCleanStartTime());
+            String changeMouldType = resolveCleaningMouldChangeType(cleaningWindow);
             LhMouldChangePlan plan = new LhMouldChangePlan();
             plan.setFactoryCode(context.getFactoryCode());
             plan.setLhResultBatchNo(context.getBatchNo());
@@ -1049,17 +1056,78 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             plan.setBeforeMaterialDesc(cleaningState.getCurrentMaterialDesc());
             plan.setAfterMaterialCode(cleaningState.getCurrentMaterialCode());
             plan.setAfterMaterialDesc(cleaningState.getCurrentMaterialDesc());
-            plan.setChangeMouldType(resolveCleaningMouldChangeType(cleaningWindow));
+            plan.setChangeMouldType(changeMouldType);
             plan.setChangeTime(cleaningWindow.getCleanStartTime());
             plan.setMouldCode(cleaningWindow.getMouldCode());
             plan.setIsRelease("0");
             plan.setMouldStatus("0");
             plan.setRemark(cleaningWindow.getRemark());
             plan.setIsDelete(0);
-            plan.setEndType(machine.isEnding() ? "0" : "1");
+            // 清洗计划同样按清洗发生时点的前物料判断，不能读取排程结束后的机台 ending 状态。
+            plan.setEndType(resolveMouldChangePlanEndType(context, machineCode,
+                    cleaningState.getCurrentMaterialCode()));
             plans.add(plan);
         }
         return planOrder;
+    }
+
+    /**
+     * 解析模具交替计划下机类型。
+     * <p>只有同时满足以下条件才返回1（按时间下机）：交替计划前物料所在机台由续作降模规则选中下机、
+     * 前物料排程前硫化余量大于0、本次排程全部入口扣减后仍有剩余量。交替类型不参与 END_TYPE 判断；
+     * 若本次排程可将前物料SKU余量排完，则属于正常收尾，统一返回0。</p>
+     * <p>收尾小余量阈值跳过虽然也会释放续作机台，但不会写入续作降模快照，因此会稳定返回0；
+     * 同时以“机台+前物料”精确匹配，避免后物料满足条件时反向污染本条交替计划。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 交替计划机台编码
+     * @param beforeMaterialCode 交替计划前物料编码
+     * @return 1-按时间下机；0-按余量收尾下机
+     */
+    private String resolveMouldChangePlanEndType(LhScheduleContext context,
+                                                 String machineCode,
+                                                 String beforeMaterialCode) {
+        Map<String, SkuScheduleDTO> beforeSkuMap = Objects.isNull(context)
+                || CollectionUtils.isEmpty(context.getReducedContinuationMachineBeforeSkuMap())
+                ? null : context.getReducedContinuationMachineBeforeSkuMap().get(machineCode);
+        SkuScheduleDTO beforeSku = CollectionUtils.isEmpty(beforeSkuMap)
+                || StringUtils.isEmpty(beforeMaterialCode) ? null : beforeSkuMap.get(beforeMaterialCode);
+        boolean reducedContinuationMachine = Objects.nonNull(beforeSku);
+        int beforeMaterialSurplusQty = reducedContinuationMachine ? Math.max(0, beforeSku.getSurplusQty()) : 0;
+        Integer beforeMaterialRemainingQty = resolveBeforeMaterialRemainingQty(context, beforeSku);
+        boolean beforeMaterialCannotFinish = reducedContinuationMachine
+                && beforeMaterialSurplusQty > 0
+                && Objects.nonNull(beforeMaterialRemainingQty)
+                && beforeMaterialRemainingQty > 0;
+        String endType = beforeMaterialCannotFinish
+                ? END_TYPE_BY_TIME : END_TYPE_BY_REMAINING_QTY;
+        log.info("模具交替计划END_TYPE判断, machineCode: {}, beforeMaterialCode: {}, "
+                        + "reducedContinuationMachine: {}, beforeMaterialSurplusQty: {}, "
+                        + "beforeMaterialRemainingQty: {}, beforeMaterialCannotFinish: {}, endType: {}",
+                machineCode, beforeMaterialCode, reducedContinuationMachine, beforeMaterialSurplusQty,
+                beforeMaterialRemainingQty, beforeMaterialCannotFinish, endType);
+        return endType;
+    }
+
+    /**
+     * 读取前物料 SKU 在本次排程全部入口消费后的剩余量。
+     * <p>续作、换活字块、续作补偿新增等入口统一扣减 SKU 实际消费账本，账本 key 为“物料+产品状态”。
+     * S4.6 位于排程结果保存前，此时读取到的是本次排程最终剩余量：大于0表示本次不能收尾，等于0表示
+     * 本次可以排完。账本缺失时不重新计算、不使用初始余量兜底，按不满足时间下机条件处理，避免误标。</p>
+     *
+     * @param context 排程上下文
+     * @param beforeSku 续作降模时登记的前物料来源 SKU
+     * @return 本次排程后的 SKU 剩余量；无法取得准确运行态账本时返回 null
+     */
+    private Integer resolveBeforeMaterialRemainingQty(LhScheduleContext context, SkuScheduleDTO beforeSku) {
+        if (Objects.isNull(context) || Objects.isNull(beforeSku)
+                || StringUtils.isEmpty(beforeSku.getMaterialCode())) {
+            return null;
+        }
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                beforeSku.getMaterialCode(), beforeSku.getProductStatus());
+        Integer remainingQty = context.getSkuProductionRemainingQtyMap().get(skuKey);
+        return Objects.isNull(remainingQty) ? null : Math.max(0, remainingQty);
     }
 
     /**

@@ -271,6 +271,15 @@ public class LhScheduleContext {
     private Set<String> releasedContinuousMachineCodeSet = new LinkedHashSet<>();
     /** 已按降模规则释放过续作机台的物料集合，避免后续补偿链路把降模机台重新补回 */
     private Set<String> reducedContinuationGroupKeySet = new LinkedHashSet<>();
+    /**
+     * 续作降模下机机台对应的前物料 SKU 快照。
+     * <p>第一层 key=机台编码，第二层 key=降模前物料编码，value=实际触发降模的来源 SKU。
+     * 该快照只记录续作降模规则实际选出的下机机台，不包含窗口无计划、首日无计划、收尾小余量跳过等
+     * 其他释放原因。S4.6 使用来源 SKU 精确读取“物料+产品状态”的本次排程剩余账本，判断前物料能否在
+     * 本次排程中收尾；该快照本身不参与选机、排量或余量扣减。</p>
+     */
+    private Map<String, Map<String, SkuScheduleDTO>> reducedContinuationMachineBeforeSkuMap =
+            new LinkedHashMap<String, Map<String, SkuScheduleDTO>>(8);
     /** 已按降模规则只保留单台续作机台的分组集合，避免后续补偿链路把已释放机台重新补回 */
     private Set<String> singleMachineReducedContinuationGroupKeySet = new LinkedHashSet<>();
     /** 续作收尾小余量释放后可优先进入换活字块匹配的机台集合 */
