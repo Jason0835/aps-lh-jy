@@ -286,6 +286,29 @@ public class LhScheduleContext {
     private Set<String> typeBlockReleasedContinuousMachineCodeSet = new LinkedHashSet<>();
     /** 首日无计划但后续有计划的续作释放机台集合，供S4.4/S4.5稳定识别占位结果，不受后续账本扣减影响 */
     private Set<String> firstDayNoPlanReleasedContinuousMachineCodeSet = new LinkedHashSet<>();
+    /**
+     * 续作停产保机日期，key=机台编码，value=该机台计划量必须为0但仍保持原SKU和模具占用的业务日集合。
+     * <p>该状态只属于本次排程运行态，不代表机台释放，也不参与续作降模END_TYPE判断。</p>
+     */
+    private Map<String, Set<LocalDate>> continuousStopHoldDateMap =
+            new LinkedHashMap<String, Set<LocalDate>>(8);
+    /**
+     * 当前仍处于停产保机占用的机台集合。
+     * <p>历史保机日期保留在continuousStopHoldDateMap；计划恢复生产或后续真正降模后会从本集合移除，
+     * 使候选过滤只约束当前仍被原SKU占用的机台。</p>
+     */
+    private Set<String> activeContinuousStopHoldMachineCodeSet = new LinkedHashSet<String>(8);
+    /**
+     * 曾停产保机、但后续业务日重新判断后已真正降模的机台集合。
+     * <p>历史保机日期仍需保留用于班次清零，但这些机台在真实释放边界后可以重新进入后续资源候选。</p>
+     */
+    private Set<String> releasedContinuousStopHoldMachineCodeSet = new LinkedHashSet<String>(8);
+    /**
+     * 真正降模机台的最后允许生产班次，key=机台编码，value=本窗口最后允许保留正计划量的班次序号。
+     * <p>该边界来自真实降模决策结果，供日标准收敛、收尾补量和尾量归集后统一清理释放边界后的误补量。</p>
+     */
+    private Map<String, Integer> continuousReducedMachineReleaseBoundaryShiftIndexMap =
+            new LinkedHashMap<String, Integer>(8);
     /** 运行态结果来源SKU映射，使用对象身份避免结果行可变字段影响Map命中，供后置校验回到原始日计划账本 */
     private Map<LhScheduleResult, SkuScheduleDTO> scheduleResultSourceSkuMap = new IdentityHashMap<>();
     /** S4.5新增链路模具资源运行态，只限制新增机台数量，不反向裁剪S4.4续作结果 */
@@ -549,6 +572,106 @@ public class LhScheduleContext {
         } catch (NumberFormatException e) {
             return defaultValue;
         }
+    }
+
+    /**
+     * 登记续作停产保机业务日。
+     *
+     * @param machineCode 机台编码
+     * @param productionDate 业务日期
+     */
+    public void registerContinuousStopHoldDate(String machineCode, LocalDate productionDate) {
+        if (StringUtils.isEmpty(machineCode) || Objects.isNull(productionDate)) {
+            return;
+        }
+        continuousStopHoldDateMap
+                .computeIfAbsent(machineCode, key -> new LinkedHashSet<LocalDate>(4))
+                .add(productionDate);
+        activeContinuousStopHoldMachineCodeSet.add(machineCode);
+        releasedContinuousStopHoldMachineCodeSet.remove(machineCode);
+    }
+
+    /**
+     * 判断机台在指定业务日是否处于停产保机状态。
+     *
+     * @param machineCode 机台编码
+     * @param productionDate 业务日期
+     * @return true-该日停产保机；false-不是
+     */
+    public boolean isContinuousStopHoldDate(String machineCode, LocalDate productionDate) {
+        if (StringUtils.isEmpty(machineCode) || Objects.isNull(productionDate)
+                || CollectionUtils.isEmpty(continuousStopHoldDateMap)) {
+            return false;
+        }
+        Set<LocalDate> holdDateSet = continuousStopHoldDateMap.get(machineCode);
+        return !CollectionUtils.isEmpty(holdDateSet) && holdDateSet.contains(productionDate);
+    }
+
+    /**
+     * 判断机台在本次排程窗口内是否存在停产保机占用。
+     *
+     * @param machineCode 机台编码
+     * @return true-存在停产保机日期；false-不存在
+     */
+    public boolean isContinuousStopHoldMachine(String machineCode) {
+        if (StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(activeContinuousStopHoldMachineCodeSet)) {
+            return false;
+        }
+        return activeContinuousStopHoldMachineCodeSet.contains(machineCode);
+    }
+
+    /**
+     * 标记停产保机机台已按原续作SKU恢复生产。
+     *
+     * @param machineCode 机台编码
+     */
+    public void markContinuousStopHoldMachineProductionResumed(String machineCode) {
+        if (StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        activeContinuousStopHoldMachineCodeSet.remove(machineCode);
+    }
+
+    /**
+     * 标记曾停产保机的机台已在后续业务日真正降模释放。
+     *
+     * @param machineCode 机台编码
+     */
+    public void markContinuousStopHoldMachineReleased(String machineCode) {
+        if (StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(continuousStopHoldDateMap.get(machineCode))) {
+            return;
+        }
+        activeContinuousStopHoldMachineCodeSet.remove(machineCode);
+        releasedContinuousStopHoldMachineCodeSet.add(machineCode);
+    }
+
+    /**
+     * 登记真正降模机台最后允许生产的班次序号。
+     *
+     * @param machineCode 机台编码
+     * @param shiftIndex 最后允许生产班次序号；0表示本窗口全部班次均已释放
+     */
+    public void registerContinuousReducedMachineReleaseBoundary(String machineCode, int shiftIndex) {
+        if (StringUtils.isEmpty(machineCode)) {
+            return;
+        }
+        continuousReducedMachineReleaseBoundaryShiftIndexMap.put(machineCode, Math.max(0, shiftIndex));
+    }
+
+    /**
+     * 获取真正降模机台最后允许生产的班次序号。
+     *
+     * @param machineCode 机台编码
+     * @return 最后允许生产班次序号；未登记真正降模边界时返回null
+     */
+    public Integer getContinuousReducedMachineReleaseBoundaryShiftIndex(String machineCode) {
+        if (StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(continuousReducedMachineReleaseBoundaryShiftIndexMap)) {
+            return null;
+        }
+        return continuousReducedMachineReleaseBoundaryShiftIndexMap.get(machineCode);
     }
 
     /**

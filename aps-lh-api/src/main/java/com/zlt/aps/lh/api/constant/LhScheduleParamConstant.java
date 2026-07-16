@@ -222,4 +222,6 @@ public final class LhScheduleParamConstant {
     public static final String EARLY_PRODUCTION_DAYS_THRESHOLD = "SYS0304028";
     /** 收尾落在夜班或错开模具交替是否自动补量（0-关闭，1-开启） */
     public static final String ENDING_AUTO_FILL_ENABLED = "SYS0304029";
+    /** 在机模具下机时前后计划校验天数 */
+    public static final String CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS = "SYS0304030";
 }

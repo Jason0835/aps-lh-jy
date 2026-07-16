@@ -113,6 +113,45 @@ class LhScheduleConfigResolverTest {
         }
     }
 
+    @Test
+    void resolveAndAttach_shouldValidateContinuousMouldOfflineCheckDays() {
+        Logger logger = (Logger) LoggerFactory.getLogger(LhScheduleConfigResolver.class);
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        logger.addAppender(listAppender);
+        try {
+            LhScheduleContext missingContext = context();
+            resolverWithParam(null).resolveAndAttach(missingContext);
+            LhScheduleContext validContext = context();
+            resolverWithParam(continuousMouldOfflineCheckDaysParam("3")).resolveAndAttach(validContext);
+            LhScheduleContext invalidTextContext = context();
+            resolverWithParam(continuousMouldOfflineCheckDaysParam("invalid")).resolveAndAttach(invalidTextContext);
+            LhScheduleContext invalidRangeContext = context();
+            resolverWithParam(continuousMouldOfflineCheckDaysParam("4")).resolveAndAttach(invalidRangeContext);
+
+            Assertions.assertEquals(2,
+                    missingContext.getScheduleConfig().getContinuousMouldOfflineCheckDays());
+            Assertions.assertEquals(3,
+                    validContext.getScheduleConfig().getContinuousMouldOfflineCheckDays());
+            Assertions.assertEquals(2,
+                    invalidTextContext.getScheduleConfig().getContinuousMouldOfflineCheckDays());
+            Assertions.assertEquals(2,
+                    invalidRangeContext.getScheduleConfig().getContinuousMouldOfflineCheckDays());
+            Assertions.assertTrue(listAppender.list.stream()
+                            .anyMatch(event -> event.getFormattedMessage().contains("未配置或为空")),
+                    "参数缺失时必须记录默认值告警");
+            Assertions.assertTrue(listAppender.list.stream()
+                            .anyMatch(event -> event.getFormattedMessage().contains("解析失败")),
+                    "参数非数字时必须记录默认值告警");
+            Assertions.assertTrue(listAppender.list.stream()
+                            .anyMatch(event -> event.getFormattedMessage().contains("配置越界")),
+                    "参数越界时必须记录默认值告警");
+        } finally {
+            logger.detachAppender(listAppender);
+            listAppender.stop();
+        }
+    }
+
     private LhScheduleConfigResolver resolverWithParam(LhParams param) {
         LhScheduleConfigResolver resolver = new LhScheduleConfigResolver();
         LhParamsMapper mapper = Mockito.mock(LhParamsMapper.class);
@@ -134,6 +173,14 @@ class LhScheduleConfigResolverTest {
         LhParams param = new LhParams();
         param.setFactoryCode("116");
         param.setParamCode(LhScheduleParamConstant.ENDING_AUTO_FILL_ENABLED);
+        param.setParamValue(value);
+        return param;
+    }
+
+    private LhParams continuousMouldOfflineCheckDaysParam(String value) {
+        LhParams param = new LhParams();
+        param.setFactoryCode("116");
+        param.setParamCode(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS);
         param.setParamValue(value);
         return param;
     }

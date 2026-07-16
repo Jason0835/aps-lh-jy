@@ -190,6 +190,25 @@ class DefaultMachineMatchStrategyRegressionTest {
     }
 
     @Test
+    void matchMachines_shouldExcludeContinuousStopHoldMachine() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        MachineScheduleDTO stopHoldMachine = machine("A-HOLD", dateTime(2026, 4, 21, 7, 0),
+                "SPEC-A", "22.5", "MAT-OLD");
+        MachineScheduleDTO normalMachine = machine("Z-NORMAL", dateTime(2026, 4, 21, 7, 10),
+                "SPEC-A", "22.5", "MAT-NORMAL");
+        context.getMachineScheduleMap().put(stopHoldMachine.getMachineCode(), stopHoldMachine);
+        context.getMachineScheduleMap().put(normalMachine.getMachineCode(), normalMachine);
+        context.registerContinuousStopHoldDate("A-HOLD", LocalDate.of(2026, 4, 21));
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, sku("MAT-001", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "停产保机机台不得进入新增排产候选池");
+        assertEquals("Z-NORMAL", candidates.get(0).getMachineCode());
+    }
+
+    @Test
     void matchMachines_shouldTraceTodayIdleAsDiagnosticWhenMachineCodeFallbackWins() {
         DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
         LhScheduleContext context = buildTraceContext();

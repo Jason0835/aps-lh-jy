@@ -228,10 +228,16 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         // SKU提前生产需要从窗口结束日继续向后观察N个自然日，月计划和结构机台数按真实年月批量加载。
         Date earlyProductionLookupEndDate = LhScheduleTimeUtil.addDays(endDate, earlyProductionDaysThreshold);
         Map<String, LocalDate> requiredMonthMap = resolveRequiredMonthMap(startDate, earlyProductionLookupEndDate);
-        // 续作 T 日降模需要比较 T 日与 T-1 日原始月计划量；月初排程时，月计划和定稿版本必须额外加载上月。
+        int continuousMouldOfflineCheckDays = context.getScheduleConfig().getContinuousMouldOfflineCheckDays();
+        Date continuousMouldOfflineLookupEndDate =
+                LhScheduleTimeUtil.addDays(endDate, continuousMouldOfflineCheckDays);
+        Date monthPlanLookupEndDate = continuousMouldOfflineLookupEndDate.after(earlyProductionLookupEndDate)
+                ? continuousMouldOfflineLookupEndDate : earlyProductionLookupEndDate;
+        // 续作降模停产保机需读取窗口内每个业务日前后N天原始月计划；月初、月末及跨年时必须加载相邻月份。
         // 该扩展范围只用于月计划链路，结构机台统计、月完成量等其他基础数据仍沿用原排程窗口月份范围。
         Map<String, LocalDate> monthPlanRequiredMonthMap =
-                resolveMonthPlanRequiredMonthMap(startDate, earlyProductionLookupEndDate);
+                resolveMonthPlanRequiredMonthMap(startDate, monthPlanLookupEndDate,
+                        continuousMouldOfflineCheckDays);
         // 设备停机、工作日历沿用 T-1 覆盖范围，保证滚动继承和跨日停机判断可复用同一窗口。
         Date calendarControlStartDate = LhScheduleTimeUtil.addDays(startDate, -1);
 
@@ -561,16 +567,22 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     /**
      * 解析月计划及定稿版本需要加载的月份集合。
-     * <p>续作 T 日降模需要比较 T 日和 T-1 日原始月计划量，因此月计划链路从 T-1 开始加载；
-     * 该范围不用于结构统计、完成量等其他基础数据，避免扩大无关业务口径。</p>
+     * <p>续作停产保机需要比较窗口内业务日前后N天原始月计划量，因此月计划链路从窗口起点前N天开始，
+     * 并由调用方把结束时间扩展到窗口末日后N天；该范围不用于结构统计、完成量等其他基础数据，
+     * 避免扩大无关业务口径。</p>
      *
      * @param scheduleStartDate 排程窗口开始日期 T
      * @param endDateExclusive 月计划后看结束日期，不含当天
+     * @param continuousMouldOfflineCheckDays 停产保机前后校验自然日数量
      * @return key=year_month，value=该月月初
      */
     private Map<String, LocalDate> resolveMonthPlanRequiredMonthMap(Date scheduleStartDate,
-                                                                    Date endDateExclusive) {
-        Date monthPlanStartDate = LhScheduleTimeUtil.addDays(scheduleStartDate, -1);
+                                                                    Date endDateExclusive,
+                                                                    int continuousMouldOfflineCheckDays) {
+        int lookAroundDays = Math.max(LhScheduleConstant.MIN_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS,
+                Math.min(continuousMouldOfflineCheckDays,
+                        LhScheduleConstant.MAX_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS));
+        Date monthPlanStartDate = LhScheduleTimeUtil.addDays(scheduleStartDate, -lookAroundDays);
         return resolveRequiredMonthMap(monthPlanStartDate, endDateExclusive);
     }
 

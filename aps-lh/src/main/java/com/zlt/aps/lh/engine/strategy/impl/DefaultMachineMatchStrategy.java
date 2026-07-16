@@ -989,6 +989,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                                                                       BigDecimal skuInch,
                                                                       SpecialMaterialMatchResult matchResult,
                                                                       MachineScheduleDTO machine) {
+        // 停产保机机台仍由原续作SKU和在机模具占用，属于硬排除资源，不能进入任何新增选机排序。
+        if (context.isContinuousStopHoldMachine(machine.getMachineCode())) {
+            return MachineAvailabilityReason.CONTINUOUS_STOP_HOLD;
+        }
         if (!MachineStatusUtil.isEnabled(machine.getStatus())) {
             return MachineAvailabilityReason.DISABLED;
         }
@@ -2422,7 +2426,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         int filteredCount = trace.notAllowedMachineFilteredCount + trace.disabledCount
                 + trace.stopTimeoutCount + trace.inchMismatchCount + trace.mouldSetMismatchCount
                 + trace.resolveSpecialSupportFilteredCount() + trace.mouldConflictCount
-                + trace.singleControlRuleFilteredCount;
+                + trace.singleControlRuleFilteredCount + trace.continuousStopHoldCount;
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 PriorityTraceLogHelper.kv("候选机台总数", trace.totalMachineCount)
                         + ", " + PriorityTraceLogHelper.kv("有效候选数", PriorityTraceLogHelper.sizeOf(candidates))
@@ -2434,7 +2438,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                         + ", 模套不符=" + trace.mouldSetMismatchCount
                         + ", 特殊不支持=" + trace.resolveSpecialSupportFilteredCount()
                         + ", 模具占用=" + trace.mouldConflictCount
-                        + ", 单控规则=" + trace.singleControlRuleFilteredCount);
+                        + ", 单控规则=" + trace.singleControlRuleFilteredCount
+                        + ", 续作停产保机=" + trace.continuousStopHoldCount);
         PriorityTraceLogHelper.appendLine(detailBuilder,
                 PriorityTraceLogHelper.kv("同班次基准班次序号", endingWindowContext.getBaseShiftIndex())
                         + ", " + PriorityTraceLogHelper.kv("同班次窗口起点(班次开始)", PriorityTraceLogHelper.formatDateTime(
@@ -3130,6 +3135,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         SPECIAL_225_UNSUPPORTED,
         SPECIAL_CHIP_UNSUPPORTED,
         SPECIAL_CATEGORY_UNSUPPORTED,
+        CONTINUOUS_STOP_HOLD,
         MOULD_CONFLICT
     }
 
@@ -3159,6 +3165,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         private int specialCategoryUnsupportedCount;
         /** 模具冲突过滤数 */
         private int mouldConflictCount;
+        /** 续作停产保机过滤数 */
+        private int continuousStopHoldCount;
         /** 单控/普通机台类型约束过滤数 */
         private int singleControlRuleFilteredCount;
         /** 过滤明细 */
@@ -3197,6 +3205,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             } else if (MachineAvailabilityReason.SPECIAL_CATEGORY_UNSUPPORTED == reason) {
                 specialCategoryUnsupportedCount++;
                 recordFilteredMachine(machine, "特殊分类不支持");
+            } else if (MachineAvailabilityReason.CONTINUOUS_STOP_HOLD == reason) {
+                continuousStopHoldCount++;
+                recordFilteredMachine(machine, "续作停产保机占用");
             } else if (MachineAvailabilityReason.MOULD_CONFLICT == reason) {
                 mouldConflictCount++;
                 recordFilteredMachine(machine, "模具占用");

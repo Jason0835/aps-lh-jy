@@ -74,6 +74,33 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class LhBaseDataServiceImplTest {
 
     /**
+     * 用例说明：停产保机参数为3天时，月计划加载月份必须覆盖窗口前3天和窗口末日后3天。
+     */
+    @Test
+    public void resolveMonthPlanRequiredMonthMapShouldCoverStopHoldCrossMonthRange() {
+        LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
+
+        Map<String, LocalDate> requiredMonthMap = ReflectionTestUtils.invokeMethod(
+                service, "resolveMonthPlanRequiredMonthMap",
+                buildDate(2026, 7, 1), buildDate(2026, 8, 4), 3);
+
+        Assertions.assertNotNull(requiredMonthMap);
+        Assertions.assertTrue(requiredMonthMap.containsValue(LocalDate.of(2026, 6, 1)),
+                "窗口起点前3天跨月时必须加载上月月计划");
+        Assertions.assertTrue(requiredMonthMap.containsValue(LocalDate.of(2026, 8, 1)),
+                "窗口末日后3天跨月时必须加载下月月计划");
+
+        Map<String, LocalDate> crossYearMonthMap = ReflectionTestUtils.invokeMethod(
+                service, "resolveMonthPlanRequiredMonthMap",
+                buildDate(2027, 1, 1), buildDate(2027, 1, 4), 3);
+        Assertions.assertNotNull(crossYearMonthMap);
+        Assertions.assertTrue(crossYearMonthMap.containsValue(LocalDate.of(2026, 12, 1)),
+                "窗口起点前3天跨年时必须加载上年12月月计划");
+        Assertions.assertTrue(crossYearMonthMap.containsValue(LocalDate.of(2027, 1, 1)),
+                "跨年读取不得遗漏当前年度1月月计划");
+    }
+
+    /**
      * 用例说明：基础数据初始化必须使用注入的独立线程池执行异步任务。
      *
      * @throws Exception 反射注入异常
@@ -432,7 +459,7 @@ public class LhBaseDataServiceImplTest {
         LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
 
         Map<String, LocalDate> requiredMonthMap = ReflectionTestUtils.invokeMethod(service,
-                "resolveMonthPlanRequiredMonthMap", buildDate(2026, 7, 1), buildDate(2026, 7, 4));
+                "resolveMonthPlanRequiredMonthMap", buildDate(2026, 7, 1), buildDate(2026, 7, 4), 2);
 
         Assertions.assertNotNull(requiredMonthMap);
         Assertions.assertEquals(Arrays.asList("2026_6", "2026_7"),

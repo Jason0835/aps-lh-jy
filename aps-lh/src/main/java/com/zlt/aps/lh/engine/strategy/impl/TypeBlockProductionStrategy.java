@@ -147,7 +147,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         // 基于续作收尾回写后的真实收尾时间，按机台收尾先后衔接换活字块。
         // 只有已标记收尾且有预计完工时刻的机台，才代表当前活字块可切换到下一规格。
         List<MachineScheduleDTO> endingMachines = context.getMachineScheduleMap().values().stream()
-                .filter(m -> m.isEnding() && m.getEstimatedEndTime() != null)
+                .filter(m -> m.isEnding() && m.getEstimatedEndTime() != null
+                        && !context.isContinuousStopHoldMachine(m.getMachineCode()))
                 .collect(Collectors.toList());
         endingMachines.sort(Comparator.comparing(MachineScheduleDTO::getEstimatedEndTime));
         Map<String, String> machineTriggerSourceMap = new HashMap<>(Math.max(16, endingMachines.size() * 2));
@@ -1850,6 +1851,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         for (MachineScheduleDTO candidateMachine : context.getMachineScheduleMap().values()) {
             if (candidateMachine == null
                     || StringUtils.isEmpty(candidateMachine.getMachineCode())
+                    || context.isContinuousStopHoldMachine(candidateMachine.getMachineCode())
                     || StringUtils.equals(candidateMachine.getMachineCode(), currentMachine.getMachineCode())
                     || candidateMachine.getEstimatedEndTime() == null
                     || !isMachineHardMatched(context, candidateMachine, sku)) {
@@ -2453,6 +2455,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             if (StringUtils.isEmpty(machineCode)) {
                 continue;
             }
+            if (context.isContinuousStopHoldMachine(machineCode)) {
+                log.info("续作停产保机机台跳过换活字块释放候选, machineCode: {}", machineCode);
+                continue;
+            }
             MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
             if (machine == null
                     || StringUtils.isEmpty(machine.getCurrentMaterialCode())
@@ -2505,6 +2511,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             }
             String machineCode = machine.getMachineCode();
             if (StringUtils.isEmpty(machineCode)
+                    || context.isContinuousStopHoldMachine(machineCode)
                     || !context.getMachineOnlineInfoMap().containsKey(machineCode)
                     || StringUtils.isEmpty(machine.getCurrentMaterialCode())) {
                 continue;

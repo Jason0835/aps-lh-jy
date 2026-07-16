@@ -284,6 +284,30 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：在机模具下机校验天数默认2天，只接受1～3。
+     */
+    @Test
+    public void shouldReadContinuousMouldOfflineCheckDaysConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals(2, defaultConfig.getContinuousMouldOfflineCheckDays());
+
+        Map<String, String> validParamMap = new HashMap<>(1);
+        validParamMap.put(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS, "3");
+        Assertions.assertEquals(3,
+                new LhScheduleConfig(validParamMap).getContinuousMouldOfflineCheckDays());
+
+        Map<String, String> zeroParamMap = new HashMap<>(1);
+        zeroParamMap.put(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS, "0");
+        Assertions.assertEquals(2,
+                new LhScheduleConfig(zeroParamMap).getContinuousMouldOfflineCheckDays());
+
+        Map<String, String> overParamMap = new HashMap<>(1);
+        overParamMap.put(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS, "4");
+        Assertions.assertEquals(2,
+                new LhScheduleConfig(overParamMap).getContinuousMouldOfflineCheckDays());
+    }
+
+    /**
      * 用例说明：本月历史欠产追加默认开启，配置为0时才关闭。
      */
     @Test

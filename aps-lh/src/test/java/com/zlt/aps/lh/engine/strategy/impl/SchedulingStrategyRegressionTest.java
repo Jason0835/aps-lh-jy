@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
@@ -33,10 +34,12 @@ import com.zlt.aps.lh.engine.strategy.support.MachineScheduleRole;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
+import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
@@ -900,6 +903,321 @@ public class SchedulingStrategyRegressionTest {
                         MonthPlanDateResolver.buildMaterialStatusKey(
                                 sku.getMaterialCode(), sku.getProductStatus())),
                 "实际释放后必须登记续作降模分组，阻断同物料补偿回流");
+    }
+
+    /**
+     * 续作计划量短期下降且前后两天理论机台峰值恢复一致时，待减机台必须零产量保机。
+     */
+    @Test
+    public void shouldStopProductionAndHoldMachineWhenPlanRecoversAfterWindow() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        LocalDate thirdProductionDate = resolveShiftWorkDate(shifts, 3);
+        SkuScheduleDTO sku = buildContinuousSku("3302003001", 18, 800,
+                buildQuotaMapByShifts(shifts, 162, 108, 108));
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 162, 108, 108);
+        FactoryMonthPlanProductionFinalResult plan = context.getMonthPlanList().get(0);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(1), 162);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(2), 162);
+        setMonthPlanDayQty(plan, thirdProductionDate.plusDays(1), 162);
+        setMonthPlanDayQty(plan, thirdProductionDate.plusDays(2), 162);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(54);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        String[] machineCodes = new String[]{"K1501", "K1601", "K1701"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult(
+                    sku.getMaterialCode(), machineCode, 18, shifts, "0");
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getContinuousStopHoldDateMap().size(),
+                "三台降为两台且未来恢复三台时应有一台停产保机");
+        String stopHoldMachineCode = context.getContinuousStopHoldDateMap().keySet().iterator().next();
+        LhScheduleResult stopHoldResult = context.getScheduleResultList().stream()
+                .filter(result -> StringUtils.equals(stopHoldMachineCode, result.getLhMachineCode()))
+                .findFirst()
+                .orElse(null);
+        Assertions.assertNotNull(stopHoldResult, "停产保机结果仍必须保留在续作结果中");
+        LocalDate secondProductionDate = resolveShiftWorkDate(shifts, 2);
+        Assertions.assertEquals(0, sumPlanQtyByWorkDate(
+                java.util.Collections.singletonList(stopHoldResult), shifts, secondProductionDate));
+        Assertions.assertEquals(0, sumPlanQtyByWorkDate(
+                java.util.Collections.singletonList(stopHoldResult), shifts, thirdProductionDate));
+        Assertions.assertTrue(shifts.stream()
+                .filter(shift -> secondProductionDate.equals(
+                        shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate()))
+                .anyMatch(shift -> StringUtils.contains(
+                        ShiftFieldUtil.getShiftAnalysis(stopHoldResult, shift.getShiftIndex()), "停产保机")));
+        Assertions.assertEquals(shifts.get(shifts.size() - 1).getShiftEndDateTime(),
+                stopHoldResult.getSpecEndTime(),
+                "窗口结束时仍保机的结果必须把机台和模具占用延续到末班");
+        Assertions.assertTrue(context.getReducedContinuationGroupKeySet().isEmpty(),
+                "全部待减机台均命中保机时不得登记真实降模释放分组");
+        Assertions.assertTrue(context.getScheduleLogList().stream()
+                .anyMatch(log -> StringUtils.equals("续作停产保机", log.getTitle())));
+    }
+
+    /**
+     * 当前在机数高于前后共同峰值时，只保到共同峰值，超过峰值的机台仍需真正下机。
+     */
+    @Test
+    public void shouldOnlyHoldMachinesUpToCommonPeak() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        LocalDate thirdProductionDate = resolveShiftWorkDate(shifts, 3);
+        SkuScheduleDTO sku = buildContinuousSku("3302003002", 18, 900,
+                buildQuotaMapByShifts(shifts, 162, 108, 108));
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 162, 108, 108);
+        FactoryMonthPlanProductionFinalResult plan = context.getMonthPlanList().get(0);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(1), 162);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(2), 162);
+        setMonthPlanDayQty(plan, thirdProductionDate.plusDays(1), 162);
+        setMonthPlanDayQty(plan, thirdProductionDate.plusDays(2), 162);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(54);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        String[] machineCodes = new String[]{"K1502", "K1602", "K1702", "K1802"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult(
+                    sku.getMaterialCode(), machineCode, 18, shifts, "0");
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getContinuousStopHoldDateMap().size(),
+                "四台在机、共同峰值三台、当日需两台时只应保机一台");
+        Assertions.assertEquals(1, context.getReducedContinuationMachineBeforeSkuMap().size(),
+                "超过共同峰值的另一台机台必须真正降模下机");
+        Assertions.assertFalse(context.getReducedContinuationGroupKeySet().isEmpty(),
+                "发生部分真正下机时必须登记释放分组");
+    }
+
+    /**
+     * 正规SKU使用单控整机模式时，停产保机必须保持同一物理机台L/R两侧成组。
+     * <p>单控运行态每侧按普通机台一半日标准量计算。本例四个运行态侧机台从四侧降为两侧，
+     * 前后共同峰值仍为四侧，因此需要保留两侧；二次校验只能选择同一物理机台的完整L/R组，
+     * 不得从两台物理机台各保留一侧。</p>
+     */
+    @Test
+    public void shouldHoldWholeSingleControlMachinePairTogether() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        Map<String, String> paramMap = new HashMap<String, String>(4);
+        paramMap.put(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS, "2");
+        paramMap.put(LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, "0");
+        paramMap.put(LhScheduleParamConstant.SINGLE_CONTROL_MACHINE_CODES, "K1501,K1502");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        LocalDate thirdProductionDate = resolveShiftWorkDate(shifts, 3);
+        SkuScheduleDTO sku = buildContinuousSku("3302003007", 9, 900,
+                buildQuotaMapByShifts(shifts, 108, 54, 54));
+        sku.setProductStatus("S");
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 108, 54, 54);
+        FactoryMonthPlanProductionFinalResult plan = context.getMonthPlanList().get(0);
+        plan.setProductStatus(sku.getProductStatus());
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(1), 108);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(2), 108);
+        setMonthPlanDayQty(plan, thirdProductionDate.plusDays(1), 108);
+        setMonthPlanDayQty(plan, thirdProductionDate.plusDays(2), 108);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(9);
+        capacity.setStandardCapacity(54);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+        context.getSingleControlModeSnapshotMap().put(
+                LhSingleControlMachineUtil.buildSkuModeKey(sku),
+                SingleControlMachineModeEnum.WHOLE_PAIR);
+
+        String[] machineCodes = new String[]{"K1501L", "K1501R", "K1502L", "K1502R"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult(
+                    sku.getMaterialCode(), machineCode, 9, shifts, "0");
+            result.setProductStatus(sku.getProductStatus());
+            result.setMouldQty(1);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(2, context.getContinuousStopHoldDateMap().size(),
+                "四个单控侧机台降为两侧时必须停产保机一个完整L/R组");
+        Set<String> heldPhysicalMachineCodes = new HashSet<String>(2);
+        for (String machineCode : context.getContinuousStopHoldDateMap().keySet()) {
+            heldPhysicalMachineCodes.add(
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode));
+        }
+        Assertions.assertEquals(1, heldPhysicalMachineCodes.size(),
+                "停产保机的两侧必须属于同一物理机台");
+        String heldPhysicalMachineCode = heldPhysicalMachineCodes.iterator().next();
+        Assertions.assertTrue(context.getContinuousStopHoldDateMap().containsKey(
+                heldPhysicalMachineCode + "L"));
+        Assertions.assertTrue(context.getContinuousStopHoldDateMap().containsKey(
+                heldPhysicalMachineCode + "R"));
+    }
+
+    /**
+     * 前一业务日命中停产保机、后一业务日前后峰值不再相等时，必须按当日结果真正释放机台。
+     */
+    @Test
+    public void shouldReleasePreviouslyHeldMachineWhenNextDayCheckDoesNotMatch() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        Map<String, String> paramMap = new HashMap<String, String>(2);
+        paramMap.put(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS, "2");
+        paramMap.put(LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, "0");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        SkuScheduleDTO sku = buildContinuousSku("3302003004", 18, 900,
+                buildQuotaMapByShifts(shifts, 108, 108, 162));
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 108, 108, 162);
+        FactoryMonthPlanProductionFinalResult plan = context.getMonthPlanList().get(0);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(1), 54);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(2), 162);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(54);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        String[] machineCodes = new String[]{"K1504", "K1604", "K1704"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult(
+                    sku.getMaterialCode(), machineCode, 18, shifts, "0");
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getContinuousStopHoldDateMap().size(),
+                "首日共同峰值为3时应先停产保机一台");
+        String machineCode = context.getContinuousStopHoldDateMap().keySet().iterator().next();
+        Assertions.assertTrue(context.getReleasedContinuousStopHoldMachineCodeSet().contains(machineCode),
+                "次日前后峰值不一致时必须登记该保机机台已真正释放");
+        Assertions.assertFalse(context.isContinuousStopHoldMachine(machineCode),
+                "真正释放后不得继续按停产保机硬过滤后续资源候选");
+        Assertions.assertTrue(context.getReducedContinuationMachineBeforeSkuMap().containsKey(machineCode),
+                "后续业务日真正下机后必须写入续作降模前物料快照");
+    }
+
+    /**
+     * 窗口内计划量恢复时，保留机台必须直接在原续作SKU恢复生产，并解除停产保机候选硬过滤。
+     */
+    @Test
+    public void shouldResumeHeldMachineOnOriginalContinuousSkuWhenPlanRecovers() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        Map<String, String> paramMap = new HashMap<String, String>(2);
+        paramMap.put(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS, "2");
+        paramMap.put(LhScheduleParamConstant.CONTINUOUS_SHORTAGE_LOOK_AHEAD_DAYS, "0");
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        LocalDate secondProductionDate = resolveShiftWorkDate(shifts, 2);
+        LocalDate thirdProductionDate = resolveShiftWorkDate(shifts, 3);
+        SkuScheduleDTO sku = buildContinuousSku("3302003006", 18, 900,
+                buildQuotaMapByShifts(shifts, 162, 108, 162));
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 162, 108, 162);
+        FactoryMonthPlanProductionFinalResult plan = context.getMonthPlanList().get(0);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(1), 162);
+        setMonthPlanDayQty(plan, firstProductionDate.minusDays(2), 162);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(54);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        String[] machineCodes = new String[]{"K1506", "K1606", "K1706"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult(
+                    sku.getMaterialCode(), machineCode, 18, shifts, "0");
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(1, context.getContinuousStopHoldDateMap().size());
+        String machineCode = context.getContinuousStopHoldDateMap().keySet().iterator().next();
+        LhScheduleResult result = context.getScheduleResultList().stream()
+                .filter(item -> StringUtils.equals(machineCode, item.getLhMachineCode()))
+                .findFirst()
+                .orElse(null);
+        Assertions.assertNotNull(result);
+        Assertions.assertEquals(0, sumPlanQtyByWorkDate(
+                java.util.Collections.singletonList(result), shifts, secondProductionDate));
+        Assertions.assertTrue(sumPlanQtyByWorkDate(
+                        java.util.Collections.singletonList(result), shifts, thirdProductionDate) > 0,
+                "计划恢复日必须直接在原续作机台恢复生产");
+        Assertions.assertFalse(context.isContinuousStopHoldMachine(machineCode),
+                "恢复生产后不得继续按停产保机状态硬过滤机台");
+        Assertions.assertTrue(context.getReleasedContinuousStopHoldMachineCodeSet().isEmpty(),
+                "直接恢复生产不是降模释放，不得登记保机后释放状态");
+        Assertions.assertTrue(context.getReducedContinuationGroupKeySet().isEmpty(),
+                "保机后直接恢复生产不得登记续作降模释放分组");
+    }
+
+    /**
+     * 停产保机机台整个窗口均为零产量时，仍必须保留续作结果和资源占用结束时间。
+     */
+    @Test
+    public void shouldKeepWholeWindowZeroContinuousStopHoldResult() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhScheduleResult stopHoldResult = buildContinuousResult(
+                "3302003003", "K1903", 18, shifts, "0");
+        for (LhShiftConfigVO shift : shifts) {
+            ShiftFieldUtil.setShiftPlanQty(stopHoldResult, shift.getShiftIndex(), 0, null, null);
+        }
+        ShiftFieldUtil.syncDailyPlanQty(stopHoldResult);
+        context.getScheduleResultList().add(stopHoldResult);
+        context.registerContinuousStopHoldDate(
+                stopHoldResult.getLhMachineCode(), resolveShiftWorkDate(shifts, 1));
+
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "finalizeZeroPlanContinuousResults", LhScheduleContext.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context);
+
+        Assertions.assertTrue(context.getScheduleResultList().contains(stopHoldResult),
+                "整窗零产量停产保机结果不得被零结果收口移除");
+        Assertions.assertEquals(Integer.valueOf(0), stopHoldResult.getDailyPlanQty());
+        Assertions.assertEquals(ScheduleTypeEnum.CONTINUOUS.getCode(), stopHoldResult.getScheduleType());
+        Assertions.assertEquals("0", stopHoldResult.getProductionStatus());
+        Assertions.assertNotNull(stopHoldResult.getSpecEndTime(),
+                "整窗零产量停产保机结果必须占用到窗口末班");
+        Assertions.assertTrue(context.getReleasedContinuousMachineCodeSet().isEmpty(),
+                "停产保机机台不得登记为真正释放机台");
+        Method effectiveMethod = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "isEffectiveContinuousResult", LhScheduleContext.class, LhScheduleResult.class);
+        effectiveMethod.setAccessible(true);
+        Assertions.assertTrue((Boolean) effectiveMethod.invoke(strategy, context, stopHoldResult),
+                "机台终态同步必须把整窗零量停产保机结果视为有效占用结果");
     }
 
     /**
@@ -2040,6 +2358,33 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 停产保机机台即使误入续作释放候选集合，也不得进入换活字块选机池。
+     */
+    @Test
+    public void shouldExcludeContinuousStopHoldMachineFromTypeBlockReleasedCandidates() throws Exception {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode("K1204");
+        machine.setCurrentMaterialCode("3302003005");
+        machine.setEstimatedEndTime(context.getScheduleWindowShifts().get(0).getShiftStartDateTime());
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+        context.getTypeBlockReleasedContinuousMachineCodeSet().add(machine.getMachineCode());
+        context.registerContinuousStopHoldDate(
+                machine.getMachineCode(), resolveShiftWorkDate(context.getScheduleWindowShifts(), 1));
+
+        Method method = TypeBlockProductionStrategy.class.getDeclaredMethod(
+                "resolveReleasedTypeBlockMachines", LhScheduleContext.class);
+        method.setAccessible(true);
+        @SuppressWarnings("unchecked")
+        List<MachineScheduleDTO> candidateMachines =
+                (List<MachineScheduleDTO>) method.invoke(strategy, context);
+
+        Assertions.assertTrue(candidateMachines.isEmpty(),
+                "停产保机占用必须优先于误登记的换活字块释放候选");
+    }
+
+    /**
      * 排程滚动到窗口最后一天后，当前日不足时仍需后看下一生产日决定是否增机台。
      */
     @Test
@@ -2621,6 +2966,9 @@ public class SchedulingStrategyRegressionTest {
                                     LocalDate date,
                                     int qty) {
         switch (date.getDayOfMonth()) {
+            case 9:
+                plan.setDay9(qty);
+                break;
             case 10:
                 plan.setDay10(qty);
                 break;
@@ -2632,6 +2980,12 @@ public class SchedulingStrategyRegressionTest {
                 break;
             case 13:
                 plan.setDay13(qty);
+                break;
+            case 14:
+                plan.setDay14(qty);
+                break;
+            case 15:
+                plan.setDay15(qty);
                 break;
             case 27:
                 plan.setDay27(qty);

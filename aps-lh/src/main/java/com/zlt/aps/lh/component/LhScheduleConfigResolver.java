@@ -220,6 +220,8 @@ public class LhScheduleConfigResolver {
         putEarlyProductionDaysThreshold(resolvedParamMap, lhParamsMap);
         // 收尾自动补量只允许0/1，在配置快照入口统一校验，避免两条补量链各自解析。
         putEndingAutoFillEnabled(resolvedParamMap, lhParamsMap);
+        // 续作停产保机前后观察天数只允许1～3，非法配置统一回退默认值2。
+        putContinuousMouldOfflineCheckDays(resolvedParamMap, lhParamsMap);
         putStringValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE,
                 LhScheduleConstant.ODD_SHIFT_CAPACITY_PLUS_SHIFT_TYPE);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE,
@@ -364,6 +366,41 @@ public class LhScheduleConfigResolver {
         }
         log.warn("收尾自动补量开关配置非法，使用默认值, paramCode={}, value={}, defaultValue={}",
                 paramCode, value, defaultValue);
+        resolvedParamMap.put(paramCode, String.valueOf(defaultValue));
+    }
+
+    /**
+     * 解析在机模具下机时前后计划校验天数。
+     * <p>业务允许范围为1～3天，空值、非数字和越界值均使用默认值2，避免无效配置扩大月计划读取范围。</p>
+     *
+     * @param resolvedParamMap 解析后的参数快照
+     * @param lhParamsMap 原始硫化参数
+     */
+    private void putContinuousMouldOfflineCheckDays(Map<String, String> resolvedParamMap,
+                                                     Map<String, String> lhParamsMap) {
+        String paramCode = LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS;
+        int defaultValue = LhScheduleConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS;
+        String value = lhParamsMap.get(paramCode);
+        if (StringUtils.isEmpty(value)) {
+            log.warn("在机模具下机校验天数未配置或为空, paramCode={}, 使用默认值: {}",
+                    paramCode, defaultValue);
+            resolvedParamMap.put(paramCode, String.valueOf(defaultValue));
+            return;
+        }
+        try {
+            int days = Integer.parseInt(value.trim());
+            if (days >= LhScheduleConstant.MIN_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS
+                    && days <= LhScheduleConstant.MAX_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS) {
+                resolvedParamMap.put(paramCode, String.valueOf(days));
+                return;
+            }
+            log.warn("在机模具下机校验天数配置越界, paramCode={}, value={}, 合法范围={}～{}, 使用默认值: {}",
+                    paramCode, value, LhScheduleConstant.MIN_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS,
+                    LhScheduleConstant.MAX_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS, defaultValue);
+        } catch (NumberFormatException e) {
+            log.warn("在机模具下机校验天数解析失败, paramCode={}, value={}, 使用默认值: {}",
+                    paramCode, value, defaultValue);
+        }
         resolvedParamMap.put(paramCode, String.valueOf(defaultValue));
     }
 

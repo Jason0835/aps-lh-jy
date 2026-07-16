@@ -585,6 +585,22 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 获取在机模具下机时前后计划校验天数。
+     * <p>配置快照入口已完成1～3范围校验；直接构造配置对象的测试场景仍在此保留相同保护。</p>
+     *
+     * @return 前后校验自然日数量，范围1～3
+     */
+    public int getContinuousMouldOfflineCheckDays() {
+        int days = getParamIntValue(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS,
+                LhScheduleConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS);
+        if (days < LhScheduleConstant.MIN_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS
+                || days > LhScheduleConstant.MAX_CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS) {
+            return LhScheduleConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS;
+        }
+        return days;
+    }
+
+    /**
      * 获取奇数班产计划量加一班别配置。
      * <p>空值表示不启用；合法性由产能计算入口按 1/2/3 判断，非法值保持原班产口径。</p>
      *
