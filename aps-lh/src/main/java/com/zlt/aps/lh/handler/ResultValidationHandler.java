@@ -150,7 +150,7 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
      * 排程后置校验：检查结果完整性。
      *
      * <p>该方法会补齐部分保存所需的默认字段，例如批次号、工厂、目标日和发布状态；
-     * 但不会改变机台、班次计划量、排序结果、换模判断和收尾判断。</p>
+     * 普通双模/多模结果会在保存前按模台数收敛，但同物料多状态续作切换必须保留专用链已确定的精确尾量。</p>
      *
      * @param context 排程上下文
      */
@@ -324,6 +324,14 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         if (mouldQty <= 1) {
             return;
         }
+        // 同物料X/T临时占用续作机台时，收尾班必须严格按剩余量落库，不得在S4.6再向上补齐模数。
+        if (containsSameMaterialStatusContinuationAnalysis(result)) {
+            log.info("同物料多状态续作切换跳过模台数保存前收敛, batchNo: {}, "
+                            + "materialCode: {}, productStatus: {}, machineCode: {}, mouldQty: {}, planQty: {}",
+                    context.getBatchNo(), result.getMaterialCode(), result.getProductStatus(),
+                    result.getLhMachineCode(), mouldQty, ShiftFieldUtil.resolveScheduledQty(result));
+            return;
+        }
         if (getTargetScheduleQtyResolver().isEmbryoStockEnding(context, result)) {
             log.info("成型胎胚库存收尾结果跳过模台数保存前收敛, batchNo: {}, materialCode: {}, embryoCode: {}, "
                             + "machineCode: {}, mouldQty: {}",
@@ -353,6 +361,28 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         if (adjusted) {
             ShiftFieldUtil.syncDailyPlanQty(result);
         }
+    }
+
+    /**
+     * 判断结果任一有效班次是否带有同物料多状态续作切换标记。
+     *
+     * @param result 排程结果
+     * @return true-专用切换链结果；false-普通排程结果
+     */
+    private boolean containsSameMaterialStatusContinuationAnalysis(LhScheduleResult result) {
+        if (Objects.isNull(result)) {
+            return false;
+        }
+        for (int shiftIndex = 1;
+             shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             shiftIndex++) {
+            if (StringUtils.contains(
+                    ShiftFieldUtil.getShiftAnalysis(result, shiftIndex),
+                    LhScheduleConstant.SAME_MATERIAL_STATUS_CONTINUATION_ANALYSIS)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

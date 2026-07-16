@@ -92,6 +92,9 @@ public final class LhScheduleConstant {
     /** 每班最大首检次数（-1 表示不限制） */
     public static final int MAX_FIRST_INSPECTION_PER_SHIFT = -1;
 
+    /** 同物料多产品状态续作切换标记，用于跨滚动窗口还原原正规承接机台 */
+    public static final String SAME_MATERIAL_STATUS_CONTINUATION_ANALYSIS = "同物料多状态续作切换";
+
     // ======================== 收尾判定 ========================
 
     /** 收尾判定天数 */

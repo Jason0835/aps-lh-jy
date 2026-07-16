@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.regression;
 
+import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
@@ -11,6 +12,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.handler.DataInitHandler;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -201,6 +203,50 @@ class ContinuousSkuAssignmentRegressionTest {
         assertEquals("T", context.getContinuousSkuList().get(0).getProductStatus());
         assertEquals(1, context.getNewSpecSkuList().size());
         assertEquals("S", context.getNewSpecSkuList().get(0).getProductStatus());
+    }
+
+    /**
+     * 同物料多状态专用链跨窗口时，最新X/T结果必须还原为正规续作并锁回原机台。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldRestoreFormalCarrierForMarkedSpecialChain() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setBatchNo("LHPC20260716001");
+        context.setRollingScheduleHandoff(true);
+        String materialCode = "3302002217";
+
+        SkuScheduleDTO formalSku = buildSku(materialCode, "STRUCT-1", "S");
+        SkuScheduleDTO trialSku = buildSku(materialCode, "STRUCT-1", "X");
+        trialSku.setSurplusQty(20);
+        trialSku.setPendingQty(20);
+        trialSku.setTargetScheduleQty(20);
+        context.setStructureSkuMap(new LinkedHashMap<String, java.util.List<SkuScheduleDTO>>());
+        context.getStructureSkuMap().put("STRUCT-1",
+                new ArrayList<SkuScheduleDTO>(Arrays.asList(formalSku, trialSku)));
+
+        context.setMachineOnlineInfoMap(new LinkedHashMap<String, LhMachineOnlineInfo>());
+        context.getMachineOnlineInfoMap().put(
+                "K1101", buildOnlineInfo("K1101", materialCode, "X"));
+        context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
+        context.getMachineScheduleMap().put("K1101", buildMachine("K1101", "1"));
+        context.getMachineScheduleMap().get("K1101").setCurrentMaterialCode(materialCode);
+        LhScheduleResult inheritedResult = buildInheritedResult(
+                "K1101", materialCode, "X", "1");
+        ShiftFieldUtil.appendShiftAnalysis(
+                inheritedResult, 1,
+                LhScheduleConstant.SAME_MATERIAL_STATUS_CONTINUATION_ANALYSIS);
+        context.getRollingInheritedScheduleResultList().add(inheritedResult);
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
+        assertEquals("S", context.getContinuousSkuList().get(0).getProductStatus());
+        assertEquals("K1101", context.getContinuousSkuList().get(0).getContinuousMachineCode());
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertEquals("X", context.getNewSpecSkuList().get(0).getProductStatus());
+        assertEquals("K1101",
+                context.getNewSpecSkuList().get(0).getPreferredContinuousMachineCode());
     }
 
     /**

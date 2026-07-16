@@ -1882,7 +1882,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             String materialCode = Objects.nonNull(rollingResult)
                     ? rollingResult.getMaterialCode() : entry.getValue().getMaterialCode();
             String productStatus = Objects.nonNull(rollingResult)
-                    ? rollingResult.getProductStatus() : entry.getValue().getProductStatus();
+                    ? resolveSameMaterialStatusRollingProductStatus(
+                    context, entry.getKey(), rollingResult, skuByMaterialMap)
+                    : entry.getValue().getProductStatus();
             assignContinuousSku(entry.getKey(), materialCode, productStatus, skuByMaterialMap,
                     continuousTemplateMap, continuousSkuList, allowMaterialFallback);
         }
@@ -1893,10 +1895,87 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                         context, entry.getKey(), entry.getValue());
                 assignContinuousSku(entry.getKey(),
                         Objects.nonNull(rollingResult) ? rollingResult.getMaterialCode() : null,
-                        Objects.nonNull(rollingResult) ? rollingResult.getProductStatus() : null,
+                        Objects.nonNull(rollingResult)
+                                ? resolveSameMaterialStatusRollingProductStatus(
+                                context, entry.getKey(), rollingResult, skuByMaterialMap)
+                                : null,
                         skuByMaterialMap, continuousTemplateMap, continuousSkuList, allowMaterialFallback);
             }
         }
+    }
+
+    /**
+     * 还原同物料多状态状态链跨滚动窗口后的正规续作身份和原承接机台。
+     *
+     * <p>专用X/T结果会在每个有效班次写入持久化标记。下一滚动窗口即使最新结果仍是X/T，
+     * 也必须把同物料正规SKU继续识别为该机台的续作，并把剩余X/T锁回同一机台。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 滚动继承机台编码
+     * @param rollingResult 最新滚动继承结果
+     * @param skuByMaterialMap 当前待匹配SKU集合
+     * @return 续作匹配应使用的产品状态
+     */
+    private String resolveSameMaterialStatusRollingProductStatus(
+            LhScheduleContext context,
+            String machineCode,
+            LhScheduleResult rollingResult,
+            Map<String, List<SkuScheduleDTO>> skuByMaterialMap) {
+        if (Objects.isNull(rollingResult)
+                || !containsSameMaterialStatusContinuationAnalysis(rollingResult)) {
+            return Objects.nonNull(rollingResult) ? rollingResult.getProductStatus() : null;
+        }
+        List<SkuScheduleDTO> sameMaterialSkuList = skuByMaterialMap.get(
+                rollingResult.getMaterialCode());
+        if (CollectionUtils.isEmpty(sameMaterialSkuList)) {
+            return rollingResult.getProductStatus();
+        }
+        boolean hasFormalSku = false;
+        for (SkuScheduleDTO sku : sameMaterialSkuList) {
+            if (Objects.isNull(sku)) {
+                continue;
+            }
+            String productStatus = normalizeOnlineProductStatus(sku.getProductStatus());
+            if (StringUtils.equals(TrialStatusEnum.FORMAL.getCode(), productStatus)) {
+                hasFormalSku = true;
+                continue;
+            }
+            if ((StringUtils.equals(TrialStatusEnum.TRIAL.getCode(), productStatus)
+                    || StringUtils.equals(TrialStatusEnum.MASS_TRIAL.getCode(), productStatus))
+                    && sku.resolveTargetScheduleQty() > 0) {
+                sku.setPreferredContinuousMachineCode(machineCode);
+            }
+        }
+        if (!hasFormalSku) {
+            return rollingResult.getProductStatus();
+        }
+        log.info("同物料多状态续作跨窗口身份还原, factoryCode: {}, batchNo: {}, materialCode: {}, "
+                        + "rollingProductStatus: {}, formalProductStatus: {}, carrierMachineCode: {}",
+                context.getFactoryCode(), context.getBatchNo(), rollingResult.getMaterialCode(),
+                rollingResult.getProductStatus(), TrialStatusEnum.FORMAL.getCode(), machineCode);
+        return TrialStatusEnum.FORMAL.getCode();
+    }
+
+    /**
+     * 判断滚动继承结果是否带有同物料多状态续作链标记。
+     *
+     * @param result 滚动继承结果
+     * @return true-专用状态链结果；false-普通续作结果
+     */
+    private boolean containsSameMaterialStatusContinuationAnalysis(LhScheduleResult result) {
+        if (Objects.isNull(result)) {
+            return false;
+        }
+        for (int shiftIndex = 1;
+             shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             shiftIndex++) {
+            if (StringUtils.contains(
+                    ShiftFieldUtil.getShiftAnalysis(result, shiftIndex),
+                    LhScheduleConstant.SAME_MATERIAL_STATUS_CONTINUATION_ANALYSIS)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -2321,7 +2400,15 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                 latestInheritedResult = inheritedResult;
             }
         }
-        if (latestInheritedResult == null || StringUtils.equals("1", latestInheritedResult.getIsEnd())) {
+        if (latestInheritedResult == null) {
+            return null;
+        }
+        /*
+         * 普通收尾结果仍按原逻辑结束续作；专用同物料状态链即使X/T在窗口末班完成，
+         * 下一窗口仍需据此恢复正规SKU到原机台，不能因为isEnd=1丢失承接关系。
+         */
+        if (StringUtils.equals("1", latestInheritedResult.getIsEnd())
+                && !containsSameMaterialStatusContinuationAnalysis(latestInheritedResult)) {
             return null;
         }
         return latestInheritedResult;
