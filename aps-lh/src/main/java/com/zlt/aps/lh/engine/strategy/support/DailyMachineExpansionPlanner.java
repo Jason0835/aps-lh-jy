@@ -3,6 +3,7 @@ package com.zlt.aps.lh.engine.strategy.support;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -301,6 +302,8 @@ public final class DailyMachineExpansionPlanner {
         // 实际剩余班次产能仍由各排产策略和班次产能工具负责，不在此处改变实际排产量及时间窗口语义。
         int singleMachineDailyTheoryCapacityQty = resolveAddMachineDailyTheoryCapacityQty(context, sku);
         LocalDate firstProductionDate = sku.getDailyPlanQuotaMap().keySet().iterator().next();
+        // 续作排产逐日推进并支持窗口末日（T+2）后看 T+3；新增排产保持"首日满足不后看"原语义。
+        boolean continuationLookAhead = ScheduleTypeEnum.CONTINUOUS.getCode().equals(scheduleType);
         for (LocalDate productionDate : sku.getDailyPlanQuotaMap().keySet()) {
             SkuDailyPlanQuotaDTO quota = sku.getDailyPlanQuotaMap().get(productionDate);
             int dayPlanQty = quota == null ? 0 : Math.max(0, quota.getDayPlanQty());
@@ -316,14 +319,52 @@ public final class DailyMachineExpansionPlanner {
                         sku.getMaterialCode(), productionDate, activeMachineCount, currentDayCapacityQty,
                         dayPlanQty, currentDayPlanQty, resolveFirstDayFinishQty(sku, productionDate, firstProductionDate),
                         true, false, false);
-                // spec: 当前日已满足时，当前日不加机台，且不再后看下一日。
-                // 使用 break 而非 continue，避免已满足的首日（含 T-1 滚动日）后仍继续检查后续日计划，
-                // 导致日计划略高于单机日产能的收尾 SKU 被误判为需要增机台。
-                break;
+                // 当前日已满足时该日不加机台，但继续逐日推进判断后续业务日，避免首日（含 T-1 滚动日）
+                // 满足后吞掉后续高计划日的增机需求（如 dayN=48,48,68 首日 48 满足却看不到 17 日 68 需增机台）。
+                // 新增排产与续作排产均逐日推进；末日无 T+3 时新增排产滚动不增、续作排产当前日增机台（见下方分支）。
+                continue;
             }
+            // 解析后看下一日计划量：窗口内有下一生产日时取下一日；窗口末日（T+2）后看 T+3。
+            // T+3 不进扣账账本，仅参与增机台节奏判断，与新增侧 windowLastDayNextPlanLookAhead 语义一致。
             LocalDate nextProductionDate = resolveNextProductionDate(sku.getDailyPlanQuotaMap(), productionDate);
-            if (Objects.isNull(nextProductionDate)) {
-                log.info("小欠产加机台逐日后看末日不足，直接判定需要加机台, materialCode: {}, productionDate: {}, "
+            int nextDayPlanQty = 0;
+            boolean nextDayLookAheadEntered = false;
+            String nextDayLookAheadSource = null;
+            int nextDayCapacityQty = resolveDailyTheoryCapacityQty(
+                    singleMachineDailyTheoryCapacityQty, activeMachineCount);
+            if (Objects.nonNull(nextProductionDate)) {
+                SkuDailyPlanQuotaDTO nextQuota = sku.getDailyPlanQuotaMap().get(nextProductionDate);
+                nextDayPlanQty = nextQuota == null ? 0 : Math.max(0, nextQuota.getDayPlanQty());
+                nextDayLookAheadEntered = true;
+                nextDayLookAheadSource = "windowNextDay";
+            } else {
+                // 窗口末日（T+2）后看 T+3（新增排产与续作排产均后看）：spec 要求 T+2 必须继续判断 T+3 日计划。
+                int nextDayPlanQtyAfterWindow = Math.max(0, sku.getNextDayPlanQtyAfterWindow());
+                if (nextDayPlanQtyAfterWindow > 0) {
+                    nextDayPlanQty = nextDayPlanQtyAfterWindow;
+                    nextDayLookAheadEntered = true;
+                    nextDayLookAheadSource = "windowLastDayNextPlan";
+                }
+            }
+            boolean addMachine = nextDayPlanQty > nextDayCapacityQty;
+            log.info("小欠产加机台逐日后看判断, materialCode: {}, productionDate: {}, "
+                            + "activeMachineCount: {}, currentDayCapacityQty: {}, dayPlanQty: {}, "
+                            + "currentDayPlanQty: {}, scheduleDayFinishQty: {}, currentDayPlanSatisfied: {}, "
+                            + "nextDayLookAheadEntered: {}, nextDayLookAheadSource: {}, "
+                            + "nextProductionDate: {}, nextDayPlanQty: {}, nextDayCapacityQty: {}, "
+                            + "addMachine: {}",
+                    sku.getMaterialCode(), productionDate, activeMachineCount, currentDayCapacityQty,
+                    dayPlanQty, currentDayPlanQty, resolveFirstDayFinishQty(sku, productionDate, firstProductionDate),
+                    false, nextDayLookAheadEntered, nextDayLookAheadSource, nextProductionDate, nextDayPlanQty,
+                    nextDayCapacityQty, addMachine);
+            if (addMachine) {
+                // 当前日不满足且后看日（下一生产日或 T+3）也不满足时，当前日必须增机台。
+                return productionDate;
+            }
+            if (continuationLookAhead && !nextDayLookAheadEntered) {
+                // 续作排产窗口末日不满足且无 T+3 计划可承接时，无后续业务日分摊，当前日仍需增机台。
+                // 新增排产窗口末日不满足且无 T+3 时滚动到后续业务日再判断（保持"首日满足不后看"滚动语义）。
+                log.info("小欠产加机台逐日后看末日不足且无T+3计划，直接判定需要加机台, materialCode: {}, productionDate: {}, "
                                 + "activeMachineCount: {}, currentDayCapacityQty: {}, dayPlanQty: {}, "
                                 + "currentDayPlanQty: {}, scheduleDayFinishQty: {}, currentDayPlanSatisfied: {}, "
                                 + "nextDayLookAheadEntered: {}, addMachine: {}",
@@ -332,26 +373,7 @@ public final class DailyMachineExpansionPlanner {
                         false, false, true);
                 return productionDate;
             }
-            if (Objects.nonNull(nextProductionDate)) {
-                SkuDailyPlanQuotaDTO nextQuota = sku.getDailyPlanQuotaMap().get(nextProductionDate);
-                int nextDayPlanQty = nextQuota == null ? 0 : Math.max(0, nextQuota.getDayPlanQty());
-                int nextDayCapacityQty = resolveDailyTheoryCapacityQty(
-                        singleMachineDailyTheoryCapacityQty, activeMachineCount);
-                boolean addMachine = nextDayPlanQty > nextDayCapacityQty;
-                log.info("小欠产加机台逐日后看判断, materialCode: {}, productionDate: {}, "
-                                + "activeMachineCount: {}, currentDayCapacityQty: {}, dayPlanQty: {}, "
-                                + "currentDayPlanQty: {}, scheduleDayFinishQty: {}, currentDayPlanSatisfied: {}, "
-                                + "nextDayLookAheadEntered: {}, "
-                                + "nextProductionDate: {}, nextDayPlanQty: {}, nextDayCapacityQty: {}, "
-                                + "addMachine: {}",
-                        sku.getMaterialCode(), productionDate, activeMachineCount, currentDayCapacityQty,
-                        dayPlanQty, currentDayPlanQty, resolveFirstDayFinishQty(sku, productionDate, firstProductionDate),
-                        false, true, nextProductionDate, nextDayPlanQty,
-                        nextDayCapacityQty, addMachine);
-                if (addMachine) {
-                    return productionDate;
-                }
-            }
+            // 当前日不满足但后看日满足时，当前日不加机台，继续逐日推进判断下一业务日。
         }
         return null;
     }

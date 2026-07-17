@@ -1710,6 +1710,136 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 续作排产首日满足但窗口末日超过单机日标准、且 T+3 也未满足时，必须增机台（修 3302001590 漏增）。
+     */
+    @Test
+    public void shouldAddMachineForContinuousWhenFirstDaySatisfiedButLastDayAndT3Exceed() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 48, 48, 68);
+        SkuScheduleDTO sku = buildContinuousSku("3302001590", 16, 164, quotaMap);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(164);
+        sku.setScheduleDayFinishQty(0);
+        sku.setNextDayPlanQtyAfterWindow(96);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001590");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(48);
+        context.getSkuLhCapacityMap().put("3302001590", capacity);
+
+        boolean satisfied = DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+        LocalDate lastDay = new ArrayList<LocalDate>(quotaMap.keySet()).get(quotaMap.size() - 1);
+
+        Assertions.assertFalse(satisfied, "窗口末日 68 与 T+3 96 均超过单机日标准 48，必须增机台");
+        Assertions.assertEquals(lastDay, addMachineDate);
+    }
+
+    /**
+     * 续作排产 dayN 全部被单机日标准覆盖时不增机台（修 3302001271 误增：dayN=46,46,46，日标准46，一台即够）。
+     */
+    @Test
+    public void shouldNotAddMachineForContinuousWhenAllDaysCoveredByOneMachine() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 46, 46, 46);
+        SkuScheduleDTO sku = buildContinuousSku("3302001271", 16, 138, quotaMap);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(138);
+        sku.setScheduleDayFinishQty(0);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001271");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001271", capacity);
+
+        boolean satisfied = DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        Assertions.assertTrue(satisfied, "dayN=46,46,46 全部被一台日标准46覆盖，不得增机台");
+        Assertions.assertNull(addMachineDate);
+    }
+
+    /**
+     * 续作排产窗口末日超过单机日标准但 T+3 已被当前机台满足时，不立即增机台，滚动到后续业务日再判断。
+     */
+    @Test
+    public void shouldNotAddMachineForContinuousWhenLastDayExceedsButT3Satisfied() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 8, 46, 66);
+        SkuScheduleDTO sku = buildContinuousSku("3302001318", 16, 120, quotaMap);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(120);
+        sku.setScheduleDayFinishQty(0);
+        sku.setNextDayPlanQtyAfterWindow(40);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001318");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001318", capacity);
+
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        Assertions.assertNull(addMachineDate, "末日 66 超过日标准 46 但 T+3 40 已满足，应滚动到后续业务日再判断");
+    }
+
+    /**
+     * 续作排产窗口末日超过单机日标准且无 T+3 计划可承接时，当前日仍需增机台。
+     */
+    @Test
+    public void shouldAddMachineForContinuousWhenLastDayExceedsAndNoT3() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 8, 46, 66);
+        SkuScheduleDTO sku = buildContinuousSku("3302001319", 16, 120, quotaMap);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(120);
+        sku.setScheduleDayFinishQty(0);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001319");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001319", capacity);
+
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 1, ScheduleTypeEnum.CONTINUOUS.getCode());
+        LocalDate lastDay = new ArrayList<LocalDate>(quotaMap.keySet()).get(quotaMap.size() - 1);
+
+        Assertions.assertEquals(lastDay, addMachineDate, "末日 66 超过日标准 46 且无 T+3，当前日需增机台");
+    }
+
+    /**
+     * 新增排产首日满足时不后看下一日，保持原滚动语义（修 8,46,66 仅新增排产 defer，续作才逐日推进）。
+     */
+    @Test
+    public void shouldNotAddMachineForNewSpecWhenFirstDaySatisfied() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 8, 46, 66);
+        SkuScheduleDTO sku = buildContinuousSku("3302001320", 16, 120, quotaMap);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(120);
+        sku.setScheduleDayFinishQty(0);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001320");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put("3302001320", capacity);
+
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 1, ScheduleTypeEnum.NEW_SPEC.getCode());
+
+        Assertions.assertNull(addMachineDate, "新增排产首日 8 满足日标准 46 时不后看，滚动到后续业务日再判断");
+    }
+
+    /**
      * dayN 只能作为节奏和资源判断依据，不能作为正规非收尾新增 SKU 的实际排产硬上限。
      */
     @Test

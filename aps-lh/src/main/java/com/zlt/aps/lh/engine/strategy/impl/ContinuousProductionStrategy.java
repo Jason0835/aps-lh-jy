@@ -8908,7 +8908,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return false;
         }
         int activeMachineCount = resolveContinuousMachineCount(context, sourceSku);
-        if (activeMachineCount <= 0 || !hasPureContinuousResultReachWindowEnd(context, sourceSku)) {
+        if (activeMachineCount <= 0) {
+            return false;
+        }
+        // 收尾 SKU 排完严格收尾目标即可，不要求续作机台排到窗口末班；只要 dayN 节奏已满足，
+        // 月计划余量留给后续滚动窗口消费，不在当前窗口盲目回流新增扩机（如 3302001271 dayN=46,46,46，
+        // K1104 排完收尾目标未到窗口末班，不应按月计划余量 700 扩第 2 台）。
+        boolean endingSku = StringUtils.equals(SkuTagEnum.ENDING.getCode(), sourceSku.getSkuTag());
+        if (!endingSku && !hasPureContinuousResultReachWindowEnd(context, sourceSku)) {
             return false;
         }
         return DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
@@ -9554,6 +9561,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         compensationSku.setContinuationAddMachineDayPlanQty(Math.max(0, addMachineDayPlanQty));
         // 复用同一份日计划账本，作为续作补偿SKU与来源续作SKU的共享归属锚点。
         compensationSku.setDailyPlanQuotaMap(sourceSku.getDailyPlanQuotaMap());
+        // 显式传递窗口后下一日（T+3）与后续月计划量，确保补偿SKU进入新增链路后仍能按 dayN 节奏
+        // 后看 T+3 判断是否需要增机台，避免 BeanUtil 未复制导致 T+3=0 误判已满足。
+        compensationSku.setNextDayPlanQtyAfterWindow(sourceSku.getNextDayPlanQtyAfterWindow());
+        compensationSku.setFutureMonthPlanQtyAfterWindow(sourceSku.getFutureMonthPlanQtyAfterWindow());
         return compensationSku;
     }
 
