@@ -152,6 +152,23 @@ class LhScheduleConfigResolverTest {
         }
     }
 
+    @Test
+    void resolveAndAttach_shouldUseDefaultsForInvalidCapsuleReplacementParams() {
+        LhScheduleContext upperLimitContext = context();
+        resolverWithParam(capsuleParam(
+                LhScheduleParamConstant.CAPSULE_FORCE_DOWN_COUNT, "0"))
+                .resolveAndAttach(upperLimitContext);
+        LhScheduleContext lossQtyContext = context();
+        resolverWithParam(capsuleParam(
+                LhScheduleParamConstant.CAPSULE_CHANGE_LOSS_QTY, "-1"))
+                .resolveAndAttach(lossQtyContext);
+
+        Assertions.assertEquals(450,
+                upperLimitContext.getScheduleConfig().getCapsuleUsageUpperLimit());
+        Assertions.assertEquals(2,
+                lossQtyContext.getScheduleConfig().getCapsuleChangeLossQty());
+    }
+
     private LhScheduleConfigResolver resolverWithParam(LhParams param) {
         LhScheduleConfigResolver resolver = new LhScheduleConfigResolver();
         LhParamsMapper mapper = Mockito.mock(LhParamsMapper.class);
@@ -181,6 +198,14 @@ class LhScheduleConfigResolverTest {
         LhParams param = new LhParams();
         param.setFactoryCode("116");
         param.setParamCode(LhScheduleParamConstant.CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS);
+        param.setParamValue(value);
+        return param;
+    }
+
+    private LhParams capsuleParam(String paramCode, String value) {
+        LhParams param = new LhParams();
+        param.setFactoryCode("116");
+        param.setParamCode(paramCode);
         param.setParamValue(value);
         return param;
     }

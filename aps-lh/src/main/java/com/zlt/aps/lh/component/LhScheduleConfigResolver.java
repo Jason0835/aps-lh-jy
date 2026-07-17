@@ -177,6 +177,8 @@ public class LhScheduleConfigResolver {
                 LhScheduleConstant.ALLOW_MAINTENANCE_ON_INVENTORY_DAY);
         putDoubleValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS,
                 LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue());
+        // 胶囊参数统一在配置快照入口校验，非法值回到业务默认值，禁止把负数静默修正成其他业务含义。
+        putCapsuleReplacementParams(resolvedParamMap, lhParamsMap);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS,
                 LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS);
 
@@ -301,6 +303,58 @@ public class LhScheduleConfigResolver {
         }
         if (minValue != null && resolvedValue < minValue) {
             resolvedValue = minValue;
+        }
+        resolvedParamMap.put(paramCode, String.valueOf(resolvedValue));
+    }
+
+    /**
+     * 解析换胶囊参数。
+     *
+     * <p>使用次数上限必须大于0，班次扣减量必须大于等于0。空值、非数字或越界值均使用
+     * 常量默认值，避免上限被修正为1或扣减量被修正为0后改变业务语义。</p>
+     *
+     * @param resolvedParamMap 解析后参数
+     * @param lhParamsMap 原始参数
+     */
+    private void putCapsuleReplacementParams(Map<String, String> resolvedParamMap,
+                                             Map<String, String> lhParamsMap) {
+        putCapsuleReplacementParam(resolvedParamMap, lhParamsMap,
+                LhScheduleParamConstant.CAPSULE_FORCE_DOWN_COUNT,
+                LhScheduleConstant.CAPSULE_FORCE_DOWN_COUNT, false);
+        putCapsuleReplacementParam(resolvedParamMap, lhParamsMap,
+                LhScheduleParamConstant.CAPSULE_CHANGE_LOSS_QTY,
+                LhScheduleConstant.CAPSULE_CHANGE_LOSS_QTY, true);
+    }
+
+    /**
+     * 解析单个换胶囊整数参数。
+     *
+     * @param resolvedParamMap 解析后参数
+     * @param lhParamsMap 原始参数
+     * @param paramCode 参数编码
+     * @param defaultValue 默认值
+     * @param allowZero 是否允许配置为0
+     */
+    private void putCapsuleReplacementParam(Map<String, String> resolvedParamMap,
+                                            Map<String, String> lhParamsMap,
+                                            String paramCode,
+                                            int defaultValue,
+                                            boolean allowZero) {
+        String value = lhParamsMap.get(paramCode);
+        int resolvedValue = defaultValue;
+        if (StringUtils.isNotEmpty(value)) {
+            try {
+                int parsedValue = Integer.parseInt(value.trim());
+                if (parsedValue > 0 || allowZero && parsedValue == 0) {
+                    resolvedValue = parsedValue;
+                } else {
+                    log.warn("换胶囊参数配置越界，使用默认值, paramCode={}, value={}, defaultValue={}",
+                            paramCode, value, defaultValue);
+                }
+            } catch (NumberFormatException e) {
+                log.warn("换胶囊参数解析失败，使用默认值, paramCode={}, value={}, defaultValue={}",
+                        paramCode, value, defaultValue);
+            }
         }
         resolvedParamMap.put(paramCode, String.valueOf(resolvedValue));
     }

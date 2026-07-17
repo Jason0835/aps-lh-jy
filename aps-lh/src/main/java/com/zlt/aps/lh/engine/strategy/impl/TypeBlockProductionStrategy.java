@@ -23,6 +23,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
@@ -134,6 +135,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private ICapacityCalculateStrategy capacityCalculateStrategy;
     @Resource
     private IMachineMatchStrategy machineMatchStrategy;
+    /** 胶囊次数累计与换胶囊班次扣减统一入口 */
+    @Resource
+    private CapsuleReplacementRuleService capsuleReplacementRuleService = new CapsuleReplacementRuleService();
 
     /**
      * 执行换活字块排产。
@@ -1817,6 +1821,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 pairResult.getLeftRightMould(), pairMachine.getMachineCode()));
         pairResult.setMachineOrder(pairMachine.getMachineOrder());
         pairResult.setMouldCode(resolveTypeBlockActualMouldCode(context, pairMachine, sku));
+        // 主侧已代表物理整机执行一次换胶囊，配对侧结果不得复制出第二条换胶囊备注。
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            ShiftFieldUtil.removeShiftAnalysis(
+                    pairResult, shiftIndex, CapsuleReplacementRuleService.CAPSULE_REPLACEMENT_ANALYSIS);
+        }
         refreshResultSummary(context, pairResult, shifts);
         return pairResult;
     }
@@ -2998,14 +3007,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 ScheduleTypeEnum.TYPE_BLOCK.getCode(), result.getLhMachineCode());
         boolean firstInspectionRecorded = false;
         if (shouldWriteFirstInspectionBeforeProduction(firstInspectionShift, startTime, firstInspectionQty)) {
-            setShiftPlanQty(result, firstInspectionShift.getShiftIndex(), firstInspectionQty,
-                    firstInspectionShift.getShiftStartDateTime(), firstInspectionShift.getShiftEndDateTime());
-            remaining -= firstInspectionQty;
-            FirstInspectionQtyUtil.recordFirstInspectionSequence(context, firstInspectionShift);
-            firstInspectionRecorded = true;
-            logTypeBlockFirstInspectionQty(context, result, firstInspectionShift, switchCompleteTime,
-                    firstInspectionSequence, firstInspectionQty, 0, firstInspectionQty,
-                    shiftCapacity, remaining + firstInspectionQty);
+            // 首检先于正常生产独立落班时，也必须按实际首检条数判断和累计胶囊使用次数。
+            firstInspectionQty = capsuleReplacementRuleService.resolveActualPlanQty(
+                    context, result, firstInspectionShift, firstInspectionQty, mouldQty,
+                    "换活字块首检");
+            if (firstInspectionQty > 0) {
+                setShiftPlanQty(result, firstInspectionShift.getShiftIndex(), firstInspectionQty,
+                        firstInspectionShift.getShiftStartDateTime(), firstInspectionShift.getShiftEndDateTime());
+                remaining -= firstInspectionQty;
+                FirstInspectionQtyUtil.recordFirstInspectionSequence(context, firstInspectionShift);
+                firstInspectionRecorded = true;
+                logTypeBlockFirstInspectionQty(context, result, firstInspectionShift, switchCompleteTime,
+                        firstInspectionSequence, firstInspectionQty, 0, firstInspectionQty,
+                        shiftCapacity, remaining + firstInspectionQty);
+            }
         }
 
         boolean started = false;
@@ -3092,9 +3107,12 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             }
             int shiftQty = getTargetScheduleQtyResolver().resolveAllocatedShiftQty(
                     context, result, Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
+            // 目标量、首检和物理产能全部收口后，再按本班实际候选量执行一次换胶囊扣减。
+            shiftQty = capsuleReplacementRuleService.resolveActualPlanQty(
+                    context, result, shift, shiftQty, mouldQty, "换活字块排产");
             if (shiftQty <= 0) {
                 logTypeBlockShiftSkip(result, shift, remaining, shiftCapacity,
-                        physicalShiftMaxQty, shiftMaxQty, "目标量或硫化余量账本回裁为0");
+                        physicalShiftMaxQty, shiftMaxQty, "目标量/硫化余量或换胶囊扣减后为0");
                 continue;
             }
             if (!firstInspectionRecorded

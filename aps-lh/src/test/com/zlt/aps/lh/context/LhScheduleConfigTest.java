@@ -137,6 +137,24 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：换胶囊参数默认450/2，合法配置应从配置快照读取。
+     */
+    @Test
+    public void shouldReadCapsuleReplacementConfig() {
+        LhScheduleConfig defaultConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Assertions.assertEquals(450, defaultConfig.getCapsuleUsageUpperLimit());
+        Assertions.assertEquals(2, defaultConfig.getCapsuleChangeLossQty());
+
+        Map<String, String> paramMap = new HashMap<String, String>(2);
+        paramMap.put(LhScheduleParamConstant.CAPSULE_FORCE_DOWN_COUNT, "500");
+        paramMap.put(LhScheduleParamConstant.CAPSULE_CHANGE_LOSS_QTY, "4");
+        LhScheduleConfig configured = new LhScheduleConfig(paramMap);
+
+        Assertions.assertEquals(500, configured.getCapsuleUsageUpperLimit());
+        Assertions.assertEquals(4, configured.getCapsuleChangeLossQty());
+    }
+
+    /**
      * 用例说明：收尾小余量允许欠产偏差默认2，配置后按配置值读取。
      */
     @Test

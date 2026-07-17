@@ -395,6 +395,40 @@ public final class ShiftFieldUtil {
     }
 
     /**
+     * 从指定班次原因分析中移除一个原因，其他已有原因保持原顺序不变。
+     *
+     * <p>主要用于L/R整机结果复制后移除配对侧重复的“换胶囊”备注，保证同一物理机台
+     * 同一班次只展示一次换胶囊动作。</p>
+     *
+     * @param result 排程结果
+     * @param shiftIndex 班次索引
+     * @param analysis 待移除原因
+     */
+    public static void removeShiftAnalysis(LhScheduleResult result, int shiftIndex, String analysis) {
+        if (Objects.isNull(result) || StringUtils.isEmpty(analysis) || !isValidIndex(shiftIndex)) {
+            return;
+        }
+        String currentAnalysis = getShiftAnalysis(result, shiftIndex);
+        if (StringUtils.isEmpty(currentAnalysis)) {
+            return;
+        }
+        StringBuilder retainedAnalysis = new StringBuilder(currentAnalysis.length());
+        String[] analysisArray = currentAnalysis.split(ANALYSIS_SEPARATOR);
+        for (String currentItem : analysisArray) {
+            String trimmedItem = StringUtils.trim(currentItem);
+            if (StringUtils.isEmpty(trimmedItem) || StringUtils.equals(trimmedItem, analysis)) {
+                continue;
+            }
+            if (retainedAnalysis.length() > 0) {
+                retainedAnalysis.append(ANALYSIS_SEPARATOR);
+            }
+            retainedAnalysis.append(trimmedItem);
+        }
+        setShiftAnalysis(result, shiftIndex,
+                retainedAnalysis.length() > 0 ? retainedAnalysis.toString() : null);
+    }
+
+    /**
      * 获取班次原因分析。
      *
      * @param result 排程结果

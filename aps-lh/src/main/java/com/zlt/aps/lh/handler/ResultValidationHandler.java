@@ -18,6 +18,7 @@ import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.component.IncrSerialGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEvent;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
@@ -82,6 +83,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
     @Resource
     private TargetScheduleQtyResolver targetScheduleQtyResolver;
+    /** 最终结果阶段只重建并核对胶囊运行态，不得再次扣减班次计划量 */
+    @Resource
+    private CapsuleReplacementRuleService capsuleReplacementRuleService = new CapsuleReplacementRuleService();
 
     private static final AtomicInteger ORDER_SEQ = new AtomicInteger(0);
     private static final AtomicInteger CHG_SEQ = new AtomicInteger(0);
@@ -98,6 +102,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         try {
             // S4.6.1 排程后置校验：保存前校验结果必填字段和关键数量约束。
             postValidation(context);
+
+            // 模数规范化完成后按最终实际班次量重建胶囊次数；这里只核对，不得再次扣减计划量。
+            capsuleReplacementRuleService.verifyFinalState(context);
 
             // S4.6.2 生成模具交替计划：基于结果真实换模开始时间和机台滚动状态生成前后规格。
             generateMouldChangePlan(context);
