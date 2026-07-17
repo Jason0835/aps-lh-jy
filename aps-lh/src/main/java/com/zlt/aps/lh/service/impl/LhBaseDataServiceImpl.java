@@ -336,7 +336,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         () -> loadSpecifyMachine(context, factoryCode),
                         () -> sizeOf(context.getSpecifyMachineMap())),
                 runDataInitTaskAsync("硫化机胶囊已使用次数",
-                        () -> loadCapsuleUsage(context, factoryCode),
+                        () -> loadCapsuleUsage(context, factoryCode, scheduleDate),
                         () -> sizeOf(context.getCapsuleUsageMap())),
                 runDataInitTaskAsync("设备保养计划",
                         () -> loadMaintenancePlan(context, factoryCode),
@@ -2346,16 +2346,24 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
     }
 
     /**
-     * 加载硫化机胶囊已使用次数，按机台编号建立Map
+     * 加载硫化机胶囊已使用次数，按机台编号建立Map。
+     * <p>仅加载获取日期等于排程窗口起点T日（obtainTime = scheduleDate）的数据，
+     * 避免历史多日快照叠加导致同机台记录被无序覆盖，保证初始化取到的是T日最新快照。</p>
      *
-     * @param context     排程上下文
-     * @param factoryCode 分厂编号
+     * @param context      排程上下文
+     * @param factoryCode  分厂编号
+     * @param scheduleDate 排程窗口起点T日，用于过滤胶囊使用次数的获取日期
      */
-    private void loadCapsuleUsage(LhScheduleContext context, String factoryCode) {
+    private void loadCapsuleUsage(LhScheduleContext context, String factoryCode, Date scheduleDate) {
+        // T日零点与次日零点，用范围比较兼容OBTAIN_TIME为date或datetime的存储类型
+        Date tDay = LhScheduleTimeUtil.clearTime(scheduleDate);
+        Date nextDay = LhScheduleTimeUtil.addDays(tDay, 1);
         List<LhRepairCapsule> capsuleUsageList = lhRepairCapsuleMapper.selectList(
                 new LambdaQueryWrapper<LhRepairCapsule>()
                         .eq(LhRepairCapsule::getFactoryCode, factoryCode)
-                        .eq(LhRepairCapsule::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
+                        .eq(LhRepairCapsule::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
+                        .ge(LhRepairCapsule::getObtainTime, tDay)
+                        .lt(LhRepairCapsule::getObtainTime, nextDay));
         Map<String, LhRepairCapsule> capsuleUsageMap = new HashMap<>(32);
         if (capsuleUsageList != null) {
             for (LhRepairCapsule capsule : capsuleUsageList) {
@@ -2365,7 +2373,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             }
         }
         context.setCapsuleUsageMap(capsuleUsageMap);
-        log.debug("硫化机胶囊使用次数加载完成, 数量: {}", capsuleUsageMap.size());
+        log.debug("硫化机胶囊使用次数加载完成, 数量: {}, T日: {}",
+                capsuleUsageMap.size(), LhScheduleTimeUtil.formatDate(tDay));
     }
 
     /**
