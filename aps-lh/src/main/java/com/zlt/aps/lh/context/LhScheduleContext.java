@@ -1,5 +1,6 @@
 package com.zlt.aps.lh.context;
 
+import com.zlt.aps.lh.api.domain.dto.CleaningScheduleDateFillItem;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
@@ -145,6 +146,14 @@ public class LhScheduleContext {
      * 判断“机台是否存在有效清洗计划”使用，不参与普通停机产能扣减，也不改变清洗每日上限和班次安排。</p>
      */
     private List<MdmDevicePlanShut> loadedCleaningPlanShutList = new ArrayList<>();
+    /**
+     * 清洗计划排程日期回填项列表。
+     * <p>清洗实际安排成功时记录实际清洗开始时间；因 SKU 3 天内收尾跳过清洗时记录收尾日期。
+     * 该列表在排程结果落库事务（{@code replaceScheduleAtomically}）内统一回填到
+     * {@code T_MDM_DEVICE_PLAN_SHUT.SCHEDULE_DATE}，按设备停机计划主键 id 去重更新。
+     * 配对侧派生窗口、超窗口上限、配置非法、最晚日期超限等未安排场景不收集回填项。</p>
+     */
+    private List<CleaningScheduleDateFillItem> cleaningScheduleDateFillList = new ArrayList<>();
     /** SKU与模具关系Map, key=materialCode */
     private Map<String, List<MdmSkuMouldRel>> skuMouldRelMap = new HashMap<>();
     /** 模具台账Map, key=mouldCode */

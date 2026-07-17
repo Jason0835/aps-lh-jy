@@ -2,6 +2,7 @@ package com.zlt.aps.lh.service.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.CleaningScheduleDateFillItem;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
@@ -191,6 +192,15 @@ public class LhCleaningScheduleService {
                     cleaningPlan.getMachineCode(), cleanType, LhScheduleTimeUtil.formatDateTime(cleaningPlan.getBeginDate()));
             return null;
         }
+        // 最晚安排日期校验：实际清洗日期不得晚于计划开始日期（含当天），超过则跳过且不占用每日上限名额
+        if (!getDeviceStopPlanScheduleService()
+                .isCleaningActualDateNotLaterThanPlanBegin(cleaningPlan.getBeginDate(), cleanStartTime)) {
+            log.info("清洗实际安排日期晚于计划开始日期，跳过清洗, 机台: {}, 类型: {}, 计划开始: {}, 实际清洗开始: {}",
+                    cleaningPlan.getMachineCode(), cleanType,
+                    LhScheduleTimeUtil.formatDateTime(cleaningPlan.getBeginDate()),
+                    LhScheduleTimeUtil.formatDateTime(cleanStartTime));
+            return null;
+        }
         String machineMaterial = resolveMachineMaterial(context, cleaningPlan.getMachineCode());
         // 清洗执行前先判断当前 SKU 是否 3 天内可收尾；命中时不再占用干冰/喷砂清洗名额。
         if (isMachineEndingWithinThreeDays(context, cleaningPlan.getMachineCode(), cleanStartTime, machineMaterial)) {
@@ -198,6 +208,8 @@ public class LhCleaningScheduleService {
                     cleaningPlan.getMachineCode(),
                     StringUtils.isEmpty(machineMaterial) ? "N/A" : machineMaterial,
                     cleanType, LhScheduleTimeUtil.formatDateTime(cleanStartTime));
+            // 因 SKU 收尾未安排清洗：回填写该 SKU 收尾日期（候选清洗开始日 + 剩余排产天数 N）
+            collectEndingSkipScheduleDateFill(context, cleaningPlan, cleanType, cleanStartTime, machineMaterial);
             return null;
         }
         increaseDeviceStopCleaningUsage(context, dryIceDailyCountMap, dryIceMorningCountMap,
@@ -205,7 +217,10 @@ public class LhCleaningScheduleService {
         log.info("设备停机清洗纳入本次窗口, 机台: {}, 类型: {}, 计划开始: {}, 实际清洗开始: {}, 清洗时长小时: {}",
                 cleaningPlan.getMachineCode(), cleanType, LhScheduleTimeUtil.formatDateTime(cleaningPlan.getBeginDate()),
                 LhScheduleTimeUtil.formatDateTime(cleanStartTime), cleanDurationHours);
-        return buildCleaningWindow(context, cleaningPlan, cleanType, cleanStartTime, cleanDurationHours);
+        MachineCleaningWindowDTO cleaningWindow = buildCleaningWindow(context, cleaningPlan, cleanType, cleanStartTime, cleanDurationHours);
+        // 清洗成功排程：回填实际清洗开始时间到设备停机计划排程日期
+        collectCleaningScheduleDateFill(context, cleaningPlan, cleanType, cleanStartTime, "清洗成功");
+        return cleaningWindow;
     }
 
     /**
@@ -362,6 +377,60 @@ public class LhCleaningScheduleService {
                 increaseCount(dryIceAfternoonCountMap, dateKey);
             }
         }
+    }
+
+    /**
+     * 收集清洗排程日期回填项（通用）。
+     * <p>清洗成功排程或因 SKU 收尾跳过清洗时，将回填项追加到排程上下文，
+     * 由排程结果落库事务统一回填到 {@code T_MDM_DEVICE_PLAN_SHUT.SCHEDULE_DATE}。</p>
+     *
+     * @param context      排程上下文
+     * @param cleaningPlan 设备停机清洗计划
+     * @param cleanType    清洗类型（干冰/喷砂）
+     * @param scheduleDate 回填排程日期（实际清洗开始时间 或 收尾日期）
+     * @param fillReason   回填原因
+     */
+    private void collectCleaningScheduleDateFill(LhScheduleContext context,
+                                                MdmDevicePlanShut cleaningPlan,
+                                                String cleanType,
+                                                Date scheduleDate,
+                                                String fillReason) {
+        if (Objects.isNull(context) || Objects.isNull(cleaningPlan) || Objects.isNull(scheduleDate)) {
+            return;
+        }
+        CleaningScheduleDateFillItem fillItem = new CleaningScheduleDateFillItem();
+        fillItem.setPlanId(cleaningPlan.getId());
+        fillItem.setScheduleDate(scheduleDate);
+        fillItem.setCleanType(cleanType);
+        fillItem.setMachineCode(cleaningPlan.getMachineCode());
+        fillItem.setFillReason(fillReason);
+        context.getCleaningScheduleDateFillList().add(fillItem);
+    }
+
+    /**
+     * 因 SKU 收尾未安排清洗时，收集收尾日期回填项。
+     * <p>收尾日期 = 候选清洗开始时间所在自然日 + 剩余排产天数 N（N = 月计划余量 / 日硫化量 向上取整），
+     * 与 {@link #isMachineEndingWithinThreeDays} 的 3 天收尾判断同一口径。
+     * isMachineEndingWithinThreeDays 命中时 N 必为 [0,3]，故无需额外兜底。</p>
+     *
+     * @param context         排程上下文
+     * @param cleaningPlan    设备停机清洗计划
+     * @param cleanType       清洗类型
+     * @param cleanStartTime  候选清洗开始时间
+     * @param machineMaterial 机台当前在机物料
+     */
+    private void collectEndingSkipScheduleDateFill(LhScheduleContext context,
+                                                   MdmDevicePlanShut cleaningPlan,
+                                                   String cleanType,
+                                                   Date cleanStartTime,
+                                                   String machineMaterial) {
+        if (Objects.isNull(context) || Objects.isNull(cleaningPlan) || Objects.isNull(cleanStartTime)) {
+            return;
+        }
+        int remainingDays = resolveEndingRemainingDays(context, machineMaterial);
+        // isMachineEndingWithinThreeDays 命中时 remainingDays 必为 [0,3]，收尾日 = 候选清洗开始日 + 剩余天数
+        Date endingDate = LhScheduleTimeUtil.addDays(LhScheduleTimeUtil.clearTime(cleanStartTime), remainingDays);
+        collectCleaningScheduleDateFill(context, cleaningPlan, cleanType, endingDate, "收尾未安排清洗");
     }
 
     /**

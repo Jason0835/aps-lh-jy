@@ -8,6 +8,7 @@ import com.zlt.aps.lh.mapper.LhScheduleProcessLogMapper;
 import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
 import com.zlt.aps.lh.mapper.LhUnscheduledResultMapper;
 import com.zlt.aps.lh.service.ILhScheduleResultService;
+import com.zlt.aps.lh.service.impl.LhDeviceStopPlanScheduleService;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,9 @@ class SchedulePersistenceRollbackTest {
 
     @Mock
     private ILhScheduleResultService scheduleResultService;
+
+    @Mock
+    private LhDeviceStopPlanScheduleService deviceStopPlanScheduleService;
 
     @InjectMocks
     private SchedulePersistenceService schedulePersistenceService;

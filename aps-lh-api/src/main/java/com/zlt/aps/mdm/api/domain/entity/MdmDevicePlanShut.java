@@ -100,6 +100,15 @@ public class MdmDevicePlanShut extends BaseEntity {
     @TableField(value = "ACTUAL_FINISH_DATE")
     private Date actualFinishDate;
 
+    /**
+     * 排程日期（硫化排程回填给精度计划/清洗计划）
+     */
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @Excel(name = "ui.data.column.mdmDevicePlanShut.scheduleDate", width = 30, dateFormat = "yyyy-MM-dd HH:mm:ss")
+    @ApiModelProperty(value = "排程日期（硫化排程回填给精度计划/清洗计划）", name = "scheduleDate")
+    @TableField(value = "SCHEDULE_DATE")
+    private Date scheduleDate;
+
     @ImportExcelValidated(maxLength = 500)
     @Excel(name = "ui.data.column.mdmMaterialInfo.remark")
     @ApiModelProperty("备注")

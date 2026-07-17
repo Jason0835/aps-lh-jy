@@ -2,9 +2,11 @@ package com.zlt.aps.lh.service.impl;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.CleaningScheduleDateFillItem;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.mapper.MdmDevicePlanShutMapper;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -13,12 +15,16 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import javax.annotation.Resource;
+
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -38,6 +44,10 @@ public class LhDeviceStopPlanScheduleService {
     private static final int ENABLED = 1;
     /** 多值参数分隔符 */
     private static final String VALUE_SEPARATOR = ",";
+
+    /** 设备停机计划 Mapper：用于回填清洗实际排程日期到 T_MDM_DEVICE_PLAN_SHUT.SCHEDULE_DATE */
+    @Resource
+    private MdmDevicePlanShutMapper mdmDevicePlanShutMapper;
 
     /**
      * 从设备停机计划中过滤干冰/喷砂清洗候选，并按计划开始时间、机台编码升序返回。
@@ -284,6 +294,74 @@ public class LhDeviceStopPlanScheduleService {
         }
         Date scheduleStartTime = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
         return !planBeginTime.before(scheduleStartTime);
+    }
+
+    /**
+     * 校验清洗实际安排日期是否不晚于计划开始日期。
+     *
+     * <p>业务规则：实际清洗日期 ≤ 计划开始日期所在自然日。允许提前安排、允许安排在计划开始日当天，
+     * 禁止晚于计划开始日期安排；比较按自然日（归零时分秒）进行，与"允许当天"口径一致。</p>
+     *
+     * <p>任一参数为 null 时返回 true，保持与 {@link #isPlanBeginOnOrAfterScheduleDate} 一致的容错口径，
+     * 由调用方保证传入有效时间，不在本方法内新增兜底默认值。</p>
+     *
+     * @param planBeginDate        设备停机清洗计划的计划开始时间（beginDate）
+     * @param actualCleanStartTime 实际清洗开始时间
+     * @return true-实际清洗日不晚于计划开始日（含当天），可继续安排；false-已晚于计划开始日，应跳过
+     */
+    public boolean isCleaningActualDateNotLaterThanPlanBegin(Date planBeginDate, Date actualCleanStartTime) {
+        if (Objects.isNull(planBeginDate) || Objects.isNull(actualCleanStartTime)) {
+            return true;
+        }
+        // 归零到自然日后比较：实际清洗日 <= 计划开始日（含当天）
+        Date planBeginDay = LhScheduleTimeUtil.clearTime(planBeginDate);
+        Date actualCleanDay = LhScheduleTimeUtil.clearTime(actualCleanStartTime);
+        return !actualCleanDay.after(planBeginDay);
+    }
+
+    /**
+     * 批量回填清洗计划排程日期到设备停机计划。
+     *
+     * <p>在排程结果落库事务内调用：将清洗成功排程的实际清洗日期、或因 SKU 收尾未安排清洗时的收尾日期，
+     * 回填到对应设备停机计划（{@code T_MDM_DEVICE_PLAN_SHUT}）的 {@code SCHEDULE_DATE} 字段。
+     * 按设备停机计划主键 id 去重（同一计划只回填一次，保留首条），避免重复更新；仅更新非空字段。</p>
+     *
+     * @param fillList 清洗排程日期回填项列表
+     * @return 实际更新记录数（去重后条数）
+     */
+    public int batchFillCleaningScheduleDate(List<CleaningScheduleDateFillItem> fillList) {
+        if (CollectionUtils.isEmpty(fillList)) {
+            log.info("清洗排程日期回填跳过，待回填列表为空");
+            return 0;
+        }
+        // 按设备停机计划主键 id 去重，同一计划只回填一次（保留首次出现的回填项）
+        Map<Long, CleaningScheduleDateFillItem> dedupMap = new LinkedHashMap<>(fillList.size());
+        for (CleaningScheduleDateFillItem fillItem : fillList) {
+            if (Objects.isNull(fillItem) || Objects.isNull(fillItem.getPlanId())
+                    || Objects.isNull(fillItem.getScheduleDate())) {
+                continue;
+            }
+            dedupMap.putIfAbsent(fillItem.getPlanId(), fillItem);
+        }
+        if (dedupMap.isEmpty()) {
+            log.info("清洗排程日期回填跳过，去重后无可回填记录，原始条数: {}", fillList.size());
+            return 0;
+        }
+        log.info("清洗排程日期回填开始，原始条数: {}, 去重后待回填条数: {}", fillList.size(), dedupMap.size());
+        int updatedCount = 0;
+        for (CleaningScheduleDateFillItem fillItem : dedupMap.values()) {
+            // 仅按主键更新 SCHEDULE_DATE，MyBatis-Plus updateById 默认不覆盖 null 字段
+            MdmDevicePlanShut updateEntity = new MdmDevicePlanShut();
+            updateEntity.setId(fillItem.getPlanId());
+            updateEntity.setScheduleDate(fillItem.getScheduleDate());
+            mdmDevicePlanShutMapper.updateById(updateEntity);
+            updatedCount++;
+            log.info("清洗排程日期回填, 设备停机计划ID: {}, 机台: {}, 清洗类型: {}, 回填日期: {}, 原因: {}",
+                    fillItem.getPlanId(), fillItem.getMachineCode(), fillItem.getCleanType(),
+                    LhScheduleTimeUtil.formatDateTime(fillItem.getScheduleDate()), fillItem.getFillReason());
+        }
+        log.info("清洗排程日期回填完成，实际更新记录数: {}", updatedCount);
+        return updatedCount;
     }
 
     /**
