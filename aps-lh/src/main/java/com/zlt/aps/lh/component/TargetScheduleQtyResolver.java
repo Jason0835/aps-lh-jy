@@ -316,12 +316,13 @@ public class TargetScheduleQtyResolver {
 
     /**
      * 判断胎胚是否配置为胎胚库存收尾。
+     * <p>供收尾目标量门控与共用胎胚零余量预剔除生产者候选判定复用。</p>
      *
      * @param context 排程上下文
      * @param embryoCode 胎胚代码
      * @return true-胎胚库存收尾；false-普通胎胚
      */
-    private boolean isEmbryoStockEndingFlagYes(LhScheduleContext context, String embryoCode) {
+    public boolean isEmbryoStockEndingFlagYes(LhScheduleContext context, String embryoCode) {
         if (Objects.isNull(context) || StringUtils.isEmpty(embryoCode)
                 || CollectionUtils.isEmpty(context.getEmbryoEndingFlagMap())) {
             return false;

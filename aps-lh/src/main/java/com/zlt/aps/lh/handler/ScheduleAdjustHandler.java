@@ -385,11 +385,41 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * @return true-命中共用胎胚零余量；false-未命中
      */
     private boolean isSharedEmbryoZeroSurplusSku(LhScheduleContext context, SkuScheduleDTO sku) {
-        return Objects.nonNull(sku)
-                && sku.getSurplusQty() <= 0
-                && StringUtils.isNotEmpty(sku.getEmbryoCode())
-                && StringUtils.isNotEmpty(sku.getMaterialCode())
-                && getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku);
+        if (Objects.isNull(sku)
+                || sku.getSurplusQty() > 0
+                || StringUtils.isEmpty(sku.getEmbryoCode())
+                || StringUtils.isEmpty(sku.getMaterialCode())
+                || !getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku)) {
+            return false;
+        }
+        // 胎胚库存收尾生产者候选保留：共用胎胚组内消纳胎胚库存的自然生产者不得一刀切未排，
+        // 由动态转单胎胚归一化转为单胎胚按胎胚库存排产，避免胎胚库存无法消纳（违反动态转单胎胚/单胎胚放宽规则）。
+        return !isEmbryoStockEndingProducerCandidate(context, sku);
+    }
+
+    /**
+     * 判断当前SKU是否为胎胚库存收尾生产者候选。
+     * <p>共用胎胚组内余量为0但胎胚仍处于收尾且有库存时，前一业务日(T-1)仍在产的SKU
+     * 是消纳胎胚库存的自然生产者，应在预剔除阶段保留，由动态转单胎胚归一化转为单胎胚按胎胚库存排产。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @return true-生产者候选，应保留不预剔除；false-非生产者，可预剔除
+     */
+    private boolean isEmbryoStockEndingProducerCandidate(LhScheduleContext context, SkuScheduleDTO sku) {
+        // 胎胚收尾标识必须为是，否则该胎胚不属于清尾场景，零余量SKU照常预剔除
+        if (!getTargetScheduleQtyResolver().isEmbryoStockEndingFlagYes(context, sku.getEmbryoCode())) {
+            return false;
+        }
+        // 胎胚库存为0时无需消纳库存，零余量SKU照常预剔除
+        if (sku.getEmbryoStock() <= 0) {
+            return false;
+        }
+        // 前一业务日(T-1)有日计划，表示昨日仍在产，是消纳胎胚库存的自然生产者
+        LocalDate previousDay = toLocalDate(context.getScheduleDate()).minusDays(1);
+        int previousDayPlanQty = MonthPlanDateResolver.resolveDayQty(
+                context, sku.getMaterialCode(), sku.getProductStatus(), previousDay);
+        return previousDayPlanQty > 0;
     }
 
     /**
