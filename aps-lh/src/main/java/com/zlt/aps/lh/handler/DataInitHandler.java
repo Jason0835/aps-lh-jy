@@ -233,7 +233,8 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                     }
                     MachineStopTypeEnum stopTypeEnum = MachineStopTypeEnum.getByCode(planShut.getMachineStopType());
                     // 临时性故障(06)需要标记维修计划，抬高机台准备就绪时间。
-                    // 计划性维修(05)只作为停机窗口扣减产能，维修前后均允许原物料续作；
+                    // 计划性维修(05)不复用旧的全局抬时字段：维修开始班次按SYS0308010固定排产，
+                    // 维修结束后由统一容量时间轴追加SYS0307009预热；同物料仍保持续作身份。
                     // 盘点(09)、精度校验(00)等其他停机类型仅保留停机窗口用于产能扣减，
                     // 不触发换模、换活字块、首检、预热等逻辑。
                     if (stopTypeEnum == MachineStopTypeEnum.TEMPORARY_FAULT) {
@@ -241,10 +242,15 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                         dto.setRepairPlanTime(earlier(dto.getRepairPlanTime(), planShut.getBeginDate()));
                     }
                     if (stopTypeEnum == MachineStopTypeEnum.PLANNED_REPAIR) {
-                        log.info("机台存在计划性维修停机计划，按停机窗口扣减产能并保留原物料续作, 机台: {}, 维修开始: {}, 维修结束: {}",
+                        log.info("机台存在计划性维修停机计划，开始班次按SYS0308010固定排产，"
+                                        + "维修结束后按SYS0307009预热并保留原物料续作, 机台: {}, "
+                                        + "维修开始: {}, 维修结束: {}, 固定排产量: {}, 预热分钟数: {}",
                                 machineCode,
                                 LhScheduleTimeUtil.formatDateTime(planShut.getBeginDate()),
-                                LhScheduleTimeUtil.formatDateTime(planShut.getEndDate()));
+                                LhScheduleTimeUtil.formatDateTime(planShut.getEndDate()),
+                                context.getParamIntValue(LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY,
+                                        LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY),
+                                LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
                     }
                     // 盘点停机计划日志：记录机台、盘点时间段，便于排查盘点扣产能问题
                     if (stopTypeEnum == MachineStopTypeEnum.TAKE_STOCK) {
@@ -335,17 +341,21 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                     dto.setStopType(planShut.getMachineStopType());
                 }
                 MachineStopTypeEnum stopTypeEnum = MachineStopTypeEnum.getByCode(planShut.getMachineStopType());
-                // 临时性故障(06)需要抬高机台准备就绪时间；计划性维修(05)仅扣减停机产能，
-                // 维修前后均保留原物料续作，不再转换为强制换模或换活字块状态。
+                // 临时性故障(06)需要抬高机台准备就绪时间；计划性维修(05)不设置旧全局维修标记，
+                // 而是由统一容量时间轴处理开始班次固定量、真实维修停机和SYS0307009预热。
                 if (stopTypeEnum == MachineStopTypeEnum.TEMPORARY_FAULT) {
                     dto.setHasRepairPlan(true);
                     dto.setRepairPlanTime(earlier(dto.getRepairPlanTime(), planShut.getBeginDate()));
                 }
                 if (stopTypeEnum == MachineStopTypeEnum.PLANNED_REPAIR) {
-                    log.info("机台存在计划性维修停机计划，运行态保留原物料续作, 机台: {}, 维修开始: {}, 维修结束: {}",
+                    log.info("机台存在计划性维修停机计划，运行态保留原物料续作并在维修后执行预热, "
+                                    + "机台: {}, 维修开始: {}, 维修结束: {}, 固定排产量: {}, 预热分钟数: {}",
                             machineCode,
                             LhScheduleTimeUtil.formatDateTime(planShut.getBeginDate()),
-                            LhScheduleTimeUtil.formatDateTime(planShut.getEndDate()));
+                            LhScheduleTimeUtil.formatDateTime(planShut.getEndDate()),
+                            context.getParamIntValue(LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY,
+                                    LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY),
+                            LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
                 }
             }
         }

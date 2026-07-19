@@ -1130,8 +1130,24 @@ public class TargetScheduleQtyResolver {
         }
         int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
         Date mouldChangeCompleteTime = resolveMouldChangeCompleteTime(context, switchStartTime, scheduleType);
+        boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
+                context, context.getDevicePlanShutList(), machine.getMachineCode(), machine.getEstimatedEndTime(),
+                switchStartTime, mouldChangeCompleteTime);
+        Date firstInspectionBaseTime = plannedRepairAffectingSwitch
+                ? ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, context.getDevicePlanShutList(), machine.getMachineCode(), machine.getEstimatedEndTime(),
+                switchStartTime, mouldChangeCompleteTime)
+                : mouldChangeCompleteTime;
+        /*
+         * 目标量预演与最终排产共用维修后预热完成时刻：非试制SKU不会在
+         * resolveTrialProductionStartTime 内主动抬高开产点，因此这里先显式取现有开产点与维修恢复点的较晚值，
+         * 避免预演仍从维修或预热区间开始累计产能。
+         */
+        Date repairAdjustedProductionStartTime = plannedRepairAffectingSwitch
+                && productionStartTime.before(firstInspectionBaseTime)
+                ? firstInspectionBaseTime : productionStartTime;
         productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
-                context, sku, shifts, mouldChangeCompleteTime, productionStartTime, scheduleType);
+                context, sku, shifts, firstInspectionBaseTime, repairAdjustedProductionStartTime, scheduleType);
         if (Objects.isNull(productionStartTime)) {
             return 0;
         }
@@ -1160,7 +1176,7 @@ public class TargetScheduleQtyResolver {
         Date cursorStartTime = firstProductionStartTime;
         int totalQty = 0;
         LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
-                context, sku, shifts, mouldChangeCompleteTime, scheduleType);
+                context, sku, shifts, firstInspectionBaseTime, scheduleType);
         int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
                 || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
         int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
@@ -1184,6 +1200,9 @@ public class TargetScheduleQtyResolver {
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
+                    ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                            context, context.getDevicePlanShutList(), machine.getMachineCode(),
+                            machine.getMaintenanceWindowList()),
                     machine.getMachineCode(),
                     effectiveStartTime,
                     effectiveEndTime,
@@ -1600,7 +1619,10 @@ public class TargetScheduleQtyResolver {
             Date effectiveStartTime = control.getEffectiveStartTime();
             Date effectiveEndTime = control.getEffectiveEndTime();
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
-                    context.getDevicePlanShutList(), cleaningWindowList, machine.getMaintenanceWindowList(),
+                    context.getDevicePlanShutList(), cleaningWindowList,
+                    ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                            context, context.getDevicePlanShutList(), machine.getMachineCode(),
+                            machine.getMaintenanceWindowList()),
                     machine.getMachineCode(), effectiveStartTime, effectiveEndTime,
                     shiftCapacity, lhTimeSeconds, mouldQty,
                     ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
@@ -1612,7 +1634,10 @@ public class TargetScheduleQtyResolver {
             }
             if (remainingQty <= shiftMaxQty) {
                 Date predictedEndingTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
-                        context.getDevicePlanShutList(), cleaningWindowList, machine.getMaintenanceWindowList(),
+                        context.getDevicePlanShutList(), cleaningWindowList,
+                        ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                                context, context.getDevicePlanShutList(), machine.getMachineCode(),
+                                machine.getMaintenanceWindowList()),
                         machine.getMachineCode(), effectiveStartTime, effectiveEndTime,
                         remainingQty, shiftMaxQty);
                 log.info("长期在机自然收尾时间预测完成, materialCode: {}, machineCode: {}, targetQty: {}, "
@@ -1744,7 +1769,9 @@ public class TargetScheduleQtyResolver {
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     machine.getCleaningWindowList(),
-                    machine.getMaintenanceWindowList(),
+                    ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                            context, context.getDevicePlanShutList(), machine.getMachineCode(),
+                            machine.getMaintenanceWindowList()),
                     machine.getMachineCode(),
                     effectiveStartTime,
                     effectiveEndTime,

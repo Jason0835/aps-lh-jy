@@ -30,6 +30,7 @@ import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ResultDowntimeSummaryUtil;
+import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -102,6 +103,9 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
     protected void doHandle(LhScheduleContext context) {
         String scheduleOrderBusinessKey = buildScheduleOrderBusinessKey(context);
         try {
+            // 保存前对齐计划性维修后的首个有量班次：只修正时间与原因，不重新扣减任何业务账本。
+            alignPlannedRepairResumeTimeToFinalResults(context);
+
             // 保存前按机台实际挂载窗口绑定保养摘要：只处理本批班次覆盖范围内的保养，
             // 优先绑定首条保养后结果，无后续SKU时绑定最后一条结果，并统一写入“精度计划”。
             bindMaintenanceWindowsToFinalResults(context);
@@ -142,6 +146,95 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
             scheduleEventPublisher.publish(ScheduleEvent.completed(context));
         } finally {
             clearScheduleOrderCounter(scheduleOrderBusinessKey);
+        }
+    }
+
+    /**
+     * 将计划性维修结束并完成 SYS0307009 预热后的首个有量班次对齐到最早开产时间。
+     * <p>维修容量窗口由设备停机计划临时构造，不写入机台精度保养列表，因此本方法不会生成
+     * 精度计划摘要、占用保养额度或改变计划回填；班次量、月/日计划账本、胎胚库存和胶囊次数
+     * 均保持排程主链已经确定的值，仅校正最终展示时间并补充组合原因。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void alignPlannedRepairResumeTimeToFinalResults(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleResultList())
+                || CollectionUtils.isEmpty(context.getDevicePlanShutList())) {
+            return;
+        }
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())) {
+                continue;
+            }
+            List<MachineMaintenanceWindowDTO> repairWindowList =
+                    ShiftCapacityResolverUtil.resolvePlannedRepairCapacityWindowList(
+                            context, context.getDevicePlanShutList(), result.getLhMachineCode());
+            for (MachineMaintenanceWindowDTO repairWindow : repairWindowList) {
+                alignResultShiftStartAfterPlannedRepair(context, result, repairWindow);
+            }
+        }
+    }
+
+    /**
+     * 校正单条结果在计划性维修预热后的首个生产班次，并追加可对账的组合原因。
+     * <p>维修开始班次固定排产量的结束时间已在主链截到维修开始，因此不会被当作维修后结果；
+     * 维修后首个有量班次即使仍保留标准班次起点，也会向后对齐到预热完成时刻。
+     * 若该结果属于换模或换活字块，则原因中同步体现切换类型。</p>
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param repairWindow 计划性维修容量窗口
+     */
+    private void alignResultShiftStartAfterPlannedRepair(LhScheduleContext context,
+                                                         LhScheduleResult result,
+                                                         MachineMaintenanceWindowDTO repairWindow) {
+        if (Objects.isNull(repairWindow)
+                || Objects.isNull(repairWindow.getMaintenanceStartTime())
+                || Objects.isNull(repairWindow.getProductionResumeTime())) {
+            return;
+        }
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+            Date shiftEndTime = ShiftFieldUtil.getShiftEndTime(result, shiftIndex);
+            if (Objects.isNull(planQty) || planQty <= 0
+                    || Objects.isNull(shiftStartTime) || Objects.isNull(shiftEndTime)
+                    || !shiftEndTime.after(repairWindow.getProductionResumeTime())) {
+                continue;
+            }
+            // 维修开始班次固定2条的结束时间已被主链截到维修开始，不会进入本分支；
+            // 因此即使结果仍保留标准班次起点，也可以安全向后对齐到预热完成时间。
+            ShiftFieldUtil.alignShiftStartTimeNotBefore(
+                    result, shiftIndex, repairWindow.getProductionResumeTime());
+            String analysis = "计划性维修+预热";
+            if ("1".equals(result.getIsChangeMould())) {
+                analysis = "计划性维修+换模+预热";
+            } else if ("1".equals(result.getIsTypeBlock())) {
+                analysis = "计划性维修+换活字块+预热";
+            }
+            ShiftFieldUtil.appendShiftAnalysis(result, shiftIndex, analysis);
+            log.info("计划性维修后班次开产时间对齐完成, machineCode: {}, materialCode: {}, "
+                            + "shiftIndex: {}, repairStartTime: {}, repairEndTime: {}, "
+                            + "originalStartTime: {}, productionResumeTime: {}, planQty: {}, analysis: {}",
+                    result.getLhMachineCode(), result.getMaterialCode(), shiftIndex,
+                    LhScheduleTimeUtil.formatDateTime(repairWindow.getMaintenanceStartTime()),
+                    LhScheduleTimeUtil.formatDateTime(repairWindow.getMaintenanceEndTime()),
+                    LhScheduleTimeUtil.formatDateTime(shiftStartTime),
+                    LhScheduleTimeUtil.formatDateTime(repairWindow.getProductionResumeTime()), planQty, analysis);
+            StringBuilder detailBuilder = new StringBuilder(256);
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "机台=" + result.getLhMachineCode() + ", SKU=" + result.getMaterialCode()
+                            + ", 组合原因=" + analysis);
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "维修开始=" + LhScheduleTimeUtil.formatDateTime(repairWindow.getMaintenanceStartTime())
+                            + ", 维修结束=" + LhScheduleTimeUtil.formatDateTime(repairWindow.getMaintenanceEndTime())
+                            + ", 预热分钟数=" + LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
+            PriorityTraceLogHelper.appendLine(detailBuilder,
+                    "最早开产=" + LhScheduleTimeUtil.formatDateTime(repairWindow.getProductionResumeTime())
+                            + ", 首个有量班次=" + shiftIndex + ", 计划量=" + planQty);
+            PriorityTraceLogHelper.appendProcessLog(
+                    context, "计划性维修恢复时间轴", detailBuilder.toString().trim());
+            return;
         }
     }
 

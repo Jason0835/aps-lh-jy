@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * 回归场景：计划性维修停机（05）仅作为停机窗口，不应在 readyTime 阶段被当成维修阻塞。
+ * 回归场景：计划性维修（05）不使用旧维修字段全局抬高 readyTime，真实维修与预热由容量时间轴处理。
  */
 class PlannedRepairReadyTimeRegressionTest {
 
@@ -58,7 +58,7 @@ class PlannedRepairReadyTimeRegressionTest {
         Date endingTime = dateTime(2026, 4, 21, 6, 0);
         Date readyTime = capacityCalculateStrategy.calculateStartTime(context, "K2027", endingTime);
         assertEquals(endingTime, readyTime,
-                "05 停机仅应在后续停机扣量/顺延阶段生效，不应在 readyTime 阶段提前抬高");
+                "05 应在后续统一维修+预热容量窗口生效，不应从排程窗口起点提前全局抬高 readyTime");
     }
 
     private static Date date(int y, int month, int day) {

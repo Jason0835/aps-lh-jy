@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * 换模均衡策略回归：设备停机期间不得发起换模；换模配额回滚。
+ * 换模均衡策略回归：05计划性维修允许并行切换，其他设备停机继续顺延，换模配额支持回滚。
  */
 class DefaultMouldChangeBalanceStrategyRegressionTest {
 
@@ -172,7 +172,8 @@ class DefaultMouldChangeBalanceStrategyRegressionTest {
 
         assertEquals(dateTime(2026, 4, 21, 6, 0, 0), allocatedTime,
                 "其它机台的停机记录不应影响当前机台换模");
-        assertArrayEquals(new int[]{0, 1}, context.getDailyMouldChangeCountMap().get("2026-04-21"));
+        assertArrayEquals(new int[]{1, 0}, context.getDailyMouldChangeCountMap().get("2026-04-21"),
+                "06:00实际落在早班，其他机台停机不得把本机台配额错误记入中班");
     }
 
     @Test
@@ -199,6 +200,46 @@ class DefaultMouldChangeBalanceStrategyRegressionTest {
                 "换活字块应按独立切换时长判断停机重叠，不应沿用换模总时长");
         assertArrayEquals(new int[]{0, 1}, context.getDailyMouldChangeCountMap().get("2026-04-21"));
         assertArrayEquals(new int[]{1, 0}, context.getDailyMouldChangeCountMap().get("2026-04-22"));
+    }
+
+    @Test
+    void allocateMouldChange_shouldAllowMouldAndTypeBlockSwitchDuringPlannedRepairOnly() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext plannedRepairContext = new LhScheduleContext();
+        MdmDevicePlanShut plannedRepair = planShut("K2024",
+                dateTime(2026, 7, 19, 8, 0, 0),
+                dateTime(2026, 7, 19, 16, 0, 0));
+        plannedRepair.setMachineStopType("05");
+        plannedRepairContext.getDevicePlanShutList().add(plannedRepair);
+
+        Date mouldChangeAllocated = strategy.allocateMouldChange(
+                plannedRepairContext, "K2024", dateTime(2026, 7, 19, 6, 0, 0), 8);
+
+        LhScheduleContext typeBlockContext = new LhScheduleContext();
+        MdmDevicePlanShut typeBlockRepair = planShut("K2024",
+                dateTime(2026, 7, 19, 8, 0, 0),
+                dateTime(2026, 7, 19, 16, 0, 0));
+        typeBlockRepair.setMachineStopType("05");
+        typeBlockContext.getDevicePlanShutList().add(typeBlockRepair);
+        Date typeBlockAllocated = strategy.allocateMouldChange(
+                typeBlockContext, "K2024", dateTime(2026, 7, 19, 10, 0, 0), 3);
+
+        assertEquals(dateTime(2026, 7, 19, 6, 0, 0), mouldChangeAllocated,
+                "换模与05维修重叠时应保留原切换起点，后续统一按最大结束时间追加预热");
+        assertEquals(dateTime(2026, 7, 19, 10, 0, 0), typeBlockAllocated,
+                "换活字块使用同一分配器时也必须保持05并行语义");
+
+        LhScheduleContext faultContext = new LhScheduleContext();
+        MdmDevicePlanShut temporaryFault = planShut("K2024",
+                dateTime(2026, 7, 21, 8, 0, 0),
+                dateTime(2026, 7, 21, 16, 0, 0));
+        temporaryFault.setMachineStopType("06");
+        faultContext.getDevicePlanShutList().add(temporaryFault);
+        Date faultAllocated = strategy.allocateMouldChange(
+                faultContext, "K2024", dateTime(2026, 7, 21, 6, 0, 0), 8);
+
+        assertEquals(dateTime(2026, 7, 21, 16, 0, 0), faultAllocated,
+                "06及其他停机类型仍必须顺延切换，不得随05规则一起放开");
     }
 
     private MdmDevicePlanShut planShut(String machineCode, Date beginDate, Date endDate) {

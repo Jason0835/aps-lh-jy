@@ -4,6 +4,7 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -78,7 +79,7 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
 
         // 最多向后探索有限次数，避免极端数据导致死循环
         for (int attempt = 0; attempt < MAX_ALLOCATION_ATTEMPTS; attempt++) {
-            // 先扣掉设备停机窗口，确保“停机后再换模”从停机结束时刻继续判断。
+            // 先处理设备停机窗口：05允许并行，其他停机仍从停机结束时刻继续判断。
             Date downtimeAdjustedTime = resolveDowntimeAdjustedStartTime(
                     context, machineCode, adjustedTime, switchDurationHours);
             if (downtimeAdjustedTime.after(adjustedTime)) {
@@ -165,7 +166,7 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
 
         // 最多向后探索有限次数，避免极端数据导致死循环
         for (int attempt = 0; attempt < MAX_ALLOCATION_ATTEMPTS; attempt++) {
-            // 先扣掉设备停机窗口，确保“停机后再换模”从停机结束时刻继续判断。
+            // 先处理设备停机窗口：05允许并行，其他停机仍从停机结束时刻继续判断。
             Date downtimeAdjustedTime = resolveDowntimeAdjustedStartTime(
                     context, machineCode, adjustedTime, switchDurationHours);
             if (downtimeAdjustedTime.after(adjustedTime)) {
@@ -381,7 +382,9 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
 
     /**
      * 解析扣除设备停机后的最早换模开始时间。
-     * <p>若候选换模窗口命中设备停机，则顺延到该停机结束时间。</p>
+     * <p>05-计划性维修属于下机维修，换模或换活字块允许在维修窗口内并行完成，因此不再把
+     * 切换开始时间顺延到 05 结束；后续由统一维修时间轴执行 max(维修结束, 切换结束)+预热。
+     * 00～04、06、09 等其他停机仍保持原顺延语义，不扩大本次规则影响范围。</p>
      */
     private Date resolveDowntimeAdjustedStartTime(LhScheduleContext context,
                                                   String machineCode,
@@ -399,6 +402,8 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
             if (planShut == null
                     || !StringUtils.equals(machineCode, planShut.getMachineCode())
+                    || StringUtils.equals(MachineStopTypeEnum.PLANNED_REPAIR.getCode(),
+                    planShut.getMachineStopType())
                     || planShut.getBeginDate() == null
                     || planShut.getEndDate() == null
                     || !planShut.getBeginDate().before(planShut.getEndDate())) {

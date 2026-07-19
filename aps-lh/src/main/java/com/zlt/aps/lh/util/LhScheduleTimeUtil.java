@@ -301,7 +301,8 @@ public final class LhScheduleTimeUtil {
     }
 
     /**
-     * 获取胶囊预热时间（分钟）
+     * 获取胶囊预热时间（分钟）。
+     * <p>SYS0307009 为精度保养和计划性维修共用参数，修改配置会同步影响两条时间轴。</p>
      *
      * @param context 排程上下文
      * @return 预热分钟数
@@ -312,7 +313,7 @@ public final class LhScheduleTimeUtil {
             String paramValue = context.getParamValue(
                     LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS, null);
             if (StringUtils.isEmpty(paramValue)) {
-                LOG.warn("精度计划胶囊预热参数为空，使用默认值, paramCode: {}, defaultValue: {}",
+                LOG.warn("胶囊预热参数为空，使用默认值, paramCode: {}, defaultValue: {}",
                         LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS,
                         LhScheduleConstant.CAPSULE_PREHEAT_HOURS);
                 paramValue = LhScheduleConstant.CAPSULE_PREHEAT_HOURS.toPlainString();
@@ -320,14 +321,14 @@ public final class LhScheduleTimeUtil {
             try {
                 capsulePreheatHours = Double.parseDouble(paramValue.trim());
             } catch (NumberFormatException e) {
-                LOG.warn("精度计划胶囊预热参数格式非法，使用默认值, paramCode: {}, rawValue: {}, defaultValue: {}",
+                LOG.warn("胶囊预热参数格式非法，使用默认值, paramCode: {}, rawValue: {}, defaultValue: {}",
                         LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS, paramValue,
                         LhScheduleConstant.CAPSULE_PREHEAT_HOURS);
                 capsulePreheatHours = LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue();
             }
         }
         if (capsulePreheatHours < 0D) {
-            LOG.warn("精度计划胶囊预热参数为负数，使用默认值, paramCode: {}, rawValue: {}, defaultValue: {}",
+            LOG.warn("胶囊预热参数为负数，使用默认值, paramCode: {}, rawValue: {}, defaultValue: {}",
                     LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS, capsulePreheatHours,
                     LhScheduleConstant.CAPSULE_PREHEAT_HOURS);
             capsulePreheatHours = LhScheduleConstant.CAPSULE_PREHEAT_HOURS.doubleValue();

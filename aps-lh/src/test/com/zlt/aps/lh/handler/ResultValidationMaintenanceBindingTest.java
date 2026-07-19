@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -94,6 +95,37 @@ class ResultValidationMaintenanceBindingTest {
         assertNull(currentResult.getMaintenanceEndTime());
         assertNull(ShiftFieldUtil.getShiftAnalysis(currentResult, 2),
                 "未来保养未进入本批班次时不得污染当前结果原因");
+    }
+
+    /**
+     * 计划性维修容量窗口不得写入精度摘要，但必须把维修后首个有量班次对齐到预热完成时间。
+     */
+    @Test
+    void alignPlannedRepairResumeTime_shouldAlignShiftAndKeepQuantity() {
+        LhScheduleContext context = buildContext();
+        MdmDevicePlanShut plannedRepair = new MdmDevicePlanShut();
+        plannedRepair.setMachineCode("K1001");
+        plannedRepair.setMachineStopType("05");
+        plannedRepair.setBeginDate(dateTime(2026, 5, 21, 8, 0));
+        plannedRepair.setEndDate(dateTime(2026, 5, 21, 15, 0));
+        context.getDevicePlanShutList().add(plannedRepair);
+
+        LhScheduleResult result = buildResult("MAT-TYPE-BLOCK",
+                dateTime(2026, 5, 21, 6, 0), dateTime(2026, 5, 21, 20, 0));
+        result.setIsTypeBlock("1");
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(
+                new ResultValidationHandler(), "alignPlannedRepairResumeTimeToFinalResults", context);
+
+        assertEquals(dateTime(2026, 5, 21, 17, 30), ShiftFieldUtil.getShiftStartTime(result, 2),
+                "维修后班次开始时间必须对齐到默认2.5小时预热完成时刻");
+        assertEquals(Integer.valueOf(10), ShiftFieldUtil.getShiftPlanQty(result, 2),
+                "最终时间校正不得再次修改计划量或业务账本");
+        assertEquals("计划性维修+换活字块+预热", ShiftFieldUtil.getShiftAnalysis(result, 2),
+                "维修、换活字块和预热组合原因必须可对账");
+        assertNull(result.getMaintenanceStartTime(),
+                "计划性维修容量窗口不得伪装为精度保养摘要");
     }
 
     /**

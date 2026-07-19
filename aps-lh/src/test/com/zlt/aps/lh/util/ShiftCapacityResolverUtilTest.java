@@ -1,10 +1,12 @@
 package com.zlt.aps.lh.util;
 
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import org.junit.jupiter.api.Test;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -75,6 +78,176 @@ class ShiftCapacityResolverUtilTest {
                 22, 2160, 2, 8 * 3600L, 6, 3, 2);
 
         assertEquals(2, shiftQty, "05维修开始班次仍应按SYS0308010配置的固定量排产");
+    }
+
+    @Test
+    void plannedRepairFixedQtyCompletion_shouldNotCrossRepairStartTime() {
+        Date shiftStart = dateTime(2026, 7, 19, 6, 0);
+        Date shiftEnd = dateTime(2026, 7, 19, 14, 0);
+        MdmDevicePlanShut plannedRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 10, 0), dateTime(2026, 7, 19, 12, 0));
+        plannedRepair.setMachineStopType("05");
+
+        Date completionTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
+                Arrays.asList(plannedRepair), null, "K1110", shiftStart, shiftEnd, 2, 2);
+
+        assertEquals(dateTime(2026, 7, 19, 10, 0), completionTime,
+                "维修开始班次固定2条的结果结束时间不得穿过维修窗口顺延到维修结束以后");
+    }
+
+    @Test
+    void plannedRepairCapacityWindow_shouldMergeAdjacentRepairsAndAppendConfiguredPreheatOnce() {
+        LhScheduleContext context = buildPreheatContext("2.5");
+        MdmDevicePlanShut firstRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 20, 0), dateTime(2026, 7, 20, 0, 0));
+        firstRepair.setMachineStopType("05");
+        MdmDevicePlanShut secondRepair = buildStop(
+                "K1110", dateTime(2026, 7, 20, 0, 0), dateTime(2026, 7, 20, 5, 30));
+        secondRepair.setMachineStopType("05");
+
+        List<MachineMaintenanceWindowDTO> repairWindowList =
+                ShiftCapacityResolverUtil.resolvePlannedRepairCapacityWindowList(
+                        context, Arrays.asList(firstRepair, secondRepair), "K1110");
+
+        assertEquals(1, repairWindowList.size(), "相邻维修必须先合并，不能对每条记录重复追加预热");
+        assertEquals(dateTime(2026, 7, 19, 20, 0),
+                repairWindowList.get(0).getMaintenanceStartTime());
+        assertEquals(dateTime(2026, 7, 20, 5, 30),
+                repairWindowList.get(0).getMaintenanceEndTime());
+        assertEquals(dateTime(2026, 7, 20, 8, 0),
+                repairWindowList.get(0).getProductionResumeTime(),
+                "跨天维修应只在最终结束时间后追加SYS0307009配置的2.5小时预热");
+    }
+
+    @Test
+    void plannedRepairPreheatWindow_shouldOccupyCapacityUntilConfiguredResumeTime() {
+        LhScheduleContext context = buildPreheatContext("2.5");
+        MdmDevicePlanShut plannedRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 8, 0), dateTime(2026, 7, 19, 12, 0));
+        plannedRepair.setMachineStopType("05");
+        List<MachineMaintenanceWindowDTO> capacityWindowList =
+                ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                        context, Arrays.asList(plannedRepair), "K1110", null);
+
+        int preheatQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                Arrays.asList(plannedRepair), null, capacityWindowList, "K1110",
+                dateTime(2026, 7, 19, 12, 0), dateTime(2026, 7, 19, 14, 30),
+                22, 2160, 2, 8 * 3600L, 6, 3, 2);
+        int resumeQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                Arrays.asList(plannedRepair), null, capacityWindowList, "K1110",
+                dateTime(2026, 7, 19, 14, 30), dateTime(2026, 7, 19, 22, 0),
+                22, 2160, 2, 8 * 3600L, 6, 3, 2);
+
+        assertEquals(0, preheatQty, "维修结束后的SYS0307009预热必须完整占用机台产能");
+        assertTrue(resumeQty > 0, "预热完成后同SKU才允许续作恢复生产");
+    }
+
+    @Test
+    void plannedRepairAndSwitchOverlap_shouldTakeLatestEndThenAppendPreheat() {
+        LhScheduleContext context = buildPreheatContext("2.5");
+        MdmDevicePlanShut plannedRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 8, 0), dateTime(2026, 7, 19, 16, 0));
+        plannedRepair.setMachineStopType("05");
+
+        Date productionReadyTime = ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, Arrays.asList(plannedRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 10, 0),
+                dateTime(2026, 7, 19, 18, 0));
+
+        assertTrue(ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
+                context, Arrays.asList(plannedRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 10, 0),
+                dateTime(2026, 7, 19, 18, 0)));
+        assertEquals(dateTime(2026, 7, 19, 20, 30), productionReadyTime,
+                "换模或换活字块结束晚于维修时，应从切换结束继续追加2.5小时预热");
+    }
+
+    @Test
+    void plannedRepairContainingSwitch_shouldAppendPreheatAfterRepairEnd() {
+        LhScheduleContext context = buildPreheatContext("2.5");
+        MdmDevicePlanShut plannedRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 8, 0), dateTime(2026, 7, 19, 18, 0));
+        plannedRepair.setMachineStopType("05");
+
+        Date productionReadyTime = ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, Arrays.asList(plannedRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 10, 0),
+                dateTime(2026, 7, 19, 14, 0));
+
+        assertEquals(dateTime(2026, 7, 19, 20, 30), productionReadyTime,
+                "维修完全包含切换时，应从维修结束继续追加SYS0307009预热");
+    }
+
+    @Test
+    void independentRepairDuringPreheat_shouldRestartFullPreheatAfterLatestRepair() {
+        LhScheduleContext context = buildPreheatContext("2.5");
+        MdmDevicePlanShut firstRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 8, 0), dateTime(2026, 7, 19, 16, 0));
+        firstRepair.setMachineStopType("05");
+        MdmDevicePlanShut secondRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 20, 0), dateTime(2026, 7, 19, 21, 0));
+        secondRepair.setMachineStopType("05");
+
+        Date productionReadyTime = ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, Arrays.asList(firstRepair, secondRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 10, 0),
+                dateTime(2026, 7, 19, 18, 0));
+
+        assertEquals(dateTime(2026, 7, 19, 23, 30), productionReadyTime,
+                "后续独立维修落入预热区间时，必须从后续维修结束重新执行完整2.5小时预热");
+    }
+
+    @Test
+    void zeroPreheatConfig_shouldStillIdentifyRepairWithoutAddingTime() {
+        LhScheduleContext context = buildPreheatContext("0");
+        MdmDevicePlanShut plannedRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 8, 0), dateTime(2026, 7, 19, 16, 0));
+        plannedRepair.setMachineStopType("05");
+
+        Date productionReadyTime = ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, Arrays.asList(plannedRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 10, 0),
+                dateTime(2026, 7, 19, 18, 0));
+
+        assertTrue(ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
+                context, Arrays.asList(plannedRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 10, 0),
+                dateTime(2026, 7, 19, 18, 0)),
+                "SYS0307009为0时仍需识别维修命中，避免误走额外首检小时分支");
+        assertEquals(dateTime(2026, 7, 19, 18, 0), productionReadyTime,
+                "SYS0307009为0时最早开产应等于维修与切换的较晚结束时间");
+    }
+
+    @Test
+    void futurePlannedRepair_shouldNotDelayCurrentSwitchPreview() {
+        LhScheduleContext context = buildPreheatContext("2.5");
+        MdmDevicePlanShut futureRepair = buildStop(
+                "K1110", dateTime(2026, 7, 20, 8, 0), dateTime(2026, 7, 20, 16, 0));
+        futureRepair.setMachineStopType("05");
+        Date switchEndTime = dateTime(2026, 7, 19, 14, 0);
+
+        Date productionReadyTime = ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, Arrays.asList(futureRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 10, 0), switchEndTime);
+
+        assertEquals(switchEndTime, productionReadyTime,
+                "尚未开始的未来维修应由后续班次容量窗口处理，不得提前抬高当前切换时间");
+    }
+
+    @Test
+    void switchAfterRepairPreheatCompleted_shouldNotAppendPreheatAgain() {
+        LhScheduleContext context = buildPreheatContext("2.5");
+        MdmDevicePlanShut plannedRepair = buildStop(
+                "K1110", dateTime(2026, 7, 19, 8, 0), dateTime(2026, 7, 19, 12, 0));
+        plannedRepair.setMachineStopType("05");
+        Date switchEndTime = dateTime(2026, 7, 19, 18, 0);
+
+        Date productionReadyTime = ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, Arrays.asList(plannedRepair), "K1110",
+                dateTime(2026, 7, 19, 6, 0), dateTime(2026, 7, 19, 15, 0), switchEndTime);
+
+        assertEquals(switchEndTime, productionReadyTime,
+                "切换开始晚于14:30维修预热完成点时，不得在18:00切换完成后重复追加2.5小时");
     }
 
     @Test
@@ -660,5 +833,19 @@ class ShiftCapacityResolverUtilTest {
         maintenanceWindow.setMaintenanceStartTime(startTime);
         maintenanceWindow.setMaintenanceEndTime(endTime);
         return maintenanceWindow;
+    }
+
+    /**
+     * 构造带SYS0307009配置的排程上下文。
+     *
+     * @param preheatHours 预热小时数，支持小数
+     * @return 排程上下文
+     */
+    private static LhScheduleContext buildPreheatContext(String preheatHours) {
+        Map<String, String> scheduleParamMap = new HashMap<>(2);
+        scheduleParamMap.put(LhScheduleParamConstant.CAPSULE_PREHEAT_HOURS, preheatHours);
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+        return context;
     }
 }

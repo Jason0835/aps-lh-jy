@@ -314,6 +314,8 @@ public class LocalSearchMachineAllocatorStrategy {
         Date mouldChangeStartTime = null;
         Date mouldChangeCompleteTime = null;
         Date inspectionTime = null;
+        Date plannedRepairReadyTime = null;
+        boolean plannedRepairAffectingSwitch = false;
         // 试制SKU换模需在早班完成，不受开产模式限制；非试制SKU仍受开产模式约束
         Date candidateSwitchStartTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
                 context, machineReadyTime, sku);
@@ -331,7 +333,16 @@ public class LocalSearchMachineAllocatorStrategy {
             }
             mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(
                     mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
-            inspectionTime = inspectionBalance.allocateInspection(context, machineCode, mouldChangeCompleteTime);
+            plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
+                    context, context.getDevicePlanShutList(), machineCode, machineEndTime,
+                    mouldChangeStartTime, mouldChangeCompleteTime);
+            plannedRepairReadyTime = plannedRepairAffectingSwitch
+                    ? ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                    context, context.getDevicePlanShutList(), machineCode, machineEndTime,
+                    mouldChangeStartTime, mouldChangeCompleteTime)
+                    : mouldChangeCompleteTime;
+            // 局部搜索预占与正式新增一致：首检均衡从维修预热完成时刻开始登记。
+            inspectionTime = inspectionBalance.allocateInspection(context, machineCode, plannedRepairReadyTime);
             if (inspectionTime == null) {
                 // 首检失败需要回滚换模，避免污染全局资源状态
                 mouldChangeBalance.rollbackMouldChange(context, mouldChangeStartTime);
@@ -346,13 +357,18 @@ public class LocalSearchMachineAllocatorStrategy {
             mouldChangeStartTime = null;
             mouldChangeCompleteTime = null;
             inspectionTime = null;
+            plannedRepairReadyTime = null;
+            plannedRepairAffectingSwitch = false;
             candidateSwitchStartTime = delayedSwitchStartTime;
         }
         if (mouldChangeStartTime == null || inspectionTime == null) {
             return null;
         }
-        // 业务口径：换模总时长已包含首检时长，局部搜索与主流程保持一致，不再额外 +FIRST_INSPECTION_HOURS
-        Date productionStartTime = inspectionTime;
+        /*
+         * 换模总时长已包含首检时长，不再额外增加首检小时；命中05时直接以维修重叠处理后的
+         * 完整预热结束时刻作为正式生产起点，不能使用维修前的换模完成时刻。
+         */
+        Date productionStartTime = plannedRepairAffectingSwitch ? plannedRepairReadyTime : inspectionTime;
         int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
         int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
                 context, machine, sku.getShiftCapacity());
@@ -431,8 +447,23 @@ public class LocalSearchMachineAllocatorStrategy {
         }
         Date mouldChangeCompleteTime = mouldChangeStartTime == null ? null
                 : LhScheduleTimeUtil.addHours(mouldChangeStartTime, LhScheduleTimeUtil.getMouldChangeTotalHours(context));
+        boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
+                context, context.getDevicePlanShutList(), machine.getMachineCode(), machine.getEstimatedEndTime(),
+                mouldChangeStartTime, mouldChangeCompleteTime);
+        Date firstInspectionBaseTime = plannedRepairAffectingSwitch
+                ? ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                context, context.getDevicePlanShutList(), machine.getMachineCode(), machine.getEstimatedEndTime(),
+                mouldChangeStartTime, mouldChangeCompleteTime)
+                : mouldChangeCompleteTime;
+        /*
+         * 局部搜索不仅要把首检归属放在维修预热之后，还必须显式抬高非试制SKU的开产时间；
+         * resolveTrialProductionStartTime 对非试制SKU会原样返回默认值，若不先取较晚时刻，搜索评分仍会高估维修班次产能。
+         */
+        Date repairAdjustedProductionStartTime = plannedRepairAffectingSwitch
+                && productionStartTime.before(firstInspectionBaseTime)
+                ? firstInspectionBaseTime : productionStartTime;
         productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
-                context, sku, shifts, mouldChangeCompleteTime, productionStartTime,
+                context, sku, shifts, firstInspectionBaseTime, repairAdjustedProductionStartTime,
                 ScheduleTypeEnum.NEW_SPEC.getCode());
         if (productionStartTime == null) {
             return LocalSearchCapacityEstimate.empty();
@@ -451,7 +482,7 @@ public class LocalSearchMachineAllocatorStrategy {
 
         Date cursorStartTime = productionStartTime;
         LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
-                context, sku, shifts, mouldChangeCompleteTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+                context, sku, shifts, firstInspectionBaseTime, ScheduleTypeEnum.NEW_SPEC.getCode());
         int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
                 || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
         int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
@@ -483,6 +514,9 @@ public class LocalSearchMachineAllocatorStrategy {
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
+                    ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                            context, context.getDevicePlanShutList(), machine.getMachineCode(),
+                            machine.getMaintenanceWindowList()),
                     machine.getMachineCode(),
                     effectiveStartTime,
                     effectiveEndTime,
@@ -511,6 +545,9 @@ public class LocalSearchMachineAllocatorStrategy {
             specEndTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
                     context.getDevicePlanShutList(),
                     cleaningWindowList,
+                    ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                            context, context.getDevicePlanShutList(), machine.getMachineCode(),
+                            machine.getMaintenanceWindowList()),
                     machine.getMachineCode(),
                     effectiveStartTime,
                     effectiveEndTime,

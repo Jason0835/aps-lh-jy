@@ -64,7 +64,9 @@ class ContinuousProductionStrategyInjectionRegressionTest {
         Date mouldChangeStartTime = new Date(1767204000000L);
 
         when(capacityCalculateStrategy.calculateStartTime(context, "M1", endingTime)).thenReturn(readyTime);
-        when(mouldChangeBalanceStrategy.allocateMouldChange(context, "M1", readyTime)).thenReturn(mouldChangeStartTime);
+        when(mouldChangeBalanceStrategy.allocateMouldChange(
+                context, "M1", readyTime, 8, specifySku,
+                IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE)).thenReturn(mouldChangeStartTime);
         when(firstInspectionBalanceStrategy.allocateInspection(any(LhScheduleContext.class), eq("M1"), any(Date.class)))
                 .thenReturn(null);
 
@@ -79,7 +81,9 @@ class ContinuousProductionStrategyInjectionRegressionTest {
 
         assertFalse(Boolean.TRUE.equals(schedulable));
         verify(capacityCalculateStrategy).calculateStartTime(context, "M1", endingTime);
-        verify(mouldChangeBalanceStrategy).allocateMouldChange(context, "M1", readyTime);
+        verify(mouldChangeBalanceStrategy).allocateMouldChange(
+                context, "M1", readyTime, 8, specifySku,
+                IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
         verify(firstInspectionBalanceStrategy).allocateInspection(any(LhScheduleContext.class), eq("M1"), any(Date.class));
         verify(mouldChangeBalanceStrategy).rollbackMouldChange(context, mouldChangeStartTime);
         verify(firstInspectionBalanceStrategy, never()).rollbackInspection(any(LhScheduleContext.class), any(Date.class));
@@ -105,7 +109,9 @@ class ContinuousProductionStrategyInjectionRegressionTest {
         Date mouldChangeStartTime = dateTime(2026, 5, 8, 6, 0);
 
         when(capacityCalculateStrategy.calculateStartTime(context, "M1", endingTime)).thenReturn(readyTime);
-        when(mouldChangeBalanceStrategy.allocateMouldChange(context, "M1", switchReadyTime)).thenReturn(mouldChangeStartTime);
+        when(mouldChangeBalanceStrategy.allocateMouldChange(
+                context, "M1", switchReadyTime, 8, specifySku,
+                IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE)).thenReturn(mouldChangeStartTime);
         when(firstInspectionBalanceStrategy.allocateInspection(any(LhScheduleContext.class), eq("M1"), any(Date.class)))
                 .thenReturn(null);
 
@@ -119,7 +125,9 @@ class ContinuousProductionStrategyInjectionRegressionTest {
                 endingTime);
 
         assertFalse(Boolean.TRUE.equals(schedulable));
-        verify(mouldChangeBalanceStrategy).allocateMouldChange(context, "M1", switchReadyTime);
+        verify(mouldChangeBalanceStrategy).allocateMouldChange(
+                context, "M1", switchReadyTime, 8, specifySku,
+                IMouldChangeBalanceStrategy.ACTION_NEW_SPEC_MOULD_CHANGE);
     }
 
     private ShiftProductionControlDTO openProductionShift(Date startTime) {

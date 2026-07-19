@@ -25,7 +25,7 @@ class DataInitPlannedRepairRegressionTest {
     private final DataInitHandler handler = new DataInitHandler();
 
     @Test
-    void buildStandardDataObjects_shouldKeepPlannedRepairAsStopWindowOnly() {
+    void buildStandardDataObjects_shouldKeepPlannedRepairOutOfLegacyGlobalReadyState() {
         LhScheduleContext context = new LhScheduleContext();
         context.setScheduleDate(date(2026, 4, 21));
         context.setScheduleTargetDate(date(2026, 4, 23));
@@ -54,7 +54,7 @@ class DataInitPlannedRepairRegressionTest {
         assertEquals(dateTime(2026, 4, 22, 16, 0), machine.getPlanStopEndTime());
         assertEquals("05", machine.getStopType());
         assertTrue(!machine.isHasRepairPlan(),
-                "计划性维修停机应只作为停机窗口，不应在初始化阶段抬高机台维修就绪时间");
+                "计划性维修应由统一容量时间轴追加预热，不得在初始化阶段使用旧字段全局抬高就绪时间");
         assertEquals(null, machine.getRepairPlanTime());
     }
 

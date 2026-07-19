@@ -18,6 +18,7 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
@@ -6910,14 +6911,26 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (switchStartTime == null) {
             return null;
         }
-        if (getMaintenanceScheduleService().shouldApplyMaintenanceOverlapSwitchRule(context, machine, estimatedEndTime)) {
-            Date inspectionStartTime = LhScheduleTimeUtil.addHours(
-                    switchStartTime, LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context));
-            return LhScheduleTimeUtil.addHours(
-                    inspectionStartTime, LhScheduleTimeUtil.getFirstInspectionHours(context));
+        boolean maintenanceOverlapSwitch = getMaintenanceScheduleService()
+                .shouldApplyMaintenanceOverlapSwitchRule(context, machine, estimatedEndTime);
+        int switchDurationHours = maintenanceOverlapSwitch
+                ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
+                : LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context);
+        Date switchCompleteTime = LhScheduleTimeUtil.addHours(switchStartTime, switchDurationHours);
+        boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
+                context, context.getDevicePlanShutList(), machine.getMachineCode(), estimatedEndTime,
+                switchStartTime, switchCompleteTime);
+        if (plannedRepairAffectingSwitch) {
+            // 换活字块命中05后，预热完成即可首检/生产，不再叠加精度保养分支的1小时等待。
+            return ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                    context, context.getDevicePlanShutList(), machine.getMachineCode(), estimatedEndTime,
+                    switchStartTime, switchCompleteTime);
         }
-        return LhScheduleTimeUtil.addHours(
-                switchStartTime, LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context));
+        if (maintenanceOverlapSwitch) {
+            return LhScheduleTimeUtil.addHours(
+                    switchCompleteTime, LhScheduleTimeUtil.getFirstInspectionHours(context));
+        }
+        return switchCompleteTime;
     }
 
     /**
@@ -6950,7 +6963,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * 根据停机窗口顺延换活字块切换起点。
-     * <p>当候选切换窗口与机台停机窗口重叠时，顺延到重叠停机结束时刻。</p>
+     * <p>05允许并行并由统一时间轴追加预热；其他停机仍顺延到重叠停机结束时刻。</p>
      */
     private Date resolveDowntimeAdjustedSwitchStartTime(LhScheduleContext context,
                                                         String machineCode,
@@ -6967,6 +6980,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
                 if (planShut == null
                         || !StringUtils.equals(machineCode, planShut.getMachineCode())
+                        || StringUtils.equals(MachineStopTypeEnum.PLANNED_REPAIR.getCode(),
+                        planShut.getMachineStopType())
                         || planShut.getBeginDate() == null
                         || planShut.getEndDate() == null
                         || !planShut.getBeginDate().before(planShut.getEndDate())) {
@@ -7060,6 +7075,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         int switchDurationHours = maintenanceOverlapSwitch
                 ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                 : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+        // 定点物料预演继续携带真实切换时长、SKU和动作类型，保留换模均衡、试制及次数限制语义；
+        // 默认实现内部仅对05维修放开并行，其他停机仍按原规则顺延。
         Date mouldChangeStartTime = getMouldChangeBalanceStrategy().allocateMouldChange(
                 context,
                 machine.getMachineCode(),
@@ -7075,14 +7092,23 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         Date inspectionTime = null;
         try {
             Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
+            boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
+                    context, context.getDevicePlanShutList(), machine.getMachineCode(), endingTime,
+                    mouldChangeStartTime, mouldChangeCompleteTime);
+            Date firstInspectionBaseTime = plannedRepairAffectingSwitch
+                    ? ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+                    context, context.getDevicePlanShutList(), machine.getMachineCode(), endingTime,
+                    mouldChangeStartTime, mouldChangeCompleteTime)
+                    : mouldChangeCompleteTime;
             inspectionTime = getFirstInspectionBalanceStrategy().allocateInspection(
-                    context, machine.getMachineCode(), mouldChangeCompleteTime);
+                    context, machine.getMachineCode(), firstInspectionBaseTime);
             if (inspectionTime == null) {
                 log.debug("定点物料新增换模预判不可排, machineCode: {}, materialCode: {}, 原因: 首检窗口分配失败",
                         machine.getMachineCode(), specifySku.getMaterialCode());
                 return false;
             }
-            Date productionStartTime = maintenanceOverlapSwitch
+            Date productionStartTime = plannedRepairAffectingSwitch
+                    ? firstInspectionBaseTime : maintenanceOverlapSwitch
                     ? LhScheduleTimeUtil.addHours(inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
                     : inspectionTime;
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
@@ -10435,10 +10461,26 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     private List<MachineMaintenanceWindowDTO> resolveMachineMaintenanceWindowList(LhScheduleContext context, String machineCode) {
         MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
-        if (machine == null || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
-            return new ArrayList<>();
-        }
-        return machine.getMaintenanceWindowList();
+        List<MachineMaintenanceWindowDTO> maintenanceWindowList = machine == null
+                ? new ArrayList<>() : machine.getMaintenanceWindowList();
+        // 续作的所有产能预演、实际分配和结束时间推进必须共用同一维修时间轴。
+        // 临时维修窗口不会回写 machine，因而不会被误识别为精度保养或占用保养额度。
+        return ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                context, context.getDevicePlanShutList(), machineCode, maintenanceWindowList);
+    }
+
+    /**
+     * 获取机台真实精度保养窗口，仅供停机摘要使用。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编号
+     * @return 真实精度保养窗口，不包含容量计算专用的计划性维修窗口
+     */
+    private List<MachineMaintenanceWindowDTO> resolveActualMachineMaintenanceWindowList(
+            LhScheduleContext context, String machineCode) {
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        return machine == null || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())
+                ? new ArrayList<>() : machine.getMaintenanceWindowList();
     }
 
     private List<MdmDevicePlanShut> resolveMachineShutdownWindowList(LhScheduleContext context, String machineCode) {
@@ -10467,7 +10509,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         List<LhShiftConfigVO> scheduleWindowShifts = context.getScheduleWindowShifts();
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
                 result,
-                resolveMachineMaintenanceWindowList(context, result.getLhMachineCode()),
+                resolveActualMachineMaintenanceWindowList(context, result.getLhMachineCode()),
                 resolveEffectiveCleaningWindowList(context, result, firstPlannedShiftStartTime),
                 resolveMachineShutdownWindowList(context, result.getLhMachineCode()),
                 scheduleWindowShifts);
