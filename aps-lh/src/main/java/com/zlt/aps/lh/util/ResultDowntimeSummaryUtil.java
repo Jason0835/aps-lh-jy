@@ -22,6 +22,8 @@ import java.util.Objects;
  */
 public final class ResultDowntimeSummaryUtil {
 
+    /** 精度保养结束时间所在班次必须写入的固定原因 */
+    private static final String PRECISION_PLAN_ANALYSIS = "精度计划";
     /** 喷砂与精度保养重叠时写入班次分析的固定原因 */
     private static final String SAND_BLAST_PRECISION_ANALYSIS = "喷砂清洗+精度";
     /** 喷砂与设备停机计划重叠时写入班次分析的固定原因 */
@@ -64,6 +66,8 @@ public final class ResultDowntimeSummaryUtil {
             return;
         }
         fillMaintenanceSummary(result, maintenanceWindowList, productionStartTime, productionEndTime);
+        // “精度计划”固定原因只允许在最终结果阶段统一绑定一次；此处只回填中间态摘要，
+        // 避免同一机台多个结果在反复重算时残留重复原因。
         // 清洗摘要是机台级口径：只要该机台存在有效清洗窗口就回填，不按结果生产时段截断，
         // 避免清洗恰好从完工时刻开始时被边界判定漏掉。
         fillCleaningSummary(result, cleaningWindowList);
@@ -100,12 +104,75 @@ public final class ResultDowntimeSummaryUtil {
         if (Objects.isNull(result)) {
             return;
         }
-        result.setMaintenanceStartTime(null);
-        result.setMaintenanceEndTime(null);
+        clearMaintenanceSummaryAndAnalysis(result);
         result.setShutdownStartTime(null);
         result.setShutdownEndTime(null);
         result.setCleaningStartTime(null);
         result.setCleaningEndTime(null);
+    }
+
+    /**
+     * 清除单条结果上的精度保养摘要和固定班次原因。
+     * <p>最终结果绑定前先清理同机台所有结果，再仅对唯一目标结果重新绑定，保证“精度计划”不会因
+     * 中间态重算、结果复制或无后续 SKU 回退而重复落到多条结果；清洗、维修及其他班次原因保持不变。</p>
+     *
+     * @param result 待清理的排程结果
+     */
+    public static void clearMaintenanceSummaryAndAnalysis(LhScheduleResult result) {
+        if (Objects.isNull(result)) {
+            return;
+        }
+        result.setMaintenanceStartTime(null);
+        result.setMaintenanceEndTime(null);
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            ShiftFieldUtil.removeShiftAnalysis(result, shiftIndex, PRECISION_PLAN_ANALYSIS);
+        }
+    }
+
+    /**
+     * 将机台实际挂载的精度保养窗口绑定到最终选定的排程结果，并写入班次原因。
+     * <p>正常情况下绑定首条保养后结果；保养后没有后续 SKU 时由调用方传入机台最后一条结果。
+     * 只有保养结束时间真实落入本批标准班次窗口时才绑定；未来保养继续保留运行态窗口、过程日志和
+     * 计划日期回填，待后续滚动排程覆盖该日期时再生成结果摘要及“精度计划”原因。</p>
+     *
+     * @param result 待绑定结果
+     * @param maintenanceWindowList 机台精度保养窗口
+     * @param scheduleWindowShifts 排程窗口标准班次
+     * @return true-已绑定当前排程窗口内的保养；false-没有可绑定的当前窗口保养
+     */
+    public static boolean bindMaintenanceSummaryAndAnalysis(
+            LhScheduleResult result,
+            List<MachineMaintenanceWindowDTO> maintenanceWindowList,
+            List<LhShiftConfigVO> scheduleWindowShifts) {
+        if (Objects.isNull(result) || CollectionUtils.isEmpty(maintenanceWindowList)) {
+            return false;
+        }
+        Date earliestStartTime = null;
+        Date latestEndTime = null;
+        for (MachineMaintenanceWindowDTO maintenanceWindow : maintenanceWindowList) {
+            if (Objects.isNull(maintenanceWindow)
+                    || Objects.isNull(maintenanceWindow.getMaintenanceStartTime())
+                    || Objects.isNull(maintenanceWindow.getMaintenanceEndTime())
+                    || !maintenanceWindow.getMaintenanceStartTime().before(
+                    maintenanceWindow.getMaintenanceEndTime())) {
+                continue;
+            }
+            // 结果仅有固定数量的班次字段。未来保养若尚未进入本批班次窗口，不应把摘要错误绑定到
+            // 当前最后一条生产结果，也不存在可填写“精度计划”的对应班次。
+            if (resolveShiftIndexByStartTime(
+                    scheduleWindowShifts, maintenanceWindow.getMaintenanceEndTime()) <= 0) {
+                continue;
+            }
+            earliestStartTime = earlier(earliestStartTime, maintenanceWindow.getMaintenanceStartTime());
+            latestEndTime = later(latestEndTime, maintenanceWindow.getMaintenanceEndTime());
+        }
+        if (Objects.isNull(earliestStartTime) || Objects.isNull(latestEndTime)) {
+            return false;
+        }
+        result.setMaintenanceStartTime(earliestStartTime);
+        result.setMaintenanceEndTime(latestEndTime);
+        appendMaintenanceEndShiftAnalysis(result, scheduleWindowShifts);
+        return true;
     }
 
     private static void fillMaintenanceSummary(LhScheduleResult result,
@@ -130,6 +197,23 @@ public final class ResultDowntimeSummaryUtil {
         }
         result.setMaintenanceStartTime(earliestStartTime);
         result.setMaintenanceEndTime(latestEndTime);
+    }
+
+    /**
+     * 在精度保养结束时间所在标准班次追加固定原因“精度计划”。
+     *
+     * @param result 排程结果
+     * @param scheduleWindowShifts 排程窗口标准班次
+     */
+    private static void appendMaintenanceEndShiftAnalysis(LhScheduleResult result,
+                                                          List<LhShiftConfigVO> scheduleWindowShifts) {
+        if (Objects.isNull(result) || Objects.isNull(result.getMaintenanceEndTime())) {
+            return;
+        }
+        int shiftIndex = resolveShiftIndexByStartTime(scheduleWindowShifts, result.getMaintenanceEndTime());
+        if (shiftIndex > 0) {
+            ShiftFieldUtil.appendShiftAnalysis(result, shiftIndex, PRECISION_PLAN_ANALYSIS);
+        }
     }
 
     private static void fillCleaningSummary(LhScheduleResult result,

@@ -190,6 +190,33 @@ class TargetScheduleQtyResolverRegressionTest {
                 "真实窗口产能判断应扣除候选机台清洗窗口");
     }
 
+    @Test
+    void predictContinuousNaturalEndingTime_shouldUseActualShiftCapacityWithoutMutatingContext() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(date(2026, 5, 1));
+        context.setScheduleWindowShifts(
+                LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        MachineScheduleDTO machine = machine("K1001", "3302001001");
+        machine.setCurrentMaterialCode("3302001001");
+        machine.setMaxMoldNum(1);
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001001");
+        sku.setTargetScheduleQty(4);
+        sku.setRemainingScheduleQty(4);
+        sku.setShiftCapacity(16);
+        sku.setLhTimeSeconds(1800);
+        int originalResultCount = context.getScheduleResultList().size();
+
+        java.util.Date predictedEndingTime = resolver.predictContinuousNaturalEndingTime(
+                context, sku, machine, dateTime(2026, 5, 1, 6), context.getScheduleWindowShifts());
+
+        assertEquals(dateTime(2026, 5, 1, 8), predictedEndingTime,
+                "班产16条、目标4条应按早班四分之一净生产时长预测到08:00收尾");
+        assertEquals(originalResultCount, context.getScheduleResultList().size(),
+                "自然收尾预测不得写入排程结果");
+        assertEquals(4, sku.getRemainingScheduleQty(), "自然收尾预测不得扣减SKU运行态账本");
+    }
+
     private static LhScheduleConfig createConfig(String fullCapacityMode) {
         return createConfig(fullCapacityMode, "5");
     }

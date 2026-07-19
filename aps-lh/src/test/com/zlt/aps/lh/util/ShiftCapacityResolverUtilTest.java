@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link ShiftCapacityResolverUtil} 班产与残班折算回归测试。
@@ -256,6 +257,41 @@ class ShiftCapacityResolverUtilTest {
         assertEquals(20, shiftQty, "保养占用中班 1 小时后，应按剩余 7/8 时间折算班产并向上收敛到双模偶数");
         assertEquals(dateTime(2026, 4, 22, 22, 22, 7), completionTime,
                 "向上收敛到 20 条需跨过保养窗口，完工时间超出班末");
+    }
+
+    @Test
+    void maintenancePreheatWindow_shouldBlockProductionUntilSeventeenThirty() {
+        MachineMaintenanceWindowDTO maintenanceWindow = buildMaintenanceWindow("K1110",
+                dateTime(2026, 4, 22, 8, 0), dateTime(2026, 4, 22, 15, 0));
+        maintenanceWindow.setProductionResumeTime(dateTime(2026, 4, 22, 17, 30));
+
+        int preheatWindowQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                null, null, Arrays.asList(maintenanceWindow), "K1110",
+                dateTime(2026, 4, 22, 15, 0), dateTime(2026, 4, 22, 17, 30),
+                22, 2160, 2, 8 * 3600L, 6, 3, 0);
+        int afterPreheatQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                null, null, Arrays.asList(maintenanceWindow), "K1110",
+                dateTime(2026, 4, 22, 17, 30), dateTime(2026, 4, 22, 22, 0),
+                22, 2160, 2, 8 * 3600L, 6, 3, 0);
+
+        assertEquals(0, preheatWindowQty, "15:00～17:30胶囊预热期间产能必须为0");
+        assertTrue(afterPreheatQty > 0, "17:30胶囊预热完成后机台才允许恢复生产");
+    }
+
+    @Test
+    void maintenanceAndPlannedStopOverlap_shouldDeductMergedUnionOnlyOnce() {
+        MachineMaintenanceWindowDTO maintenanceWindow = buildMaintenanceWindow("K1110",
+                dateTime(2026, 4, 22, 8, 0), dateTime(2026, 4, 22, 15, 0));
+        maintenanceWindow.setProductionResumeTime(dateTime(2026, 4, 22, 17, 30));
+        MdmDevicePlanShut plannedStop = buildStop("K1110",
+                dateTime(2026, 4, 22, 14, 0), dateTime(2026, 4, 22, 18, 0));
+
+        long overlapSeconds = ShiftCapacityResolverUtil.resolveDowntimeOverlapSeconds(
+                Arrays.asList(plannedStop), null, Arrays.asList(maintenanceWindow), "K1110",
+                dateTime(2026, 4, 22, 6, 0), dateTime(2026, 4, 22, 22, 0));
+
+        assertEquals(10 * 3600L, overlapSeconds,
+                "保养预热08:00～17:30与停机14:00～18:00应按08:00～18:00并集扣减，不能重复扣减");
     }
 
     @Test

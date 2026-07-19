@@ -902,7 +902,6 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
                 // 3. 计算机台可开工时间（考虑机台当前预计完工和能力策略约束）
                 Date endingTime = resolveMachineOccupationEndTime(context, sku, candidateMachine, shifts);
-                getMaintenanceScheduleService().tryAttachLongOnlineMaintenance(context, candidateMachine);
                 if (isEnding) {
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                             context, candidateMachine, endingTime);
@@ -925,7 +924,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                 sku.getMaterialCode(), machineCode,
                                 LhScheduleTimeUtil.formatDateTime(endingTime),
                                 LhScheduleTimeUtil.formatDateTime(trialSwitchStartTime), trialNormalSwitchHours);
-                        getMaintenanceScheduleService().clearMaintenanceWindows(candidateMachine);
+                        getMaintenanceScheduleService().clearMaintenanceWindows(context, candidateMachine);
                     }
                 }
                 // 保养窗口挂载会改变候选机台运行态，提前清理窗口产能缓存，避免后续复用旧产能。

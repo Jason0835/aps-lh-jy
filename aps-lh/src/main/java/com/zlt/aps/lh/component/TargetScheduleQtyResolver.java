@@ -1530,6 +1530,107 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 无副作用预测续作 SKU 按当前目标量自然收尾的准确时间。
+     * <p>预测复用正式排产使用的逐班次产能、班次管控、设备停机、清洗、精度保养、模台数和奇数班产口径；
+     * 只读取上下文和运行态，不修改月计划、日计划、胎胚库存、机台分配及排程结果。
+     * 当目标量无法在当前排程窗口内完成，或关键产能数据缺失时返回 null，由长期在机规则按
+     * “无法证明可在保养前自然收尾”处理。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前续作 SKU
+     * @param machine 当前运行态机台
+     * @param productionStartTime 当前续作最早开产时间
+     * @param shifts 排程窗口班次
+     * @return 预测自然收尾时间；窗口内无法完成时返回 null
+     */
+    public Date predictContinuousNaturalEndingTime(LhScheduleContext context,
+                                                   SkuScheduleDTO sku,
+                                                   MachineScheduleDTO machine,
+                                                   Date productionStartTime,
+                                                   List<LhShiftConfigVO> shifts) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(machine)
+                || Objects.isNull(productionStartTime) || CollectionUtils.isEmpty(shifts)) {
+            return null;
+        }
+        int remainingQty = Math.max(0, sku.resolveTargetScheduleQty());
+        if (remainingQty <= 0) {
+            return productionStartTime;
+        }
+        int shiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
+                context, machine, sku.getShiftCapacity());
+        int lhTimeSeconds = sku.getLhTimeSeconds();
+        if (shiftCapacity <= 0 && lhTimeSeconds <= 0) {
+            return null;
+        }
+        int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+        Date firstProductionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                context, machine.getMachineCode(), productionStartTime, shifts,
+                shiftCapacity, lhTimeSeconds, mouldQty);
+        if (Objects.isNull(firstProductionStartTime)) {
+            return null;
+        }
+        List<MachineCleaningWindowDTO> cleaningWindowList = resolveEffectiveCleaningWindowList(
+                context, machine, sku, null, firstProductionStartTime);
+        int dryIceLossQty = context.getParamIntValue(
+                LhScheduleParamConstant.DRY_ICE_LOSS_QTY, LhScheduleConstant.DRY_ICE_LOSS_QTY);
+        int dryIceDurationHours = context.getParamIntValue(
+                LhScheduleParamConstant.DRY_ICE_DURATION_HOURS, LhScheduleConstant.DRY_ICE_DURATION_HOURS);
+        int plannedRepairFixedQty = context.getParamIntValue(
+                LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
+        String plusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
+        Date cursorStartTime = firstProductionStartTime;
+        boolean started = false;
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
+                    || Objects.isNull(shift.getShiftEndDateTime())) {
+                continue;
+            }
+            if (!started) {
+                if (cursorStartTime.before(shift.getShiftEndDateTime())) {
+                    started = true;
+                } else {
+                    continue;
+                }
+            }
+            ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(
+                    context, shift, cursorStartTime);
+            if (Objects.isNull(control) || !control.isCanSchedule()) {
+                continue;
+            }
+            Date effectiveStartTime = control.getEffectiveStartTime();
+            Date effectiveEndTime = control.getEffectiveEndTime();
+            int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                    context.getDevicePlanShutList(), cleaningWindowList, machine.getMaintenanceWindowList(),
+                    machine.getMachineCode(), effectiveStartTime, effectiveEndTime,
+                    shiftCapacity, lhTimeSeconds, mouldQty,
+                    ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
+                    dryIceLossQty, dryIceDurationHours, shift, plusShiftType,
+                    ScheduleTypeEnum.CONTINUOUS.getCode(), plannedRepairFixedQty);
+            shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+            if (shiftMaxQty <= 0) {
+                continue;
+            }
+            if (remainingQty <= shiftMaxQty) {
+                Date predictedEndingTime = ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
+                        context.getDevicePlanShutList(), cleaningWindowList, machine.getMaintenanceWindowList(),
+                        machine.getMachineCode(), effectiveStartTime, effectiveEndTime,
+                        remainingQty, shiftMaxQty);
+                log.info("长期在机自然收尾时间预测完成, materialCode: {}, machineCode: {}, targetQty: {}, "
+                                + "predictedEndingTime: {}",
+                        sku.getMaterialCode(), machine.getMachineCode(), sku.resolveTargetScheduleQty(),
+                        LhScheduleTimeUtil.formatDateTime(predictedEndingTime));
+                return predictedEndingTime;
+            }
+            remainingQty -= shiftMaxQty;
+            cursorStartTime = effectiveEndTime;
+        }
+        log.info("长期在机自然收尾时间预测未在窗口内完成, materialCode: {}, machineCode: {}, targetQty: {}, "
+                        + "remainingQty: {}",
+                sku.getMaterialCode(), machine.getMachineCode(), sku.resolveTargetScheduleQty(), remainingQty);
+        return null;
+    }
+
+    /**
      * 计算单台机台在排程窗口内的可用产能。
      * <p>从机台预计可用时间起，逐班次累加该机台可排量。</p>
      *

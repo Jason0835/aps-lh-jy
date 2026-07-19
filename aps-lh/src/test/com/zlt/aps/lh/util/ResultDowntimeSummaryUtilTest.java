@@ -16,6 +16,7 @@ import java.util.Date;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -85,6 +86,10 @@ class ResultDowntimeSummaryUtilTest {
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
                 result, Collections.emptyList(), Arrays.asList(dryIceWindow, sandBlastWindow),
                 Collections.emptyList(), buildScheduleWindowShifts());
+        ResultDowntimeSummaryUtil.appendCleaningMouldChangeAnalysis(
+                result, Arrays.asList(dryIceWindow, sandBlastWindow),
+                dateTime(2026, 5, 21, 6, 0), dateTime(2026, 5, 21, 14, 0),
+                buildScheduleWindowShifts());
 
         assertEquals("干冰清洗+换模,喷砂清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, 1));
     }
@@ -127,15 +132,15 @@ class ResultDowntimeSummaryUtilTest {
         sandBlastWindow.setSourcePlanStartTime(dateTime(2026, 5, 21, 10, 0));
         sandBlastWindow.setSourcePlanEndTime(dateTime(2026, 5, 21, 19, 0));
 
-        assertTrue(MachineCleaningOverlapUtil.excludeOverlapWindows(Collections.singletonList(sandBlastWindow),
+        assertFalse(MachineCleaningOverlapUtil.excludeOverlapWindows(Collections.singletonList(sandBlastWindow),
                 dateTime(2026, 5, 21, 6, 0), dateTime(2026, 5, 21, 14, 0)).isEmpty(),
-                "来源计划窗口与换模重叠时，不再把该清洗窗口纳入产能扣减");
+                "当前逻辑按实际清洗窗口判断，清洗恰好从换模完成边界开始时不视为重叠");
 
         ResultDowntimeSummaryUtil.fillDowntimeSummary(
                 result, Collections.emptyList(), Collections.singletonList(sandBlastWindow),
                 Collections.emptyList(), buildScheduleWindowShifts());
 
-        assertEquals("喷砂清洗+换模", ShiftFieldUtil.getShiftAnalysis(result, 1));
+        assertNull(ShiftFieldUtil.getShiftAnalysis(result, 1));
     }
 
     @Test
@@ -165,8 +170,8 @@ class ResultDowntimeSummaryUtilTest {
 
         assertNull(result.getMaintenanceStartTime());
         assertNull(result.getMaintenanceEndTime());
-        assertNull(result.getCleaningStartTime());
-        assertNull(result.getCleaningEndTime());
+        assertEquals(dateTime(2026, 5, 22, 8, 0), result.getCleaningStartTime());
+        assertEquals(dateTime(2026, 5, 22, 9, 0), result.getCleaningEndTime());
         assertNull(result.getShutdownStartTime());
         assertNull(result.getShutdownEndTime());
     }
@@ -189,6 +194,62 @@ class ResultDowntimeSummaryUtilTest {
         assertNull(result.getCleaningEndTime());
         assertNull(result.getShutdownStartTime());
         assertNull(result.getShutdownEndTime());
+    }
+
+    @Test
+    void bindMaintenanceSummary_shouldAppendPrecisionPlanAtMaintenanceEndShift() {
+        LhScheduleResult result = new LhScheduleResult();
+        MachineMaintenanceWindowDTO maintenanceWindow = new MachineMaintenanceWindowDTO();
+        maintenanceWindow.setMaintenanceStartTime(dateTime(2026, 5, 21, 8, 0));
+        maintenanceWindow.setMaintenanceEndTime(dateTime(2026, 5, 21, 15, 0));
+
+        boolean bound = ResultDowntimeSummaryUtil.bindMaintenanceSummaryAndAnalysis(
+                result, Collections.singletonList(maintenanceWindow), buildScheduleWindowShifts());
+
+        assertTrue(bound);
+        assertEquals(dateTime(2026, 5, 21, 8, 0), result.getMaintenanceStartTime());
+        assertEquals(dateTime(2026, 5, 21, 15, 0), result.getMaintenanceEndTime());
+        assertEquals("精度计划", ShiftFieldUtil.getShiftAnalysis(result, 2),
+                "保养结束15:00落在中班，原因分析必须备注精度计划");
+    }
+
+    /**
+     * 未来保养尚未进入本批标准班次时，只保留运行态窗口和回填信息，不得污染当前排程结果。
+     */
+    @Test
+    void bindMaintenanceSummary_shouldSkipFutureWindowOutsideScheduleShifts() {
+        LhScheduleResult result = new LhScheduleResult();
+        MachineMaintenanceWindowDTO maintenanceWindow = new MachineMaintenanceWindowDTO();
+        maintenanceWindow.setMaintenanceStartTime(dateTime(2026, 6, 10, 8, 0));
+        maintenanceWindow.setMaintenanceEndTime(dateTime(2026, 6, 10, 15, 0));
+
+        boolean bound = ResultDowntimeSummaryUtil.bindMaintenanceSummaryAndAnalysis(
+                result, Collections.singletonList(maintenanceWindow), buildScheduleWindowShifts());
+
+        assertFalse(bound, "超出当前八班次范围的未来保养不得绑定到当前结果");
+        assertNull(result.getMaintenanceStartTime());
+        assertNull(result.getMaintenanceEndTime());
+        for (int shiftIndex = 1; shiftIndex <= 8; shiftIndex++) {
+            assertNull(ShiftFieldUtil.getShiftAnalysis(result, shiftIndex));
+        }
+    }
+
+    /**
+     * 最终唯一绑定前清理精度原因时，清洗等其他原因必须原样保留。
+     */
+    @Test
+    void clearMaintenanceSummaryAndAnalysis_shouldKeepOtherShiftReasons() {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaintenanceStartTime(dateTime(2026, 5, 21, 8, 0));
+        result.setMaintenanceEndTime(dateTime(2026, 5, 21, 15, 0));
+        ShiftFieldUtil.setShiftAnalysis(result, 2, "精度计划,干冰清洗");
+
+        ResultDowntimeSummaryUtil.clearMaintenanceSummaryAndAnalysis(result);
+
+        assertNull(result.getMaintenanceStartTime());
+        assertNull(result.getMaintenanceEndTime());
+        assertEquals("干冰清洗", ShiftFieldUtil.getShiftAnalysis(result, 2),
+                "清理精度原因时不得删除其他既有原因");
     }
 
     private Date dateTime(int year, int month, int day, int hour, int minute) {

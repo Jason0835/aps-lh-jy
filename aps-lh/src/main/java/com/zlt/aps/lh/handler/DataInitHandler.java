@@ -144,8 +144,6 @@ public class DataInitHandler extends AbsScheduleStepHandler {
                 return;
             }
         }
-        attachLongOnlineMaintenanceWindows(context);
-
         log.info("基础数据初始化完成, 机台数量: {}, 月计划SKU数: {}",
                 context.getMachineInfoMap().size(), context.getMonthPlanList().size());
     }
@@ -363,21 +361,6 @@ public class DataInitHandler extends AbsScheduleStepHandler {
         Arrays.fill(dto.getShiftAvailable(), true);
         applyShiftProductionControl(context, dto);
         dto.setEstimatedEndTime(resolveInitialEstimatedEndTime(context, machineCode));
-    }
-
-    /**
-     * 挂载长期在机强制下机保养窗口。
-     *
-     * @param context 排程上下文
-     */
-    private void attachLongOnlineMaintenanceWindows(LhScheduleContext context) {
-        int scheduledCount = 0;
-        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
-            if (getMaintenanceScheduleService().tryAttachLongOnlineMaintenance(context, machine)) {
-                scheduledCount++;
-            }
-        }
-        log.info("长期在机保养检查完成, 已安排保养机台数: {}", scheduledCount);
     }
 
     private LhCleaningScheduleService getCleaningScheduleService() {

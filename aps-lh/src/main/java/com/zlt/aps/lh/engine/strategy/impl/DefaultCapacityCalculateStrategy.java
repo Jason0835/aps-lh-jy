@@ -93,13 +93,13 @@ public class DefaultCapacityCalculateStrategy implements ICapacityCalculateStrat
     /**
      * 计算设备保养后的开产时间
      * <p>
-     * 保养规则：<br/>
-     * 开产时间 = MAX(保养开始时间(固定8:00), 前SKU收尾时间) + 保养时间(7h) + 换模含预热(4h) + 首检(1h) = 17:30<br/>
-     * 注：若前SKU收尾时间在保养时间之前，也从保养开始时间起算
+     * 已进入当前固定班次范围的保养必须先完成再安排后续 SKU；超出当前范围的未来保养只有在
+     * 基础就绪时间真实落入“保养开始～胶囊预热完成”区间时才顺延，避免未来计划提前锁机。
      * </p>
      *
      * @param context     排程上下文
      * @param machineCode 机台编号
+     * @param baseReadyTime 机台原始就绪时间
      * @return 保养后的开产时间，null表示无保养计划
      */
     private Date calculateMaintenanceStartTime(LhScheduleContext context, String machineCode, Date baseReadyTime) {

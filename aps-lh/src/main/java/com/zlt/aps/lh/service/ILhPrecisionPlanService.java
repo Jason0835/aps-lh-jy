@@ -12,10 +12,10 @@ import java.util.Map;
 public interface ILhPrecisionPlanService {
 
     /**
-     * 批量硫化排程回填计划排程精度日期
-     * 将循环内的逐条DB查询优化为外层批量查询+内存分组匹配，逐条update优化为批量操作
+     * 按精准计划主键批量回填 APS 最终安排日期。
+     * <p>每项必须包含 precisionPlanId 和 scheduleDate；机台、工厂仅用于日志对账。</p>
      *
-     * @param fillList 回填数据列表，每项包含machineCode、factoryCode、scheduleDate
+     * @param fillList 回填数据列表
      * @return 成功回填的数量
      */
     int batchFillScheduleDate(List<Map<String, Object>> fillList);

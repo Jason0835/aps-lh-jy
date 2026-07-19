@@ -18,10 +18,10 @@ import java.util.Date;
  * 硫化精度计划实体
  *
  * 业务规则：
- * 1. 硫化机台每年都要维保1次
- * 2. 维保计划7个小时（8:00-15:00）
- * 3. 第1次数据源于MES，后面APS自动按自然年度自动推算（前年的实际时间）
- * 4. 需要提前30天预警
+ * 1. 每台启用硫化机每个自然年度应维护1条精准计划；计划缺失或重复时APS只告警，不自动生成。
+ * 2. APS仅加载当年未完成且实际保养日期为空的计划参与排程，实际完成状态仍由MES/设备侧维护。
+ * 3. 保养默认固定在候选日08:00开始、持续7小时，保养后还需计入胶囊预热时间。
+ * 4. APS成功排程后只回填SCHEDULE_DATE，表示最新建议安排时间，不代表保养实际完成。
  *
  * @author APS Team
  */
@@ -64,6 +64,16 @@ public class LhPrecisionPlan extends BaseEntity implements Serializable {
     @TableField("ACTUAL_DATE")
     private Date actualDate;
 
+    /**
+     * APS 最终安排的保养开始时间。
+     * <p>该字段只表示排程建议时间，不代表设备已经实际完成保养；实际执行日期和完成状态仍由
+     * MES/设备业务侧回写 {@link #actualDate}、{@link #completionStatus}。</p>
+     */
+    @Excel(name = "ui.data.column.lhPrecisionPlan.scheduleDate", dateFormat = "yyyy-MM-dd HH:mm:ss")
+    @ApiModelProperty(value = "APS安排的保养开始时间")
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @TableField("SCHEDULE_DATE")
+    private Date scheduleDate;
 
     @Excel(name = "ui.data.column.lhPrecisionPlan.daysToDue")
     @ApiModelProperty(value = "距离到期日剩余天数")

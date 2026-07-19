@@ -1815,7 +1815,9 @@ public final class ShiftCapacityResolverUtil {
     }
 
     /**
-     * 收集并合并指定时间窗内的保养区间。
+     * 收集并合并指定时间窗内的精度保养不可生产区间。
+     * <p>区间起点为保养固定开始时间，区间终点优先使用胶囊预热完成时间；历史窗口未携带
+     * productionResumeTime 时继续使用真实保养结束时间，兼容旧批次运行态数据。</p>
      */
     private static List<Date[]> collectMergedMaintenanceIntervals(List<MachineMaintenanceWindowDTO> maintenanceWindowList,
                                                                   Date windowStartTime,
@@ -1825,21 +1827,37 @@ public final class ShiftCapacityResolverUtil {
             return maintenanceIntervals;
         }
         for (MachineMaintenanceWindowDTO maintenanceWindow : maintenanceWindowList) {
+            Date maintenanceUnavailableEndTime = resolveMaintenanceUnavailableEndTime(maintenanceWindow);
             if (Objects.isNull(maintenanceWindow)
                     || Objects.isNull(maintenanceWindow.getMaintenanceStartTime())
-                    || Objects.isNull(maintenanceWindow.getMaintenanceEndTime())
-                    || !maintenanceWindow.getMaintenanceStartTime().before(maintenanceWindow.getMaintenanceEndTime())) {
+                    || Objects.isNull(maintenanceUnavailableEndTime)
+                    || !maintenanceWindow.getMaintenanceStartTime().before(maintenanceUnavailableEndTime)) {
                 continue;
             }
             Date overlapStartTime = later(maintenanceWindow.getMaintenanceStartTime(), windowStartTime);
             Date overlapEndTime = windowEndTime == null
-                    ? maintenanceWindow.getMaintenanceEndTime()
-                    : earlier(maintenanceWindow.getMaintenanceEndTime(), windowEndTime);
+                    ? maintenanceUnavailableEndTime
+                    : earlier(maintenanceUnavailableEndTime, windowEndTime);
             if (overlapStartTime.before(overlapEndTime)) {
                 maintenanceIntervals.add(new Date[]{overlapStartTime, overlapEndTime});
             }
         }
         return mergeIntervals(maintenanceIntervals);
+    }
+
+    /**
+     * 解析精度保养完整不可生产区间终点。
+     *
+     * @param maintenanceWindow 精度保养窗口
+     * @return 胶囊预热完成时间；历史窗口缺失时返回保养结束时间
+     */
+    private static Date resolveMaintenanceUnavailableEndTime(MachineMaintenanceWindowDTO maintenanceWindow) {
+        if (Objects.isNull(maintenanceWindow)) {
+            return null;
+        }
+        Date productionResumeTime = maintenanceWindow.getProductionResumeTime();
+        return Objects.nonNull(productionResumeTime)
+                ? productionResumeTime : maintenanceWindow.getMaintenanceEndTime();
     }
 
     /**

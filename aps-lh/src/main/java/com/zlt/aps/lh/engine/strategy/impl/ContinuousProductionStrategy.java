@@ -256,6 +256,14 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             Date startTime = resolveContinuousStartTime(context, sku, machine, shifts, isEnding);
             applySingleMachineContinuousTargetRule(context, sku, machine, startTime, shifts,
                     isEnding, isSingleMachine, shortageQuotaPlan);
+            // 长期在机强制下机不能在数据初始化阶段直接挂窗；此处目标量、起排时间和班次产能均已明确，
+            // 先无副作用预测物理机台 L/R 所有活跃侧的自然收尾时间，确实无法在候选保养 08:00 前完成时才强制下机。
+            if (getMaintenanceScheduleService().shouldCheckLongOnlineMaintenance(context, machine)) {
+                Date predictedNaturalEndingTime = predictPhysicalMachineNaturalEndingTime(
+                        context, sku, machine, startTime, shifts);
+                getMaintenanceScheduleService().tryAttachLongOnlineMaintenance(
+                        context, machine, predictedNaturalEndingTime);
+            }
             // 非收尾续作可以为定点新增物料挤出后续换模窗口；收尾场景不走挤量预留。
             Date specifySwitchStartTime = !isEnding
                     ? tryReserveSpecifySqueezeSwitchStartTime(context, machine, sku, shifts) : null;
@@ -288,6 +296,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     machine.setEnding(true);
                     machine.setEstimatedEndTime(actualCompletionTime);
                     traceContinuousEndingUpdate(context, machine, sku, result, actualCompletionTime);
+                    // 首个规格真实收尾后统一交给中心保养服务判断30天预警、08:00边界及不可排日期；
+                    // 挂载后的窗口会继续约束换活字块、新增SKU和结果班次原因分析。
+                    getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
+                            context, machine, actualCompletionTime);
                 } else if (specifySwitchStartTime != null && result.getDailyPlanQty() != null
                         && result.getDailyPlanQty() > 0) {
                     // 非收尾续作让出指定切换起点，后续换活字块/新增按该时刻识别机台已经可切换。
@@ -404,6 +416,67 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return machine.getEstimatedEndTime();
         }
         return defaultStartTime;
+    }
+
+    /**
+     * 预测单控物理机台所有活跃侧的最晚自然收尾时间。
+     * <p>非 L/R 机台只预测当前 SKU；单控机台必须同时预测配对侧，任一活跃侧缺少续作 SKU、
+     * 缺少可证明完成的数据或无法在窗口内完成时返回 null，由中心保养服务触发强制下机。</p>
+     *
+     * @param context 排程上下文
+     * @param currentSku 当前续作 SKU
+     * @param currentMachine 当前运行态机台
+     * @param currentStartTime 当前侧起排时间
+     * @param shifts 排程窗口班次
+     * @return 物理机台最晚自然收尾时间；无法证明时返回 null
+     */
+    private Date predictPhysicalMachineNaturalEndingTime(LhScheduleContext context,
+                                                         SkuScheduleDTO currentSku,
+                                                         MachineScheduleDTO currentMachine,
+                                                         Date currentStartTime,
+                                                         List<LhShiftConfigVO> shifts) {
+        Date latestEndingTime = getTargetScheduleQtyResolver().predictContinuousNaturalEndingTime(
+                context, currentSku, currentMachine, currentStartTime, shifts);
+        if (Objects.isNull(latestEndingTime)) {
+            return null;
+        }
+        MachineScheduleDTO pairMachine = LhSingleControlMachineUtil.resolvePairMachine(
+                context, currentMachine.getMachineCode());
+        if (Objects.isNull(pairMachine) || StringUtils.isEmpty(pairMachine.getCurrentMaterialCode())) {
+            return latestEndingTime;
+        }
+        SkuScheduleDTO pairSku = resolveContinuousSkuByMachineCode(
+                context, pairMachine.getMachineCode());
+        if (Objects.isNull(pairSku)) {
+            return null;
+        }
+        Date pairStartTime = resolveContinuousStartTime(context, pairSku, pairMachine, shifts, true);
+        Date pairEndingTime = getTargetScheduleQtyResolver().predictContinuousNaturalEndingTime(
+                context, pairSku, pairMachine, pairStartTime, shifts);
+        if (Objects.isNull(pairEndingTime)) {
+            return null;
+        }
+        return pairEndingTime.after(latestEndingTime) ? pairEndingTime : latestEndingTime;
+    }
+
+    /**
+     * 按运行态机台编码查找续作 SKU。
+     *
+     * @param context 排程上下文
+     * @param machineCode 运行态机台编码
+     * @return 对应续作 SKU；不存在时返回 null
+     */
+    private SkuScheduleDTO resolveContinuousSkuByMachineCode(LhScheduleContext context, String machineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(context.getContinuousSkuList())) {
+            return null;
+        }
+        for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
+            if (Objects.nonNull(sku) && StringUtils.equals(machineCode, sku.getContinuousMachineCode())) {
+                return sku;
+            }
+        }
+        return null;
     }
 
     /**

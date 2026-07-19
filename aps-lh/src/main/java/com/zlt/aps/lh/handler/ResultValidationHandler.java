@@ -4,6 +4,7 @@ import cn.hutool.core.date.DateUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
+import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
@@ -28,6 +29,7 @@ import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
+import com.zlt.aps.lh.util.ResultDowntimeSummaryUtil;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
@@ -100,6 +102,10 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
     protected void doHandle(LhScheduleContext context) {
         String scheduleOrderBusinessKey = buildScheduleOrderBusinessKey(context);
         try {
+            // 保存前按机台实际挂载窗口绑定保养摘要：只处理本批班次覆盖范围内的保养，
+            // 优先绑定首条保养后结果，无后续SKU时绑定最后一条结果，并统一写入“精度计划”。
+            bindMaintenanceWindowsToFinalResults(context);
+
             // S4.6.1 排程后置校验：保存前校验结果必填字段和关键数量约束。
             postValidation(context);
 
@@ -137,6 +143,244 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         } finally {
             clearScheduleOrderCounter(scheduleOrderBusinessKey);
         }
+    }
+
+    /**
+     * 将精度保养窗口绑定到每台机台唯一的最终结果。
+     *
+     * @param context 排程上下文
+     */
+    private void bindMaintenanceWindowsToFinalResults(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getMachineScheduleMap())
+                || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return;
+        }
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+                continue;
+            }
+            // 班次产能已经按保养及预热区间扣减，但跨占用边界的班次结果仍可能保留标准班次开始时间。
+            // 保存前将实际只能在预热后生产的班次开始时间对齐到最早开产时间，保证时间轴字段可直接对账。
+            alignMachineShiftStartAfterMaintenance(context, machine);
+            // 最终绑定前先清除该机台所有中间结果上的保养摘要和固定原因，随后只向唯一目标结果回填。
+            // 清洗、维修及其他原因不会被清除，避免 K1605 一类同班次多结果重复出现“精度计划”。
+            clearMachineMaintenanceBinding(context, machine.getMachineCode());
+            LhScheduleResult bindingResult = resolveMaintenanceBindingResult(context, machine);
+            if (Objects.isNull(bindingResult)) {
+                log.warn("精度计划已触发但机台没有可绑定排程结果，保留窗口过程日志和计划日期回填, machineCode: {}",
+                        machine.getMachineCode());
+                continue;
+            }
+            boolean bound = ResultDowntimeSummaryUtil.bindMaintenanceSummaryAndAnalysis(
+                    bindingResult, machine.getMaintenanceWindowList(), context.getScheduleWindowShifts());
+            if (!bound) {
+                log.info("精度计划已安排但保养结束时间尚未进入当前排程班次窗口，"
+                                + "本批不绑定结果摘要和班次原因，保留过程日志及计划日期回填, "
+                                + "machineCode: {}, maintenanceResumeTime: {}",
+                        machine.getMachineCode(), LhScheduleTimeUtil.formatDateTime(
+                                resolveMaintenanceResumeTime(machine.getMaintenanceWindowList())));
+                continue;
+            }
+            log.info("精度计划班次原因绑定完成, machineCode: {}, materialCode: {}, maintenanceStart: {}, "
+                            + "maintenanceEnd: {}, analysis: 精度计划",
+                    machine.getMachineCode(), bindingResult.getMaterialCode(),
+                    LhScheduleTimeUtil.formatDateTime(bindingResult.getMaintenanceStartTime()),
+                    LhScheduleTimeUtil.formatDateTime(bindingResult.getMaintenanceEndTime()));
+        }
+    }
+
+    /**
+     * 将保养及预热结束后才能生产的班次开始时间对齐到最早开产时间。
+     * <p>统一产能计算已经扣除了不可生产分钟数，本方法不修改班次计划量、日计划量、库存或账本；
+     * 只修正“标准班次从14:00开始、实际因预热只能17:30开产”这类结果展示时间。保养前已经开始
+     * 生产的班次保持原开始时间，避免抹掉08:00前的真实可生产时段。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 运行态机台
+     */
+    private void alignMachineShiftStartAfterMaintenance(LhScheduleContext context,
+                                                        MachineScheduleDTO machine) {
+        for (MachineMaintenanceWindowDTO window : machine.getMaintenanceWindowList()) {
+            if (Objects.isNull(window)
+                    || Objects.isNull(window.getMaintenanceStartTime())
+                    || Objects.isNull(window.getProductionResumeTime())) {
+                continue;
+            }
+            for (LhScheduleResult result : context.getScheduleResultList()) {
+                if (Objects.isNull(result)
+                        || !StringUtils.equals(machine.getMachineCode(), result.getLhMachineCode())) {
+                    continue;
+                }
+                alignResultShiftStartAfterMaintenance(result, window);
+            }
+        }
+    }
+
+    /**
+     * 修正单条结果中落入保养占用区间且在预热完成后仍有可生产时间的班次开始时刻。
+     *
+     * @param result 排程结果
+     * @param window 精度保养窗口
+     */
+    private void alignResultShiftStartAfterMaintenance(LhScheduleResult result,
+                                                       MachineMaintenanceWindowDTO window) {
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+            Date shiftEndTime = ShiftFieldUtil.getShiftEndTime(result, shiftIndex);
+            if (Objects.isNull(planQty) || planQty <= 0
+                    || Objects.isNull(shiftStartTime) || Objects.isNull(shiftEndTime)
+                    || shiftStartTime.before(window.getMaintenanceStartTime())
+                    || !shiftStartTime.before(window.getProductionResumeTime())
+                    || !shiftEndTime.after(window.getProductionResumeTime())) {
+                continue;
+            }
+            ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, planQty,
+                    window.getProductionResumeTime(), shiftEndTime);
+            log.info("精度保养后班次开产时间对齐完成, machineCode: {}, materialCode: {}, shiftIndex: {}, "
+                            + "originalStartTime: {}, productionResumeTime: {}, planQty: {}",
+                    result.getLhMachineCode(), result.getMaterialCode(), shiftIndex,
+                    LhScheduleTimeUtil.formatDateTime(shiftStartTime),
+                    LhScheduleTimeUtil.formatDateTime(window.getProductionResumeTime()), planQty);
+        }
+    }
+
+    /**
+     * 清除指定机台全部结果上的保养摘要和固定原因。
+     * <p>排程过程中同一结果可能多次同步停机摘要，最终阶段必须先按机台清理，再选择唯一结果绑定，
+     * 从而保证一台运行侧的一次保养只形成一条结果摘要和一个对应班次原因。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     */
+    private void clearMachineMaintenanceBinding(LhScheduleContext context, String machineCode) {
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.nonNull(result)
+                    && StringUtils.equals(machineCode, result.getLhMachineCode())) {
+                ResultDowntimeSummaryUtil.clearMaintenanceSummaryAndAnalysis(result);
+            }
+        }
+    }
+
+    /**
+     * 解析精度保养窗口应绑定的排程结果。
+     * <p>优先选择生产开始时间不早于胶囊预热完成时间的第一条结果；若当前排程窗口内的保养后
+     * 没有后续生产结果，则回退到该机台最后一条结果。未来保养是否进入当前结果班次范围由统一
+     * 绑定工具再次校验，未进入时不会把未来摘要错误挂到当前最后结果。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 运行态机台
+     * @return 待绑定结果；机台没有任何结果时返回 null
+     */
+    private LhScheduleResult resolveMaintenanceBindingResult(LhScheduleContext context,
+                                                             MachineScheduleDTO machine) {
+        Date maintenanceResumeTime = resolveMaintenanceResumeTime(machine.getMaintenanceWindowList());
+        LhScheduleResult firstPostMaintenanceResult = null;
+        Date firstPostMaintenanceTime = null;
+        LhScheduleResult lastMachineResult = null;
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.isNull(result)
+                    || !StringUtils.equals(machine.getMachineCode(), result.getLhMachineCode())) {
+                continue;
+            }
+            if (Objects.isNull(lastMachineResult)
+                    || compareResultTime(result, lastMachineResult) > 0) {
+                lastMachineResult = result;
+            }
+            // 一条SKU结果可能同时包含保养前班次和预热后的恢复生产班次，不能只看整条结果的最早开始时间。
+            // 应逐班次定位预热完成后的第一段实际生产，把摘要和“精度计划”原因绑定到真实承接恢复生产的结果。
+            Date productionStartTime = resolveFirstProductionTimeAfterMaintenance(
+                    result, maintenanceResumeTime);
+            if (Objects.nonNull(productionStartTime)
+                    && (Objects.isNull(firstPostMaintenanceTime)
+                    || productionStartTime.before(firstPostMaintenanceTime))) {
+                firstPostMaintenanceResult = result;
+                firstPostMaintenanceTime = productionStartTime;
+            }
+        }
+        return Objects.nonNull(firstPostMaintenanceResult) ? firstPostMaintenanceResult : lastMachineResult;
+    }
+
+    /**
+     * 解析单条结果在精度保养及胶囊预热结束后的第一段实际生产时间。
+     * <p>班次必须存在正计划量且实际结束时间晚于恢复时间。若班次开始时间早于恢复时间，说明该结果
+     * 跨越保养占用边界，保养后的实际恢复点仍按 productionResumeTime 计算。</p>
+     *
+     * @param result 排程结果
+     * @param productionResumeTime 胶囊预热完成及最早开产时间
+     * @return 第一段保养后生产时间；没有保养后产量时返回null
+     */
+    private Date resolveFirstProductionTimeAfterMaintenance(LhScheduleResult result,
+                                                            Date productionResumeTime) {
+        if (Objects.isNull(result) || Objects.isNull(productionResumeTime)) {
+            return null;
+        }
+        Date firstProductionTime = null;
+        for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+            Date shiftEndTime = ShiftFieldUtil.getShiftEndTime(result, shiftIndex);
+            if (Objects.isNull(planQty) || planQty <= 0
+                    || Objects.isNull(shiftStartTime) || Objects.isNull(shiftEndTime)
+                    || !shiftEndTime.after(productionResumeTime)) {
+                continue;
+            }
+            Date actualProductionTime = shiftStartTime.before(productionResumeTime)
+                    ? productionResumeTime : shiftStartTime;
+            if (Objects.isNull(firstProductionTime)
+                    || actualProductionTime.before(firstProductionTime)) {
+                firstProductionTime = actualProductionTime;
+            }
+        }
+        return firstProductionTime;
+    }
+
+    /**
+     * 解析机台全部保养及胶囊预热完成后的最晚恢复生产时间。
+     * <p>历史窗口未保存 productionResumeTime 时使用真实保养结束时间，兼容旧运行态数据。</p>
+     *
+     * @param maintenanceWindowList 精度保养窗口
+     * @return 最晚恢复生产时间
+     */
+    private Date resolveMaintenanceResumeTime(List<MachineMaintenanceWindowDTO> maintenanceWindowList) {
+        Date latestResumeTime = null;
+        if (CollectionUtils.isEmpty(maintenanceWindowList)) {
+            return null;
+        }
+        for (MachineMaintenanceWindowDTO window : maintenanceWindowList) {
+            if (Objects.isNull(window)) {
+                continue;
+            }
+            Date resumeTime = Objects.nonNull(window.getProductionResumeTime())
+                    ? window.getProductionResumeTime() : window.getMaintenanceEndTime();
+            if (Objects.nonNull(resumeTime)
+                    && (Objects.isNull(latestResumeTime) || resumeTime.after(latestResumeTime))) {
+                latestResumeTime = resumeTime;
+            }
+        }
+        return latestResumeTime;
+    }
+
+    /**
+     * 按结果生产时间比较先后。
+     *
+     * @param left 左结果
+     * @param right 右结果
+     * @return 小于0-左结果更早；大于0-左结果更晚
+     */
+    private int compareResultTime(LhScheduleResult left, LhScheduleResult right) {
+        Date leftTime = resolveProductionStartTime(left);
+        Date rightTime = resolveProductionStartTime(right);
+        if (Objects.isNull(leftTime)) {
+            leftTime = left.getSpecEndTime();
+        }
+        if (Objects.isNull(rightTime)) {
+            rightTime = right.getSpecEndTime();
+        }
+        if (Objects.isNull(leftTime)) {
+            return Objects.isNull(rightTime) ? 0 : -1;
+        }
+        return Objects.isNull(rightTime) ? 1 : leftTime.compareTo(rightTime);
     }
 
     /**

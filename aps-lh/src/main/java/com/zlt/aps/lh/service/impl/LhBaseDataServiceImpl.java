@@ -51,6 +51,7 @@ import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.MonthPlanStatisticsDayUtil;
+import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.mp.api.domain.entity.MdmCapsuleChuck;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -364,6 +365,10 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         () -> skuDecrementChecker.loadAndAttachDecrementIndex(context),
                         () -> sizeOf(context.getSkuDecrementKeySet()))
         );
+
+        // 年度精准计划完整性只做告警：不自动生成计划、不阻断其他机台排程，
+        // 但同时写应用日志和排程过程日志，便于 MES/设备主数据侧闭环补齐或去重。
+        auditAnnualMaintenancePlan(context);
 
         // 4. 胎胚收尾标识：依赖月计划、胎胚库存、月累计完成量、T日班次完成量、前日排程结果等均已就绪，
         //    故在屏障同步之后计算；以胎胚维度合并硫化余量并按主销参与情况判定收尾。
@@ -2391,20 +2396,57 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 new LambdaQueryWrapper<LhPrecisionPlan>()
                         .eq(LhPrecisionPlan::getFactoryCode, factoryCode)
                         .eq(LhPrecisionPlan::getYear, BigDecimal.valueOf(scheduleYear))
-                        .eq(LhPrecisionPlan::getCompletionStatus, "0")
-                        .isNull(LhPrecisionPlan::getActualDate)
                         .eq(LhPrecisionPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>(32);
-        if (maintenancePlanList != null) {
+        Map<String, Integer> annualPlanCountMap = new HashMap<>(32);
+        if (!CollectionUtils.isEmpty(maintenancePlanList)) {
             for (LhPrecisionPlan plan : maintenancePlanList) {
-                if (StringUtils.isNotEmpty(plan.getMachineCode())) {
+                if (StringUtils.isEmpty(plan.getMachineCode())) {
+                    continue;
+                }
+                annualPlanCountMap.merge(plan.getMachineCode(), 1, Integer::sum);
+                // 运行态仅保留未完成且实际完成时间为空的计划；完成状态和实际日期继续由 MES/设备侧维护。
+                if ("0".equals(plan.getCompletionStatus()) && Objects.isNull(plan.getActualDate())) {
                     maintenancePlanMap.put(plan.getMachineCode(), plan);
                 }
             }
         }
         context.setMaintenancePlanMap(maintenancePlanMap);
-        log.debug("硫化精度保养计划加载完成（已过滤实际完成记录）, 年度: {}, 数量: {}",
-                scheduleYear, maintenancePlanMap.size());
+        context.setAnnualMaintenancePlanCountMap(annualPlanCountMap);
+        log.debug("硫化精度保养计划加载完成, 年度: {}, 年度计划数: {}, 未完成有效计划数: {}",
+                scheduleYear, Objects.isNull(maintenancePlanList) ? 0 : maintenancePlanList.size(),
+                maintenancePlanMap.size());
+    }
+
+    /**
+     * 审计启用机台年度精准计划完整性。
+     * <p>业务要求每台启用硫化机每个自然年度一条计划。缺失或重复均只告警，不自动补计划且不阻断排程。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void auditAnnualMaintenancePlan(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getMachineInfoMap())) {
+            return;
+        }
+        int scheduleYear = resolveScheduleYear(context);
+        for (String machineCode : context.getMachineInfoMap().keySet()) {
+            Integer planCount = context.getAnnualMaintenancePlanCountMap().get(machineCode);
+            int actualCount = Objects.isNull(planCount) ? 0 : planCount;
+            if (actualCount == 1) {
+                continue;
+            }
+            String result = actualCount <= 0 ? "年度精准计划缺失" : "年度精准计划重复";
+            log.warn("硫化机年度精准计划完整性告警, 工厂: {}, 年度: {}, 机台: {}, 计划条数: {}, 结果: {}",
+                    context.getFactoryCode(), scheduleYear, machineCode, actualCount, result);
+            StringBuilder detailBuilder = new StringBuilder(128);
+            detailBuilder.append("工厂=").append(context.getFactoryCode())
+                    .append("，年度=").append(scheduleYear)
+                    .append("，机台=").append(machineCode)
+                    .append("，计划条数=").append(actualCount)
+                    .append("，处理结果=").append(result)
+                    .append("，排程处理=仅告警不阻断");
+            PriorityTraceLogHelper.appendProcessLog(context, "年度精准计划完整性检查", detailBuilder.toString());
+        }
     }
 
     /**

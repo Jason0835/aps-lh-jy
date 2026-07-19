@@ -214,6 +214,12 @@ public class LhScheduleContext {
             new LinkedHashMap<String, Integer>();
     /** 硫化精度保养计划Map, key=machineCode */
     private Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>();
+    /**
+     * 排程年度精准计划条数：machineCode -> 当年有效记录数。
+     * <p>包含已完成与未完成计划，仅用于“一机一年一条”完整性告警；实际排程仍只读取
+     * maintenancePlanMap 中未完成且实际完成时间为空的计划。</p>
+     */
+    private Map<String, Integer> annualMaintenancePlanCountMap = new HashMap<>();
     /** 特殊物料清单配置列表 */
     private List<LhSpecialMaterialBom> specialMaterialBomList = new ArrayList<>();
     /** 特殊物料分类Map, key=物料编码, value=分类集合 */
@@ -416,6 +422,18 @@ public class LhScheduleContext {
     private Map<String, Integer> shiftFirstInspectionCountMap = new LinkedHashMap<>(8);
     /** 每日精度保养计数, key=dateString, value=已安排保养机台数 */
     private Map<String, Integer> dailyMaintenanceCountMap = new LinkedHashMap<>();
+    /**
+     * 每日已占用保养额度的物理机台集合，key=dateString，value=物理机台编码集合。
+     * <p>单控 L/R 两侧属于同一物理机台，只能在集合中登记一次；清除运行时保养窗口时也通过
+     * 该集合释放额度，避免仅递减数字导致重复占用或误释放其他机台额度。</p>
+     */
+    private Map<String, Set<String>> dailyMaintenancePhysicalMachineSetMap = new LinkedHashMap<>();
+    /**
+     * 已记录的精度保养就绪时间顺延日志键集合。
+     * <p>键由“机台 + 原就绪时间 + 最早开产时间”组成。同一候选在选机、产能预演和最终排产阶段
+     * 可能被重复计算，本集合只抑制完全相同的过程日志，不改变任何机台时间和排程判断。</p>
+     */
+    private Set<String> maintenanceResumeDelayLogKeySet = new LinkedHashSet<>();
 
     // ========== 排程输出结果 ==========
 

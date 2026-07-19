@@ -8,6 +8,7 @@ import com.zlt.aps.cx.api.domain.entity.CxStock;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
+import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
@@ -17,7 +18,6 @@ import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhMachineInfoMapper;
 import com.zlt.aps.lh.mapper.LhMachineOnlineInfoMapper;
 import com.zlt.aps.lh.mapper.LhMouldChangePlanEntityMapper;
-import com.zlt.aps.lh.mapper.LhMouldCleanPlanMapper;
 import com.zlt.aps.lh.mapper.LhPrecisionPlanMapper;
 import com.zlt.aps.lh.mapper.LhRepairCapsuleMapper;
 import com.zlt.aps.lh.mapper.LhScheduleResultMapper;
@@ -34,6 +34,7 @@ import com.zlt.aps.lh.mapper.MdmSkuMouldRelMapper;
 import com.zlt.aps.lh.mapper.MdmSkuScheduleCategoryMapper;
 import com.zlt.aps.lh.mapper.MdmWorkCalendarMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
+import com.zlt.aps.lh.mapper.MpMouldDeliveryPlanEntityMapper;
 import com.zlt.aps.lh.mapper.MpMonthPlanStatisticsMapper;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -72,6 +73,32 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author APS
  */
 public class LhBaseDataServiceImplTest {
+
+    /**
+     * 用例说明：启用机台年度精准计划缺失或重复时只记录告警，不中断排程上下文。
+     */
+    @Test
+    public void auditAnnualMaintenancePlanShouldWarnForMissingAndDuplicatePlans() {
+        LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.setScheduleDate(buildDate(2026, 7, 18));
+        LhMachineInfo duplicateMachine = new LhMachineInfo();
+        duplicateMachine.setMachineCode("K1001");
+        LhMachineInfo missingMachine = new LhMachineInfo();
+        missingMachine.setMachineCode("K1002");
+        context.getMachineInfoMap().put("K1001", duplicateMachine);
+        context.getMachineInfoMap().put("K1002", missingMachine);
+        context.getAnnualMaintenancePlanCountMap().put("K1001", 2);
+
+        ReflectionTestUtils.invokeMethod(service, "auditAnnualMaintenancePlan", context);
+
+        long warningLogCount = context.getScheduleLogList().stream()
+                .filter(item -> "年度精准计划完整性检查".equals(item.getTitle()))
+                .count();
+        Assertions.assertEquals(2L, warningLogCount);
+        Assertions.assertFalse(context.isInterrupted(), "年度计划缺失或重复只能告警，不能中断排程");
+    }
 
     /**
      * 用例说明：停产保机参数为3天时，月计划加载月份必须覆盖窗口前3天和窗口末日后3天。
@@ -767,7 +794,6 @@ public class LhBaseDataServiceImplTest {
         injectField(service, "skuMouldRelMapper", mockMapper(MdmSkuMouldRelMapper.class));
         injectField(service, "mdmModelInfoMapper", mockMapper(MdmModelInfoMapper.class));
         injectField(service, "lhMachineInfoMapper", buildMachineInfoMapper());
-        injectField(service, "lhMouldCleanPlanMapper", mockMapper(LhMouldCleanPlanMapper.class));
         injectField(service, "lhDayFinishQtyMapper", mockMapper(LhDayFinishQtyMapper.class));
         injectField(service, "lhScheFinishQtyMapper", mockMapper(LhScheFinishQtyMapper.class));
         injectField(service, "mdmMaterialInfoMapper", mockMapper(MdmMaterialInfoMapper.class));
@@ -778,11 +804,13 @@ public class LhBaseDataServiceImplTest {
         injectField(service, "lhPrecisionPlanMapper", mockMapper(LhPrecisionPlanMapper.class));
         injectField(service, "lhScheduleResultMapper", mockMapper(LhScheduleResultMapper.class));
         injectField(service, "lhMouldChangePlanMapper", mockMapper(LhMouldChangePlanEntityMapper.class));
+        injectField(service, "mouldDeliveryPlanEntityMapper", mockMapper(MpMouldDeliveryPlanEntityMapper.class));
         injectField(service, "cxStockMapper", mockMapper(CxStockMapper.class));
         injectField(service, "lhSpecialMaterialBomEntityMapper", mockMapper(LhSpecialMaterialBomEntityMapper.class));
         injectField(service, "skuConstructionRefMapper", mockMapper(MdmSkuConstructionRefMapper.class));
         injectField(service, "skuScheduleCategoryMapper", mockMapper(MdmSkuScheduleCategoryMapper.class));
         injectField(service, "scheduleAdjustHandler", Mockito.mock(ScheduleAdjustHandler.class));
+        injectField(service, "skuDecrementChecker", Mockito.mock(SkuDecrementChecker.class));
         return service;
     }
 
