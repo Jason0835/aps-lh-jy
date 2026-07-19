@@ -6,24 +6,29 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.ContinuousProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.impl.DefaultMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.handler.ResultValidationHandler;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -37,6 +42,7 @@ import java.util.Map;
 import java.time.LocalDate;
 import java.time.ZoneId;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -55,6 +61,14 @@ class ContinuousProductionResultQtyRegressionTest {
 
     @Mock
     private IEndingJudgmentStrategy endingJudgmentStrategy;
+
+    @Spy
+    private DefaultMouldChangeBalanceStrategy mouldChangeBalanceStrategy =
+            new DefaultMouldChangeBalanceStrategy();
+
+    @Spy
+    private CapsuleReplacementRuleService capsuleReplacementRuleService =
+            new CapsuleReplacementRuleService();
 
     @InjectMocks
     private ContinuousProductionStrategy strategy;
@@ -803,6 +817,54 @@ class ContinuousProductionResultQtyRegressionTest {
     }
 
     @Test
+    void sharedEmbryoEndingStagger_shouldSelectBalancedCandidateAndKeepRealCountsUntouched() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        String actualMouldChangeDate = LhScheduleTimeUtil.formatDate(
+                context.getScheduleWindowShifts().get(2).getShiftEndDateTime());
+        context.getDailyMouldChangeCountMap().put(actualMouldChangeDate, new int[]{7, 7});
+
+        List<String> materialCodes = new ArrayList<String>(2);
+        for (int index = 1; index <= 2; index++) {
+            String materialCode = "MAT-BALANCE-" + index;
+            String machineCode = "KBA0" + index;
+            materialCodes.add(materialCode);
+            registerMachine(context, machineCode);
+            SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(materialCode, "EMB-BALANCE", "01");
+            LhScheduleResult result = buildSharedEmbryoStaggerResult(
+                    context, machineCode, sku, firstShift, 8);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+        context.getActiveEmbryoSkuMap().put("EMB-BALANCE", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-BALANCE", 0);
+
+        /*
+         * KBA01 的次日早班被停机占用，只能落到中班并形成 7:8；KBA02 可落到早班形成 8:7。
+         * 机台编码故意让 KBA01 排在前面，验证班次均衡优先级高于原机台编码稳定排序。
+         */
+        MdmDevicePlanShut planShut = new MdmDevicePlanShut();
+        planShut.setMachineCode("KBA01");
+        planShut.setBeginDate(context.getScheduleWindowShifts().get(3).getShiftStartDateTime());
+        planShut.setEndDate(context.getScheduleWindowShifts().get(3).getShiftEndDateTime());
+        context.getDevicePlanShutList().add(planShut);
+        LhMouldChangePlan existingPlan = new LhMouldChangePlan();
+        context.getMouldChangePlanList().add(existingPlan);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostpone", context, context.getScheduleWindowShifts());
+
+        assertSharedEmbryoStaggerKept(context, "KBA01", 8);
+        assertSharedEmbryoStaggerPostponed(context, "KBA02", secondShift, 24);
+        assertArrayEquals(new int[]{7, 7}, context.getDailyMouldChangeCountMap().get(actualMouldChangeDate),
+                "错峰预演仅用于候选选优，不得提前占用真实换模次数");
+        assertEquals(1, context.getMouldChangePlanList().size(),
+                "错峰预演和后延不得直接增删交替计划");
+        assertEquals(existingPlan, context.getMouldChangePlanList().get(0));
+    }
+
+    @Test
     void sharedEmbryoEndingStagger_shouldKeepOriginalShiftWhenAutoFillDisabled() {
         LhScheduleContext context = newContext();
         setEndingAutoFillEnabled(context, false);
@@ -1077,7 +1139,20 @@ class ContinuousProductionResultQtyRegressionTest {
                 "recordSharedEmbryoEndingStaggerReleaseCandidate", context, sku, result);
         ShiftFieldUtil.setShiftPlanQty(result, firstShift.getShiftIndex(), 0, null, null);
         ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setSpecEndTime(dateTime(2026, 4, 11, 15, 30, 0));
+        result.setTdaySpecEndTime(dateTime(2026, 4, 11, 15, 30, 0));
         result.setSingleMouldShiftQty(0);
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get("KRB01");
+        machine.setEstimatedEndTime(dateTime(2026, 4, 11, 15, 30, 0));
+        context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().put(result, 3);
+        context.getCapsuleRuntimeUsageMap().put("KRB01_1", 12);
+        context.getCapsuleReplacementShiftKeySet().add("KRB01_2026-04-11_2");
+        context.getCapsuleReplacementPositionShiftKeySet().add("KRB01_2026-04-11_2_1");
+        context.getCapsuleReplacementShiftCapacityLimitMap().put("KRB01_2026-04-11_2_MAT-ROLLBACK", 14);
+        context.getDailyMouldChangeCountMap().put("2026-04-12", new int[]{8, 6});
+        LhMouldChangePlan inheritedPlan = new LhMouldChangePlan();
+        inheritedPlan.setLhMachineCode("K-HISTORY");
+        context.getMouldChangePlanList().add(inheritedPlan);
 
         Boolean applied = ReflectionTestUtils.invokeMethod(strategy,
                 "applySharedEmbryoEndingStaggerPostponeResult", context, result, firstShift.getShiftIndex(),
@@ -1088,6 +1163,93 @@ class ContinuousProductionResultQtyRegressionTest {
         assertEquals(0, ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()) == null
                 ? 0 : ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()).intValue(),
                 "后延失败后不应恢复原收尾班次计划量");
+        assertEquals(dateTime(2026, 4, 11, 15, 30, 0), result.getSpecEndTime(),
+                "后延失败后应精确恢复尝试前收尾时间");
+        assertEquals(dateTime(2026, 4, 11, 15, 30, 0), result.getTdaySpecEndTime(),
+                "后延失败后应精确恢复尝试前T日收尾时间");
+        assertEquals(dateTime(2026, 4, 11, 15, 30, 0), machine.getEstimatedEndTime(),
+                "后延失败后应恢复机台运行态结束时间");
+        assertEquals(Integer.valueOf(3), context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result),
+                "后延失败不得覆盖尝试前已有允许超量");
+        assertEquals(Integer.valueOf(12), context.getCapsuleRuntimeUsageMap().get("KRB01_1"),
+                "后延失败后应恢复胶囊运行次数");
+        assertEquals(1, context.getCapsuleReplacementShiftKeySet().size(),
+                "后延失败后换胶囊班次集合不得产生脏数据");
+        assertEquals(1, context.getCapsuleReplacementPositionShiftKeySet().size(),
+                "后延失败后换胶囊位置集合不得产生脏数据");
+        assertEquals(1, context.getCapsuleReplacementShiftCapacityLimitMap().size(),
+                "后延失败后换胶囊产能上限不得产生脏数据");
+        assertEquals(8, context.getDailyMouldChangeCountMap().get("2026-04-12")[0],
+                "单机后延失败不得修改真实早班换模次数");
+        assertEquals(6, context.getDailyMouldChangeCountMap().get("2026-04-12")[1],
+                "单机后延失败不得修改真实中班换模次数");
+        assertEquals(1, context.getMouldChangePlanList().size(),
+                "后延失败不得增删既有交替计划");
+        assertEquals("K-HISTORY", context.getMouldChangePlanList().get(0).getLhMachineCode());
+    }
+
+    @Test
+    void sharedEmbryoEndingStagger_shouldPostponeOnlyOneMachineWhenFourteenthSlotRemains() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        LhShiftConfigVO secondShift = context.getScheduleWindowShifts().get(1);
+        List<String> materialCodes = new ArrayList<String>();
+        for (int index = 1; index <= 4; index++) {
+            String materialCode = "MAT-PARTIAL-" + index;
+            String machineCode = "KPT0" + index;
+            materialCodes.add(materialCode);
+            registerMachine(context, machineCode);
+            SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(materialCode, "EMB-PARTIAL", "01");
+            LhScheduleResult result = buildSharedEmbryoStaggerResult(
+                    context, machineCode, sku, firstShift, 8);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+        context.getActiveEmbryoSkuMap().put("EMB-PARTIAL", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-PARTIAL", 0);
+        context.getDailyMouldChangeCountMap().put("2026-04-12", new int[]{8, 6});
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostpone", context, context.getScheduleWindowShifts());
+
+        assertSharedEmbryoStaggerPostponed(context, "KPT01", secondShift, 24);
+        assertSharedEmbryoStaggerKept(context, "KPT02", 8);
+        assertSharedEmbryoStaggerKept(context, "KPT03", 8);
+        assertSharedEmbryoStaggerKept(context, "KPT04", 8);
+        assertArrayEquals(new int[]{8, 6}, context.getDailyMouldChangeCountMap().get("2026-04-12"),
+                "逐台模拟只用于选优，不得把第15次预演写入真实换模次数");
+        assertEquals(1, context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().size(),
+                "部分成功时只允许成功机台登记错峰允许超量");
+    }
+
+    @Test
+    void sharedEmbryoEndingStagger_shouldKeepAllMachinesWhenDailyLimitReached() {
+        LhScheduleContext context = newContext();
+        LhShiftConfigVO firstShift = context.getScheduleWindowShifts().get(0);
+        List<String> materialCodes = new ArrayList<String>();
+        for (int index = 1; index <= 2; index++) {
+            String materialCode = "MAT-FULL-" + index;
+            String machineCode = "KFL0" + index;
+            materialCodes.add(materialCode);
+            registerMachine(context, machineCode);
+            SkuScheduleDTO sku = buildSharedEmbryoStaggerSku(materialCode, "EMB-FULL", "01");
+            LhScheduleResult result = buildSharedEmbryoStaggerResult(
+                    context, machineCode, sku, firstShift, 8);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+        context.getActiveEmbryoSkuMap().put("EMB-FULL", materialCodes);
+        context.getEmbryoEndingFlagMap().put("EMB-FULL", 0);
+        context.getDailyMouldChangeCountMap().put("2026-04-12", new int[]{8, 7});
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applySharedEmbryoEndingStaggerPostpone", context, context.getScheduleWindowShifts());
+
+        assertSharedEmbryoStaggerKept(context, "KFL01", 8);
+        assertSharedEmbryoStaggerKept(context, "KFL02", 8);
+        assertEquals(0, context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().size(),
+                "每日15次已满时所有候选都应保留原收尾安排");
+        assertArrayEquals(new int[]{8, 7}, context.getDailyMouldChangeCountMap().get("2026-04-12"));
     }
 
     private LhScheduleContext newContext() {

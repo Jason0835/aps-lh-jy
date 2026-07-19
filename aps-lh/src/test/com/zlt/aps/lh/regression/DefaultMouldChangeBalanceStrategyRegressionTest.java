@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Calendar;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -240,6 +242,99 @@ class DefaultMouldChangeBalanceStrategyRegressionTest {
 
         assertEquals(dateTime(2026, 7, 21, 16, 0, 0), faultAllocated,
                 "06及其他停机类型仍必须顺延切换，不得随05规则一起放开");
+    }
+
+    @Test
+    void previewEndingStagger_shouldPreferAfternoonWhenMorningTargetReached() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        Map<String, int[]> simulatedCountMap = new LinkedHashMap<String, int[]>();
+        simulatedCountMap.put("2026-04-23", new int[]{8, 2});
+
+        Date previewTime = strategy.previewEndingStaggerMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 6, 0, 0), 8, null, simulatedCountMap);
+
+        assertEquals(dateTime(2026, 4, 23, 14, 0, 0), previewTime,
+                "早班已达到8次目标时，应优先把可等待的错峰换模安排到中班");
+        assertArrayEquals(new int[]{8, 3}, simulatedCountMap.get("2026-04-23"));
+    }
+
+    @Test
+    void previewEndingStagger_shouldPreferMorningWhenAfternoonTargetReached() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        Map<String, int[]> simulatedCountMap = new LinkedHashMap<String, int[]>();
+        simulatedCountMap.put("2026-04-23", new int[]{2, 7});
+
+        Date previewTime = strategy.previewEndingStaggerMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 6, 0, 0), 8, null, simulatedCountMap);
+
+        assertEquals(dateTime(2026, 4, 23, 6, 0, 0), previewTime,
+                "中班已达到7次目标时，应优先保留早班合法落点");
+        assertArrayEquals(new int[]{3, 7}, simulatedCountMap.get("2026-04-23"));
+    }
+
+    @Test
+    void previewEndingStagger_shouldAllowFourteenthPlusOneAndBlockWhenFifteenUsed() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.getMouldChangeLimitBlockedReasonMap().put("MAT-EXISTING", "原未排原因");
+        Map<String, int[]> fourteenCountMap = new LinkedHashMap<String, int[]>();
+        fourteenCountMap.put("2026-04-23", new int[]{8, 6});
+
+        Date allowedTime = strategy.previewEndingStaggerMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 6, 0, 0), 8, null, fourteenCountMap);
+
+        assertEquals(dateTime(2026, 4, 23, 14, 0, 0), allowedTime,
+                "当天已有14次时应允许预演第15次，并优先补到中班7次目标");
+        assertArrayEquals(new int[]{8, 7}, fourteenCountMap.get("2026-04-23"));
+
+        Map<String, int[]> fifteenCountMap = new LinkedHashMap<String, int[]>();
+        fifteenCountMap.put("2026-04-23", new int[]{8, 7});
+        Date blockedTime = strategy.previewEndingStaggerMouldChange(
+                context, "K2025", dateTime(2026, 4, 23, 6, 0, 0), 8, null, fifteenCountMap);
+
+        assertNull(blockedTime, "当天已有15次时禁止继续错峰后延");
+        assertArrayEquals(new int[]{8, 7}, fifteenCountMap.get("2026-04-23"),
+                "预演失败不得污染模拟计数");
+        assertEquals("原未排原因", context.getMouldChangeLimitBlockedReasonMap().get("MAT-EXISTING"),
+                "错峰预演不得写入、清理或覆盖正式换模链的未排原因");
+    }
+
+    @Test
+    void previewEndingStagger_shouldAllowMorningBeyondTargetWhenOnlyMorningIsFeasible() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.getDevicePlanShutList().add(planShut("K2024",
+                dateTime(2026, 4, 23, 14, 0, 0), dateTime(2026, 4, 23, 23, 0, 0)));
+        Map<String, int[]> simulatedCountMap = new LinkedHashMap<String, int[]>();
+        simulatedCountMap.put("2026-04-23", new int[]{9, 5});
+        simulatedCountMap.put("2026-04-24", new int[]{8, 7});
+
+        Date previewTime = strategy.previewEndingStaggerMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 6, 0, 0), 8, null, simulatedCountMap);
+
+        assertEquals(dateTime(2026, 4, 23, 6, 0, 0), previewTime,
+                "早班超过8次仅属于软目标，全天未超过15次且中班方案不可行时仍应允许后延");
+        assertArrayEquals(new int[]{10, 5}, simulatedCountMap.get("2026-04-23"));
+    }
+
+    @Test
+    void previewEndingStagger_shouldCountByActualCrossCalendarDayAndKeepRealCountsUntouched() {
+        DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.getDailyMouldChangeCountMap().put("2026-04-24", new int[]{3, 2});
+        Map<String, int[]> simulatedCountMap = new LinkedHashMap<String, int[]>();
+        simulatedCountMap.put("2026-04-24", new int[]{3, 2});
+
+        Date previewTime = strategy.previewEndingStaggerMouldChange(
+                context, "K2024", dateTime(2026, 4, 23, 22, 0, 0), 8, null, simulatedCountMap);
+
+        assertEquals(dateTime(2026, 4, 24, 14, 0, 0), previewTime,
+                "后延后落入禁止换模时段时，应先归到实际次日，再选择次数较少的中班");
+        assertArrayEquals(new int[]{3, 3}, simulatedCountMap.get("2026-04-24"));
+        assertArrayEquals(new int[]{3, 2}, context.getDailyMouldChangeCountMap().get("2026-04-24"),
+                "错峰预演不得直接占用真实换模次数");
     }
 
     private MdmDevicePlanShut planShut(String machineCode, Date beginDate, Date endDate) {

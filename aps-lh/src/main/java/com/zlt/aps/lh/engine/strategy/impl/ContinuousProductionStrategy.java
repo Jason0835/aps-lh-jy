@@ -5325,42 +5325,311 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             return;
         }
         Map<String, Integer> mouldSharedSkuCountMap = LhMouldCodeUtil.buildMouldSharedSkuCountMap(context);
+        Map<String, int[]> simulatedCountMap = copyDailyMouldChangeCountMap(context.getDailyMouldChangeCountMap());
+        Map<LhScheduleResult, Integer> candidateEndingShiftIndexMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(16);
+        Map<Integer, Integer> maxPostponeCountMap = new LinkedHashMap<Integer, Integer>(
+                LhScheduleConstant.MAX_SHIFT_SLOT_COUNT);
+        Map<Integer, List<LhScheduleResult>> postponedResultMap =
+                new LinkedHashMap<Integer, List<LhScheduleResult>>(LhScheduleConstant.MAX_SHIFT_SLOT_COUNT);
+        List<LhScheduleResult> pendingCandidates = new ArrayList<LhScheduleResult>(16);
+        for (Map.Entry<Integer, List<LhScheduleResult>> entry : shiftCandidateMap.entrySet()) {
+            List<LhScheduleResult> candidates = entry.getValue();
+            if (CollectionUtils.isEmpty(candidates)) {
+                continue;
+            }
+            int maxPostponeCount = candidates.size() / 2;
+            maxPostponeCountMap.put(entry.getKey(), maxPostponeCount);
+            postponedResultMap.put(entry.getKey(), new ArrayList<LhScheduleResult>(maxPostponeCount));
+            if (maxPostponeCount <= 0) {
+                continue;
+            }
+            for (LhScheduleResult candidate : candidates) {
+                candidateEndingShiftIndexMap.put(candidate, entry.getKey());
+                pendingCandidates.add(candidate);
+            }
+        }
+
         boolean hasPostponedResult = false;
+        while (!CollectionUtils.isEmpty(pendingCandidates)) {
+            Map<LhScheduleResult, Map<String, int[]>> projectedCountMap =
+                    new IdentityHashMap<LhScheduleResult, Map<String, int[]>>(pendingCandidates.size());
+            Map<LhScheduleResult, Date> projectedMouldChangeTimeMap =
+                    new IdentityHashMap<LhScheduleResult, Date>(pendingCandidates.size());
+            Iterator<LhScheduleResult> iterator = pendingCandidates.iterator();
+            while (iterator.hasNext()) {
+                LhScheduleResult result = iterator.next();
+                Integer endingShiftIndex = candidateEndingShiftIndexMap.get(result);
+                if (Objects.isNull(endingShiftIndex)) {
+                    iterator.remove();
+                    continue;
+                }
+                List<LhScheduleResult> postponedResults = postponedResultMap.get(endingShiftIndex);
+                int maxPostponeCount = maxPostponeCountMap.getOrDefault(endingShiftIndex, 0);
+                if (maxPostponeCount <= 0
+                        || (!CollectionUtils.isEmpty(postponedResults)
+                        && postponedResults.size() >= maxPostponeCount)) {
+                    iterator.remove();
+                    continue;
+                }
+                LhShiftConfigVO nextShift = findShiftByIndex(shifts, endingShiftIndex + 1);
+                SkuScheduleDTO sourceSku = resolveResultSourceSku(context, result);
+                if (Objects.isNull(nextShift) || Objects.isNull(sourceSku)) {
+                    iterator.remove();
+                    continue;
+                }
+
+                /*
+                 * 每台候选都从当前已提交的模拟计数独立拷贝。预演只改这份候选副本，
+                 * 因此未选中或执行失败的方案不会污染后续机台的次数判断。
+                 */
+                Map<String, int[]> candidateCountMap = copyDailyMouldChangeCountMap(simulatedCountMap);
+                Date projectedMouldChangeTime = getMouldChangeBalanceStrategy().previewEndingStaggerMouldChange(
+                        context, result.getLhMachineCode(), nextShift.getShiftEndDateTime(),
+                        LhScheduleTimeUtil.getMouldChangeTotalHours(context), sourceSku, candidateCountMap);
+                if (Objects.isNull(projectedMouldChangeTime)) {
+                    log.info("共用胎胚收尾错峰后延候选拒绝, scheduleDate: {}, materialCode: {}, "
+                                    + "machineCode: {}, 原收尾班次: {}, 后延班次: {}, 原因: 预演无合法换模落点或当天总次数已达上限",
+                            context.getScheduleDate(), sourceSku.getMaterialCode(), result.getLhMachineCode(),
+                            endingShiftIndex, nextShift.getShiftIndex());
+                    iterator.remove();
+                    continue;
+                }
+                projectedCountMap.put(result, candidateCountMap);
+                projectedMouldChangeTimeMap.put(result, projectedMouldChangeTime);
+            }
+            if (CollectionUtils.isEmpty(projectedMouldChangeTimeMap)) {
+                break;
+            }
+
+            LhScheduleResult selectedResult = selectBestSharedEmbryoEndingStaggerCandidate(
+                    context, projectedCountMap, projectedMouldChangeTimeMap, mouldSharedSkuCountMap);
+            if (Objects.isNull(selectedResult)) {
+                break;
+            }
+            pendingCandidates.remove(selectedResult);
+            int endingShiftIndex = candidateEndingShiftIndexMap.get(selectedResult);
+            LhShiftConfigVO nextShift = findShiftByIndex(shifts, endingShiftIndex + 1);
+            Date projectedMouldChangeTime = projectedMouldChangeTimeMap.get(selectedResult);
+            Map<String, int[]> selectedCountMap = projectedCountMap.get(selectedResult);
+            String beforeCountText = buildDailyMouldChangeCountText(simulatedCountMap, projectedMouldChangeTime);
+            String afterCountText = buildDailyMouldChangeCountText(selectedCountMap, projectedMouldChangeTime);
+            int[] selectedCounts = resolveDailyMouldChangeCounts(selectedCountMap, projectedMouldChangeTime);
+            int exceededShiftCount = calculateExceededShiftCount(context, selectedCounts);
+            int overflowQty = calculateShiftTargetOverflowQty(context, selectedCounts);
+            long balanceDeviation = calculateShiftBalanceDeviation(context, selectedCounts);
+            String projectedShiftName = LhScheduleTimeUtil.isMorningShift(context, projectedMouldChangeTime)
+                    ? "早班" : "中班";
+            if (applySharedEmbryoEndingStaggerPostponeResult(
+                    context, selectedResult, endingShiftIndex, nextShift, shifts, mouldSharedSkuCountMap)) {
+                // 只有班次补量真正成功后才提交该候选的模拟次数，确保逐台累计与实际后延数量一致。
+                simulatedCountMap = selectedCountMap;
+                postponedResultMap.get(endingShiftIndex).add(selectedResult);
+                hasPostponedResult = true;
+                log.info("共用胎胚收尾错峰换模预演提交, scheduleDate: {}, materialCode: {}, "
+                                + "machineCode: {}, 预估换模时间: {}, 预估换模班次: {}, "
+                                + "提交前次数: {}, 提交后次数: {}, 每日上限: {}, 早班目标: {}, 中班目标: {}, "
+                                + "评分[超目标班次数: {}, 超目标累计次数: {}, 早中班比例偏差: {}]",
+                        context.getScheduleDate(), selectedResult.getMaterialCode(),
+                        selectedResult.getLhMachineCode(),
+                        LhScheduleTimeUtil.formatDateTime(projectedMouldChangeTime), projectedShiftName,
+                        beforeCountText, afterCountText,
+                        LhScheduleTimeUtil.getDailyMouldChangeLimit(context),
+                        LhScheduleTimeUtil.getMorningMouldChangeLimit(context),
+                        LhScheduleTimeUtil.getAfternoonMouldChangeLimit(context),
+                        exceededShiftCount, overflowQty, balanceDeviation);
+            } else {
+                log.info("共用胎胚收尾错峰换模预演不提交, scheduleDate: {}, materialCode: {}, "
+                                + "machineCode: {}, 预估换模时间: {}, 原因: 后延执行失败且已恢复尝试前状态",
+                        context.getScheduleDate(), selectedResult.getMaterialCode(),
+                        selectedResult.getLhMachineCode(),
+                        LhScheduleTimeUtil.formatDateTime(projectedMouldChangeTime));
+            }
+        }
+
         for (int endingShiftIndex = 1; endingShiftIndex < LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; endingShiftIndex++) {
             List<LhScheduleResult> candidates = shiftCandidateMap.get(endingShiftIndex);
             if (CollectionUtils.isEmpty(candidates)) {
                 continue;
             }
-            LhShiftConfigVO nextShift = findShiftByIndex(shifts, endingShiftIndex + 1);
-            if (Objects.isNull(nextShift)) {
-                continue;
-            }
-            Collections.sort(candidates, buildSharedEmbryoEndingStaggerComparator(context, mouldSharedSkuCountMap));
-            int postponeCount = candidates.size() / 2;
-            if (postponeCount <= 0) {
-                continue;
-            }
-            List<LhScheduleResult> postponedResults = new ArrayList<LhScheduleResult>(postponeCount);
-            for (LhScheduleResult result : candidates) {
-                if (postponedResults.size() >= postponeCount) {
-                    break;
-                }
-                // 候选在收集后仍可能被前序后延占用产能，因此这里按优先级顺延尝试，保证应后延数量尽量落地。
-                if (applySharedEmbryoEndingStaggerPostponeResult(
-                        context, result, endingShiftIndex, nextShift, shifts, mouldSharedSkuCountMap)) {
-                    postponedResults.add(result);
-                    hasPostponedResult = true;
-                }
-            }
+            List<LhScheduleResult> postponedResults = postponedResultMap.getOrDefault(
+                    endingShiftIndex, new ArrayList<LhScheduleResult>(0));
+            int expectedPostponeCount = maxPostponeCountMap.getOrDefault(endingShiftIndex, 0);
             log.info("共用胎胚收尾错峰班次统计, scheduleDate: {}, 原收尾班次: {}, 满足条件机台数: {}, "
-                            + "当前班次保留: {}, 后延到下一班次: {}, 后延机台: {}",
+                            + "最大期望后延: {}, 当前班次保留: {}, 实际后延到下一班次: {}, 后延机台: {}",
                     context.getScheduleDate(), endingShiftIndex, candidates.size(),
-                    candidates.size() - postponedResults.size(), postponedResults.size(),
+                    expectedPostponeCount, candidates.size() - postponedResults.size(), postponedResults.size(),
                     joinMachineCodes(postponedResults));
         }
         if (hasPostponedResult) {
             refreshSharedEmbryoEndingStaggerAllowedOverQtyBySourceSku(context);
         }
+    }
+
+    /**
+     * 深拷贝每日早/中班换模次数。
+     * <p>数组必须独立拷贝，否则候选预演会直接改写真实计数或其他候选的模拟基线。</p>
+     *
+     * @param sourceCountMap 来源计数
+     * @return 可独立修改的计数副本
+     */
+    private Map<String, int[]> copyDailyMouldChangeCountMap(Map<String, int[]> sourceCountMap) {
+        int initialCapacity = CollectionUtils.isEmpty(sourceCountMap) ? 4 : sourceCountMap.size();
+        Map<String, int[]> copiedCountMap = new LinkedHashMap<String, int[]>(initialCapacity);
+        if (CollectionUtils.isEmpty(sourceCountMap)) {
+            return copiedCountMap;
+        }
+        for (Map.Entry<String, int[]> entry : sourceCountMap.entrySet()) {
+            int[] sourceCounts = entry.getValue();
+            int morningCount = Objects.nonNull(sourceCounts) && sourceCounts.length > 0 ? sourceCounts[0] : 0;
+            int afternoonCount = Objects.nonNull(sourceCounts) && sourceCounts.length > 1 ? sourceCounts[1] : 0;
+            copiedCountMap.put(entry.getKey(), new int[]{morningCount, afternoonCount});
+        }
+        return copiedCountMap;
+    }
+
+    /**
+     * 从当前轮所有可行候选中选择最有利于早中班均衡的机台。
+     * <p>排序优先级依次为：超过班次目标的班次数、超出目标的累计次数、
+     * 与早/中班目标比例的偏差，最后才使用模具共用性、胶囊次数和机台编码的原业务排序。</p>
+     *
+     * @param context 排程上下文
+     * @param projectedCountMap 每台候选成功后的模拟计数
+     * @param projectedMouldChangeTimeMap 每台候选的预估换模时间
+     * @param mouldSharedSkuCountMap 模具关联SKU数量
+     * @return 本轮最优候选；无可行候选时返回 {@code null}
+     */
+    private LhScheduleResult selectBestSharedEmbryoEndingStaggerCandidate(
+            LhScheduleContext context,
+            Map<LhScheduleResult, Map<String, int[]>> projectedCountMap,
+            Map<LhScheduleResult, Date> projectedMouldChangeTimeMap,
+            Map<String, Integer> mouldSharedSkuCountMap) {
+        Comparator<LhScheduleResult> businessComparator =
+                buildSharedEmbryoEndingStaggerComparator(context, mouldSharedSkuCountMap);
+        LhScheduleResult selectedResult = null;
+        for (LhScheduleResult candidate : projectedMouldChangeTimeMap.keySet()) {
+            if (Objects.isNull(selectedResult)
+                    || compareSharedEmbryoEndingStaggerCandidate(
+                    context, candidate, selectedResult, projectedCountMap,
+                    projectedMouldChangeTimeMap, businessComparator) < 0) {
+                selectedResult = candidate;
+            }
+        }
+        return selectedResult;
+    }
+
+    /**
+     * 比较两台共用胎胚收尾错峰候选。
+     *
+     * @param context 排程上下文，用于读取每日上限及早中班目标
+     * @param left 左侧候选
+     * @param right 右侧候选
+     * @param projectedCountMap 每台候选成功后的独立模拟计数
+     * @param projectedMouldChangeTimeMap 每台候选的预估换模时间
+     * @param businessComparator 原模具共用性、胶囊次数和机台编码排序器
+     * @return 小于0表示左候选更优，大于0表示右候选更优
+     */
+    private int compareSharedEmbryoEndingStaggerCandidate(
+            LhScheduleContext context,
+            LhScheduleResult left,
+            LhScheduleResult right,
+            Map<LhScheduleResult, Map<String, int[]>> projectedCountMap,
+            Map<LhScheduleResult, Date> projectedMouldChangeTimeMap,
+            Comparator<LhScheduleResult> businessComparator) {
+        Date leftTime = projectedMouldChangeTimeMap.get(left);
+        Date rightTime = projectedMouldChangeTimeMap.get(right);
+        int[] leftCounts = resolveDailyMouldChangeCounts(projectedCountMap.get(left), leftTime);
+        int[] rightCounts = resolveDailyMouldChangeCounts(projectedCountMap.get(right), rightTime);
+        int comparison = Integer.compare(
+                calculateExceededShiftCount(context, leftCounts),
+                calculateExceededShiftCount(context, rightCounts));
+        if (comparison != 0) {
+            return comparison;
+        }
+        comparison = Integer.compare(
+                calculateShiftTargetOverflowQty(context, leftCounts),
+                calculateShiftTargetOverflowQty(context, rightCounts));
+        if (comparison != 0) {
+            return comparison;
+        }
+        comparison = Long.compare(
+                calculateShiftBalanceDeviation(context, leftCounts),
+                calculateShiftBalanceDeviation(context, rightCounts));
+        if (comparison != 0) {
+            return comparison;
+        }
+        return businessComparator.compare(left, right);
+    }
+
+    /**
+     * 读取预估换模实际发生日的早/中班次数。
+     *
+     * @param countMap 每日早/中班模拟计数
+     * @param mouldChangeTime 预估换模实际发生时间
+     * @return 长度固定为2的数组，下标0为早班、下标1为中班
+     */
+    private int[] resolveDailyMouldChangeCounts(Map<String, int[]> countMap, Date mouldChangeTime) {
+        if (CollectionUtils.isEmpty(countMap) || Objects.isNull(mouldChangeTime)) {
+            return new int[]{0, 0};
+        }
+        int[] counts = countMap.get(LhScheduleTimeUtil.formatDate(mouldChangeTime));
+        if (Objects.isNull(counts) || counts.length < 2) {
+            return new int[]{0, 0};
+        }
+        return counts;
+    }
+
+    /**
+     * 计算超过早/中班目标的班次数。
+     *
+     * @param context 排程上下文，用于读取早中班目标
+     * @param counts 预估换模发生日的早/中班次数
+     * @return 超过目标的班次数，取值范围为0至2
+     */
+    private int calculateExceededShiftCount(LhScheduleContext context, int[] counts) {
+        return (counts[0] > LhScheduleTimeUtil.getMorningMouldChangeLimit(context) ? 1 : 0)
+                + (counts[1] > LhScheduleTimeUtil.getAfternoonMouldChangeLimit(context) ? 1 : 0);
+    }
+
+    /**
+     * 计算早/中班超出目标的累计次数。
+     *
+     * @param context 排程上下文，用于读取早中班目标
+     * @param counts 预估换模发生日的早/中班次数
+     * @return 两个班次超过目标部分的合计次数
+     */
+    private int calculateShiftTargetOverflowQty(LhScheduleContext context, int[] counts) {
+        return Math.max(0, counts[0] - LhScheduleTimeUtil.getMorningMouldChangeLimit(context))
+                + Math.max(0, counts[1] - LhScheduleTimeUtil.getAfternoonMouldChangeLimit(context));
+    }
+
+    /**
+     * 计算早/中班次数与配置目标比例的偏差。
+     *
+     * @param context 排程上下文，用于读取早中班目标
+     * @param counts 预估换模发生日的早/中班次数
+     * @return 早中班比例偏差绝对值，越小越接近配置目标比例
+     */
+    private long calculateShiftBalanceDeviation(LhScheduleContext context, int[] counts) {
+        return Math.abs((long) counts[0] * LhScheduleTimeUtil.getAfternoonMouldChangeLimit(context)
+                - (long) counts[1] * LhScheduleTimeUtil.getMorningMouldChangeLimit(context));
+    }
+
+    /**
+     * 构建预估换模实际发生日的次数日志文本。
+     *
+     * @param countMap 每日早/中班模拟计数
+     * @param mouldChangeTime 预估换模实际发生时间
+     * @return 包含日期、总次数、早班次数和中班次数的日志文本
+     */
+    private String buildDailyMouldChangeCountText(Map<String, int[]> countMap, Date mouldChangeTime) {
+        int[] counts = resolveDailyMouldChangeCounts(countMap, mouldChangeTime);
+        StringBuilder text = new StringBuilder(64);
+        return text.append("日期=").append(LhScheduleTimeUtil.formatDate(mouldChangeTime))
+                .append(",总次数=").append(counts[0] + counts[1])
+                .append(",早班=").append(counts[0])
+                .append(",中班=").append(counts[1])
+                .toString();
     }
 
     /**
@@ -5499,43 +5768,129 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (Objects.isNull(sourceSku) || Objects.isNull(nextShift)) {
             return false;
         }
+        /*
+         * 已降模释放的候选需要先恢复原收尾班次，换胶囊规则还会同步修改上下文运行态。
+         * 因此必须在任何修改前保存完整快照；无产能、换胶囊后无实际产量或运行时异常时，
+         * 统一恢复到本次尝试前，而不是重新推导一个“近似原状态”。
+         */
+        LhScheduleResult resultSnapshot = new LhScheduleResult();
+        BeanUtil.copyProperties(result, resultSnapshot);
+        MachineScheduleDTO machine = CollectionUtils.isEmpty(context.getMachineScheduleMap())
+                ? null : context.getMachineScheduleMap().get(result.getLhMachineCode());
+        Date machineEstimatedEndTimeSnapshot = Objects.isNull(machine) ? null : machine.getEstimatedEndTime();
+        boolean hadAllowedOverQty = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().containsKey(result);
+        Integer allowedOverQtySnapshot = context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result);
+        Map<String, Integer> capsuleRuntimeUsageSnapshot =
+                new LinkedHashMap<String, Integer>(context.getCapsuleRuntimeUsageMap());
+        Set<String> capsuleReplacementShiftKeySnapshot =
+                new LinkedHashSet<String>(context.getCapsuleReplacementShiftKeySet());
+        Set<String> capsuleReplacementPositionShiftKeySnapshot =
+                new LinkedHashSet<String>(context.getCapsuleReplacementPositionShiftKeySet());
+        Map<String, Integer> capsuleReplacementCapacitySnapshot =
+                new LinkedHashMap<String, Integer>(context.getCapsuleReplacementShiftCapacityLimitMap());
         int beforeQty = ShiftFieldUtil.resolveScheduledQty(result);
-        Integer originalEndingQty = ShiftFieldUtil.getShiftPlanQty(result, endingShiftIndex);
-        Date originalEndingStartTime = ShiftFieldUtil.getShiftStartTime(result, endingShiftIndex);
-        Date originalEndingEndTime = ShiftFieldUtil.getShiftEndTime(result, endingShiftIndex);
-        restoreSharedEmbryoEndingStaggerReleaseShift(context, result, endingShiftIndex, shifts);
-        int nextShiftCapacity = calculateResultShiftCapacity(context, result, nextShift);
-        if (nextShiftCapacity <= 0) {
-            // 降模释放候选可能需要先恢复原班次才能按当前机台状态计算下一班产能；失败时必须回滚，不改变原释放语义。
-            setShiftPlanQty(result, endingShiftIndex,
-                    Objects.isNull(originalEndingQty) ? 0 : originalEndingQty,
-                    originalEndingStartTime, originalEndingEndTime);
+        try {
+            restoreSharedEmbryoEndingStaggerReleaseShift(context, result, endingShiftIndex, shifts);
+            int nextShiftCapacity = calculateResultShiftCapacity(context, result, nextShift);
+            if (nextShiftCapacity <= 0) {
+                rollbackSharedEmbryoEndingStaggerAttempt(
+                        context, result, resultSnapshot, machine, machineEstimatedEndTimeSnapshot,
+                        hadAllowedOverQty, allowedOverQtySnapshot, capsuleRuntimeUsageSnapshot,
+                        capsuleReplacementShiftKeySnapshot, capsuleReplacementPositionShiftKeySnapshot,
+                        capsuleReplacementCapacitySnapshot);
+                return false;
+            }
+            // 错峰后延会在下一班真实新增计划量，必须先执行换胶囊判断，不能在后置结果阶段直接减量。
+            int actualNextShiftQty = capsuleReplacementRuleService.resolveActualPlanQty(
+                    context, result, nextShift, nextShiftCapacity,
+                    Objects.isNull(result.getMouldQty()) ? 1 : result.getMouldQty(),
+                    "共用胎胚收尾错峰后延");
+            if (actualNextShiftQty <= 0) {
+                rollbackSharedEmbryoEndingStaggerAttempt(
+                        context, result, resultSnapshot, machine, machineEstimatedEndTimeSnapshot,
+                        hadAllowedOverQty, allowedOverQtySnapshot, capsuleRuntimeUsageSnapshot,
+                        capsuleReplacementShiftKeySnapshot, capsuleReplacementPositionShiftKeySnapshot,
+                        capsuleReplacementCapacitySnapshot);
+                return false;
+            }
+            setShiftPlanQty(result, nextShift.getShiftIndex(), actualNextShiftQty,
+                    nextShift.getShiftStartDateTime(), nextShift.getShiftEndDateTime());
+            result.setIsEnd("1");
             refreshResultSummary(context, result, shifts);
-            return false;
+            syncMachineEstimatedEndTime(context, result);
+            int afterQty = ShiftFieldUtil.resolveScheduledQty(result);
+            int allowedOverQty = Math.max(0, afterQty - beforeQty);
+            if (allowedOverQty > 0) {
+                context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().merge(result, allowedOverQty, Integer::sum);
+            }
+            int mouldSharedSkuCount = resolveMachineMouldSharedSkuCount(context, result, mouldSharedSkuCountMap);
+            int capsuleUsageCount = resolveCapsuleUsageCount(context, result);
+            String detail = buildSharedEmbryoEndingStaggerProcessLogDetail(
+                    context, sourceSku, result, endingShiftIndex, nextShift, allowedOverQty,
+                    mouldSharedSkuCount, capsuleUsageCount);
+            PriorityTraceLogHelper.appendProcessLog(context, "共用胎胚收尾错峰后延", detail);
+            log.info("共用胎胚收尾错峰后延完成, {}", detail);
+            return true;
+        } catch (RuntimeException ex) {
+            rollbackSharedEmbryoEndingStaggerAttempt(
+                    context, result, resultSnapshot, machine, machineEstimatedEndTimeSnapshot,
+                    hadAllowedOverQty, allowedOverQtySnapshot, capsuleRuntimeUsageSnapshot,
+                    capsuleReplacementShiftKeySnapshot, capsuleReplacementPositionShiftKeySnapshot,
+                    capsuleReplacementCapacitySnapshot);
+            log.warn("共用胎胚收尾错峰后延异常，已恢复尝试前状态, scheduleDate: {}, materialCode: {}, "
+                            + "machineCode: {}, 原收尾班次: {}, 后延班次: {}",
+                    context.getScheduleDate(), sourceSku.getMaterialCode(), result.getLhMachineCode(),
+                    endingShiftIndex, nextShift.getShiftIndex(), ex);
+            throw ex;
         }
-        // 错峰后延会在下一班真实新增计划量，必须先执行换胶囊判断，不能在后置结果阶段直接减量。
-        int actualNextShiftQty = capsuleReplacementRuleService.resolveActualPlanQty(
-                context, result, nextShift, nextShiftCapacity,
-                Objects.isNull(result.getMouldQty()) ? 1 : result.getMouldQty(),
-                "共用胎胚收尾错峰后延");
-        setShiftPlanQty(result, nextShift.getShiftIndex(), actualNextShiftQty,
-                nextShift.getShiftStartDateTime(), nextShift.getShiftEndDateTime());
-        result.setIsEnd("1");
-        refreshResultSummary(context, result, shifts);
-        syncMachineEstimatedEndTime(context, result);
-        int afterQty = ShiftFieldUtil.resolveScheduledQty(result);
-        int allowedOverQty = Math.max(0, afterQty - beforeQty);
-        if (allowedOverQty > 0) {
-            context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().merge(result, allowedOverQty, Integer::sum);
+    }
+
+    /**
+     * 恢复单台错峰后延尝试前的排程结果和运行态。
+     * <p>本方法只撤销当前候选尝试产生的修改：正常降模已经形成的零计划结果仍恢复为零，
+     * 不会被错误恢复成降模前的排产量；真实换模次数和交替计划在预演阶段从未修改。</p>
+     *
+     * @param context 排程上下文
+     * @param result 当前排程结果
+     * @param resultSnapshot 尝试前结果快照
+     * @param machine 当前运行态机台
+     * @param machineEstimatedEndTimeSnapshot 尝试前机台预计结束时间
+     * @param hadAllowedOverQty 尝试前是否已有允许超量标记
+     * @param allowedOverQtySnapshot 尝试前允许超量
+     * @param capsuleRuntimeUsageSnapshot 尝试前胶囊使用次数
+     * @param capsuleReplacementShiftKeySnapshot 尝试前换胶囊班次集合
+     * @param capsuleReplacementPositionShiftKeySnapshot 尝试前换胶囊位置集合
+     * @param capsuleReplacementCapacitySnapshot 尝试前换胶囊班次产能上限
+     */
+    private void rollbackSharedEmbryoEndingStaggerAttempt(
+            LhScheduleContext context,
+            LhScheduleResult result,
+            LhScheduleResult resultSnapshot,
+            MachineScheduleDTO machine,
+            Date machineEstimatedEndTimeSnapshot,
+            boolean hadAllowedOverQty,
+            Integer allowedOverQtySnapshot,
+            Map<String, Integer> capsuleRuntimeUsageSnapshot,
+            Set<String> capsuleReplacementShiftKeySnapshot,
+            Set<String> capsuleReplacementPositionShiftKeySnapshot,
+            Map<String, Integer> capsuleReplacementCapacitySnapshot) {
+        BeanUtil.copyProperties(resultSnapshot, result);
+        if (Objects.nonNull(machine)) {
+            machine.setEstimatedEndTime(machineEstimatedEndTimeSnapshot);
         }
-        int mouldSharedSkuCount = resolveMachineMouldSharedSkuCount(context, result, mouldSharedSkuCountMap);
-        int capsuleUsageCount = resolveCapsuleUsageCount(context, result);
-        String detail = buildSharedEmbryoEndingStaggerProcessLogDetail(
-                context, sourceSku, result, endingShiftIndex, nextShift, allowedOverQty,
-                mouldSharedSkuCount, capsuleUsageCount);
-        PriorityTraceLogHelper.appendProcessLog(context, "共用胎胚收尾错峰后延", detail);
-        log.info("共用胎胚收尾错峰后延完成, {}", detail);
-        return true;
+        if (hadAllowedOverQty) {
+            context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().put(result, allowedOverQtySnapshot);
+        } else {
+            context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().remove(result);
+        }
+        context.getCapsuleRuntimeUsageMap().clear();
+        context.getCapsuleRuntimeUsageMap().putAll(capsuleRuntimeUsageSnapshot);
+        context.getCapsuleReplacementShiftKeySet().clear();
+        context.getCapsuleReplacementShiftKeySet().addAll(capsuleReplacementShiftKeySnapshot);
+        context.getCapsuleReplacementPositionShiftKeySet().clear();
+        context.getCapsuleReplacementPositionShiftKeySet().addAll(capsuleReplacementPositionShiftKeySnapshot);
+        context.getCapsuleReplacementShiftCapacityLimitMap().clear();
+        context.getCapsuleReplacementShiftCapacityLimitMap().putAll(capsuleReplacementCapacitySnapshot);
     }
 
     /**

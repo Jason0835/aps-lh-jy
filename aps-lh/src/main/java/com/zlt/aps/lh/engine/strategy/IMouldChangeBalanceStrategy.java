@@ -6,6 +6,7 @@ package com.zlt.aps.lh.engine.strategy;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import java.util.Date;
+import java.util.Map;
 
 /**
  * 模具切换均衡策略接口
@@ -103,6 +104,29 @@ public interface IMouldChangeBalanceStrategy {
      */
     default void rollbackMouldChange(LhScheduleContext context, Date allocatedTime) {
         // 默认无需处理
+    }
+
+    /**
+     * 预演共用胎胚收尾错峰后的换模/换活字块落点。
+     * <p>该入口只允许修改调用方传入的模拟计数，不得修改上下文中的真实换模计数、
+     * 未排原因或交替计划。成功时将本次切换计入模拟计数，供后续候选逐台累计；
+     * 失败时返回 {@code null}，且传入的模拟计数必须保持不变。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param switchReadyTime 错峰后机台可开始切换的时间
+     * @param switchDurationHours 切换时长（小时）
+     * @param sku 共用胎胚收尾SKU
+     * @param simulatedCountMap 独立的每日早/中班模拟计数
+     * @return 预估换模开始时间；每日总次数已满或无合法班次时返回 {@code null}
+     */
+    default Date previewEndingStaggerMouldChange(LhScheduleContext context,
+                                                 String machineCode,
+                                                 Date switchReadyTime,
+                                                 int switchDurationHours,
+                                                 SkuScheduleDTO sku,
+                                                 Map<String, int[]> simulatedCountMap) {
+        return null;
     }
 
     /**

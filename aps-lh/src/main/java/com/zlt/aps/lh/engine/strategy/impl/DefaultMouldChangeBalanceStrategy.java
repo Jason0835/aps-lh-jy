@@ -14,7 +14,10 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 默认模具切换均衡策略实现
@@ -236,6 +239,178 @@ public class DefaultMouldChangeBalanceStrategy implements IMouldChangeBalanceStr
         if (LhScheduleTimeUtil.isAfternoonShift(context, allocatedTime) && counts[IDX_AFTERNOON] > 0) {
             counts[IDX_AFTERNOON]--;
         }
+    }
+
+    @Override
+    public Date previewEndingStaggerMouldChange(LhScheduleContext context,
+                                                String machineCode,
+                                                Date switchReadyTime,
+                                                int switchDurationHours,
+                                                SkuScheduleDTO sku,
+                                                Map<String, int[]> simulatedCountMap) {
+        if (context == null || switchReadyTime == null || simulatedCountMap == null) {
+            return null;
+        }
+        Date earliestTime = resolveEndingStaggerPreviewStartTime(
+                context, machineCode, switchReadyTime, switchDurationHours);
+        if (earliestTime == null) {
+            return null;
+        }
+
+        /*
+         * 错峰预演可以在机台已可换模的早班继续换模，也可主动等待到当日中班。
+         * 但不允许把本次切换倒排到机台释放时间之前；因此原始落点已在中班时，
+         * 只评估当前中班落点。
+         */
+        List<Date> candidateTimeList = new ArrayList<Date>(2);
+        candidateTimeList.add(earliestTime);
+        if (LhScheduleTimeUtil.isMorningShift(context, earliestTime)) {
+            Date afternoonProbeTime = LhScheduleTimeUtil.getAfternoonShiftStart(context, earliestTime);
+            Date afternoonTime = resolveEndingStaggerPreviewStartTime(
+                    context, machineCode, afternoonProbeTime, switchDurationHours);
+            if (afternoonTime != null && !afternoonTime.equals(earliestTime)) {
+                candidateTimeList.add(afternoonTime);
+            }
+        }
+
+        Date selectedTime = null;
+        int selectedExceededShiftCount = Integer.MAX_VALUE;
+        int selectedOverflowQty = Integer.MAX_VALUE;
+        long selectedBalanceDeviation = Long.MAX_VALUE;
+        for (Date candidateTime : candidateTimeList) {
+            String dateKey = formatDateKey(candidateTime);
+            int[] currentCounts = simulatedCountMap.getOrDefault(dateKey, new int[]{0, 0});
+            int morningCount = currentCounts.length > IDX_MORNING ? currentCounts[IDX_MORNING] : 0;
+            int afternoonCount = currentCounts.length > IDX_AFTERNOON ? currentCounts[IDX_AFTERNOON] : 0;
+            if (morningCount + afternoonCount >= getDailyLimit(context)) {
+                continue;
+            }
+            int projectedMorningCount = morningCount
+                    + (LhScheduleTimeUtil.isMorningShift(context, candidateTime) ? 1 : 0);
+            int projectedAfternoonCount = afternoonCount
+                    + (LhScheduleTimeUtil.isAfternoonShift(context, candidateTime) ? 1 : 0);
+            if (projectedMorningCount == morningCount && projectedAfternoonCount == afternoonCount) {
+                continue;
+            }
+            int exceededShiftCount = (projectedMorningCount > getMorningLimit(context) ? 1 : 0)
+                    + (projectedAfternoonCount > getAfternoonLimit(context) ? 1 : 0);
+            int overflowQty = Math.max(0, projectedMorningCount - getMorningLimit(context))
+                    + Math.max(0, projectedAfternoonCount - getAfternoonLimit(context));
+            long balanceDeviation = calculateShiftBalanceDeviation(
+                    context, projectedMorningCount, projectedAfternoonCount);
+            if (isBetterEndingStaggerPreviewCandidate(
+                    exceededShiftCount, overflowQty, balanceDeviation, candidateTime,
+                    selectedExceededShiftCount, selectedOverflowQty, selectedBalanceDeviation, selectedTime)) {
+                selectedTime = candidateTime;
+                selectedExceededShiftCount = exceededShiftCount;
+                selectedOverflowQty = overflowQty;
+                selectedBalanceDeviation = balanceDeviation;
+            }
+        }
+        if (selectedTime == null) {
+            return null;
+        }
+
+        String selectedDateKey = formatDateKey(selectedTime);
+        int[] selectedCounts = simulatedCountMap.computeIfAbsent(selectedDateKey, key -> new int[]{0, 0});
+        if (LhScheduleTimeUtil.isMorningShift(context, selectedTime)) {
+            selectedCounts[IDX_MORNING]++;
+        } else if (LhScheduleTimeUtil.isAfternoonShift(context, selectedTime)) {
+            selectedCounts[IDX_AFTERNOON]++;
+        }
+        log.debug("共用胎胚收尾错峰换模预演完成, materialCode: {}, machineCode: {}, 换模日期: {}, "
+                        + "早班模拟次数: {}, 中班模拟次数: {}, 每日上限: {}, 早班目标: {}, 中班目标: {}",
+                sku == null ? null : sku.getMaterialCode(), machineCode, selectedDateKey,
+                selectedCounts[IDX_MORNING], selectedCounts[IDX_AFTERNOON], getDailyLimit(context),
+                getMorningLimit(context), getAfternoonLimit(context));
+        return selectedTime;
+    }
+
+    /**
+     * 解析错峰后最早可用的换模开始时间。
+     * <p>处理顺序与正式换模分配一致：先避让不可并行的设备停机，再避让禁止换模时段，
+     * 最终只允许落在早班或中班。本方法只读上下文，不登记任何真实次数。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param startTime 起始探测时间
+     * @param switchDurationHours 切换时长（小时）
+     * @return 最早可用换模开始时间；超出探测上限时返回 {@code null}
+     */
+    private Date resolveEndingStaggerPreviewStartTime(LhScheduleContext context,
+                                                      String machineCode,
+                                                      Date startTime,
+                                                      int switchDurationHours) {
+        Date adjustedTime = startTime;
+        for (int attempt = 0; attempt < MAX_ALLOCATION_ATTEMPTS; attempt++) {
+            Date downtimeAdjustedTime = resolveDowntimeAdjustedStartTime(
+                    context, machineCode, adjustedTime, switchDurationHours);
+            if (downtimeAdjustedTime.after(adjustedTime)) {
+                adjustedTime = downtimeAdjustedTime;
+                continue;
+            }
+            if (LhScheduleTimeUtil.isNoMouldChangeTime(context, adjustedTime)) {
+                adjustedTime = LhScheduleTimeUtil.resolveNextMorningAfterNoMouldChangeWindow(context, adjustedTime);
+                continue;
+            }
+            if (LhScheduleTimeUtil.isMorningShift(context, adjustedTime)
+                    || LhScheduleTimeUtil.isAfternoonShift(context, adjustedTime)) {
+                return adjustedTime;
+            }
+            adjustedTime = getNextCalendarDayMorningStart(context, adjustedTime);
+        }
+        return null;
+    }
+
+    /**
+     * 判断新的错峰预演落点是否更优。
+     *
+     * @param exceededShiftCount 新落点超过目标的班次数
+     * @param overflowQty 新落点超过目标的累计次数
+     * @param balanceDeviation 新落点与早中班目标比例的偏差
+     * @param candidateTime 新落点时间
+     * @param selectedExceededShiftCount 已选落点超过目标的班次数
+     * @param selectedOverflowQty 已选落点超过目标的累计次数
+     * @param selectedBalanceDeviation 已选落点的比例偏差
+     * @param selectedTime 已选落点时间
+     * @return true-新落点更优；false-保留已选落点
+     */
+    private boolean isBetterEndingStaggerPreviewCandidate(int exceededShiftCount,
+                                                          int overflowQty,
+                                                          long balanceDeviation,
+                                                          Date candidateTime,
+                                                          int selectedExceededShiftCount,
+                                                          int selectedOverflowQty,
+                                                          long selectedBalanceDeviation,
+                                                          Date selectedTime) {
+        if (selectedTime == null) {
+            return true;
+        }
+        if (exceededShiftCount != selectedExceededShiftCount) {
+            return exceededShiftCount < selectedExceededShiftCount;
+        }
+        if (overflowQty != selectedOverflowQty) {
+            return overflowQty < selectedOverflowQty;
+        }
+        if (balanceDeviation != selectedBalanceDeviation) {
+            return balanceDeviation < selectedBalanceDeviation;
+        }
+        return candidateTime.before(selectedTime);
+    }
+
+    /**
+     * 计算早中班模拟次数与目标比例的偏差。
+     *
+     * @param context 排程上下文
+     * @param morningCount 早班次数
+     * @param afternoonCount 中班次数
+     * @return 偏差绝对值，越小越接近目标比例
+     */
+    private long calculateShiftBalanceDeviation(LhScheduleContext context,
+                                                int morningCount,
+                                                int afternoonCount) {
+        return Math.abs((long) morningCount * getAfternoonLimit(context)
+                - (long) afternoonCount * getMorningLimit(context));
     }
 
     @Override
