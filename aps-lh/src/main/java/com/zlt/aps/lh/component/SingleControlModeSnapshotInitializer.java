@@ -2,12 +2,9 @@ package com.zlt.aps.lh.component;
 
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
-import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
-import com.zlt.aps.lh.exception.ScheduleErrorCode;
-import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -142,7 +139,7 @@ public class SingleControlModeSnapshotInitializer {
      *
      * @param context 排程上下文
      * @param sku 待冻结SKU
-     * @return 实际硫化余量或特殊场景下的严格业务目标量
+     * @return 实际硫化余量、特殊场景下的严格业务目标量；账本缺失等异常场景返回 0
      */
     private int resolveInitialTargetQty(LhScheduleContext context, SkuScheduleDTO sku) {
         // 优先使用实际硫化余量，避免满排模式下理论窗口产能覆盖实际待排量
@@ -161,12 +158,10 @@ public class SingleControlModeSnapshotInitializer {
         if (Objects.nonNull(productionRemainingQty)) {
             return Math.max(0, productionRemainingQty);
         }
-        // S4.3 正式主链必须在快照初始化前建立实际消费账本。账本缺失时无法可靠判断模式，
-        // 必须阻断本批排程，禁止退回理论目标量或0条继续排产，否则仍可能生成错误的单模/双模结果。
-        throw new ScheduleException(ScheduleStepEnum.S4_3_ADJUST_AND_GATHER,
-                ScheduleErrorCode.SURPLUS_CALCULATION_ERROR,
-                context.getFactoryCode(), context.getBatchNo(),
-                "单控模式冻结失败，SKU实际消费账本缺失，materialCode=" + sku.getMaterialCode()
-                        + ", productStatus=" + sku.getProductStatus());
+        // 账本缺失属于异常场景：此时实际待排量按 0 处理，冻结为单边模式，不再阻断整批排程。
+        // 本方法只关心实际待排量，不采用代表窗口理论产能的 targetScheduleQty，故此处不回退到理论目标量。
+        log.warn("单控模式冻结账本缺失，按实际待排量0冻结单边模式, factoryCode: {}, batchNo: {}, materialCode: {}, productStatus: {}",
+                context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus());
+        return 0;
     }
 }
