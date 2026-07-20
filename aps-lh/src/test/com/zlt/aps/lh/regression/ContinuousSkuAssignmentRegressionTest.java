@@ -6,6 +6,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.SkuDecrementChecker;
@@ -21,6 +22,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -433,7 +435,7 @@ class ContinuousSkuAssignmentRegressionTest {
         assertEquals(0, context.getNewSpecSkuList().size());
         assertEquals(1, context.getUnscheduledResultList().size());
         assertEquals(0, context.getUnscheduledResultList().get(0).getUnscheduledQty().intValue());
-        assertEquals("当前排程窗口无日计划，后续远期有计划，禁止提前消耗未来计划",
+        assertEquals(PendingSkuUnscheduledRule.DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
         assertTrue(context.getStructureSkuMap().isEmpty());
         assertTrue(context.getActiveEmbryoSkuMap().isEmpty());
@@ -441,8 +443,8 @@ class ContinuousSkuAssignmentRegressionTest {
     }
 
     @Test
-    void classifyContinuousAndNewSkus_shouldKeepNewSkuWhenCurrentMonthShortageExists() {
-        assertWindowNoPlanSkuKeptAsNew(10, 0, 62, 0);
+    void classifyContinuousAndNewSkus_shouldBlockNewSkuWhenCurrentMonthShortageExists() {
+        assertWindowNoPlanSkuBlocked(10, 0, 62, 0);
     }
 
     @Test
@@ -451,8 +453,8 @@ class ContinuousSkuAssignmentRegressionTest {
     }
 
     @Test
-    void classifyContinuousAndNewSkus_shouldKeepOverallEndingSkuWhenNoFuturePlanExists() {
-        assertWindowNoPlanSkuKeptAsNew(0, 0, 0, 0);
+    void classifyContinuousAndNewSkus_shouldBlockOverallEndingSkuWhenNoFuturePlanExists() {
+        assertWindowNoPlanSkuBlocked(0, 0, 0, 0);
     }
 
     /**
@@ -485,7 +487,7 @@ class ContinuousSkuAssignmentRegressionTest {
         assertTrue(context.getAllSkuScheduleDtoMap().isEmpty());
         assertEquals(0, trialSku.resolveTargetScheduleQty());
         assertEquals(1, context.getUnscheduledResultList().size());
-        assertEquals(PendingSkuUnscheduledRule.TRIAL_DAILY_PLAN_UNSCHEDULED_REASON,
+        assertEquals(PendingSkuUnscheduledRule.DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
@@ -538,6 +540,34 @@ class ContinuousSkuAssignmentRegressionTest {
         assertSame(massTrialSku, context.getNewSpecSkuList().get(2));
     }
 
+    /**
+     * 正规SKU完整范围无计划但存在前日排程T+1交替承接关系时，必须保留在原新增顺序中。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepSkuWhenPreviousT1ChangeoverMatches() {
+        LhScheduleContext context = buildClassificationContext();
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 1);
+        context.setScheduleDate(dateTime(2026, 7, 1, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 7, 2, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 7, 3, 0, 0));
+        SkuScheduleDTO sku = buildSku("3302003006", "STRUCT-CHANGEOVER", "S");
+        sku.setWindowPlanQty(0);
+        sku.setSurplusQty(60);
+        sku.setTargetScheduleQty(60);
+        LhMouldChangePlan plan = new LhMouldChangePlan();
+        plan.setAfterMaterialCode(sku.getMaterialCode());
+        plan.setPlanDate(Date.from(scheduleDate.atStartOfDay(ZoneId.systemDefault()).toInstant()));
+        context.setHistoricalReverseMouldChangePlanList(Collections.singletonList(plan));
+        context.getStructureSkuMap().put(sku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(sku)));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertSame(sku, context.getNewSpecSkuList().get(0));
+        assertTrue(context.getUnscheduledResultList().isEmpty());
+    }
+
     private void assertWindowNoPlanSkuKeptAsNew(int historyShortageQty,
                                                  int lastMonthOverdueQty,
                                                  int futurePlanQty,
@@ -557,6 +587,37 @@ class ContinuousSkuAssignmentRegressionTest {
 
         assertEquals(1, context.getNewSpecSkuList().size());
         assertEquals(0, context.getUnscheduledResultList().size());
+    }
+
+    /**
+     * 校验完整范围无日计划且无T+1交替承接时，历史欠产和远期计划不再作为放行条件。
+     *
+     * @param historyShortageQty 本月历史欠产量
+     * @param lastMonthOverdueQty 上月有效超欠产量
+     * @param futurePlanQty 提前范围外未来计划量
+     * @param windowPlanQty 窗口计划量
+     */
+    private void assertWindowNoPlanSkuBlocked(int historyShortageQty,
+                                              int lastMonthOverdueQty,
+                                              int futurePlanQty,
+                                              int windowPlanQty) {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO sku = buildSku("MAT-BLOCKED", "STRUCT-BLOCKED");
+        sku.setWindowPlanQty(windowPlanQty);
+        sku.setFutureMonthPlanQtyAfterWindow(futurePlanQty);
+        sku.setMonthlyHistoryShortageQty(historyShortageQty);
+        sku.setEffectiveLastMonthOverdueQty(lastMonthOverdueQty);
+        sku.setSurplusQty(100);
+        sku.setTargetScheduleQty(100);
+        context.getStructureSkuMap().put(sku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(sku)));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals(PendingSkuUnscheduledRule.DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
     }
 
     private LhScheduleContext buildClassificationContext() {
@@ -597,6 +658,9 @@ class ContinuousSkuAssignmentRegressionTest {
         sku.setMaterialDesc("测试物料-" + materialCode);
         sku.setStructureName(structureName);
         sku.setProductStatus(productStatus);
+        // 默认构造窗口内有计划的正常待排SKU；无计划规则用例必须显式覆盖为0。
+        sku.setWindowPlanQty(1);
+        sku.setTargetScheduleQty(100);
         return sku;
     }
 

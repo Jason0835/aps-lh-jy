@@ -8,15 +8,16 @@
 
 ### Requirement: 试制量试新增 SKU 必须先执行日计划准入
 
-系统 SHALL 在完成 MES 和滚动续作识别后、试制或量试 SKU 加入新增排产列表前，通过公共未排规则 `PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission` 判断是否存在可排日计划量。
+系统 SHALL 在完成 MES 和滚动续作识别后、试制或量试 SKU 加入新增排产列表前，通过公共未排规则 `PendingSkuUnscheduledRule.evaluateDailyPlanAdmission` 判断是否存在可排日计划量或前日排程 T+1 交替承接关系。本规则现已由全量非续作 SKU 统一准入规则覆盖。
 
 判断范围 SHALL 为闭区间 `scheduleDate` 至 `windowEndDate + earlyProductionDaysThreshold`。试制、量试类型 SHALL 按 `constructionStage=01/02` 识别，月计划 SHALL 按物料编码和产品状态精确读取。
 
 #### Scenario: 判断范围内日计划量全部为零
 
 - **WHEN** 非续作试制或量试 SKU 从排程窗口首日至窗口结束日后 N 天的日计划量全部小于等于 0
+- **AND** 前日排程 T+1 交替计划不存在匹配的后物料
 - **THEN** 系统 SHALL 不允许该 SKU 进入新增排产列表
-- **AND** 系统 SHALL 写入未排原因“排程及可提前生产范围内无日计划量”
+- **AND** 系统 SHALL 写入未排原因“排程窗口及提前生产范围内无日计划量，且无前日排程T+1交替计划”
 - **AND** 未排数量 SHALL 为 0
 
 #### Scenario: 窗口内无计划但提前范围内存在计划

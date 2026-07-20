@@ -3,6 +3,7 @@ package com.zlt.aps.lh.engine.strategy.support;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
@@ -32,18 +33,18 @@ class PendingSkuUnscheduledRuleTest {
      * 排程窗口及可提前生产范围内日计划量全部为0时，试制SKU必须进入未排。
      */
     @Test
-    void evaluateTrialDailyPlanAdmission_shouldReturnUnscheduledWhenAllPlanQtyIsZero() {
+    void evaluateDailyPlanAdmission_shouldReturnUnscheduledWhenAllPlanQtyIsZero() {
         LocalDate scheduleDate = LocalDate.of(2026, 7, 1);
         LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
         SkuScheduleDTO sku = buildSku("3302001001", "X", ConstructionStageEnum.TRIAL.getCode());
         sku.setMonthPlanVersion("MP-V1");
         sku.setProductionVersion("PP-V1");
 
-        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(context, sku);
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(context, sku);
 
         assertNotNull(result);
         assertEquals(0, result.getUnscheduledQty().intValue());
-        assertEquals(PendingSkuUnscheduledRule.TRIAL_DAILY_PLAN_UNSCHEDULED_REASON,
+        assertEquals(PendingSkuUnscheduledRule.DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
                 result.getUnscheduledReason());
         assertEquals("X", result.getProductStatus());
         assertEquals("MP-V1", result.getMonthPlanVersion());
@@ -54,14 +55,14 @@ class PendingSkuUnscheduledRuleTest {
      * 窗口内为0、窗口结束后的提前生产范围内存在计划时，只放行现有流程，不生成未排。
      */
     @Test
-    void evaluateTrialDailyPlanAdmission_shouldAllowWhenFuturePlanExistsWithinThreshold() {
+    void evaluateDailyPlanAdmission_shouldAllowWhenFuturePlanExistsWithinThreshold() {
         LocalDate scheduleDate = LocalDate.of(2026, 7, 1);
         LocalDate windowEndDate = scheduleDate.plusDays(2);
         LhScheduleContext context = buildContext(scheduleDate, windowEndDate, 2);
         SkuScheduleDTO sku = buildSku("3302001002", "T", ConstructionStageEnum.MASS_TRIAL.getCode());
         sku.setDailyPlanQuotaMap(quotaMap(windowEndDate.plusDays(2), 40));
 
-        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(context, sku);
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(context, sku);
 
         assertNull(result);
     }
@@ -70,15 +71,15 @@ class PendingSkuUnscheduledRuleTest {
      * 同一未来计划日在阈值1时应阻塞、阈值2时应放行，验证规则使用实际参数值。
      */
     @Test
-    void evaluateTrialDailyPlanAdmission_shouldUseConfiguredThreshold() {
+    void evaluateDailyPlanAdmission_shouldUseConfiguredThreshold() {
         LocalDate scheduleDate = LocalDate.of(2026, 7, 1);
         LocalDate windowEndDate = scheduleDate.plusDays(2);
         SkuScheduleDTO sku = buildSku("3302001003", "X", ConstructionStageEnum.TRIAL.getCode());
         sku.setDailyPlanQuotaMap(quotaMap(windowEndDate.plusDays(2), 40));
 
-        LhUnscheduledResult thresholdOneResult = PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(
+        LhUnscheduledResult thresholdOneResult = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(
                 buildContext(scheduleDate, windowEndDate, 1), sku);
-        LhUnscheduledResult thresholdTwoResult = PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(
+        LhUnscheduledResult thresholdTwoResult = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(
                 buildContext(scheduleDate, windowEndDate, 2), sku);
 
         assertNotNull(thresholdOneResult);
@@ -89,7 +90,7 @@ class PendingSkuUnscheduledRuleTest {
      * 跨月判断必须按实际月份和产品状态取数，同物料正规计划不得放行试制SKU。
      */
     @Test
-    void evaluateTrialDailyPlanAdmission_shouldReadCrossMonthPlanByProductStatus() {
+    void evaluateDailyPlanAdmission_shouldReadCrossMonthPlanByProductStatus() {
         LocalDate scheduleDate = LocalDate.of(2026, 7, 30);
         LocalDate windowEndDate = LocalDate.of(2026, 8, 1);
         LhScheduleContext context = buildContext(scheduleDate, windowEndDate, 2);
@@ -101,16 +102,35 @@ class PendingSkuUnscheduledRuleTest {
         SkuScheduleDTO trialSku = buildSku(
                 "3302001004", "X", ConstructionStageEnum.TRIAL.getCode());
 
-        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(context, trialSku);
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(context, trialSku);
 
         assertNotNull(result, "同物料正规状态有计划时，不得串状态放行试制SKU");
+    }
+
+    /**
+     * 提前生产范围跨月且下一月当前产品状态存在计划时，必须按实际年月读取并放行。
+     */
+    @Test
+    void evaluateDailyPlanAdmission_shouldAllowCrossMonthPlanForSameProductStatus() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 30);
+        LocalDate windowEndDate = LocalDate.of(2026, 8, 1);
+        LhScheduleContext context = buildContext(scheduleDate, windowEndDate, 2);
+        FactoryMonthPlanProductionFinalResult trialPlan = monthPlan(
+                "3302001009", "X", 2026, 8, 3, 48);
+        attachMonthPlans(context, trialPlan);
+        SkuScheduleDTO trialSku = buildSku(
+                "3302001009", "X", ConstructionStageEnum.TRIAL.getCode());
+
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(context, trialSku);
+
+        assertNull(result);
     }
 
     /**
      * 跨年窗口后存在量试计划时，应读取下一年度月份并放行。
      */
     @Test
-    void evaluateTrialDailyPlanAdmission_shouldAllowCrossYearFuturePlan() {
+    void evaluateDailyPlanAdmission_shouldAllowCrossYearFuturePlan() {
         LocalDate scheduleDate = LocalDate.of(2026, 12, 30);
         LocalDate windowEndDate = LocalDate.of(2027, 1, 1);
         LhScheduleContext context = buildContext(scheduleDate, windowEndDate, 2);
@@ -120,25 +140,63 @@ class PendingSkuUnscheduledRuleTest {
         SkuScheduleDTO massTrialSku = buildSku(
                 "3302001005", "T", ConstructionStageEnum.MASS_TRIAL.getCode());
 
-        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(
                 context, massTrialSku);
 
         assertNull(result);
     }
 
     /**
-     * 正规SKU不属于本规则范围，即使判断范围内无日计划也必须保持原有流程。
+     * 正规SKU同样属于非续作待排范围，完整范围无计划且无交替承接时必须进入未排。
      */
     @Test
-    void evaluateTrialDailyPlanAdmission_shouldIgnoreFormalSku() {
+    void evaluateDailyPlanAdmission_shouldApplyToFormalSku() {
         LocalDate scheduleDate = LocalDate.of(2026, 7, 1);
         LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
         SkuScheduleDTO formalSku = buildSku(
                 "3302001006", "S", ConstructionStageEnum.FORMAL.getCode());
 
-        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(context, formalSku);
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(context, formalSku);
+
+        assertNotNull(result);
+        assertEquals(PendingSkuUnscheduledRule.DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
+                result.getUnscheduledReason());
+    }
+
+    /**
+     * 完整范围无日计划量但前日排程T+1交替计划后物料匹配时，必须保留SKU继续执行现有排产主链。
+     */
+    @Test
+    void evaluateDailyPlanAdmission_shouldAllowWhenPreviousT1ChangeoverMatchesAfterMaterial() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 1);
+        LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO sku = buildSku("3302001007", "S", ConstructionStageEnum.FORMAL.getCode());
+        LhMouldChangePlan plan = new LhMouldChangePlan();
+        plan.setAfterMaterialCode(sku.getMaterialCode());
+        plan.setPlanDate(toDate(scheduleDate));
+        context.setHistoricalReverseMouldChangePlanList(Arrays.asList(plan));
+
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(context, sku);
 
         assertNull(result);
+    }
+
+    /**
+     * 后物料虽匹配但交替日期不是前批次T+1日时，不得作为本次准入放行依据。
+     */
+    @Test
+    void evaluateDailyPlanAdmission_shouldIgnoreChangeoverOutsidePreviousT1Date() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 1);
+        LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO sku = buildSku("3302001008", "S", ConstructionStageEnum.FORMAL.getCode());
+        LhMouldChangePlan plan = new LhMouldChangePlan();
+        plan.setAfterMaterialCode(sku.getMaterialCode());
+        plan.setPlanDate(toDate(scheduleDate.plusDays(1)));
+        context.setHistoricalReverseMouldChangePlanList(Arrays.asList(plan));
+
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluateDailyPlanAdmission(context, sku);
+
+        assertNotNull(result);
     }
 
     /**
