@@ -355,6 +355,11 @@ public class SpecialMaterialMachineSubstitutionService {
         List<LhScheduleResult> continuousCandidates = new ArrayList<LhScheduleResult>();
 
         for (LhScheduleResult result : context.getScheduleResultList()) {
+            // 结构保留机台在统一释放时间前不得被特殊材料置换链撤销或改排。
+            if (context.isStructureMinMachineRetained(result.getLhMachineCode())
+                    || context.isEndingStructureProtectedMachine(result.getLhMachineCode())) {
+                continue;
+            }
             // 排除特殊材料SKU的机台
             if (isSpecialMaterial(context, result.getMaterialCode(), result.getStructureName())) {
                 continue;

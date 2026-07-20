@@ -211,6 +211,10 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         MachineFilterTrace trace = new MachineFilterTrace(context.getMachineScheduleMap().size());
 
         for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (context.isEndingStructureProtectedMachine(machine.getMachineCode())) {
+                trace.recordFilteredMachine(machine, "三天内收尾结构已占用并临时保护");
+                continue;
+            }
             if (isHistoricalReverseSelectedMachine(context, sku, machine.getMachineCode())) {
                 trace.recordFilteredMachine(machine, "同状态SKU已在该反选机台排产");
                 continue;
@@ -290,6 +294,9 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (Objects.isNull(specifiedMachine)) {
             return SpecifiedMachineMatchResult.failed("本批次不存在历史指定机台");
         }
+        if (context.isEndingStructureProtectedMachine(machineCode)) {
+            return SpecifiedMachineMatchResult.failed("历史指定机台正被三天内收尾结构临时保护");
+        }
         if (isHistoricalReverseSelectedMachine(context, sku, machineCode)) {
             return SpecifiedMachineMatchResult.failed("同状态SKU已在历史指定机台完成反选，不重复排产");
         }
@@ -318,6 +325,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 new ArrayList<MachineScheduleDTO>(context.getMachineScheduleMap().size());
         for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
             if (Objects.isNull(machine)
+                    || context.isEndingStructureProtectedMachine(machine.getMachineCode())
                     || isHistoricalReverseSelectedMachine(context, sku, machine.getMachineCode())
                     || isNotAllowedMachine(notAllowedMachineCodes, machine)) {
                 continue;
@@ -1272,17 +1280,25 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      */
     private Date resolveCandidateReferenceTime(LhScheduleContext context, MachineScheduleDTO machine) {
         Date releasedMachineReferenceTime = resolveReleasedContinuousMachineReferenceTime(context, machine);
-        if (releasedMachineReferenceTime != null) {
-            return releasedMachineReferenceTime;
+        Date candidateReferenceTime = releasedMachineReferenceTime;
+        if (Objects.isNull(candidateReferenceTime)) {
+            candidateReferenceTime = resolveMachineOccupiedEndTime(context, machine);
         }
-        Date occupiedEndTime = resolveMachineOccupiedEndTime(context, machine);
-        if (occupiedEndTime != null) {
-            return occupiedEndTime;
+        if (Objects.isNull(candidateReferenceTime)) {
+            candidateReferenceTime = Objects.nonNull(context.getScheduleDate())
+                    ? context.getScheduleDate() : context.getScheduleTargetDate();
         }
-        if (context.getScheduleDate() != null) {
-            return context.getScheduleDate();
+        /*
+         * 首日无计划释放等既有路径可能给出更早的候选起点；命中结构保留后必须统一取结构最晚班次
+         * 结束时间的较晚值，确保机台只在占位结束后进入后续换模或新增排产时间轴。
+         */
+        Date retentionEndTime = Objects.nonNull(machine)
+                ? context.getStructureMinMachineRetentionEndTimeMap().get(machine.getMachineCode()) : null;
+        if (Objects.nonNull(retentionEndTime)
+                && (Objects.isNull(candidateReferenceTime) || retentionEndTime.after(candidateReferenceTime))) {
+            candidateReferenceTime = retentionEndTime;
         }
-        return context.getScheduleTargetDate();
+        return candidateReferenceTime;
     }
 
     /**

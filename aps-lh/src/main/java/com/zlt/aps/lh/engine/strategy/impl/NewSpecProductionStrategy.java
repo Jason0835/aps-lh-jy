@@ -11,6 +11,7 @@ import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SpecialMaterialMatchResult;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -161,6 +162,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private SkuDecrementChecker skuDecrementChecker;
     @Resource
     private LhMaintenanceScheduleService maintenanceScheduleService;
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService =
+            new StructureMinMachineRetentionService();
     @Resource
     private ITrialProductionStrategy trialProductionStrategy;
     /** 胶囊次数累计与换胶囊班次扣减统一入口 */
@@ -621,6 +625,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         // 单控反向匹配预留机台编码集合:配对侧机台被反向匹配推荐后,非推荐目标SKU选机时排除,使配对侧留给推荐目标SKU
         Set<String> reverseMatchReservedMachineCodes = new HashSet<String>(4);
         while (iterator.hasNext()) {
+            // 上一个SKU可能刚出队；在当前SKU生成候选前统一刷新结构保护，避免提前复用已占机台。
+            structureMinMachineRetentionService.refreshRetention(context);
             SkuScheduleDTO sku = iterator.next();
             boolean currentSkuRemoved = false;
             // 兜底校验：动态生成的补偿SKU若命中减量清单，写未排并跳过（去重set保证不重复写未排）
@@ -1462,6 +1468,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (scheduled) {
                 adjustSameSkuMultiMachineAllocation(context, sku, shifts, quantityPolicy, isEnding);
                 rebuildScheduledMachineCountMap(context, shifts);
+                /*
+                 * 当前SKU的多机台收口完成后立即刷新结构保护。结构仍有待排SKU时只保护已占用机台；
+                 * 最后一个SKU出队后才执行最终机台数统计和计划量0占位，不影响本SKU数量账本。
+                 */
+                structureMinMachineRetentionService.refreshRetention(context);
             }
             if (!scheduled) {
                 // 所有候选机台都失败，记录未排产原因并移出待排队列
@@ -1503,6 +1514,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
             }
         }
+        // 本轮最后一个SKU出队后没有下一次循环入口，需在返回前完成最终结构统计和机台释放时间刷新。
+        structureMinMachineRetentionService.refreshRetention(context);
         return new RoundScheduleSummary(scheduledCount, progressed);
     }
 
@@ -2007,6 +2020,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                          Iterator<SkuScheduleDTO> iterator,
                                          SkuScheduleDTO sku) {
         iterator.remove();
+        // 新增SKU出队时同步维护结构待排视图，供结构最低机台数规则准确识别“全部SKU已处理完成”。
+        context.removePendingSkuFromStructureMap(sku);
         context.getNewSpecTypeRuleBlockedMap().remove(sku);
         context.getNewSpecEarlyProductionAllowedMap().remove(sku);
         refreshPendingNewSpecSkuTypeCounts(context);
@@ -11198,6 +11213,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Date assignedEndTime = Objects.nonNull(machine)
                 ? resolveLatestAssignedEndTime(context, machine.getMachineCode()) : null;
         Date occupationEndTime = resolveLaterTime(machineEndTime, assignedEndTime);
+        Date retentionEndTime = Objects.nonNull(machine)
+                ? context.getStructureMinMachineRetentionEndTimeMap().get(machine.getMachineCode()) : null;
+        occupationEndTime = resolveLaterTime(occupationEndTime, retentionEndTime);
         if (Objects.nonNull(occupationEndTime)) {
             return occupationEndTime;
         }

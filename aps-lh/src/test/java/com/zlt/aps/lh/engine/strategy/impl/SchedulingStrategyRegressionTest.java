@@ -1221,6 +1221,39 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 最终SKU消费账本把续作结果完整回裁为0时，必须在S4.4结束前移除该零量结果。
+     *
+     * <p>该场景复现真实排程中“前置零结果清理已执行，最终账本同步又把正量结果裁成0”的顺序问题。
+     * 零量结果若继续保留，其完工时间会被汇总逻辑清空，并在S4.6触发specEndTime缺失校验。</p>
+     */
+    @Test
+    public void shouldRemoveContinuousResultCappedToZeroByFinalProductionLedgerSync() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        SkuScheduleDTO sku = buildContinuousSku("3302001761", 14, 112,
+                buildQuotaMapByShifts(shifts, 112, 112, 112));
+        LhScheduleResult result = buildContinuousResult(
+                sku.getMaterialCode(), "K2024", 14, shifts, "0");
+        context.getScheduleResultList().add(result);
+        context.getScheduleResultSourceSkuMap().put(result, sku);
+        context.getSkuProductionRemainingQtyMap().put(
+                MonthPlanDateResolver.buildMaterialStatusKey(
+                        sku.getMaterialCode(), sku.getProductStatus()), 0);
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertFalse(context.getScheduleResultList().contains(result),
+                "最终账本回裁为0的普通续作结果必须在进入S4.6前移除");
+        Assertions.assertEquals(Integer.valueOf(0), result.getDailyPlanQty());
+        Assertions.assertNull(result.getSpecEndTime());
+        Assertions.assertTrue(context.getUnscheduledResultList().stream()
+                        .anyMatch(item -> StringUtils.equals(sku.getMaterialCode(), item.getMaterialCode())),
+                "移除零量续作结果后必须沿用现有逻辑保留对应未排信息");
+    }
+
+    /**
      * 多机台续作窗口内日计划仍有需求且后续下降时，即使前置收尾标记命中，也必须按天降模。
      */
     @Test

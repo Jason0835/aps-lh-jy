@@ -24,6 +24,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -128,6 +129,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private TargetScheduleQtyResolver targetScheduleQtyResolver;
     @Resource
     private LhMaintenanceScheduleService maintenanceScheduleService;
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService =
+            new StructureMinMachineRetentionService();
     @Resource
     private IMouldChangeBalanceStrategy mouldChangeBalanceStrategy;
     @Resource
@@ -867,6 +871,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (sku == null) {
             return false;
         }
+        if (Objects.nonNull(machine) && context.isEndingStructureProtectedMachine(machine.getMachineCode())) {
+            log.debug("换活字块候选机台被三天内收尾结构临时保护, machineCode: {}, candidateStructure: {}",
+                    machine.getMachineCode(), sku.getStructureName());
+            return false;
+        }
         String machineMaterialCode = Objects.isNull(machine) ? null : machine.getCurrentMaterialCode();
         if (StringUtils.isNotEmpty(machineMaterialCode)
                 && StringUtils.equals(machineMaterialCode, sku.getMaterialCode())) {
@@ -1511,6 +1520,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             recordTypeBlockAppendFailure(failureReason, SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
             addSharedEmbryoZeroSurplusUnscheduledResult(context, sku);
             context.getNewSpecSkuList().remove(sku);
+            context.removePendingSkuFromStructureMap(sku);
+            structureMinMachineRetentionService.refreshRetention(context);
             getTargetScheduleQtyResolver().removeActiveEmbryoSku(
                     context, sku, SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON);
             log.info("换活字块共用胎胚余量为0，跳过排产并移出待排队列, machineCode: {}, materialCode: {}, "
@@ -1649,9 +1660,14 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             log.info("换活字块单台产能不足，剩余量回流新增排产, machineCode: {}, materialCode: {}, 已排: {}, "
                             + "remainingQtyForNewSchedule: {}, 回流阶段: S4.5新增排产/换模",
                     machine.getMachineCode(), sku.getMaterialCode(), scheduledQty, remainingQty);
+            // 当前结构仍有待排量，只登记已占用机台的临时保护，防止后续SKU提前换活字块或换模。
+            structureMinMachineRetentionService.refreshRetention(context);
             return true;
         }
         context.getNewSpecSkuList().remove(sku);
+        context.removePendingSkuFromStructureMap(sku);
+        // 当前SKU完整出队后立即判断结构是否到达最终统计时点。
+        structureMinMachineRetentionService.refreshRetention(context);
         log.debug("换活字块排产完成, 机台: {}, SKU: {}, 已排: {}, 剩余: {}",
                 machine.getMachineCode(), sku.getMaterialCode(), scheduledQty, remainingQty);
         return true;
@@ -1702,9 +1718,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         }
         context.getUnscheduledResultList().add(unscheduledResult);
         context.getNewSpecSkuList().remove(sku);
+        context.removePendingSkuFromStructureMap(sku);
         String unscheduledReason = unscheduledResult.getUnscheduledReason();
         recordTypeBlockAppendFailure(failureReason, unscheduledReason);
         getTargetScheduleQtyResolver().removeActiveEmbryoSku(context, sku, unscheduledReason);
+        structureMinMachineRetentionService.refreshRetention(context);
         log.info("换活字块候选SKU命中前置未排规则，跳过排产并移出待排队列, machineCode: {}, "
                         + "materialCode: {}, unscheduledQty: {}, reason: {}",
                 Objects.nonNull(machine) ? machine.getMachineCode() : null,
@@ -2089,6 +2107,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         for (MachineScheduleDTO candidateMachine : context.getMachineScheduleMap().values()) {
             if (candidateMachine == null
                     || StringUtils.isEmpty(candidateMachine.getMachineCode())
+                    || context.isEndingStructureProtectedMachine(candidateMachine.getMachineCode())
                     || context.isContinuousStopHoldMachine(candidateMachine.getMachineCode())
                     || StringUtils.equals(candidateMachine.getMachineCode(), currentMachine.getMachineCode())
                     || candidateMachine.getEstimatedEndTime() == null

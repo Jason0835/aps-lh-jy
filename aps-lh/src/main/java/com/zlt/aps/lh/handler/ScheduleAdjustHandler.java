@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.component.SingleControlModeSnapshotInitializer;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
@@ -114,6 +115,8 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
     private SkuDecrementChecker skuDecrementChecker;
     @Resource
     private SingleControlModeSnapshotInitializer singleControlModeSnapshotInitializer;
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService;
 
     @Override
     protected void doHandle(LhScheduleContext context) {
@@ -134,6 +137,14 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
 
         // S4.3.3.1 共用胎胚零余量SKU先出队，后续排产只使用动态归一化后的胎胚组
         pruneSharedEmbryoZeroSurplusSkus(context);
+
+        /*
+         * S4.3.3.2 冻结当前3天、8班窗口可全部收尾的结构，并按月计划结构类型读取最低机台数。
+         * 必须在续作/新增分类前完成，后续结构待排视图会随着SKU出队而动态缩小，不能再作为全量结构快照。
+         */
+        if (Objects.nonNull(structureMinMachineRetentionService)) {
+            structureMinMachineRetentionService.initializeEligibleStructures(context);
+        }
 
         // S4.3.4 区分续作SKU和新增SKU
         classifyContinuousAndNewSkus(context);
@@ -785,6 +796,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         dto.setMaterialCode(plan.getMaterialCode());
         dto.setMaterialDesc(plan.getMaterialDesc());
         dto.setStructureName(plan.getStructureName());
+        dto.setStructureType(targetMonthPlan.getStructureType());
         dto.setEmbryoCode(plan.getEmbryoCode());
         dto.setMainMaterialDesc(plan.getMainMaterialDesc());
         dto.setSpecCode(plan.getSpecifications());
@@ -2352,6 +2364,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         copy.setDelayDays(source.getDelayDays());
         copy.setSupplyChainPriority(source.getSupplyChainPriority());
         copy.setProductionType(source.getProductionType());
+        copy.setStructureType(source.getStructureType());
         copy.setHighPriorityPendingQty(source.getHighPriorityPendingQty());
         copy.setCycleProductionPendingQty(source.getCycleProductionPendingQty());
         copy.setMidPriorityPendingQty(source.getMidPriorityPendingQty());

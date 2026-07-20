@@ -24,6 +24,9 @@ public final class LhScheduleParamConstant {
     private LhScheduleParamConstant() {
     }
 
+    /** 常规结构最低硫化机台数，来源于月计划工厂参数表 */
+    public static final String REGULAR_STRUCTURE_MIN_VULCANIZING_MACHINE = "SYS0204012";
+
     /** 夜班开始小时 */
     public static final String NIGHT_START_HOUR = "SYS0301001";
     /** 早班开始小时 */

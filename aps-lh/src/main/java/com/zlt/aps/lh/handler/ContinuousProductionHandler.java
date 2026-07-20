@@ -9,6 +9,7 @@ import com.zlt.aps.lh.engine.strategy.IHistoricalMouldChangeReverseSelectionStra
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
 import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -39,6 +40,9 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
     private ITypeBlockProductionStrategy typeBlockProductionStrategy;
     @Resource
     private IHistoricalMouldChangeReverseSelectionStrategy historicalReverseSelectionStrategy;
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService =
+            new StructureMinMachineRetentionService();
 
     @Override
     protected void doHandle(LhScheduleContext context) {
@@ -73,10 +77,15 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
         log.info("续作降模排产完成, 排程结果数: {}, 未排产数: {}",
                 context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
 
+        // 续作数量和降模结果稳定后先执行结构机台保护，禁止提前收尾机台进入换活字块候选。
+        structureMinMachineRetentionService.refreshRetention(context);
+
         // S4.4.5 收尾后换活字块衔接排产：必须放在降模之后，读取续作最终收口后的真实机台可用时间。
         typeBlockProductionStrategy.scheduleTypeBlockChange(context);
         // 换活字块可能移出或回写待新增SKU，需重新构建结构视图供 S4.5 新增排序使用。
         context.rebuildStructureSkuMapFromPending(context.getNewSpecSkuList());
+        // 换活字块落地后再次按最终待排结构视图刷新，已完成结构立即补0并统一延迟释放时间。
+        structureMinMachineRetentionService.refreshRetention(context);
         log.info("换活字块衔接排产完成, 排程结果数: {}, 待新增SKU: {}",
                 context.getScheduleResultList().size(), context.getNewSpecSkuList().size());
 
@@ -88,6 +97,8 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
         historicalReverseSelectionStrategy.reverseSelect(context);
         // 反选可能完成换活字块或调整待新增SKU先后顺序，再次刷新结构视图供S4.5读取。
         context.rebuildStructureSkuMapFromPending(context.getNewSpecSkuList());
+        // 历史反选同样可能消费最后一个结构SKU，进入普通新增选机前必须刷新机台保护状态。
+        structureMinMachineRetentionService.refreshRetention(context);
         log.info("前日交替计划机台反选完成, 排程结果数: {}, 待新增SKU: {}, 指令数: {}",
                 context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
                 context.getHistoricalReverseSelectionDirectiveList().size());

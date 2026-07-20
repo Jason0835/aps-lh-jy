@@ -1075,6 +1075,17 @@ public class LhScheduleResult extends BaseEntity implements Serializable {
     private String isEmbryoEnding;
 
     /**
+     * 结构最低机台数保留标识：0-未命中，1-命中。
+     * <p>当同结构全部SKU可在当前3天、8班窗口内收尾，且结构最晚有量班次的去重物理机台数
+     * 小于结构最低硫化机台数时，该结构本窗口内的全部结果均标记为1。计划量为0的班次仅表示
+     * 原SKU继续占用机台，不参与产量、余量、胎胚库存、最晚班次或生产机台数统计。</p>
+     */
+    @Excel(name = "ui.data.column.lhScheduleResult.isStructureMinMachineRetained", dictType = "biz_yes_no")
+    @ApiModelProperty(value = "结构最低机台数保留标识 0-否 1-是", name = "isStructureMinMachineRetained")
+    @TableField(value = "IS_STRUCTURE_MIN_MACHINE_RETAINED")
+    private String isStructureMinMachineRetained = "0";
+
+    /**
      * SKU 排序名次。
      * <p>来源：{@code DefaultSkuPriorityStrategy.sortByPriority} 完成续作/新增统一排序后，
      * 回写到 {@code SkuScheduleDTO.scheduleOrder} 的 1~N 名次；

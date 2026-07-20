@@ -1023,6 +1023,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         this.enforceRecordedCapsuleReplacementCapacityLimits(context, shifts);
         // 最终账本同步是本阶段唯一一次扣账；其内部若按中心账本回裁，后续只重新汇总元数据，不再改班次量。
         this.syncContinuousDailyPlanQuota(context, shifts);
+        /*
+         * 最终账本同步仍可能把原本有量的续作结果完整回裁为0，并由汇总逻辑清空specEndTime。
+         * 必须在该最后数量修改器之后再次复用统一零结果收口：停产保机结果继续保留资源占用，
+         * 其他零量续作结果移除并回写未排，避免零量结果进入S4.6触发完工时间缺失校验。
+         */
+        this.finalizeZeroPlanContinuousResults(context);
         removeCoveredZeroPlanContinuousUnscheduledResults(context);
         // 结果数量已经稳定，后续只允许同步标记、展示库存和机台状态，不得再改班次量。
         refreshContinuousEndingFlagByResult(context);

@@ -28,6 +28,8 @@ public class SkuScheduleDTO {
     private String materialDesc;
     /** 产品结构 */
     private String structureName;
+    /** 月计划结构类型：01-周期结构，02-常规结构；用于解析结构最低硫化机台数 */
+    private String structureType;
     /** 胎胚代码 */
     private String embryoCode;
     /** 主物料(胎胚描述) */
