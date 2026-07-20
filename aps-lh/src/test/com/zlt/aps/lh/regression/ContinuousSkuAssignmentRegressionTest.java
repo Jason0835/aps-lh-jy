@@ -2,21 +2,25 @@ package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.handler.DataInitHandler;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
+import com.zlt.aps.lh.engine.strategy.support.PendingSkuUnscheduledRule;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -451,6 +455,89 @@ class ContinuousSkuAssignmentRegressionTest {
         assertWindowNoPlanSkuKeptAsNew(0, 0, 0, 0);
     }
 
+    /**
+     * 试制SKU在排程及可提前生产范围内无日计划时，必须写未排并彻底移出后置索引。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldRemoveTrialSkuWhenAdmissionRangeHasNoPlan() {
+        LhScheduleContext context = buildClassificationContext();
+        context.setScheduleDate(dateTime(2026, 7, 1, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 7, 3, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 7, 3, 0, 0));
+        SkuScheduleDTO trialSku = buildSku("3302003001", "STRUCT-TRIAL", "X");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setWindowPlanQty(0);
+        trialSku.setSurplusQty(60);
+        trialSku.setTargetScheduleQty(60);
+        trialSku.setEmbryoCode("EMBRYO-TRIAL");
+        context.getStructureSkuMap().put(trialSku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(trialSku)));
+        context.getActiveEmbryoSkuMap().put(trialSku.getEmbryoCode(),
+                new ArrayList<String>(Collections.singletonList(
+                        MonthPlanDateResolver.buildMaterialStatusKey(
+                                trialSku.getMaterialCode(), trialSku.getProductStatus()))));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+        assertTrue(context.getStructureSkuMap().isEmpty());
+        assertTrue(context.getActiveEmbryoSkuMap().isEmpty());
+        assertTrue(context.getAllSkuScheduleDtoMap().isEmpty());
+        assertEquals(0, trialSku.resolveTargetScheduleQty());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals(PendingSkuUnscheduledRule.TRIAL_DAILY_PLAN_UNSCHEDULED_REASON,
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    /**
+     * 已按物料和产品状态识别为续作的试制SKU，不执行新增SKU日计划未排规则。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepTrialContinuousSku() {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO trialSku = buildSku("3302003002", "STRUCT-TRIAL", "X");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        context.getStructureSkuMap().put(trialSku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(trialSku)));
+        context.getMachineOnlineInfoMap().put("K1101", buildOnlineInfo("K1101", trialSku.getMaterialCode(), "X"));
+        context.getMachineScheduleMap().put("K1101", buildMachine("K1101", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
+        assertEquals("3302003002", context.getContinuousSkuList().get(0).getMaterialCode());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+        assertTrue(context.getUnscheduledResultList().isEmpty());
+    }
+
+    /**
+     * 试制、量试SKU在提前范围内存在计划时，放行后的新增列表必须保持原遍历顺序。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepOriginalOrderWhenTrialSkusAreAllowed() {
+        LhScheduleContext context = buildClassificationContext();
+        context.setScheduleDate(dateTime(2026, 7, 1, 0, 0));
+        context.setScheduleTargetDate(dateTime(2026, 7, 3, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 7, 3, 0, 0));
+        SkuScheduleDTO trialSku = buildSku("3302003003", "STRUCT-ORDER", "X");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        attachFutureQuota(trialSku, LocalDate.of(2026, 7, 5), 20);
+        SkuScheduleDTO formalSku = buildSku("3302003004", "STRUCT-ORDER", "S");
+        formalSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        SkuScheduleDTO massTrialSku = buildSku("3302003005", "STRUCT-ORDER", "T");
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        attachFutureQuota(massTrialSku, LocalDate.of(2026, 7, 4), 20);
+        context.getStructureSkuMap().put("STRUCT-ORDER",
+                new ArrayList<SkuScheduleDTO>(Arrays.asList(trialSku, formalSku, massTrialSku)));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(3, context.getNewSpecSkuList().size());
+        assertSame(trialSku, context.getNewSpecSkuList().get(0));
+        assertSame(formalSku, context.getNewSpecSkuList().get(1));
+        assertSame(massTrialSku, context.getNewSpecSkuList().get(2));
+    }
+
     private void assertWindowNoPlanSkuKeptAsNew(int historyShortageQty,
                                                  int lastMonthOverdueQty,
                                                  int futurePlanQty,
@@ -511,6 +598,24 @@ class ContinuousSkuAssignmentRegressionTest {
         sku.setStructureName(structureName);
         sku.setProductStatus(productStatus);
         return sku;
+    }
+
+    /**
+     * 为SKU附加窗口结束后的原始日计划额度。
+     *
+     * @param sku SKU排程信息
+     * @param productionDate 未来计划日期
+     * @param dayPlanQty 日计划量
+     */
+    private void attachFutureQuota(SkuScheduleDTO sku, LocalDate productionDate, int dayPlanQty) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap =
+                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(4);
+        SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
+        quota.setProductionDate(productionDate);
+        quota.setDayPlanQty(dayPlanQty);
+        quota.setRemainingQty(dayPlanQty);
+        quotaMap.put(productionDate, quota);
+        sku.setDailyPlanQuotaMap(quotaMap);
     }
 
     private MachineScheduleDTO buildMachine(String machineCode, String status) {

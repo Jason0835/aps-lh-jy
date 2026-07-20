@@ -20,6 +20,7 @@ import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.api.enums.TrialStatusEnum;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionChecker;
+import com.zlt.aps.lh.engine.strategy.support.PendingSkuUnscheduledRule;
 import com.zlt.aps.lh.api.domain.dto.CuringMonthPlanTotalResult;
 import com.zlt.aps.lh.component.CuringMonthPlanTotalCalculator;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
@@ -1841,6 +1842,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         List<SkuScheduleDTO> continuousSkuList = new ArrayList<>();
         List<SkuScheduleDTO> newSpecSkuList = new ArrayList<>();
         List<SkuScheduleDTO> blockedNewSkuList = new ArrayList<SkuScheduleDTO>(8);
+        List<SkuScheduleDTO> blockedTrialSkuList = new ArrayList<SkuScheduleDTO>(8);
         Map<String, List<SkuScheduleDTO>> skuByMaterialMap = buildSkuByMaterialMap(context);
         Map<String, SkuScheduleDTO> continuousTemplateMap = new LinkedHashMap<String, SkuScheduleDTO>(16);
 
@@ -1852,6 +1854,17 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
             for (SkuScheduleDTO sku : skuList) {
                 if (StringUtils.equals(ScheduleTypeEnum.CONTINUOUS.getCode(), sku.getScheduleType())) {
+                    continue;
+                }
+                /*
+                 * 试制、量试SKU正式进入新增排产前，先统一判断T～窗口结束日后N天是否存在日计划量。
+                 * 该公共规则只返回未排结果，不改变当前遍历顺序，也不触碰续作、排序和资源校验逻辑。
+                 */
+                LhUnscheduledResult trialUnscheduledResult =
+                        PendingSkuUnscheduledRule.evaluateTrialDailyPlanAdmission(context, sku);
+                if (Objects.nonNull(trialUnscheduledResult)) {
+                    context.getUnscheduledResultList().add(trialUnscheduledResult);
+                    blockedTrialSkuList.add(sku);
                     continue;
                 }
                 // 续作匹配完成后，拦截窗口无计划、无本月历史欠产且仅存在窗口后计划的新增SKU。
@@ -1868,12 +1881,12 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         }
 
         // 遍历完成后统一清理，避免修改正在遍历的结构SKU集合。
+        for (SkuScheduleDTO blockedTrialSku : blockedTrialSkuList) {
+            cleanupBlockedNewSku(context, blockedTrialSku,
+                    PendingSkuUnscheduledRule.TRIAL_DAILY_PLAN_UNSCHEDULED_REASON);
+        }
         for (SkuScheduleDTO blockedSku : blockedNewSkuList) {
-            blockedSku.setTargetScheduleQty(0);
-            blockedSku.setRemainingScheduleQty(0);
-            context.removePendingSkuFromStructureMap(blockedSku);
-            getTargetScheduleQtyResolver().removeActiveEmbryoSku(
-                    context, blockedSku, WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON);
+            cleanupBlockedNewSku(context, blockedSku, WINDOW_NO_PLAN_NO_SHORTAGE_UNSCHEDULED_REASON);
         }
 
         // 续作匹配完成后，在机物料本次不需要排程（余量为0/共用胎胚零余量/未排等）的机台，
@@ -1896,6 +1909,27 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         // SKU减量清单统一前置过滤：命中减量清单的SKU不进入任何排产入口，写未排并从排产集合移除
         skuDecrementChecker.filterDecrementSkus(context);
         log.info("续作/新增SKU区分完成, 续作: {}个, 新增: {}个", continuousSkuList.size(), newSpecSkuList.size());
+    }
+
+    /**
+     * 清理已判定不进入新增排产的SKU运行态数据。
+     * <p>该方法必须在结构SKU遍历完成后调用，避免遍历过程中修改结构集合。清理后SKU不会进入新增、
+     * 换活字块、空闲产能补排或胎胚动态分配入口。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 被拦截的SKU
+     * @param reason 未排原因，用于胎胚活跃集合清理日志
+     */
+    private void cleanupBlockedNewSku(LhScheduleContext context, SkuScheduleDTO sku, String reason) {
+        if (Objects.isNull(context) || Objects.isNull(sku)) {
+            return;
+        }
+        sku.setTargetScheduleQty(0);
+        sku.setRemainingScheduleQty(0);
+        context.removePendingSkuFromStructureMap(sku);
+        context.getAllSkuScheduleDtoMap().remove(MonthPlanDateResolver.buildMaterialStatusKey(
+                sku.getMaterialCode(), sku.getProductStatus()));
+        getTargetScheduleQtyResolver().removeActiveEmbryoSku(context, sku, reason);
     }
 
     /**

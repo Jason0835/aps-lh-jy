@@ -268,7 +268,7 @@ public final class EarlyProductionChecker {
      * @param context 排程上下文
      * @return 提前生产天数阈值，范围1～31
      */
-    private static int resolveEarlyProductionDaysThreshold(LhScheduleContext context) {
+    public static int resolveEarlyProductionDaysThreshold(LhScheduleContext context) {
         int threshold;
         if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleConfig())) {
             threshold = context.getScheduleConfig().getEarlyProductionDaysThreshold();

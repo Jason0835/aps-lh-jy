@@ -3,6 +3,7 @@ package com.zlt.aps.lh.engine.strategy.support;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import lombok.extern.slf4j.Slf4j;
@@ -24,6 +25,10 @@ import java.util.Objects;
 @Slf4j
 public final class PendingSkuUnscheduledRule {
 
+    /** 试制、量试SKU在排程及可提前生产范围内无日计划量的统一未排原因 */
+    public static final String TRIAL_DAILY_PLAN_UNSCHEDULED_REASON =
+            "排程及可提前生产范围内无日计划量";
+
     /** 仅历史欠产且最近一次已有完成量的统一未排原因 */
     public static final String HISTORY_SHORTAGE_UNSCHEDULED_REASON =
             "仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排";
@@ -32,6 +37,82 @@ public final class PendingSkuUnscheduledRule {
     private static final String AUTO_DATA_SOURCE = "0";
 
     private PendingSkuUnscheduledRule() {
+    }
+
+    /**
+     * 评估试制、量试SKU是否因排程及可提前生产范围内无日计划量而直接进入未排。
+     * <p>判断范围由两部分组成：SKU已初始化的排程窗口计划量覆盖T～T+2；窗口结束日之后
+     * 复用提前生产判断器，按硫化参数配置的提前生产天数阈值继续向后查找。两部分均无正计划量时，
+     * 返回未排结果；任意一天存在正计划量时仅代表允许继续进入现有排产流程，并不保证最终排产。</p>
+     * <p>本方法只负责判断和构造未排结果，不修改SKU目标量、排产集合、胎胚库存或日计划账本。</p>
+     *
+     * @param context 排程上下文，提供排程窗口、提前生产参数和跨月月计划数据
+     * @param sku 待评估的新增SKU
+     * @return 命中规则时返回未排结果；未命中返回null
+     */
+    public static LhUnscheduledResult evaluateTrialDailyPlanAdmission(LhScheduleContext context,
+                                                                       SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)
+                || !isTrialOrMassTrialSku(sku)
+                || sku.getWindowPlanQty() > 0
+                || Objects.isNull(context.getWindowEndDate())) {
+            return null;
+        }
+        LocalDate windowStartDate = toLocalDate(context.getScheduleDate());
+        LocalDate windowEndDate = toLocalDate(context.getWindowEndDate());
+        if (Objects.isNull(windowEndDate)) {
+            return null;
+        }
+
+        // 以窗口最后一天为基准继续后看N天，与提前生产准入共用同一参数、跨月取数和产品状态口径。
+        LocalDate firstFuturePlanDate = EarlyProductionChecker.resolveFirstFuturePlanDate(
+                context, sku, windowEndDate);
+        if (Objects.nonNull(firstFuturePlanDate)) {
+            return null;
+        }
+
+        int earlyProductionDaysThreshold = EarlyProductionChecker.resolveEarlyProductionDaysThreshold(context);
+        LocalDate admissionEndDate = windowEndDate.plusDays(earlyProductionDaysThreshold);
+        log.info("试制、量试SKU日计划准入拦截, factoryCode: {}, batchNo: {}, materialCode: {}, "
+                        + "productStatus: {}, constructionStage: {}, windowStartDate: {}, windowEndDate: {}, "
+                        + "earlyProductionDaysThreshold: {}, admissionEndDate: {}, reason: {}",
+                context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(),
+                sku.getConstructionStage(), windowStartDate, windowEndDate, earlyProductionDaysThreshold,
+                admissionEndDate, TRIAL_DAILY_PLAN_UNSCHEDULED_REASON);
+        LhUnscheduledResult unscheduledResult = buildUnscheduledResult(
+                context, sku, 0, TRIAL_DAILY_PLAN_UNSCHEDULED_REASON);
+        // 月计划版本和生产版本属于本次准入未排结果的对账字段，仅在新增规则命中时回填，
+        // 避免扩展公共构造方法后改变既有收尾小余量、仅历史欠产规则的落库内容。
+        unscheduledResult.setMonthPlanVersion(sku.getMonthPlanVersion());
+        unscheduledResult.setProductionVersion(sku.getProductionVersion());
+        return unscheduledResult;
+    }
+
+    /**
+     * 判断SKU施工阶段是否属于试制或量试。
+     *
+     * @param sku SKU排程信息
+     * @return true-试制或量试；false-其他SKU类型
+     */
+    private static boolean isTrialOrMassTrialSku(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return false;
+        }
+        return StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage());
+    }
+
+    /**
+     * 将日期转换为排程业务日。
+     *
+     * @param date 日期
+     * @return 本地业务日；日期为空时返回null
+     */
+    private static LocalDate toLocalDate(java.util.Date date) {
+        if (Objects.isNull(date)) {
+            return null;
+        }
+        return date.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 
     /**
