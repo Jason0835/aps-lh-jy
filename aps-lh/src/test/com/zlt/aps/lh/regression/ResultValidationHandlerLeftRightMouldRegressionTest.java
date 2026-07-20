@@ -4,10 +4,12 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.CleaningScheduleDateFillItem;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
+import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
@@ -709,6 +711,93 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
         assertEquals("干冰计划", plan.getRemark());
     }
 
+    /**
+     * 清洗与正规换模实际重叠时，只生成正规换模计划，不再重复生成干冰清洗计划。
+     */
+    @Test
+    void generateMouldChangePlan_shouldSkipCleaningPlanWhenRegularMouldChangeOverlaps() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1311", "MAT-ONLINE", "当前在机物料");
+        MachineCleaningWindowDTO cleaningWindow = buildCleaningWindow(
+                "K1311", CleaningTypeEnum.DRY_ICE.getCode(), dateTime(2026, 4, 17, 8, 0), 4101L);
+        context.getMachineScheduleMap().get("K1311")
+                .setCleaningWindowList(Collections.singletonList(cleaningWindow));
+        LhScheduleResult changeResult = buildChangeResult("K1311", "MAT-AFTER", "换模后物料",
+                dateTime(2026, 4, 17, 7, 0), dateTime(2026, 4, 17, 15, 0));
+        context.getScheduleResultList().add(changeResult);
+
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(1, context.getMouldChangePlanList().size());
+        assertEquals(MouldChangeTypeEnum.REGULAR.getCode(),
+                context.getMouldChangePlanList().get(0).getChangeMouldType());
+    }
+
+    /**
+     * 三天内收尾优先于换模重叠：不生成清洗计划，收尾班次写喷砂清洗+收尾，日期回填最终收尾日零点。
+     */
+    @Test
+    void finalCleaningDisposition_shouldPreferEndingAndFillFinalEndingDate() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1101", "MAT-ONLINE", "换模前物料");
+        LhMachineOnlineInfo onlineInfo = new LhMachineOnlineInfo();
+        onlineInfo.setLhCode("K1101");
+        onlineInfo.setMaterialCode("MAT-ONLINE");
+        onlineInfo.setProductStatus("S");
+        context.getMachineOnlineInfoMap().put("K1101", onlineInfo);
+        MachineCleaningWindowDTO cleaningWindow = buildCleaningWindow(
+                "K1101", CleaningTypeEnum.SAND_BLAST.getCode(), dateTime(2026, 4, 20, 8, 0), 4201L);
+        context.getMachineScheduleMap().get("K1101")
+                .setCleaningWindowList(Collections.singletonList(cleaningWindow));
+        context.getCleaningScheduleDateFillList().add(buildCleaningFillItem(
+                4201L, "K1101", CleaningTypeEnum.SAND_BLAST.getCode(), dateTime(2026, 4, 20, 8, 0)));
+
+        LhScheduleResult endingResult = buildChangeResult("K1101", "MAT-ENDING", "收尾物料",
+                dateTime(2026, 4, 20, 6, 0), dateTime(2026, 4, 22, 6, 53));
+        endingResult.setProductStatus("S");
+        endingResult.setMouldSurplusQty(110);
+        endingResult.setStandardCapacity(54);
+        endingResult.setClass1PlanQty(10);
+        context.getScheduleResultList().add(endingResult);
+
+        ReflectionTestUtils.invokeMethod(handler, "finalizeCleaningDisposition", context);
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(1, context.getMouldChangePlanList().size(), "只保留正规换模计划");
+        assertEquals(MouldChangeTypeEnum.REGULAR.getCode(),
+                context.getMouldChangePlanList().get(0).getChangeMouldType());
+        assertTrue(endingResult.getClass1Analysis().contains("喷砂清洗+收尾"));
+        assertEquals(date(2026, 4, 22), context.getCleaningScheduleDateFillList().get(0).getScheduleDate());
+        assertEquals("收尾未安排清洗", context.getCleaningScheduleDateFillList().get(0).getFillReason());
+    }
+
+    /**
+     * 独立清洗保持原行为：生成清洗交替计划，并将设备停机排程日期归零到实际清洗日。
+     */
+    @Test
+    void finalCleaningDisposition_shouldKeepStandaloneCleaningPlanAndClearScheduleTime() {
+        ResultValidationHandler handler = new ResultValidationHandler();
+        LhScheduleContext context = newContext();
+        prepareInitialMachine(context, "K1201", "MAT-ONLINE", "当前在机物料");
+        MachineCleaningWindowDTO cleaningWindow = buildCleaningWindow(
+                "K1201", CleaningTypeEnum.DRY_ICE.getCode(), dateTime(2026, 4, 17, 14, 0), 4301L);
+        context.getMachineScheduleMap().get("K1201")
+                .setCleaningWindowList(Collections.singletonList(cleaningWindow));
+        context.getCleaningScheduleDateFillList().add(buildCleaningFillItem(
+                4301L, "K1201", CleaningTypeEnum.DRY_ICE.getCode(), dateTime(2026, 4, 17, 14, 0)));
+
+        ReflectionTestUtils.invokeMethod(handler, "finalizeCleaningDisposition", context);
+        ReflectionTestUtils.invokeMethod(handler, "generateMouldChangePlan", context);
+
+        assertEquals(1, context.getMouldChangePlanList().size());
+        assertEquals(MouldChangeTypeEnum.DRY_ICE.getCode(),
+                context.getMouldChangePlanList().get(0).getChangeMouldType());
+        assertEquals(date(2026, 4, 17), context.getCleaningScheduleDateFillList().get(0).getScheduleDate());
+        assertEquals("独立清洗", context.getCleaningScheduleDateFillList().get(0).getFillReason());
+    }
+
     @Test
     void generateMouldChangePlan_shouldResolveCleaningLeftRightMouldByMachineCodeSuffix() {
         ResultValidationHandler handler = new ResultValidationHandler();
@@ -932,6 +1021,36 @@ class ResultValidationHandlerLeftRightMouldRegressionTest {
         cleaningWindow.setMouldCode("MOULD-" + machineCode);
         machine.setCleaningWindowList(Collections.singletonList(cleaningWindow));
         return machine;
+    }
+
+    /**
+     * 构造带来源设备停机计划主键的清洗窗口。
+     */
+    private MachineCleaningWindowDTO buildCleaningWindow(String machineCode, String cleanType,
+                                                          Date cleanStartTime, Long sourcePlanId) {
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setSourcePlanId(sourcePlanId);
+        cleaningWindow.setLhCode(machineCode);
+        cleaningWindow.setCleanType(cleanType);
+        cleaningWindow.setCleanStartTime(cleanStartTime);
+        cleaningWindow.setCleanEndTime(new Date(cleanStartTime.getTime() + 3 * 60 * 60 * 1000L));
+        cleaningWindow.setReadyTime(cleaningWindow.getCleanEndTime());
+        cleaningWindow.setMouldCode("MOULD-" + machineCode);
+        return cleaningWindow;
+    }
+
+    /**
+     * 构造清洗设备停机计划排程日期回填项。
+     */
+    private CleaningScheduleDateFillItem buildCleaningFillItem(Long planId, String machineCode,
+                                                                String cleanType, Date scheduleDate) {
+        CleaningScheduleDateFillItem fillItem = new CleaningScheduleDateFillItem();
+        fillItem.setPlanId(planId);
+        fillItem.setMachineCode(machineCode);
+        fillItem.setCleanType(cleanType);
+        fillItem.setScheduleDate(scheduleDate);
+        fillItem.setFillReason("清洗成功");
+        return fillItem;
     }
 
     private void invokeManualSundaySandBlastValidationWithoutException(ResultValidationHandler handler, LhScheduleContext context)

@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.CleaningScheduleDateFillItem;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
@@ -290,6 +291,59 @@ public class LhCleaningScheduleServiceDeviceStopTest {
     }
 
     /**
+     * 用例说明：同物料存在正规与试制月计划时，收尾判断必须按产品状态精确匹配，禁止取首条计划串状态。
+     */
+    @Test
+    public void shouldMatchEndingMonthPlanByMaterialAndProductStatus() {
+        LhScheduleContext context = buildContext(toDate(2026, 4, 20, 0, 0, 0));
+        com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo onlineInfo =
+                buildOnlineInfo("K1301", "MAT-MULTI-STATUS");
+        onlineInfo.setProductStatus("X");
+        context.getMachineOnlineInfoMap().put("K1301", onlineInfo);
+        FactoryMonthPlanProductionFinalResult formalPlan = buildMonthPlan("MAT-MULTI-STATUS", 20, 10);
+        formalPlan.setProductStatus("S");
+        FactoryMonthPlanProductionFinalResult trialPlan = buildMonthPlan("MAT-MULTI-STATUS", 100, 10);
+        trialPlan.setProductStatus("X");
+        context.setMonthPlanList(Arrays.asList(formalPlan, trialPlan));
+        context.setDevicePlanShutList(Collections.singletonList(
+                buildDeviceStop("K1301", MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                        toDate(2026, 4, 20, 8, 0, 0), toDate(2026, 4, 20, 11, 0, 0))));
+
+        Map<String, List<MachineCleaningWindowDTO>> windowMap =
+                new LhCleaningScheduleService().buildScheduledCleaningWindowMap(context);
+
+        Assertions.assertTrue(windowMap.containsKey("K1301"),
+                "试制状态剩余 10 天，不得误用正规状态 2 天余量跳过清洗");
+    }
+
+    /**
+     * 用例说明：单控配对侧窗口继承同一来源计划主键，但设备停机计划只收集一条回填项。
+     */
+    @Test
+    public void shouldShareSourcePlanIdForPairedSingleControlWindow() {
+        LhScheduleContext context = buildContext(toDate(2026, 4, 20, 0, 0, 0));
+        MachineScheduleDTO leftMachine = new MachineScheduleDTO();
+        leftMachine.setMachineCode("K1501L");
+        MachineScheduleDTO rightMachine = new MachineScheduleDTO();
+        rightMachine.setMachineCode("K1501R");
+        context.getMachineScheduleMap().put("K1501L", leftMachine);
+        context.getMachineScheduleMap().put("K1501R", rightMachine);
+        MdmDevicePlanShut plan = buildDeviceStop("K1501L",
+                MachineStopTypeEnum.DRY_ICE_CLEANING.getCode(),
+                toDate(2026, 4, 20, 8, 0, 0), toDate(2026, 4, 20, 11, 0, 0));
+        plan.setId(5001L);
+        context.setDevicePlanShutList(Collections.singletonList(plan));
+
+        Map<String, List<MachineCleaningWindowDTO>> windowMap =
+                new LhCleaningScheduleService().buildScheduledCleaningWindowMap(context);
+
+        Assertions.assertEquals(5001L, windowMap.get("K1501L").get(0).getSourcePlanId());
+        Assertions.assertEquals(5001L, windowMap.get("K1501R").get(0).getSourcePlanId());
+        Assertions.assertEquals(1, context.getCleaningScheduleDateFillList().size(),
+                "配对侧窗口不得额外生成设备停机计划回填项");
+    }
+
+    /**
      * 用例说明：喷砂与精度保养实际重叠时，班次产能只扣最大占用时间，不按两者耗时相加扣减。
      */
     @Test
@@ -342,6 +396,8 @@ public class LhCleaningScheduleServiceDeviceStopTest {
         Assertions.assertEquals(1, fillList.size(), "清洗成功应收集 1 条回填项");
         CleaningScheduleDateFillItem fillItem = fillList.get(0);
         Assertions.assertEquals(1001L, fillItem.getPlanId());
+        Assertions.assertEquals(1001L, windowMap.get("K1301").get(0).getSourcePlanId(),
+                "清洗窗口必须保留来源设备停机计划主键");
         Assertions.assertEquals(toDate(2026, 4, 20, 6, 0, 0), fillItem.getScheduleDate());
         Assertions.assertEquals(CleaningTypeEnum.DRY_ICE.getCode(), fillItem.getCleanType());
         Assertions.assertEquals("清洗成功", fillItem.getFillReason());
@@ -503,12 +559,12 @@ public class LhCleaningScheduleServiceDeviceStopTest {
         Assertions.assertEquals(2, count, "去重后应回填 2 条");
         ArgumentCaptor<MdmDevicePlanShut> captor = ArgumentCaptor.forClass(MdmDevicePlanShut.class);
         verify(mockMapper, times(2)).updateById(captor.capture());
-        // 去重保留首条：3001 回填 04-20 06:00，3002 回填 04-20 14:00
+        // 去重保留首条，但设备停机计划排程日期统一归零到自然日。
         List<MdmDevicePlanShut> updated = captor.getAllValues();
         Assertions.assertEquals(3001L, updated.get(0).getId());
-        Assertions.assertEquals(toDate(2026, 4, 20, 6, 0, 0), updated.get(0).getScheduleDate());
+        Assertions.assertEquals(toDate(2026, 4, 20, 0, 0, 0), updated.get(0).getScheduleDate());
         Assertions.assertEquals(3002L, updated.get(1).getId());
-        Assertions.assertEquals(toDate(2026, 4, 20, 14, 0, 0), updated.get(1).getScheduleDate());
+        Assertions.assertEquals(toDate(2026, 4, 20, 0, 0, 0), updated.get(1).getScheduleDate());
     }
 
     /**

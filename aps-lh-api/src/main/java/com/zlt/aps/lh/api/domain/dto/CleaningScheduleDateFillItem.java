@@ -14,8 +14,8 @@ import java.util.Date;
  *
  * <p>仅以下两类场景产生回填项：</p>
  * <ul>
- *   <li>清洗成功排程：{@code scheduleDate} = 实际清洗开始时间；</li>
- *   <li>因 SKU 3 天内收尾跳过清洗：{@code scheduleDate} = 候选清洗开始日 + 剩余排产天数 N。</li>
+ *   <li>独立清洗或与正规换模合并：{@code scheduleDate} = 实际清洗开始日 00:00:00；</li>
+ *   <li>因 SKU 3 天内收尾跳过清洗：{@code scheduleDate} = 最终收尾日 00:00:00。</li>
  * </ul>
  * 超窗口上限、配置非法、最晚日期超限等未安排场景不产生回填项。
  *
@@ -28,12 +28,12 @@ public class CleaningScheduleDateFillItem implements Serializable {
 
     /** 来源设备停机计划主键 id（T_MDM_DEVICE_PLAN_SHUT.ID） */
     private Long planId;
-    /** 回填到设备停机计划的排程日期（实际清洗开始时间 或 收尾日期） */
+    /** 回填到设备停机计划的排程日期（实际清洗日或最终收尾日，时分秒统一为 00:00:00） */
     private Date scheduleDate;
     /** 清洗类型：干冰/喷砂，仅用于日志定位，不参与回填匹配 */
     private String cleanType;
     /** 机台编码，仅用于日志定位，不参与回填匹配 */
     private String machineCode;
-    /** 回填原因：清洗成功 / 收尾未安排清洗 */
+    /** 回填原因：独立清洗 / 清洗与换模合并 / 收尾未安排清洗 */
     private String fillReason;
 }

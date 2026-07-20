@@ -7,6 +7,8 @@ import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
+import com.zlt.aps.lh.api.enums.TrialStatusEnum;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
@@ -140,6 +142,8 @@ public class LhCleaningScheduleService {
         }
         // 创建配对侧清洗窗口，时间、类型与原窗口一致，左右模按配对侧机台编码确定
         MachineCleaningWindowDTO pairedWindow = new MachineCleaningWindowDTO();
+        // 配对窗口继承来源计划主键，最终阶段按同一主键去重回填，不产生第二条停机计划更新。
+        pairedWindow.setSourcePlanId(cleaningWindow.getSourcePlanId());
         pairedWindow.setLhCode(pairMachineCode);
         pairedWindow.setCleanType(cleaningWindow.getCleanType());
         pairedWindow.setLeftRightMould(LeftRightMouldUtil.resolveCleaningLeftRightMould(pairMachineCode));
@@ -201,15 +205,19 @@ public class LhCleaningScheduleService {
                     LhScheduleTimeUtil.formatDateTime(cleanStartTime));
             return null;
         }
-        String machineMaterial = resolveMachineMaterial(context, cleaningPlan.getMachineCode());
+        LhMachineOnlineInfo machineOnlineInfo = resolveMachineOnlineInfo(context, cleaningPlan.getMachineCode());
+        String machineMaterial = Objects.isNull(machineOnlineInfo) ? null : machineOnlineInfo.getMaterialCode();
+        String productStatus = Objects.isNull(machineOnlineInfo) ? null : machineOnlineInfo.getProductStatus();
         // 清洗执行前先判断当前 SKU 是否 3 天内可收尾；命中时不再占用干冰/喷砂清洗名额。
-        if (isMachineEndingWithinThreeDays(context, cleaningPlan.getMachineCode(), cleanStartTime, machineMaterial)) {
+        if (isMachineEndingWithinThreeDays(context, cleaningPlan.getMachineCode(), cleanStartTime,
+                machineMaterial, productStatus)) {
             log.info("机台当前物料3天内可收尾，跳过清洗, 机台: {}, 物料: {}, 清洗类型: {}, 清洗时间: {}",
                     cleaningPlan.getMachineCode(),
                     StringUtils.isEmpty(machineMaterial) ? "N/A" : machineMaterial,
                     cleanType, LhScheduleTimeUtil.formatDateTime(cleanStartTime));
             // 因 SKU 收尾未安排清洗：回填写该 SKU 收尾日期（候选清洗开始日 + 剩余排产天数 N）
-            collectEndingSkipScheduleDateFill(context, cleaningPlan, cleanType, cleanStartTime, machineMaterial);
+            collectEndingSkipScheduleDateFill(context, cleaningPlan, cleanType, cleanStartTime,
+                    machineMaterial, productStatus);
             return null;
         }
         increaseDeviceStopCleaningUsage(context, dryIceDailyCountMap, dryIceMorningCountMap,
@@ -327,6 +335,7 @@ public class LhCleaningScheduleService {
                                                          Date cleanStartTime,
                                                          int cleanDurationHours) {
         MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setSourcePlanId(cleaningPlan.getId());
         cleaningWindow.setLhCode(cleaningPlan.getMachineCode());
         cleaningWindow.setCleanType(cleanType);
         // 单控机台按机台编码后缀确定左/右模，双模机台统一 LR
@@ -418,16 +427,18 @@ public class LhCleaningScheduleService {
      * @param cleanType       清洗类型
      * @param cleanStartTime  候选清洗开始时间
      * @param machineMaterial 机台当前在机物料
+     * @param productStatus 机台当前在机物料产品状态
      */
     private void collectEndingSkipScheduleDateFill(LhScheduleContext context,
                                                    MdmDevicePlanShut cleaningPlan,
                                                    String cleanType,
                                                    Date cleanStartTime,
-                                                   String machineMaterial) {
+                                                   String machineMaterial,
+                                                   String productStatus) {
         if (Objects.isNull(context) || Objects.isNull(cleaningPlan) || Objects.isNull(cleanStartTime)) {
             return;
         }
-        int remainingDays = resolveEndingRemainingDays(context, machineMaterial);
+        int remainingDays = resolveEndingRemainingDays(context, machineMaterial, productStatus);
         // isMachineEndingWithinThreeDays 命中时 remainingDays 必为 [0,3]，收尾日 = 候选清洗开始日 + 剩余天数
         Date endingDate = LhScheduleTimeUtil.addDays(LhScheduleTimeUtil.clearTime(cleanStartTime), remainingDays);
         collectCleaningScheduleDateFill(context, cleaningPlan, cleanType, endingDate, "收尾未安排清洗");
@@ -440,17 +451,19 @@ public class LhCleaningScheduleService {
      * @param machineCode 机台编码
      * @param cleanStartTime 清洗开始时间
      * @param machineMaterial 机台当前在机物料
+     * @param productStatus 机台当前在机物料产品状态
      * @return true-应跳过清洗；false-允许继续判断清洗纳入
      */
     private boolean isMachineEndingWithinThreeDays(LhScheduleContext context,
                                                    String machineCode,
                                                    Date cleanStartTime,
-                                                   String machineMaterial) {
+                                                   String machineMaterial,
+                                                   String productStatus) {
         if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)
                 || Objects.isNull(cleanStartTime) || StringUtils.isEmpty(machineMaterial)) {
             return false;
         }
-        int remainingDays = resolveEndingRemainingDays(context, machineMaterial);
+        int remainingDays = resolveEndingRemainingDays(context, machineMaterial, productStatus);
         return remainingDays >= 0 && remainingDays <= CLEANING_SKIP_ENDING_DAYS;
     }
 
@@ -1018,7 +1031,9 @@ public class LhCleaningScheduleService {
         if (StringUtils.isEmpty(machineMaterial)) {
             return false;
         }
-        int remainingDays = resolveEndingRemainingDays(context, machineMaterial);
+        LhMachineOnlineInfo machineOnlineInfo = resolveMachineOnlineInfo(context, cleaningPlan.getLhCode());
+        String productStatus = Objects.isNull(machineOnlineInfo) ? null : machineOnlineInfo.getProductStatus();
+        int remainingDays = resolveEndingRemainingDays(context, machineMaterial, productStatus);
         return remainingDays >= 0 && remainingDays <= threshold;
     }
 
@@ -1031,11 +1046,12 @@ public class LhCleaningScheduleService {
      *
      * @param context      排程上下文
      * @param materialCode 物料编码
+     * @param productStatus 产品状态；空状态按正规 S 处理
      * @return 剩余排产天数；-1 表示无法判定（无月计划/日产能为0等）
      * @author APS
      * @since 2026-05-09
      */
-    private int resolveEndingRemainingDays(LhScheduleContext context, String materialCode) {
+    private int resolveEndingRemainingDays(LhScheduleContext context, String materialCode, String productStatus) {
         if (context == null || StringUtils.isEmpty(materialCode)) {
             return -1;
         }
@@ -1043,9 +1059,13 @@ public class LhCleaningScheduleService {
         if (CollectionUtils.isEmpty(monthPlanList)) {
             return -1;
         }
+        String materialStatusKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                materialCode, normalizeProductStatus(productStatus));
         FactoryMonthPlanProductionFinalResult matchedPlan = null;
         for (FactoryMonthPlanProductionFinalResult plan : monthPlanList) {
-            if (plan != null && StringUtils.equals(materialCode, plan.getMaterialCode())) {
+            if (plan != null && StringUtils.equals(materialStatusKey,
+                    MonthPlanDateResolver.buildMaterialStatusKey(
+                            plan.getMaterialCode(), normalizeProductStatus(plan.getProductStatus())))) {
                 matchedPlan = plan;
                 break;
             }
@@ -1081,17 +1101,37 @@ public class LhCleaningScheduleService {
      * @since 2026-05-09
      */
     private String resolveMachineMaterial(LhScheduleContext context, String machineCode) {
-        if (context == null || StringUtils.isEmpty(machineCode)) {
-            return null;
-        }
-        Map<String, LhMachineOnlineInfo> onlineInfoMap = context.getMachineOnlineInfoMap();
-        if (CollectionUtils.isEmpty(onlineInfoMap)) {
-            return null;
-        }
-        LhMachineOnlineInfo onlineInfo = onlineInfoMap.get(machineCode);
-        if (onlineInfo == null || StringUtils.isEmpty(onlineInfo.getMaterialCode())) {
+        LhMachineOnlineInfo onlineInfo = resolveMachineOnlineInfo(context, machineCode);
+        if (Objects.isNull(onlineInfo) || StringUtils.isEmpty(onlineInfo.getMaterialCode())) {
             return null;
         }
         return onlineInfo.getMaterialCode();
+    }
+
+    /**
+     * 获取机台 MES 在机信息，供物料与产品状态使用同一条来源记录。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @return 在机信息；无匹配记录时返回 null
+     */
+    private LhMachineOnlineInfo resolveMachineOnlineInfo(LhScheduleContext context, String machineCode) {
+        if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)
+                || CollectionUtils.isEmpty(context.getMachineOnlineInfoMap())) {
+            return null;
+        }
+        return context.getMachineOnlineInfoMap().get(machineCode);
+    }
+
+    /**
+     * 统一产品状态口径：MES 或月计划产品状态为空时按正规 S 处理。
+     *
+     * @param productStatus 原产品状态
+     * @return 标准产品状态
+     */
+    private String normalizeProductStatus(String productStatus) {
+        String normalizedStatus = StringUtils.trimToEmpty(productStatus);
+        return StringUtils.isEmpty(normalizedStatus)
+                ? TrialStatusEnum.FORMAL.getCode() : normalizedStatus;
     }
 }

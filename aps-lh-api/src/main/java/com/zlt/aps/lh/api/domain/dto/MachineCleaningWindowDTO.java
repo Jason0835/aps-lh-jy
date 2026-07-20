@@ -12,6 +12,8 @@ import java.util.Date;
 @Data
 public class MachineCleaningWindowDTO {
 
+    /** 来源设备停机计划主键，用于最终处置阶段精确回填排程日期 */
+    private Long sourcePlanId;
     /** 机台编码 */
     private String lhCode;
     /** 清洗类型 */

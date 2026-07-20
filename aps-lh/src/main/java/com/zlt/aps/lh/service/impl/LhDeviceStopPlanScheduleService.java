@@ -350,15 +350,17 @@ public class LhDeviceStopPlanScheduleService {
         log.info("清洗排程日期回填开始，原始条数: {}, 去重后待回填条数: {}", fillList.size(), dedupMap.size());
         int updatedCount = 0;
         for (CleaningScheduleDateFillItem fillItem : dedupMap.values()) {
+            // 设备停机计划排程日期只保留业务自然日，所有清洗处置场景统一归零时分秒。
+            Date scheduleDate = LhScheduleTimeUtil.clearTime(fillItem.getScheduleDate());
             // 仅按主键更新 SCHEDULE_DATE，MyBatis-Plus updateById 默认不覆盖 null 字段
             MdmDevicePlanShut updateEntity = new MdmDevicePlanShut();
             updateEntity.setId(fillItem.getPlanId());
-            updateEntity.setScheduleDate(fillItem.getScheduleDate());
+            updateEntity.setScheduleDate(scheduleDate);
             mdmDevicePlanShutMapper.updateById(updateEntity);
             updatedCount++;
             log.info("清洗排程日期回填, 设备停机计划ID: {}, 机台: {}, 清洗类型: {}, 回填日期: {}, 原因: {}",
                     fillItem.getPlanId(), fillItem.getMachineCode(), fillItem.getCleanType(),
-                    LhScheduleTimeUtil.formatDateTime(fillItem.getScheduleDate()), fillItem.getFillReason());
+                    LhScheduleTimeUtil.formatDateTime(scheduleDate), fillItem.getFillReason());
         }
         log.info("清洗排程日期回填完成，实际更新记录数: {}", updatedCount);
         return updatedCount;
