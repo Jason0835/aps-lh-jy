@@ -1537,8 +1537,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * 加载设备停机计划。
      * <p>普通维修、精度等停机仍按排程窗口交集加载；干冰/喷砂清洗需要额外按计划开始时间加载
      * T 日及之后的未来候选，后续由清洗排程服务按班次和每日上限重新安排实际执行时间。
-     * 两类查询均只加载实际完成时间为空的记录；实际完成时间非空代表设备或 MES 已确认停机完成，
-     * 不得再参与产能扣减、机台阻断或清洗重排。</p>
+     * 两类查询均只加载排程日期为空的记录；排程日期非空代表该停机计划已被上一轮硫化排程回填、
+     * 已安排执行时间，滚动排程时不得再重复加载参与产能扣减、机台阻断或清洗重排。</p>
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
@@ -1546,7 +1546,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
      * @param endDate     结束日期
      */
     private void loadDevicePlanShut(LhScheduleContext context, String factoryCode, Date startDate, Date endDate) {
-        // 普通设备停机只加载与排程窗口相交且尚未实际完成的非清洗数据；
+        // 普通设备停机只加载与排程窗口相交且尚未回填排程日期的非清洗数据；
         // 干冰/喷砂必须由下方清洗专用查询按 T 日边界加载，避免 T-1 清洗混入后重复占用本次清洗名额。
         List<MdmDevicePlanShut> normalDevicePlanShutList = devicePlanShutMapper.selectList(
                 new LambdaQueryWrapper<MdmDevicePlanShut>()
@@ -1554,17 +1554,17 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .notIn(MdmDevicePlanShut::getMachineStopType, resolveCleaningStopTypeList())
                         .le(MdmDevicePlanShut::getBeginDate, endDate)
                         .ge(MdmDevicePlanShut::getEndDate, startDate)
-                        .isNull(MdmDevicePlanShut::getActualFinishDate)
+                        .isNull(MdmDevicePlanShut::getScheduleDate)
                         .eq(MdmDevicePlanShut::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         Date cleaningCandidateStartDate = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
-        // 清洗候选按 T 日及之后的计划开始时间单独加载，且排除已实际完成记录，允许未完成候选来源超出 T～T+2 排程窗口。
+        // 清洗候选按 T 日及之后的计划开始时间单独加载，且排除已回填排程日期记录，允许未安排候选来源超出 T～T+2 排程窗口。
         // 注意：本方法入参 startDate 是普通停机使用的 T-1 覆盖起点，清洗候选必须回到 T 日口径。
         List<MdmDevicePlanShut> futureCleaningPlanList = devicePlanShutMapper.selectList(
                 new LambdaQueryWrapper<MdmDevicePlanShut>()
                         .eq(MdmDevicePlanShut::getFactoryCode, factoryCode)
                         .ge(MdmDevicePlanShut::getBeginDate, cleaningCandidateStartDate)
                         .in(MdmDevicePlanShut::getMachineStopType, resolveCleaningStopTypeList())
-                        .isNull(MdmDevicePlanShut::getActualFinishDate)
+                        .isNull(MdmDevicePlanShut::getScheduleDate)
                         .eq(MdmDevicePlanShut::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         // 保留本次已加载的原始清洗候选快照。后续清洗排程会从普通停机列表剥离 07/08 数据，
         // 续作降模仍需按“已加载且计划开始时间不早于 T 日”的业务口径判断机台是否有清洗计划。
@@ -1574,7 +1574,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         List<MdmDevicePlanShut> devicePlanShutList = mergeDevicePlanShutList(
                 normalDevicePlanShutList, futureCleaningPlanList);
         context.setDevicePlanShutList(devicePlanShutList);
-        log.debug("设备停机计划加载完成（已过滤实际完成记录）, 数量: {}", context.getDevicePlanShutList().size());
+        log.debug("设备停机计划加载完成（已过滤已排程记录）, 数量: {}", context.getDevicePlanShutList().size());
     }
 
     /**

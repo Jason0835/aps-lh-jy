@@ -88,19 +88,6 @@ public class MdmDevicePlanShut extends BaseEntity {
     private Date endDate;
 
     /**
-     * 实际完成时间。
-     * <p>由设备或 MES 业务端在本次设备停机实际结束后回写；字段非空表示该停机计划已经
-     * 确认完成，硫化排程加载基础数据时不得再将其作为机台不可生产时间，避免已完成停机
-     * 重复扣减产能或重复阻断机台。</p>
-     */
-    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
-    @Excel(name = "ui.data.column.mdmDevicePlanShut.actualFinishDate", width = 30,
-            dateFormat = "yyyy-MM-dd HH:mm:ss")
-    @ApiModelProperty(value = "实际完成时间:yyyy-MM-dd HH:mm:ss", name = "actualFinishDate")
-    @TableField(value = "ACTUAL_FINISH_DATE")
-    private Date actualFinishDate;
-
-    /**
      * 排程日期（硫化排程回填给精度计划/清洗计划）
      */
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")

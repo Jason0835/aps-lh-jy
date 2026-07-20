@@ -188,9 +188,9 @@ class ScheduleDataWindowRegressionTest {
     }
 
     /**
-     * 实际完成时间不为空的设备停机、清洗候选和精度计划不得进入排程基础数据。
+     * 已排程（排程日期非空）的设备停机、清洗候选，以及实际完成时间非空的精度计划，不得进入排程基础数据。
      * <p>本用例直接调用三个基础数据查询入口，只验证 Mapper 条件，避免排程窗口回归中
-     * 其他基础数据的前置校验影响实际完成时间筛选的回归结果。</p>
+     * 其他基础数据的前置校验影响筛选口径的回归结果。</p>
      */
     @Test
     void loadBaseDataShouldFilterRecordsWithActualFinishDate() {
@@ -210,8 +210,8 @@ class ScheduleDataWindowRegressionTest {
 
         List<LambdaQueryWrapper<MdmDevicePlanShut>> devicePlanShutWrappers = captureDevicePlanShutWrappers();
         LambdaQueryWrapper<LhPrecisionPlan> precisionPlanWrapper = capturePrecisionPlanWrapper();
-        assertWrapperFiltersUnfinishedActualFinishDate(devicePlanShutWrappers.get(0));
-        assertWrapperFiltersUnfinishedActualFinishDate(devicePlanShutWrappers.get(1));
+        assertWrapperFiltersUnscheduled(devicePlanShutWrappers.get(0));
+        assertWrapperFiltersUnscheduled(devicePlanShutWrappers.get(1));
         assertWrapperFiltersUnfinishedActualFinishDate(precisionPlanWrapper);
         assertWrapperContainsColumn(precisionPlanWrapper, "completion_status");
         assertWrapperContainsValue(precisionPlanWrapper, "0");
@@ -239,8 +239,8 @@ class ScheduleDataWindowRegressionTest {
         assertWrapperExcludesCleaningTypes(normalStopWrapper);
         assertWrapperContainsValue(cleaningStopWrapper, MachineStopTypeEnum.DRY_ICE_CLEANING.getCode());
         assertWrapperContainsValue(cleaningStopWrapper, MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode());
-        assertWrapperFiltersUnfinishedActualFinishDate(normalStopWrapper);
-        assertWrapperFiltersUnfinishedActualFinishDate(cleaningStopWrapper);
+        assertWrapperFiltersUnscheduled(normalStopWrapper);
+        assertWrapperFiltersUnscheduled(cleaningStopWrapper);
     }
 
     @Test
@@ -838,6 +838,18 @@ class ScheduleDataWindowRegressionTest {
         String sqlSegment = wrapper.getSqlSegment().toLowerCase(Locale.ROOT);
         assertTrue(sqlSegment.contains("actual_finish_date"));
         assertTrue(sqlSegment.contains("actual_finish_date is null"));
+    }
+
+    /**
+     * 校验设备停机查询仅保留排程日期为空的待排程记录。
+     * <p>排程日期非空代表该停机计划已被上一轮硫化排程回填、已安排执行时间，滚动排程时不再重复加载。</p>
+     *
+     * @param wrapper 设备停机查询条件
+     */
+    private void assertWrapperFiltersUnscheduled(LambdaQueryWrapper<?> wrapper) {
+        String sqlSegment = wrapper.getSqlSegment().toLowerCase(Locale.ROOT);
+        assertTrue(sqlSegment.contains("schedule_date"));
+        assertTrue(sqlSegment.contains("schedule_date is null"));
     }
 
     /**
