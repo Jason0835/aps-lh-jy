@@ -7,11 +7,8 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
-import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
-import com.zlt.aps.lh.exception.ScheduleErrorCode;
-import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -67,6 +64,8 @@ public class StructureMinMachineRetentionService {
     private static final String RETAINED_FLAG = "1";
     /** 计划量0占位班次原因 */
     public static final String RETENTION_ANALYSIS = "结构最低机台数保留";
+    /** 最低机台数解析失败（配置或数据异常）时的跳过哨兵值 */
+    private static final int SKIP_MIN_MACHINE_COUNT = -1;
 
     @Resource
     private IEndingJudgmentStrategy endingJudgmentStrategy;
@@ -104,6 +103,10 @@ public class StructureMinMachineRetentionService {
             }
             List<SkuScheduleDTO> structureSnapshot = new ArrayList<SkuScheduleDTO>(structureSkuList);
             int minimumMachineCount = resolveMinimumMachineCount(context, structureName, structureSnapshot);
+            // 配置或数据异常返回SKIP哨兵时，不将该结构纳入最低机台保留规则，回退原排程逻辑
+            if (minimumMachineCount < 0) {
+                continue;
+            }
             eligibleStructureMap.put(structureName, structureSnapshot);
             minimumMachineMap.put(structureName, minimumMachineCount);
         }
@@ -162,22 +165,27 @@ public class StructureMinMachineRetentionService {
      * @param context 排程上下文
      * @param structureName 结构名称
      * @param structureSkuList 结构SKU快照
-     * @return 配置的最低硫化机台数
+     * @return 配置的最低硫化机台数；配置或数据异常时返回SKIP哨兵值{@link #SKIP_MIN_MACHINE_COUNT}，
+     *         由调用方安全跳过该结构，不中断整体排程
      */
     public int resolveMinimumMachineCount(LhScheduleContext context,
                                           String structureName,
                                           List<SkuScheduleDTO> structureSkuList) {
         SkuScheduleDTO firstSku = structureSkuList.get(0);
-        validateConsistentStructureConfig(context, structureName, structureSkuList, firstSku);
+        // 同结构SKU配置不一致时安全跳过，返回SKIP哨兵，不中断整体排程
+        if (!isConsistentStructureConfig(context, structureName, structureSkuList, firstSku)) {
+            return SKIP_MIN_MACHINE_COUNT;
+        }
         if (StringUtils.equals(CYCLE_STRUCTURE_TYPE, firstSku.getStructureType())) {
             return resolveCycleStructureMinimum(context, structureName, firstSku);
         }
         if (StringUtils.equals(REGULAR_STRUCTURE_TYPE, firstSku.getStructureType())) {
             return resolveRegularStructureMinimum(context, structureName);
         }
-        throwConfigException(context, structureName,
+        // STRUCTURE_TYPE为空或不支持时安全跳过该结构
+        warnConfigSkip(context, structureName,
                 "月计划STRUCTURE_TYPE为空或不支持，实际值=" + firstSku.getStructureType());
-        return 0;
+        return SKIP_MIN_MACHINE_COUNT;
     }
 
     /**
@@ -204,22 +212,26 @@ public class StructureMinMachineRetentionService {
      * @param structureName 结构名称
      * @param structureSkuList 结构SKU列表
      * @param firstSku 首个SKU
+     * @return true-配置一致可继续解析；false-配置异常需安全跳过
      */
-    private void validateConsistentStructureConfig(LhScheduleContext context,
-                                                   String structureName,
-                                                   List<SkuScheduleDTO> structureSkuList,
-                                                   SkuScheduleDTO firstSku) {
+    private boolean isConsistentStructureConfig(LhScheduleContext context,
+                                                String structureName,
+                                                List<SkuScheduleDTO> structureSkuList,
+                                                SkuScheduleDTO firstSku) {
         if (Objects.isNull(firstSku)) {
-            throwConfigException(context, structureName, "结构SKU为空，无法解析最低机台数");
+            warnConfigSkip(context, structureName, "结构SKU为空，无法解析最低机台数");
+            return false;
         }
         for (SkuScheduleDTO sku : structureSkuList) {
             if (Objects.isNull(sku)
                     || !StringUtils.equals(firstSku.getStructureType(), sku.getStructureType())
                     || !Objects.equals(firstSku.getMonthPlanYear(), sku.getMonthPlanYear())
                     || !Objects.equals(firstSku.getMonthPlanMonth(), sku.getMonthPlanMonth())) {
-                throwConfigException(context, structureName, "同结构SKU的STRUCTURE_TYPE或月计划年月不一致");
+                warnConfigSkip(context, structureName, "同结构SKU的STRUCTURE_TYPE或月计划年月不一致");
+                return false;
             }
         }
+        return true;
     }
 
     /**
@@ -234,7 +246,8 @@ public class StructureMinMachineRetentionService {
                                              String structureName,
                                              SkuScheduleDTO sku) {
         if (Objects.isNull(sku.getMonthPlanYear()) || Objects.isNull(sku.getMonthPlanMonth())) {
-            throwConfigException(context, structureName, "周期结构月计划年份或月份为空");
+            warnConfigSkip(context, structureName, "周期结构月计划年份或月份为空");
+            return SKIP_MIN_MACHINE_COUNT;
         }
         List<MdmMonCycleSchStruConf> configs = cycleStructureConfigMapper.selectList(
                 new LambdaQueryWrapper<MdmMonCycleSchStruConf>()
@@ -245,8 +258,9 @@ public class StructureMinMachineRetentionService {
                         .eq(MdmMonCycleSchStruConf::getSourceType, CYCLE_SOURCE_TYPE)
                         .eq(MdmMonCycleSchStruConf::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         if (CollectionUtils.isEmpty(configs) || configs.size() != 1) {
-            throwConfigException(context, structureName,
+            warnConfigSkip(context, structureName,
                     "周期结构最低机台配置应唯一，实际记录数=" + (CollectionUtils.isEmpty(configs) ? 0 : configs.size()));
+            return SKIP_MIN_MACHINE_COUNT;
         }
         Integer minimumMachineCount = configs.get(0).getMinVulcanizingMachine();
         return validateMinimumMachineCount(context, structureName, minimumMachineCount,
@@ -268,20 +282,23 @@ public class StructureMinMachineRetentionService {
                                 LhScheduleParamConstant.REGULAR_STRUCTURE_MIN_VULCANIZING_MACHINE)
                         .eq(FactoryParam::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         if (CollectionUtils.isEmpty(params) || params.size() != 1) {
-            throwConfigException(context, structureName,
+            warnConfigSkip(context, structureName,
                     "工厂参数SYS0204012应唯一，实际记录数=" + (CollectionUtils.isEmpty(params) ? 0 : params.size()));
+            return SKIP_MIN_MACHINE_COUNT;
         }
         String paramValue = StringUtils.trim(params.get(0).getParamValue());
         if (StringUtils.isEmpty(paramValue)) {
-            throwConfigException(context, structureName, "工厂参数SYS0204012的PARAM_VALUE为空");
+            warnConfigSkip(context, structureName, "工厂参数SYS0204012的PARAM_VALUE为空");
+            return SKIP_MIN_MACHINE_COUNT;
         }
         try {
             return validateMinimumMachineCount(context, structureName, Integer.valueOf(paramValue),
                     "T_MP_FACTORY_PARAM.SYS0204012");
         } catch (NumberFormatException e) {
-            throw new ScheduleException(ScheduleStepEnum.S4_3_ADJUST_AND_GATHER,
-                    ScheduleErrorCode.DATA_INCOMPLETE, context.getFactoryCode(), context.getBatchNo(),
-                    "结构[" + structureName + "]工厂参数SYS0204012格式错误，paramValue=" + paramValue, e);
+            // 工厂参数SYS0204012格式错误时安全跳过该结构，仅告警不中断排程
+            warnConfigSkip(context, structureName,
+                    "工厂参数SYS0204012格式错误，paramValue=" + paramValue);
+            return SKIP_MIN_MACHINE_COUNT;
         }
     }
 
@@ -299,8 +316,9 @@ public class StructureMinMachineRetentionService {
                                             Integer minimumMachineCount,
                                             String configSource) {
         if (Objects.isNull(minimumMachineCount) || minimumMachineCount < 0) {
-            throwConfigException(context, structureName,
+            warnConfigSkip(context, structureName,
                     configSource + "缺失或小于0，实际值=" + minimumMachineCount);
+            return SKIP_MIN_MACHINE_COUNT;
         }
         return minimumMachineCount;
     }
@@ -323,7 +341,10 @@ public class StructureMinMachineRetentionService {
         }
         Integer configuredMinimumMachineCount = context.getStructureMinVulcanizingMachineMap().get(structureName);
         if (Objects.isNull(configuredMinimumMachineCount)) {
-            throwConfigException(context, structureName, "已纳入规则但未初始化最低机台数");
+            // 未初始化最低机台数时安全跳过该结构最终保留，标记未命中并回退原排程逻辑
+            warnConfigSkip(context, structureName, "已纳入规则但未初始化最低机台数");
+            markStructureResults(structureResults, NOT_RETAINED_FLAG);
+            return;
         }
         int minimumMachineCount = configuredMinimumMachineCount;
         int latestShiftMachineCount = countLatestShiftPhysicalMachines(
@@ -336,8 +357,11 @@ public class StructureMinMachineRetentionService {
         }
         LhShiftConfigVO latestShift = resolveShift(context, latestPositiveShiftIndex);
         if (Objects.isNull(latestShift) || Objects.isNull(latestShift.getShiftEndDateTime())) {
-            throwConfigException(context, structureName,
+            // 最晚有量班次缺少结束时间时安全跳过占位与延迟释放，标记未命中
+            warnConfigSkip(context, structureName,
                     "最晚有量班次缺少结束时间，shiftIndex=" + latestPositiveShiftIndex);
+            markStructureResults(structureResults, NOT_RETAINED_FLAG);
+            return;
         }
         for (String machineCode : occupiedMachineCodes) {
             fillMachinePlaceholderShifts(context, structureName, structureResults,
@@ -378,16 +402,17 @@ public class StructureMinMachineRetentionService {
         for (int shiftIndex = machineLastPositiveShiftIndex + 1;
              shiftIndex <= latestPositiveShiftIndex; shiftIndex++) {
             if (hasPositiveMachinePlan(context, machineCode, shiftIndex)) {
-                throw new ScheduleException(ScheduleStepEnum.S4_4_CONTINUOUS_PRODUCTION,
-                        ScheduleErrorCode.RESULT_VALIDATION_FAILED,
-                        context.getFactoryCode(), context.getBatchNo(),
-                        "结构[" + structureName + "]保留机台[" + machineCode + "]班次[" + shiftIndex
-                                + "]已被其它有效排程占用，无法补计划量0占位");
+                // 班次已被其它有效排程占用时跳过该班占位，避免覆盖真实计划量
+                log.warn("结构[{}]保留机台[{}]班次[{}]已被其它有效排程占用，跳过计划量0占位：factoryCode={}, batchNo={}",
+                        structureName, machineCode, shiftIndex, context.getFactoryCode(), context.getBatchNo());
+                continue;
             }
             LhShiftConfigVO shift = resolveShift(context, shiftIndex);
             if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
                     || Objects.isNull(shift.getShiftEndDateTime())) {
-                throwConfigException(context, structureName, "占位班次缺少起止时间，shiftIndex=" + shiftIndex);
+                // 占位班次缺少起止时间时跳过该班占位
+                warnConfigSkip(context, structureName, "占位班次缺少起止时间，shiftIndex=" + shiftIndex);
+                continue;
             }
             Integer existingPlanQty = ShiftFieldUtil.getShiftPlanQty(carrierResult, shiftIndex);
             if (Objects.isNull(existingPlanQty)) {
@@ -516,7 +541,9 @@ public class StructureMinMachineRetentionService {
         Integer configuredMinimumMachineCount =
                 context.getStructureMinVulcanizingMachineMap().get(structureName);
         if (Objects.isNull(configuredMinimumMachineCount)) {
-            throwConfigException(context, structureName, "已纳入规则但未初始化最低机台数");
+            // 未初始化最低机台数时无法提前判断，保持本轮临时保护，结构完成后由最终逻辑安全跳过
+            warnConfigSkip(context, structureName, "已纳入规则但未初始化最低机台数");
+            return false;
         }
         int latestShiftMachineCount = countLatestShiftPhysicalMachines(
                 structureResults, latestPositiveShiftIndex);
@@ -696,15 +723,16 @@ public class StructureMinMachineRetentionService {
     }
 
     /**
-     * 抛出结构最低机台数配置异常，不提供静默默认值。
+     * 记录结构最低机台数配置异常并安全跳过，不抛异常中断整体排程。
+     *
+     * <p>配置或数据异常时该结构等价规则未命中，回退到原排程逻辑，仅通过告警日志保留可追溯性。</p>
      *
      * @param context 排程上下文
      * @param structureName 结构名称
      * @param reason 异常原因
      */
-    private void throwConfigException(LhScheduleContext context, String structureName, String reason) {
-        throw new ScheduleException(ScheduleStepEnum.S4_3_ADJUST_AND_GATHER,
-                ScheduleErrorCode.DATA_INCOMPLETE, context.getFactoryCode(), context.getBatchNo(),
-                "结构[" + structureName + "]最低硫化机台数配置异常：" + reason);
+    private void warnConfigSkip(LhScheduleContext context, String structureName, String reason) {
+        log.warn("结构[{}]最低硫化机台数配置异常，安全跳过最低机台保留（等价规则未命中）：factoryCode={}, batchNo={}, reason={}",
+                structureName, context.getFactoryCode(), context.getBatchNo(), reason);
     }
 }
