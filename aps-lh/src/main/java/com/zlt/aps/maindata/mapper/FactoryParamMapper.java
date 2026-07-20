@@ -1,4 +1,4 @@
-package com.zlt.aps.lh.mapper;
+package com.zlt.aps.maindata.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.zlt.aps.mp.api.domain.entity.FactoryParam;

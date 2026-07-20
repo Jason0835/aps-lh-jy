@@ -12,13 +12,13 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
-import com.zlt.aps.lh.mapper.FactoryParamMapper;
-import com.zlt.aps.lh.mapper.MdmMonCycleSchStruConfMapper;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
-import com.zlt.aps.mdm.api.domain.entity.MdmMonCycleSchStruConf;
+import com.zlt.aps.maindata.mapper.FactoryParamMapper;
+import com.zlt.aps.maindata.mapper.MdmMonCycleSchStruConfEntityMapper;
 import com.zlt.aps.mp.api.domain.entity.FactoryParam;
+import com.zlt.aps.mp.api.domain.entity.MdmMonCycleSchStruConf;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -71,7 +71,7 @@ public class StructureMinMachineRetentionService {
     @Resource
     private IEndingJudgmentStrategy endingJudgmentStrategy;
     @Resource
-    private MdmMonCycleSchStruConfMapper cycleStructureConfigMapper;
+    private MdmMonCycleSchStruConfEntityMapper cycleStructureConfigMapper;
     @Resource
     private FactoryParamMapper factoryParamMapper;
 

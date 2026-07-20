@@ -10,11 +10,11 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.context.EmbryoStockConsumeLedger;
-import com.zlt.aps.lh.mapper.FactoryParamMapper;
-import com.zlt.aps.lh.mapper.MdmMonCycleSchStruConfMapper;
+import com.zlt.aps.maindata.mapper.FactoryParamMapper;
+import com.zlt.aps.maindata.mapper.MdmMonCycleSchStruConfEntityMapper;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
-import com.zlt.aps.mdm.api.domain.entity.MdmMonCycleSchStruConf;
+import com.zlt.aps.mp.api.domain.entity.MdmMonCycleSchStruConf;
 import com.zlt.aps.mp.api.domain.entity.FactoryParam;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.Assertions;
@@ -57,7 +57,7 @@ public class StructureMinMachineRetentionServiceTest {
     /** 周期结构按分厂、年月、结构和来源类型01读取MIN_VULCANIZING_MACHINE。 */
     @Test
     public void shouldReadCycleStructureMinimumMachineCountFromLocalMapper() {
-        MdmMonCycleSchStruConfMapper cycleMapper = mock(MdmMonCycleSchStruConfMapper.class);
+        MdmMonCycleSchStruConfEntityMapper cycleMapper = mock(MdmMonCycleSchStruConfEntityMapper.class);
         MdmMonCycleSchStruConf config = new MdmMonCycleSchStruConf();
         config.setMinVulcanizingMachine(4);
         when(cycleMapper.selectList(any())).thenReturn(Arrays.asList(config));
@@ -400,7 +400,7 @@ public class StructureMinMachineRetentionServiceTest {
      */
     @SuppressWarnings("unchecked")
     private LambdaQueryWrapper<MdmMonCycleSchStruConf> captureCycleStructureConfigWrapper(
-            MdmMonCycleSchStruConfMapper cycleMapper) {
+            MdmMonCycleSchStruConfEntityMapper cycleMapper) {
         initializeTableInfo(MdmMonCycleSchStruConf.class);
         ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
         verify(cycleMapper).selectList(captor.capture());

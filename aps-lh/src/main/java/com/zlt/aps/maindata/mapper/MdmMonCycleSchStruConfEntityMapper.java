@@ -1,7 +1,7 @@
-package com.zlt.aps.lh.mapper;
+package com.zlt.aps.maindata.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
-import com.zlt.aps.mdm.api.domain.entity.MdmMonCycleSchStruConf;
+import com.zlt.aps.mp.api.domain.entity.MdmMonCycleSchStruConf;
 import org.apache.ibatis.annotations.Mapper;
 
 /**
@@ -12,5 +12,5 @@ import org.apache.ibatis.annotations.Mapper;
  * @author APS
  */
 @Mapper
-public interface MdmMonCycleSchStruConfMapper extends BaseMapper<MdmMonCycleSchStruConf> {
+public interface MdmMonCycleSchStruConfEntityMapper extends BaseMapper<MdmMonCycleSchStruConf> {
 }
