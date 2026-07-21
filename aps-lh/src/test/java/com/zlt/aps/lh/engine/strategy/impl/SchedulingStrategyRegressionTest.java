@@ -794,6 +794,63 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 非收尾多机台续作的中间业务日 dayN 为0时，dayN只能参与机台节奏判断，
+     * 已被后看规则判定为生产保留的机台仍应按日标准量排满真实有效产能。
+     */
+    @Test
+    public void shouldFillKeptContinuousMachinesWhenMiddleDayPlanIsZero() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        LocalDate middleProductionDate = resolveShiftWorkDate(shifts, 3);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 230, 0, 230);
+        SkuScheduleDTO sku = buildContinuousSku("3302001270", 16, 6670, quotaMap);
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 230, 0, 230);
+
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        String[] machineCodes = new String[]{"K1206", "K1315", "K1804", "K1810", "K1918"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult(
+                    sku.getMaterialCode(), machineCode, 16, shifts, "0");
+            result.setMouldSurplusQty(6670);
+            result.setStandardCapacity(46);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        int middleDayTotalPlanQty = 0;
+        Assertions.assertEquals(5, context.getScheduleResultList().size(),
+                "后看第三日230计划需要5台机台，所有续作机台都应继续保留");
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            Assertions.assertEquals(Integer.valueOf(16), result.getClass3PlanQty(),
+                    "中间零dayN业务日晚班仍应按真实班产排产: " + result.getLhMachineCode());
+            Assertions.assertEquals(Integer.valueOf(16), result.getClass4PlanQty(),
+                    "中间零dayN业务日早班仍应按真实班产排产: " + result.getLhMachineCode());
+            Assertions.assertEquals(Integer.valueOf(14), result.getClass5PlanQty(),
+                    "中班应承担日标准量46扣除晚班、早班后的剩余14条: " + result.getLhMachineCode());
+            middleDayTotalPlanQty += result.getClass3PlanQty()
+                    + result.getClass4PlanQty() + result.getClass5PlanQty();
+            Assertions.assertFalse(context.isContinuousStopHoldDate(
+                            result.getLhMachineCode(), middleProductionDate),
+                    "生产保留机台不得误登记为停产保机: " + result.getLhMachineCode());
+            Assertions.assertFalse(context.getReleasedContinuousMachineCodeSet().contains(
+                            result.getLhMachineCode()),
+                    "生产保留机台不得误登记为续作释放机台: " + result.getLhMachineCode());
+        }
+        Assertions.assertEquals(230, middleDayTotalPlanQty,
+                "5台机台在中间零dayN业务日应按日标准量46合计排产230条");
+    }
+
+    /**
      * 续作日计划恒定且 dayN 需要两台机台时，不得因首日完成量扣减或后续追补需求为0误降到一台。
      */
     @Test

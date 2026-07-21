@@ -6096,9 +6096,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 && !policy.isStrictUpperLimit()
                 && !CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap());
         int remainingDemandQty = Math.max(0, demandQty);
-        for (LhScheduleResult result : keptResults) {
+        for (int resultIndex = 0; resultIndex < keptResults.size(); resultIndex++) {
+            LhScheduleResult result = keptResults.get(resultIndex);
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, ShiftFieldUtil.resolveScheduledQty(result)));
-            int allocation = fillKeptMachineCapacity ? machineCapacity : Math.min(remainingDemandQty, machineCapacity);
+            int allocation = resolveKeptContinuationAllocation(
+                    fillKeptMachineCapacity, false, demandQty, remainingDemandQty,
+                    machineCapacity, keptResults.size() - resultIndex);
             redistributeShiftQty(context, result, shifts, allocation);
             if (ending && policy.isStrictUpperLimit()) {
                 capResultShiftQtyToTarget(context, result, shifts, allocation);
@@ -6127,6 +6130,44 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 joinMachineCodes(removedResults), formatContinuationMachineDetails(context, sourceSku, skuResults, capacityMap),
                 formatContinuationMachineDetails(context, sourceSku, keptResults, capacityMap),
                 formatContinuationMachineDetails(context, sourceSku, removedResults, capacityMap), demandQty);
+    }
+
+    /**
+     * 解析续作生产保留机台的实际分配量。
+     * <p>dayN 只参与续作增机台、降模和停产保机决策。机台已经被判定为生产保留机台后，
+     * 非收尾、非严格目标 SKU 应按清洗、停机、保养等损失扣减后的真实有效产能排产，
+     * 不能再被当日 dayN 剩余量截断。严格目标场景继续按当日有效目标量控制，避免超排。</p>
+     *
+     * @param fillKeptMachineCapacity true-非收尾生产保留机台按有效产能排满
+     * @param keepAllActiveMachinesForCurrentDay true-T 日全部在线机台保护场景需均衡分配严格目标
+     * @param effectiveDemandQty 当日生效目标量
+     * @param remainingDemandQty 当前尚未分配的目标量
+     * @param machineCapacity 当前机台真实有效产能
+     * @param remainingMachineCount 当前机台及后续待分配机台数量
+     * @return 当前机台实际分配量
+     */
+    private int resolveKeptContinuationAllocation(boolean fillKeptMachineCapacity,
+                                                   boolean keepAllActiveMachinesForCurrentDay,
+                                                   int effectiveDemandQty,
+                                                   int remainingDemandQty,
+                                                   int machineCapacity,
+                                                   int remainingMachineCount) {
+        int safeMachineCapacity = Math.max(0, machineCapacity);
+        if (fillKeptMachineCapacity) {
+            // 非收尾保留机台以硫化余量和真实有效产能为实际消费口径，dayN 不再截断排量。
+            return safeMachineCapacity;
+        }
+        if (effectiveDemandQty <= 0) {
+            return 0;
+        }
+        int safeRemainingDemandQty = Math.max(0, remainingDemandQty);
+        if (keepAllActiveMachinesForCurrentDay && remainingMachineCount > 0) {
+            // 严格目标场景在全部受保护机台间均衡分配，避免后序在线机台被分配为零。
+            int averageAllocation = (safeRemainingDemandQty + remainingMachineCount - 1)
+                    / remainingMachineCount;
+            return Math.min(safeRemainingDemandQty, Math.min(safeMachineCapacity, averageAllocation));
+        }
+        return Math.min(safeRemainingDemandQty, safeMachineCapacity);
     }
 
     /**
@@ -6325,23 +6366,20 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             // 前一日保机、当前日计划恢复时先解除保机硬占用，再按原续作机台直接恢复班次排产。
             context.markContinuousStopHoldMachineProductionResumed(result.getLhMachineCode());
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
-            int allocation;
-            if (effectiveDemandQty <= 0) {
-                allocation = 0;
-            } else if (fillKeptMachineCapacity) {
-                // 非收尾续作沿用项目既有满产规则：保留机台按清洗、停机、保养等损失扣减后的有效产能排满。
-                // T 日计划量相等保护只限制降模，不得覆盖该规则将满班产能压缩为当日需求均分量。
-                allocation = machineCapacity;
-            } else if (keepAllActiveMachinesForCurrentDay) {
-                // 严格收尾场景不能超出目标量，将当日既有需求在全部受保护机台间均衡分配，避免后序机台为零而被收口释放。
-                int remainingMachineCount = keptResults.size() - resultIndex;
-                int averageAllocation = (remainingDemandQty + remainingMachineCount - 1) / remainingMachineCount;
-                allocation = Math.min(remainingDemandQty, Math.min(machineCapacity, averageAllocation));
-            } else {
-                allocation = Math.min(remainingDemandQty, machineCapacity);
-            }
+            int allocation = resolveKeptContinuationAllocation(
+                    fillKeptMachineCapacity, keepAllActiveMachinesForCurrentDay,
+                    effectiveDemandQty, remainingDemandQty, machineCapacity,
+                    keptResults.size() - resultIndex);
             redistributeShiftQty(context, result, dayShifts, allocation);
             remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
+            if (fillKeptMachineCapacity && effectiveDemandQty <= 0 && allocation > 0) {
+                log.info("续作非收尾零dayN保留机台继续满产, 日期: {}, materialCode: {}, machineCode: {}, "
+                                + "dayN需求量: {}, 当日生效目标量: {}, 机台真实有效产能: {}, 实际分配量: {}, "
+                                + "硫化余量: {}, 是否收尾: {}, 原因: dayN只参与机台节奏决策，不截断非收尾实际排量",
+                        productionDate, sourceSku.getMaterialCode(), result.getLhMachineCode(), demandQty,
+                        effectiveDemandQty, machineCapacity, allocation, Math.max(0, sourceSku.getSurplusQty()),
+                        ending);
+            }
             log.info("续作多机台保留机台排量, materialCode: {}, 日期: {}, machineCode: {}, allocation: {}, "
                             + "machineCapacity: {}, 是否补满班产: {}, 是否T日全机台保护分配: {}, 当日生效目标量: {}, "
                             + "剩余窗口目标量: {}, 是否收尾: {}",
