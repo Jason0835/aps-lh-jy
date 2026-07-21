@@ -8,6 +8,7 @@ import com.zlt.aps.lh.engine.observer.ScheduleEvent;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
 import com.zlt.aps.lh.engine.observer.listeners.PrecisionPlanScheduleDateFillListener;
 import com.zlt.aps.lh.service.ILhPrecisionPlanService;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -16,6 +17,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -57,7 +59,10 @@ class PrecisionPlanScheduleDateFillListenerTest {
         LhScheduleContext context = new LhScheduleContext();
         context.setBatchNo("LHPC20260507001");
         context.setFactoryCode("116");
-        Date maintenanceStartTime = new Date();
+        context.setScheduleDate(dateTime(2026, 5, 7, 0, 0));
+        // 精度计划实际安排到T+1日08:00，回填必须写T+1自然日00:00:00。
+        Date maintenanceStartTime = dateTime(2026, 5, 8, 8, 0);
+        Date expectedScheduleDate = LhScheduleTimeUtil.clearTime(maintenanceStartTime);
 
         MachineScheduleDTO m1 = new MachineScheduleDTO();
         m1.setMachineCode("M1");
@@ -88,11 +93,11 @@ class PrecisionPlanScheduleDateFillListenerTest {
         assertEquals(101L, fillList.get(0).get("precisionPlanId"));
         assertEquals("M1", fillList.get(0).get("machineCode"));
         assertEquals("116", fillList.get(0).get("factoryCode"));
-        assertEquals(maintenanceStartTime, fillList.get(0).get("scheduleDate"));
+        assertEquals(expectedScheduleDate, fillList.get(0).get("scheduleDate"));
         assertEquals(102L, fillList.get(1).get("precisionPlanId"));
         assertEquals("M2", fillList.get(1).get("machineCode"));
         assertEquals("116", fillList.get(1).get("factoryCode"));
-        assertEquals(maintenanceStartTime, fillList.get(1).get("scheduleDate"));
+        assertEquals(expectedScheduleDate, fillList.get(1).get("scheduleDate"));
     }
 
     @Test
@@ -168,5 +173,22 @@ class PrecisionPlanScheduleDateFillListenerTest {
         window.setMaintenanceStartTime(maintenanceStartTime);
         window.setMaintenanceEndTime(new Date(maintenanceStartTime.getTime() + 7 * 60 * 60 * 1000L));
         return window;
+    }
+
+    /**
+     * 构造固定测试时间。
+     *
+     * @param year 年
+     * @param month 月
+     * @param day 日
+     * @param hour 时
+     * @param minute 分
+     * @return 固定时间
+     */
+    private Date dateTime(int year, int month, int day, int hour, int minute) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(year, month - 1, day, hour, minute, 0);
+        calendar.set(Calendar.MILLISECOND, 0);
+        return calendar.getTime();
     }
 }

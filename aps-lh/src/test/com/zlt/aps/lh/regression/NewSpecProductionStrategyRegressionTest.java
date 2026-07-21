@@ -34,6 +34,7 @@ import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
 import com.zlt.aps.lh.engine.strategy.support.PendingSkuUnscheduledRule;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
+import com.zlt.aps.lh.handler.ResultValidationHandler;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -1418,7 +1419,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void scheduleNewSpecs_shouldUseMaintenanceOverlapSwitchHoursAndInspection() throws Exception {
+    void scheduleNewSpecs_shouldRunRegularMouldChangeAndPrecisionPlanInParallel() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, true);
 
@@ -1451,20 +1452,33 @@ class NewSpecProductionStrategyRegressionTest {
         sku.setTargetScheduleQty(8);
         sku.setShiftCapacity(8);
         context.getNewSpecSkuList().add(sku);
+        // 补齐真实新增换模必须具备的可用模具，避免用例在时间轴断言前被模具硬资源校验拦截。
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-MAT-MAINTENANCE");
 
         strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
                 new DefaultMouldChangeBalanceStrategy(),
                 new com.zlt.aps.lh.engine.strategy.impl.DefaultFirstInspectionBalanceStrategy(),
                 new DefaultCapacityCalculateStrategy());
+        // 生产链最终校验阶段负责将班次展示起点对齐到保养及预热恢复时间，并绑定组合原因。
+        ReflectionTestUtils.invokeMethod(
+                new ResultValidationHandler(), "bindMaintenanceWindowsToFinalResults", context);
 
         assertEquals(1, context.getScheduleResultList().size(), "维保与换模重叠时应正常生成新增排产结果");
         LhScheduleResult result = context.getScheduleResultList().get(0);
-        assertEquals(dateTime(2026, 4, 22, 15, 0), result.getMouldChangeStartTime(),
-                "维保重叠时，实际换模开始时间应从维保结束时刻起算");
+        assertEquals(dateTime(2026, 4, 22, 8, 0), result.getMouldChangeStartTime(),
+                "前序SKU在08:00前结束时，正规换模应与精度计划同时开始");
         int firstPlannedShiftIndex = resolveFirstPlannedShiftIndex(result);
         assertEquals(2, firstPlannedShiftIndex, "维保重叠后的首个排产班次应落在当日中班");
-        assertEquals(dateTime(2026, 4, 22, 20, 0), ShiftFieldUtil.getShiftStartTime(result, firstPlannedShiftIndex),
-                "维保与换模重叠时，开产时间应为15:00+4小时换模+1小时首检");
+        assertEquals(dateTime(2026, 4, 22, 17, 30),
+                ShiftFieldUtil.getShiftStartTime(result, firstPlannedShiftIndex),
+                "换模08:00～16:00、精度计划及预热08:00～17:30并行时，应在17:30恢复生产");
+        assertEquals("换模+精度计划", ShiftFieldUtil.getShiftAnalysis(result, firstPlannedShiftIndex),
+                "正规换模与精度计划重叠时仅允许写组合原因");
+        assertTrue(context.getScheduleLogList().stream()
+                        .anyMatch(item -> "换模+精度计划并行时间轴".equals(item.getTitle())
+                                && item.getLogDetail().contains("换模开始=2026-04-22 08:00:00")
+                                && item.getLogDetail().contains("精度及预热完成=2026-04-22 17:30:00")),
+                "并行时间轴必须写入可按批次、机台、物料和关键时间对账的过程日志");
     }
 
     @Test

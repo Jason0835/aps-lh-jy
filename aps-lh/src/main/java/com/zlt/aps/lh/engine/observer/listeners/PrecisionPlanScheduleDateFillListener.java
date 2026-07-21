@@ -22,7 +22,7 @@ import java.util.Objects;
 /**
  * 精度计划排程日期回填监听器。
  *
- * <p>监听硫化排程完成事件，直接遍历本次实际挂载的保养窗口，按计划主键回填最终保养开始时间。
+ * <p>监听硫化排程完成事件，直接遍历本次实际挂载的保养窗口，按计划主键回填实际安排的自然日。
  * 即使保养后没有后续 SKU，也不会因为排程结果为空而漏掉已经安排的精准计划。</p>
  *
  * @author APS
@@ -93,7 +93,9 @@ public class PrecisionPlanScheduleDateFillListener implements IScheduleEventList
                     fillMap.put(KEY_PRECISION_PLAN_ID, window.getPrecisionPlanId());
                     fillMap.put(KEY_MACHINE_CODE, machine.getMachineCode());
                     fillMap.put(KEY_FACTORY_CODE, context.getFactoryCode());
-                    fillMap.put(KEY_SCHEDULE_DATE, window.getMaintenanceStartTime());
+                    // 精度计划表只记录实际安排的自然日；窗口仍保留08:00等真实时刻供排程时间轴使用。
+                    fillMap.put(KEY_SCHEDULE_DATE,
+                            LhScheduleTimeUtil.clearTime(window.getMaintenanceStartTime()));
                     distinctMap.put(window.getPrecisionPlanId(), fillMap);
                 }
             }

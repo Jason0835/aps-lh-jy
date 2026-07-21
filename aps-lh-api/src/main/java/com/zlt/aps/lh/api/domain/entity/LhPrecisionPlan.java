@@ -19,9 +19,9 @@ import java.util.Date;
  *
  * 业务规则：
  * 1. 每台启用硫化机每个自然年度应维护1条精准计划；计划缺失或重复时APS只告警，不自动生成。
- * 2. APS仅加载当年未完成且实际保养日期为空的计划参与排程，实际完成状态仍由MES/设备侧维护。
+ * 2. APS运行态仅加载当年计划日期不早于T日、排程日期为空、未完成且实际保养日期为空的计划。
  * 3. 保养默认固定在候选日08:00开始、持续7小时，保养后还需计入胶囊预热时间。
- * 4. APS成功排程后只回填SCHEDULE_DATE，表示最新建议安排时间，不代表保养实际完成。
+ * 4. APS成功排程后只回填SCHEDULE_DATE自然日，表示实际安排日期，不代表保养实际完成。
  *
  * @author APS Team
  */
@@ -65,13 +65,14 @@ public class LhPrecisionPlan extends BaseEntity implements Serializable {
     private Date actualDate;
 
     /**
-     * APS 最终安排的保养开始时间。
-     * <p>该字段只表示排程建议时间，不代表设备已经实际完成保养；实际执行日期和完成状态仍由
+     * APS 实际安排的保养自然日。
+     * <p>该字段表示APS本次实际安排的自然日，不代表设备已经实际完成保养；实际执行日期和完成状态仍由
      * MES/设备业务侧回写 {@link #actualDate}、{@link #completionStatus}。</p>
      */
-    @Excel(name = "ui.data.column.lhPrecisionPlan.scheduleDate", dateFormat = "yyyy-MM-dd HH:mm:ss")
-    @ApiModelProperty(value = "APS安排的保养开始时间")
-    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @Excel(name = "ui.data.column.lhPrecisionPlan.scheduleDate", dateFormat = "yyyy-MM-dd")
+    @ApiModelProperty(value = "APS安排的保养日期")
+    @JsonFormat(pattern = "yyyy-MM-dd")
+    @DateTimeFormat(pattern = "yyyy-MM-dd")
     @TableField("SCHEDULE_DATE")
     private Date scheduleDate;
 

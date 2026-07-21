@@ -276,8 +276,10 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                         machine.getMachineCode());
                 continue;
             }
+            int mouldChangeHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
             boolean bound = ResultDowntimeSummaryUtil.bindMaintenanceSummaryAndAnalysis(
-                    bindingResult, machine.getMaintenanceWindowList(), context.getScheduleWindowShifts());
+                    bindingResult, machine.getMaintenanceWindowList(), context.getScheduleWindowShifts(),
+                    mouldChangeHours);
             if (!bound) {
                 log.info("精度计划已安排但保养结束时间尚未进入当前排程班次窗口，"
                                 + "本批不绑定结果摘要和班次原因，保留过程日志及计划日期回填, "
@@ -286,11 +288,19 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                                 resolveMaintenanceResumeTime(machine.getMaintenanceWindowList())));
                 continue;
             }
-            log.info("精度计划班次原因绑定完成, machineCode: {}, materialCode: {}, maintenanceStart: {}, "
-                            + "maintenanceEnd: {}, analysis: 精度计划",
+            String maintenanceAnalysis = ResultDowntimeSummaryUtil.resolveMaintenanceAnalysis(
+                    bindingResult, machine.getMaintenanceWindowList(), mouldChangeHours);
+            log.info("精度计划班次原因绑定完成, batchNo: {}, scheduleDate: {}, machineCode: {}, "
+                            + "materialCode: {}, mouldChangeStart: {}, maintenanceStart: {}, maintenanceEnd: {}, "
+                            + "maintenanceResumeTime: {}, analysis: {}",
+                    context.getBatchNo(), LhScheduleTimeUtil.formatDate(context.getScheduleTargetDate()),
                     machine.getMachineCode(), bindingResult.getMaterialCode(),
+                    LhScheduleTimeUtil.formatDateTime(bindingResult.getMouldChangeStartTime()),
                     LhScheduleTimeUtil.formatDateTime(bindingResult.getMaintenanceStartTime()),
-                    LhScheduleTimeUtil.formatDateTime(bindingResult.getMaintenanceEndTime()));
+                    LhScheduleTimeUtil.formatDateTime(bindingResult.getMaintenanceEndTime()),
+                    LhScheduleTimeUtil.formatDateTime(
+                            resolveMaintenanceResumeTime(machine.getMaintenanceWindowList())),
+                    maintenanceAnalysis);
         }
     }
 

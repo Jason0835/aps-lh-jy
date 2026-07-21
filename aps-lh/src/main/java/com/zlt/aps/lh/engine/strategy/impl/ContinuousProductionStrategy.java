@@ -17,6 +17,7 @@ import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
@@ -7469,15 +7470,21 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                        Date endingTime) {
         Date machineReadyTime = getCapacityCalculateStrategy().calculateStartTime(
                 context, machine.getMachineCode(), endingTime);
-        boolean maintenanceOverlapSwitch = getMaintenanceScheduleService()
-                .shouldApplyMaintenanceOverlapSwitchRule(context, machine, endingTime);
+        int switchDurationHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+        boolean trialConstructionStage = StringUtils.equals(
+                ConstructionStageEnum.TRIAL.getCode(), specifySku.getConstructionStage());
+        boolean maintenanceOverlapSwitch = !trialConstructionStage
+                && getMaintenanceScheduleService().shouldParallelMouldChangeWithMaintenance(
+                context, machine, endingTime, switchDurationHours);
+        boolean trialMaintenanceOverlap = trialConstructionStage
+                && getMaintenanceScheduleService().isNormalSwitchOverlapMaintenance(
+                context, machine, endingTime, switchDurationHours);
+        // 试制SKU实际落地前会清除重叠精度窗口，预判时使用原机台结束时间模拟早班换模，且不修改运行态。
         Date switchReadyTime = maintenanceOverlapSwitch
-                ? getMaintenanceScheduleService().resolveMaintenanceEndTime(context, machine)
-                : machineReadyTime;
+                ? getMaintenanceScheduleService().resolveParallelMouldChangeStartTime(
+                context, machine, endingTime, switchDurationHours)
+                : trialMaintenanceOverlap ? endingTime : machineReadyTime;
         switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
-        int switchDurationHours = maintenanceOverlapSwitch
-                ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
-                : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
         // 定点物料预演继续携带真实切换时长、SKU和动作类型，保留换模均衡、试制及次数限制语义；
         // 默认实现内部仅对05维修放开并行，其他停机仍按原规则顺延。
         Date mouldChangeStartTime = getMouldChangeBalanceStrategy().allocateMouldChange(
@@ -7495,14 +7502,24 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         Date inspectionTime = null;
         try {
             Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
+            maintenanceOverlapSwitch = !trialConstructionStage
+                    && getMaintenanceScheduleService().hasMouldChangeMaintenanceOverlap(
+                    context, machine, mouldChangeStartTime, mouldChangeCompleteTime);
+            Date maintenanceReadyTime = maintenanceOverlapSwitch
+                    ? getMaintenanceScheduleService().resolveParallelMouldChangeReadyTime(
+                    context, machine, mouldChangeStartTime, mouldChangeCompleteTime)
+                    : mouldChangeCompleteTime;
             boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
                     context, context.getDevicePlanShutList(), machine.getMachineCode(), endingTime,
                     mouldChangeStartTime, mouldChangeCompleteTime);
-            Date firstInspectionBaseTime = plannedRepairAffectingSwitch
-                    ? ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
+            Date plannedRepairReadyTime = ShiftCapacityResolverUtil.resolvePlannedRepairProductionReadyTime(
                     context, context.getDevicePlanShutList(), machine.getMachineCode(), endingTime,
-                    mouldChangeStartTime, mouldChangeCompleteTime)
-                    : mouldChangeCompleteTime;
+                    mouldChangeStartTime, mouldChangeCompleteTime);
+            Date firstInspectionBaseTime = maintenanceReadyTime;
+            if (plannedRepairAffectingSwitch && Objects.nonNull(plannedRepairReadyTime)
+                    && plannedRepairReadyTime.after(firstInspectionBaseTime)) {
+                firstInspectionBaseTime = plannedRepairReadyTime;
+            }
             inspectionTime = getFirstInspectionBalanceStrategy().allocateInspection(
                     context, machine.getMachineCode(), firstInspectionBaseTime);
             if (inspectionTime == null) {
@@ -7512,7 +7529,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             }
             Date productionStartTime = plannedRepairAffectingSwitch
                     ? firstInspectionBaseTime : maintenanceOverlapSwitch
-                    ? LhScheduleTimeUtil.addHours(inspectionTime, LhScheduleTimeUtil.getFirstInspectionHours(context))
+                    ? firstInspectionBaseTime
                     : inspectionTime;
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
             int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(

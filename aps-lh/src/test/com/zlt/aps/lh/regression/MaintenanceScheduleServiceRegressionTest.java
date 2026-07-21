@@ -188,6 +188,34 @@ class MaintenanceScheduleServiceRegressionTest {
     }
 
     @Test
+    void tryAttachMaintenanceAfterFirstEnding_shouldUseDaysToDueInsteadOfDueDateDifference() {
+        LhScheduleContext context = buildContext(date(2026, 4, 20));
+        context.getMaintenancePlanMap().put(
+                "K2025", buildPrecisionPlan("K2025", date(2026, 12, 31), 20));
+        MachineScheduleDTO machine = buildMachine("K2025");
+
+        boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
+                context, machine, dateTime(2026, 4, 20, 7, 0));
+
+        assertTrue(scheduled, "即使到期日期与T日相差超过30天，也必须直接按daysToDue=20进入预警范围");
+        assertEquals(1, machine.getMaintenanceWindowList().size());
+    }
+
+    @Test
+    void tryAttachMaintenanceAfterFirstEnding_shouldNotReplaceDaysToDueWithDueDateDifference() {
+        LhScheduleContext context = buildContext(date(2026, 4, 20));
+        context.getMaintenancePlanMap().put(
+                "K2025", buildPrecisionPlan("K2025", date(2026, 4, 21), 31));
+        MachineScheduleDTO machine = buildMachine("K2025");
+
+        boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
+                context, machine, dateTime(2026, 4, 20, 7, 0));
+
+        assertFalse(scheduled, "即使到期日期距T日仅1天，也必须直接按daysToDue=31判定未进入预警范围");
+        assertTrue(machine.getMaintenanceWindowList().isEmpty());
+    }
+
+    @Test
     void tryAttachMaintenanceAfterFirstEnding_shouldCreateWindowWhenMachineHasNoRecentOnlineRecord() {
         LhScheduleContext context = buildContext(date(2026, 5, 3));
         context.getMaintenancePlanMap().put("K1105", buildPrecisionPlan("K1105", null, 5));
@@ -378,6 +406,41 @@ class MaintenanceScheduleServiceRegressionTest {
         assertFalse(service.shouldApplyMaintenanceOverlapSwitchRule(
                 context, machine, dateTime(2026, 4, 20, 15, 0)),
                 "保养结束边界不再属于保养物理重叠区间");
+    }
+
+    /**
+     * 正规换模与精度计划重叠时必须从精度计划开始点并行，恢复时间取两个任务的最大结束时间。
+     */
+    @Test
+    void resolveParallelMouldChangeReadyTime_shouldTakeMaximumEndTime() {
+        LhScheduleContext context = buildContext(date(2026, 4, 20));
+        MachineScheduleDTO machine = buildMachine("K1001");
+        MachineMaintenanceWindowDTO window = new MachineMaintenanceWindowDTO();
+        window.setMachineCode("K1001");
+        window.setMaintenanceStartTime(dateTime(2026, 4, 20, 8, 0));
+        window.setMaintenanceEndTime(dateTime(2026, 4, 20, 15, 0));
+        window.setProductionResumeTime(dateTime(2026, 4, 20, 17, 30));
+        machine.getMaintenanceWindowList().add(window);
+
+        Date nightCandidateParallelStartTime = service.resolveParallelMouldChangeStartTime(
+                context, machine, dateTime(2026, 4, 20, 0, 0), 8);
+        Date parallelStartTime = service.resolveParallelMouldChangeStartTime(
+                context, machine, dateTime(2026, 4, 20, 6, 0), 8);
+        Date normalMouldChangeEndTime = LhScheduleTimeUtil.addHours(parallelStartTime, 8);
+        Date maintenanceLongerReadyTime = service.resolveParallelMouldChangeReadyTime(
+                context, machine, parallelStartTime, normalMouldChangeEndTime);
+        Date longMouldChangeEndTime = LhScheduleTimeUtil.addHours(parallelStartTime, 10);
+        Date mouldChangeLongerReadyTime = service.resolveParallelMouldChangeReadyTime(
+                context, machine, parallelStartTime, longMouldChangeEndTime);
+
+        assertEquals(dateTime(2026, 4, 20, 8, 0), nightCandidateParallelStartTime,
+                "晚班候选必须先对齐到允许换模的早班，再与精度计划并行");
+        assertEquals(dateTime(2026, 4, 20, 8, 0), parallelStartTime,
+                "前序SKU在08:00前结束时，正规换模应与精度计划同时开始");
+        assertEquals(dateTime(2026, 4, 20, 17, 30), maintenanceLongerReadyTime,
+                "默认8小时换模短于7小时保养加2.5小时预热，必须17:30恢复生产");
+        assertEquals(dateTime(2026, 4, 20, 18, 0), mouldChangeLongerReadyTime,
+                "换模时长更长时必须取换模结束时间");
     }
 
     private static LhScheduleContext buildContext(Date scheduleDate) {

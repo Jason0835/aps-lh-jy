@@ -188,12 +188,13 @@ class ScheduleDataWindowRegressionTest {
     }
 
     /**
-     * 已排程（排程日期非空）的设备停机、清洗候选，以及实际完成时间非空的精度计划，不得进入排程基础数据。
+     * 已排程（排程日期非空）的设备停机、清洗候选，以及早于T日、已排程或已完成的精度计划，
+     * 不得进入排程运行态基础数据；年度完整性审计仍保留全年原始查询口径。
      * <p>本用例直接调用三个基础数据查询入口，只验证 Mapper 条件，避免排程窗口回归中
      * 其他基础数据的前置校验影响筛选口径的回归结果。</p>
      */
     @Test
-    void loadBaseDataShouldFilterRecordsWithActualFinishDate() {
+    void loadBaseDataShouldSeparateAnnualAuditAndRuntimePrecisionPlanQuery() {
         String factoryCode = "FC01";
         Date scheduleDate = date(2026, 4, 2);
         Date windowEndDate = LhScheduleTimeUtil.addDays(scheduleDate, LhScheduleConstant.SCHEDULE_DAYS);
@@ -209,12 +210,19 @@ class ScheduleDataWindowRegressionTest {
         ReflectionTestUtils.invokeMethod(lhBaseDataService, "loadMaintenancePlan", context, factoryCode);
 
         List<LambdaQueryWrapper<MdmDevicePlanShut>> devicePlanShutWrappers = captureDevicePlanShutWrappers();
-        LambdaQueryWrapper<LhPrecisionPlan> precisionPlanWrapper = capturePrecisionPlanWrapper();
+        List<LambdaQueryWrapper<LhPrecisionPlan>> precisionPlanWrappers = capturePrecisionPlanWrappers();
+        LambdaQueryWrapper<LhPrecisionPlan> annualAuditWrapper = precisionPlanWrappers.get(0);
+        LambdaQueryWrapper<LhPrecisionPlan> runtimeWrapper = precisionPlanWrappers.get(1);
         assertWrapperFiltersUnscheduled(devicePlanShutWrappers.get(0));
         assertWrapperFiltersUnscheduled(devicePlanShutWrappers.get(1));
-        assertWrapperFiltersUnfinishedActualFinishDate(precisionPlanWrapper);
-        assertWrapperContainsColumn(precisionPlanWrapper, "completion_status");
-        assertWrapperContainsValue(precisionPlanWrapper, "0");
+        assertWrapperNotContainsColumn(annualAuditWrapper, "schedule_date");
+        assertWrapperNotContainsColumn(annualAuditWrapper, "plan_date");
+        assertWrapperFiltersUnscheduled(runtimeWrapper);
+        assertWrapperFiltersUnfinishedActualDate(runtimeWrapper);
+        assertWrapperContainsColumn(runtimeWrapper, "plan_date");
+        assertWrapperContainsDate(runtimeWrapper, scheduleDate);
+        assertWrapperContainsColumn(runtimeWrapper, "completion_status");
+        assertWrapperContainsValue(runtimeWrapper, "0");
     }
 
     /**
@@ -680,14 +688,14 @@ class ScheduleDataWindowRegressionTest {
     /**
      * 抓取精度计划查询条件。
      *
-     * @return 精度计划查询 wrapper
+     * @return 按调用顺序捕获到的年度审计、运行态精度计划查询 wrapper
      */
     @SuppressWarnings("unchecked")
-    private LambdaQueryWrapper<LhPrecisionPlan> capturePrecisionPlanWrapper() {
+    private List<LambdaQueryWrapper<LhPrecisionPlan>> capturePrecisionPlanWrappers() {
         initializeTableInfo(LhPrecisionPlan.class);
         ArgumentCaptor<LambdaQueryWrapper> captor = ArgumentCaptor.forClass(LambdaQueryWrapper.class);
-        verify(lhPrecisionPlanMapper).selectList(captor.capture());
-        return (LambdaQueryWrapper<LhPrecisionPlan>) captor.getValue();
+        verify(lhPrecisionPlanMapper, times(2)).selectList(captor.capture());
+        return (List<LambdaQueryWrapper<LhPrecisionPlan>>) (List<?>) captor.getAllValues();
     }
 
     /**
@@ -830,14 +838,14 @@ class ScheduleDataWindowRegressionTest {
     }
 
     /**
-     * 校验基础数据查询仅保留实际完成时间为空的待处理记录。
+     * 校验精度计划运行态查询仅保留实际执行时间为空的待处理记录。
      *
      * @param wrapper 基础数据查询条件
      */
-    private void assertWrapperFiltersUnfinishedActualFinishDate(LambdaQueryWrapper<?> wrapper) {
+    private void assertWrapperFiltersUnfinishedActualDate(LambdaQueryWrapper<?> wrapper) {
         String sqlSegment = wrapper.getSqlSegment().toLowerCase(Locale.ROOT);
-        assertTrue(sqlSegment.contains("actual_finish_date"));
-        assertTrue(sqlSegment.contains("actual_finish_date is null"));
+        assertTrue(sqlSegment.contains("actual_date"));
+        assertTrue(sqlSegment.contains("actual_date is null"));
     }
 
     /**
@@ -860,6 +868,16 @@ class ScheduleDataWindowRegressionTest {
      */
     private void assertWrapperContainsColumn(LambdaQueryWrapper<?> wrapper, String columnName) {
         assertTrue(wrapper.getSqlSegment().toLowerCase(Locale.ROOT).contains(columnName));
+    }
+
+    /**
+     * 校验查询条件不包含指定数据库字段。
+     *
+     * @param wrapper 查询条件
+     * @param columnName 数据库字段名
+     */
+    private void assertWrapperNotContainsColumn(LambdaQueryWrapper<?> wrapper, String columnName) {
+        assertFalse(wrapper.getSqlSegment().toLowerCase(Locale.ROOT).contains(columnName));
     }
 
     /**

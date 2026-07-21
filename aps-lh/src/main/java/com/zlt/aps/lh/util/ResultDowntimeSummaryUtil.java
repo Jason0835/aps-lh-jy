@@ -24,6 +24,8 @@ public final class ResultDowntimeSummaryUtil {
 
     /** 精度保养结束时间所在班次必须写入的固定原因 */
     private static final String PRECISION_PLAN_ANALYSIS = "精度计划";
+    /** 正规换模与精度计划重叠时写入班次分析的组合原因 */
+    private static final String MOULD_CHANGE_PRECISION_PLAN_ANALYSIS = "换模+精度计划";
     /** 喷砂与精度保养重叠时写入班次分析的固定原因 */
     private static final String SAND_BLAST_PRECISION_ANALYSIS = "喷砂清洗+精度";
     /** 喷砂与设备停机计划重叠时写入班次分析的固定原因 */
@@ -113,8 +115,9 @@ public final class ResultDowntimeSummaryUtil {
 
     /**
      * 清除单条结果上的精度保养摘要和固定班次原因。
-     * <p>最终结果绑定前先清理同机台所有结果，再仅对唯一目标结果重新绑定，保证“精度计划”不会因
-     * 中间态重算、结果复制或无后续 SKU 回退而重复落到多条结果；清洗、维修及其他班次原因保持不变。</p>
+     * <p>最终结果绑定前先清理同机台所有结果，再仅对唯一目标结果重新绑定，保证“精度计划”及
+     * “换模+精度计划”不会因中间态重算、结果复制或无后续 SKU 回退而重复落到多条结果；
+     * 清洗、维修及其他班次原因保持不变。</p>
      *
      * @param result 待清理的排程结果
      */
@@ -126,6 +129,7 @@ public final class ResultDowntimeSummaryUtil {
         result.setMaintenanceEndTime(null);
         for (int shiftIndex = 1; shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT; shiftIndex++) {
             ShiftFieldUtil.removeShiftAnalysis(result, shiftIndex, PRECISION_PLAN_ANALYSIS);
+            ShiftFieldUtil.removeShiftAnalysis(result, shiftIndex, MOULD_CHANGE_PRECISION_PLAN_ANALYSIS);
         }
     }
 
@@ -144,6 +148,24 @@ public final class ResultDowntimeSummaryUtil {
             LhScheduleResult result,
             List<MachineMaintenanceWindowDTO> maintenanceWindowList,
             List<LhShiftConfigVO> scheduleWindowShifts) {
+        return bindMaintenanceSummaryAndAnalysis(result, maintenanceWindowList,
+                scheduleWindowShifts, LhScheduleConstant.MOULD_CHANGE_TOTAL_HOURS);
+    }
+
+    /**
+     * 将机台精度计划绑定到最终结果，并按实际换模区间写入互斥班次原因。
+     *
+     * @param result 待绑定结果
+     * @param maintenanceWindowList 机台精度计划窗口
+     * @param scheduleWindowShifts 排程窗口标准班次
+     * @param mouldChangeHours 现有正规换模参数解析结果
+     * @return true-已绑定当前排程窗口内的精度计划；false-没有可绑定窗口
+     */
+    public static boolean bindMaintenanceSummaryAndAnalysis(
+            LhScheduleResult result,
+            List<MachineMaintenanceWindowDTO> maintenanceWindowList,
+            List<LhShiftConfigVO> scheduleWindowShifts,
+            int mouldChangeHours) {
         if (Objects.isNull(result) || CollectionUtils.isEmpty(maintenanceWindowList)) {
             return false;
         }
@@ -171,7 +193,8 @@ public final class ResultDowntimeSummaryUtil {
         }
         result.setMaintenanceStartTime(earliestStartTime);
         result.setMaintenanceEndTime(latestEndTime);
-        appendMaintenanceEndShiftAnalysis(result, scheduleWindowShifts);
+        appendMaintenanceEndShiftAnalysis(
+                result, maintenanceWindowList, scheduleWindowShifts, mouldChangeHours);
         return true;
     }
 
@@ -200,20 +223,79 @@ public final class ResultDowntimeSummaryUtil {
     }
 
     /**
-     * 在精度保养结束时间所在标准班次追加固定原因“精度计划”。
+     * 在精度保养结束时间所在标准班次追加互斥原因。
+     * <p>实际正规换模区间与“精度计划+胶囊预热”完整占用区间重叠时，仅写
+     * “换模+精度计划”；未重叠时写“精度计划”。</p>
      *
      * @param result 排程结果
+     * @param maintenanceWindowList 精度计划窗口
      * @param scheduleWindowShifts 排程窗口标准班次
+     * @param mouldChangeHours 现有正规换模时长
      */
     private static void appendMaintenanceEndShiftAnalysis(LhScheduleResult result,
-                                                          List<LhShiftConfigVO> scheduleWindowShifts) {
+                                                          List<MachineMaintenanceWindowDTO> maintenanceWindowList,
+                                                          List<LhShiftConfigVO> scheduleWindowShifts,
+                                                          int mouldChangeHours) {
         if (Objects.isNull(result) || Objects.isNull(result.getMaintenanceEndTime())) {
             return;
         }
         int shiftIndex = resolveShiftIndexByStartTime(scheduleWindowShifts, result.getMaintenanceEndTime());
         if (shiftIndex > 0) {
-            ShiftFieldUtil.appendShiftAnalysis(result, shiftIndex, PRECISION_PLAN_ANALYSIS);
+            ShiftFieldUtil.appendShiftAnalysis(result, shiftIndex,
+                    resolveMaintenanceAnalysis(result, maintenanceWindowList, mouldChangeHours));
         }
+    }
+
+    /**
+     * 解析最终结果的精度计划班次原因。
+     *
+     * @param result 最终排程结果
+     * @param maintenanceWindowList 精度计划窗口
+     * @param mouldChangeHours 现有正规换模时长
+     * @return 重叠时返回“换模+精度计划”，否则返回“精度计划”
+     */
+    public static String resolveMaintenanceAnalysis(
+            LhScheduleResult result,
+            List<MachineMaintenanceWindowDTO> maintenanceWindowList,
+            int mouldChangeHours) {
+        return isMouldChangeMaintenanceOverlap(result, maintenanceWindowList, mouldChangeHours)
+                ? MOULD_CHANGE_PRECISION_PLAN_ANALYSIS : PRECISION_PLAN_ANALYSIS;
+    }
+
+    /**
+     * 判断最终结果的正规换模是否与精度计划完整占用区间重叠。
+     *
+     * @param result 最终排程结果
+     * @param maintenanceWindowList 精度计划窗口
+     * @param mouldChangeHours 现有正规换模时长
+     * @return true-重叠；false-不重叠或不是换模结果
+     */
+    public static boolean isMouldChangeMaintenanceOverlap(
+            LhScheduleResult result,
+            List<MachineMaintenanceWindowDTO> maintenanceWindowList,
+            int mouldChangeHours) {
+        if (Objects.isNull(result) || !YES_FLAG.equals(result.getIsChangeMould())
+                || Objects.isNull(result.getMouldChangeStartTime()) || mouldChangeHours <= 0
+                || CollectionUtils.isEmpty(maintenanceWindowList)) {
+            return false;
+        }
+        Date mouldChangeEndTime = LhScheduleTimeUtil.addHours(
+                result.getMouldChangeStartTime(), mouldChangeHours);
+        for (MachineMaintenanceWindowDTO maintenanceWindow : maintenanceWindowList) {
+            if (Objects.isNull(maintenanceWindow)
+                    || Objects.isNull(maintenanceWindow.getMaintenanceStartTime())) {
+                continue;
+            }
+            Date occupationEndTime = Objects.nonNull(maintenanceWindow.getProductionResumeTime())
+                    ? maintenanceWindow.getProductionResumeTime()
+                    : maintenanceWindow.getMaintenanceEndTime();
+            if (Objects.nonNull(occupationEndTime)
+                    && isWindowOverlap(maintenanceWindow.getMaintenanceStartTime(), occupationEndTime,
+                    result.getMouldChangeStartTime(), mouldChangeEndTime)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void fillCleaningSummary(LhScheduleResult result,

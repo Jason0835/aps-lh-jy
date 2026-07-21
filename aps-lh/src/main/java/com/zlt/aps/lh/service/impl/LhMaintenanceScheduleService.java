@@ -107,7 +107,7 @@ public class LhMaintenanceScheduleService {
         }
         String lookupMachineCode = machine.getMachineCode();
         LhPrecisionPlan plan = resolveMaintenancePlan(context, lookupMachineCode);
-        Integer daysToDue = resolveDaysToDue(context, plan);
+        Integer daysToDue = resolveDaysToDue(plan);
         if (Objects.isNull(plan) || Objects.isNull(daysToDue) || Objects.isNull(context.getScheduleDate())) {
             return false;
         }
@@ -158,7 +158,7 @@ public class LhMaintenanceScheduleService {
             return false;
         }
         LhPrecisionPlan plan = resolveMaintenancePlan(context, machine.getMachineCode());
-        Integer daysToDue = resolveDaysToDue(context, plan);
+        Integer daysToDue = resolveDaysToDue(plan);
         if (!isPlanUncompleted(plan) || Objects.isNull(daysToDue)) {
             return false;
         }
@@ -239,6 +239,152 @@ public class LhMaintenanceScheduleService {
             return resumeProductionTime;
         }
         return defaultReadyTime;
+    }
+
+    /**
+     * 判断正规换模候选窗口是否与精度计划完整占用区间重叠。
+     * <p>完整占用区间包含保养及胶囊预热。换模时长由调用方传入现有
+     * {@code SYS0302009} 解析结果，本方法不读取维保重叠专用4小时参数。</p>
+     *
+     * @param context 排程上下文，用于按现有参数补算胶囊预热完成时间
+     * @param machine 机台运行态
+     * @param candidateStartTime 正规换模原始候选开始时间
+     * @param mouldChangeHours 正规换模时长
+     * @return true-换模与精度计划完整占用区间重叠；false-不重叠
+     */
+    public boolean shouldParallelMouldChangeWithMaintenance(LhScheduleContext context,
+                                                            MachineScheduleDTO machine,
+                                                            Date candidateStartTime,
+                                                            int mouldChangeHours) {
+        if (Objects.isNull(candidateStartTime) || mouldChangeHours <= 0) {
+            return false;
+        }
+        Date alignedCandidateStartTime = resolveRegularMouldChangeCandidateStartTime(
+                context, candidateStartTime);
+        Date candidateEndTime = LhScheduleTimeUtil.addHours(alignedCandidateStartTime, mouldChangeHours);
+        return hasMouldChangeMaintenanceOverlap(
+                context, machine, alignedCandidateStartTime, candidateEndTime);
+    }
+
+    /**
+     * 解析精度计划与正规换模并行时的换模开始时间。
+     * <p>前序SKU已在保养开始前结束时，将换模对齐到精度计划开始时刻，使两项任务同时执行；
+     * 若原始候选时间已经晚于保养开始，则禁止向前倒推，保持原候选时间。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 机台运行态
+     * @param candidateStartTime 正规换模原始候选开始时间
+     * @param mouldChangeHours 正规换模时长
+     * @return 并行换模开始时间；未命中重叠时返回原候选时间
+     */
+    public Date resolveParallelMouldChangeStartTime(LhScheduleContext context,
+                                                    MachineScheduleDTO machine,
+                                                    Date candidateStartTime,
+                                                    int mouldChangeHours) {
+        if (Objects.isNull(candidateStartTime) || mouldChangeHours <= 0
+                || Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            return candidateStartTime;
+        }
+        Date alignedCandidateStartTime = resolveRegularMouldChangeCandidateStartTime(
+                context, candidateStartTime);
+        Date candidateEndTime = LhScheduleTimeUtil.addHours(alignedCandidateStartTime, mouldChangeHours);
+        for (MachineMaintenanceWindowDTO window : machine.getMaintenanceWindowList()) {
+            Date resumeTime = resolveWindowResumeTime(context, window);
+            if (!isWindowOverlap(window, alignedCandidateStartTime, candidateEndTime, resumeTime)) {
+                continue;
+            }
+            if (!alignedCandidateStartTime.after(window.getMaintenanceStartTime())) {
+                return window.getMaintenanceStartTime();
+            }
+            return alignedCandidateStartTime;
+        }
+        return candidateStartTime;
+    }
+
+    /**
+     * 解析正规换模与精度计划并行后的最终恢复生产时间。
+     * <p>完成点取“正规换模结束”和“保养结束+现有胶囊预热参数”的最大值，重叠时间只计算一次。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 机台运行态
+     * @param mouldChangeStartTime 正规换模开始时间
+     * @param mouldChangeEndTime 正规换模结束时间
+     * @return 最终恢复生产时间；未命中精度计划重叠时返回换模结束时间
+     */
+    public Date resolveParallelMouldChangeReadyTime(LhScheduleContext context,
+                                                    MachineScheduleDTO machine,
+                                                    Date mouldChangeStartTime,
+                                                    Date mouldChangeEndTime) {
+        if (Objects.isNull(mouldChangeStartTime) || Objects.isNull(mouldChangeEndTime)
+                || !mouldChangeStartTime.before(mouldChangeEndTime)
+                || Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            return mouldChangeEndTime;
+        }
+        Date readyTime = mouldChangeEndTime;
+        for (MachineMaintenanceWindowDTO window : machine.getMaintenanceWindowList()) {
+            Date resumeTime = resolveWindowResumeTime(context, window);
+            if (isWindowOverlap(window, mouldChangeStartTime, mouldChangeEndTime, resumeTime)) {
+                readyTime = later(readyTime, resumeTime);
+            }
+        }
+        return readyTime;
+    }
+
+    /**
+     * 判断实际正规换模窗口是否与精度计划完整占用区间重叠。
+     *
+     * @param context 排程上下文
+     * @param machine 机台运行态
+     * @param mouldChangeStartTime 正规换模开始时间
+     * @param mouldChangeEndTime 正规换模结束时间
+     * @return true-实际重叠；false-未重叠
+     */
+    public boolean hasMouldChangeMaintenanceOverlap(LhScheduleContext context,
+                                                    MachineScheduleDTO machine,
+                                                    Date mouldChangeStartTime,
+                                                    Date mouldChangeEndTime) {
+        if (Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())
+                || Objects.isNull(mouldChangeStartTime) || Objects.isNull(mouldChangeEndTime)
+                || !mouldChangeStartTime.before(mouldChangeEndTime)) {
+            return false;
+        }
+        for (MachineMaintenanceWindowDTO window : machine.getMaintenanceWindowList()) {
+            Date resumeTime = resolveWindowResumeTime(context, window);
+            if (isWindowOverlap(window, mouldChangeStartTime, mouldChangeEndTime, resumeTime)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析与实际正规换模区间重叠的精度计划开始时间。
+     *
+     * @param context 排程上下文
+     * @param machine 机台运行态
+     * @param mouldChangeStartTime 正规换模开始时间
+     * @param mouldChangeEndTime 正规换模结束时间
+     * @return 最早重叠精度计划开始时间；未命中时返回空
+     */
+    public Date resolveOverlappedMaintenanceStartTime(LhScheduleContext context,
+                                                       MachineScheduleDTO machine,
+                                                       Date mouldChangeStartTime,
+                                                       Date mouldChangeEndTime) {
+        if (Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            return null;
+        }
+        Date maintenanceStartTime = null;
+        for (MachineMaintenanceWindowDTO window : machine.getMaintenanceWindowList()) {
+            Date resumeTime = resolveWindowResumeTime(context, window);
+            if (!isWindowOverlap(window, mouldChangeStartTime, mouldChangeEndTime, resumeTime)) {
+                continue;
+            }
+            if (Objects.isNull(maintenanceStartTime)
+                    || window.getMaintenanceStartTime().before(maintenanceStartTime)) {
+                maintenanceStartTime = window.getMaintenanceStartTime();
+            }
+        }
+        return maintenanceStartTime;
     }
 
     /**
@@ -369,7 +515,7 @@ public class LhMaintenanceScheduleService {
                         + "保养开始: {}, 保养结束: {}, 预热完成及最早开产: {}, 强制下机: {}, 原因: {}",
                 machine.getMachineCode(), Objects.nonNull(pairMachine) ? pairMachine.getMachineCode() : "-",
                 plan.getPrecisionType(), LhScheduleTimeUtil.formatDate(resolvePlanDueDate(context, plan)),
-                resolveDaysToDue(context, plan), LhScheduleTimeUtil.formatDateTime(startTime),
+                resolveDaysToDue(plan), LhScheduleTimeUtil.formatDateTime(startTime),
                 LhScheduleTimeUtil.formatDateTime(endTime), LhScheduleTimeUtil.formatDateTime(productionResumeTime),
                 forceDown, triggerReason);
         appendMaintenanceProcessLog(context, MAINTENANCE_FINAL_LOG_TITLE, machine.getMachineCode(), plan,
@@ -414,7 +560,7 @@ public class LhMaintenanceScheduleService {
         window.setMaintenanceType(Objects.nonNull(targetPlan) ? targetPlan.getPrecisionType() : null);
         window.setSourcePlanDate(Objects.nonNull(targetPlan) ? targetPlan.getPlanDate() : null);
         window.setDueDate(resolvePlanDueDate(context, targetPlan));
-        window.setDaysToDue(resolveDaysToDue(context, targetPlan));
+        window.setDaysToDue(resolveDaysToDue(targetPlan));
         window.setPlanDate(planDate);
         window.setMaintenanceStartTime(startTime);
         window.setMaintenanceEndTime(endTime);
@@ -548,7 +694,7 @@ public class LhMaintenanceScheduleService {
     }
 
     private boolean isPlanDueSoon(LhScheduleContext context, LhPrecisionPlan plan) {
-        Integer daysToDue = resolveDaysToDue(context, plan);
+        Integer daysToDue = resolveDaysToDue(plan);
         if (Objects.isNull(plan) || Objects.isNull(daysToDue) || Objects.isNull(context.getScheduleDate())) {
             return false;
         }
@@ -611,24 +757,15 @@ public class LhMaintenanceScheduleService {
     }
 
     /**
-     * 按本次排程日实时计算距离到期天数。
-     * <p>优先根据有效到期日计算，避免历史复跑继续使用数据库中相对当前日期维护的静态天数；
-     * 仅当所有日期字段均为空时保留原 DAYS_TO_DUE 口径。</p>
+     * 读取距离到期日剩余天数。
+     * <p>精准计划预警和长期在机提前检查统一直接使用数据源维护的 DAYS_TO_DUE 字段，
+     * 不再根据 DUE_DATE、PLAN_DATE 与排程T日重新计算，避免同一计划出现两套触发口径。</p>
      *
-     * @param context 排程上下文
      * @param plan 精度保养计划
-     * @return 距离到期天数；缺失返回 null
+     * @return 距离到期日剩余天数；字段缺失返回 null
      */
-    private Integer resolveDaysToDue(LhScheduleContext context, LhPrecisionPlan plan) {
-        if (Objects.isNull(plan)) {
-            return null;
-        }
-        Date dueDate = resolvePlanDueDate(context, plan);
-        if (Objects.nonNull(dueDate) && Objects.nonNull(context)
-                && Objects.nonNull(context.getScheduleDate())) {
-            return diffDays(context.getScheduleDate(), dueDate);
-        }
-        return plan.getDaysToDue();
+    private Integer resolveDaysToDue(LhPrecisionPlan plan) {
+        return Objects.isNull(plan) ? null : plan.getDaysToDue();
     }
 
     /**
@@ -1040,13 +1177,71 @@ public class LhMaintenanceScheduleService {
         return defaultValue;
     }
 
-    private boolean isWindowOverlap(MachineMaintenanceWindowDTO window, Date startTime, Date endTime) {
+    /**
+     * 解析精度计划完整占用结束时间。
+     * <p>优先复用窗口初始化时根据保养时长参数和胶囊预热参数计算的恢复生产时间；
+     * 历史测试数据未写恢复时间时，再按保养结束时间叠加现有胶囊预热参数计算。</p>
+     *
+     * @param context 排程上下文
+     * @param window 精度计划窗口
+     * @return 精度计划及胶囊预热完成时间；窗口无效时返回空
+     */
+    private Date resolveWindowResumeTime(LhScheduleContext context, MachineMaintenanceWindowDTO window) {
+        if (Objects.isNull(window) || Objects.isNull(window.getMaintenanceEndTime())) {
+            return null;
+        }
+        if (Objects.nonNull(window.getProductionResumeTime())) {
+            return window.getProductionResumeTime();
+        }
+        return LhScheduleTimeUtil.addMinutes(
+                window.getMaintenanceEndTime(), LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
+    }
+
+    /**
+     * 将正规换模原始候选时间对齐到允许换模的早班起点。
+     * <p>晚班候选必须先按现有禁止换模参数顺延，否则00:00等候选会因原始8小时窗口恰好止于
+     * 精度计划开始边界而漏判，导致主排程、dayN模拟和定点预判时间轴不一致。</p>
+     *
+     * @param context 排程上下文
+     * @param candidateStartTime 原始换模候选时间
+     * @return 对齐后的正规换模候选时间
+     */
+    private Date resolveRegularMouldChangeCandidateStartTime(LhScheduleContext context,
+                                                              Date candidateStartTime) {
+        if (Objects.isNull(candidateStartTime)
+                || !LhScheduleTimeUtil.isNoMouldChangeTime(context, candidateStartTime)) {
+            return candidateStartTime;
+        }
+        return LhScheduleTimeUtil.resolveNextMorningAfterNoMouldChangeWindow(context, candidateStartTime);
+    }
+
+    /**
+     * 判断指定任务区间是否与精度计划完整占用区间重叠。
+     *
+     * @param window 精度计划窗口
+     * @param startTime 任务开始时间
+     * @param endTime 任务结束时间
+     * @param occupationEndTime 精度计划及胶囊预热完成时间
+     * @return true-区间重叠，false-区间不重叠或参数无效
+     */
+    private boolean isWindowOverlap(MachineMaintenanceWindowDTO window,
+                                    Date startTime,
+                                    Date endTime,
+                                    Date occupationEndTime) {
         return Objects.nonNull(window)
                 && Objects.nonNull(window.getMaintenanceStartTime())
-                && Objects.nonNull(window.getMaintenanceEndTime())
-                && window.getMaintenanceStartTime().before(window.getMaintenanceEndTime())
-                && startTime.before(window.getMaintenanceEndTime())
+                && Objects.nonNull(startTime)
+                && Objects.nonNull(endTime)
+                && Objects.nonNull(occupationEndTime)
+                && window.getMaintenanceStartTime().before(occupationEndTime)
+                && startTime.before(endTime)
+                && startTime.before(occupationEndTime)
                 && endTime.after(window.getMaintenanceStartTime());
+    }
+
+    private boolean isWindowOverlap(MachineMaintenanceWindowDTO window, Date startTime, Date endTime) {
+        return isWindowOverlap(window, startTime, endTime,
+                Objects.nonNull(window) ? window.getMaintenanceEndTime() : null);
     }
 
     private Date later(Date current, Date candidate) {
@@ -1091,7 +1286,7 @@ public class LhMaintenanceScheduleService {
                 .append("，计划到期=")
                 .append(PriorityTraceLogHelper.formatDateTime(resolvePlanDueDate(context, plan)))
                 .append("，距到期天数=")
-                .append(PriorityTraceLogHelper.safeText(resolveDaysToDue(context, plan)))
+                .append(PriorityTraceLogHelper.safeText(resolveDaysToDue(plan)))
                 .append("，候选时间=")
                 .append(PriorityTraceLogHelper.formatDateTime(candidateDate))
                 .append("，命中规则=").append(PriorityTraceLogHelper.safeText(hitRule))

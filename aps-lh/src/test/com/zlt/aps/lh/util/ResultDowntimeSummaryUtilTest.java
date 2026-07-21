@@ -214,6 +214,27 @@ class ResultDowntimeSummaryUtilTest {
     }
 
     /**
+     * 正规换模与精度计划及胶囊预热完整占用区间重叠时，只写组合原因。
+     */
+    @Test
+    void bindMaintenanceSummary_shouldAppendCombinedReasonWhenMouldChangeOverlapsPrecisionPlan() {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setIsChangeMould("1");
+        result.setMouldChangeStartTime(dateTime(2026, 5, 21, 8, 0));
+        MachineMaintenanceWindowDTO maintenanceWindow = new MachineMaintenanceWindowDTO();
+        maintenanceWindow.setMaintenanceStartTime(dateTime(2026, 5, 21, 8, 0));
+        maintenanceWindow.setMaintenanceEndTime(dateTime(2026, 5, 21, 15, 0));
+        maintenanceWindow.setProductionResumeTime(dateTime(2026, 5, 21, 17, 30));
+
+        boolean bound = ResultDowntimeSummaryUtil.bindMaintenanceSummaryAndAnalysis(
+                result, Collections.singletonList(maintenanceWindow), buildScheduleWindowShifts(), 8);
+
+        assertTrue(bound);
+        assertEquals("换模+精度计划", ShiftFieldUtil.getShiftAnalysis(result, 2),
+                "换模08:00～16:00与精度计划08:00～17:30重叠时只允许写组合原因");
+    }
+
+    /**
      * 未来保养尚未进入本批标准班次时，只保留运行态窗口和回填信息，不得污染当前排程结果。
      */
     @Test
@@ -242,7 +263,7 @@ class ResultDowntimeSummaryUtilTest {
         LhScheduleResult result = new LhScheduleResult();
         result.setMaintenanceStartTime(dateTime(2026, 5, 21, 8, 0));
         result.setMaintenanceEndTime(dateTime(2026, 5, 21, 15, 0));
-        ShiftFieldUtil.setShiftAnalysis(result, 2, "精度计划,干冰清洗");
+        ShiftFieldUtil.setShiftAnalysis(result, 2, "精度计划,换模+精度计划,干冰清洗");
 
         ResultDowntimeSummaryUtil.clearMaintenanceSummaryAndAnalysis(result);
 

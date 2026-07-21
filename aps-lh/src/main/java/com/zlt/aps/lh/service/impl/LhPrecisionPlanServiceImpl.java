@@ -22,7 +22,7 @@ public class LhPrecisionPlanServiceImpl implements ILhPrecisionPlanService {
 
     /** 回填参数：精准计划主键 */
     private static final String KEY_PRECISION_PLAN_ID = "precisionPlanId";
-    /** 回填参数：APS 最终安排日期 */
+    /** 回填参数：APS 实际安排的自然日 */
     private static final String KEY_SCHEDULE_DATE = "scheduleDate";
 
     @Resource
@@ -46,17 +46,17 @@ public class LhPrecisionPlanServiceImpl implements ILhPrecisionPlanService {
                         LhScheduleTimeUtil.formatDateTime(scheduleDate));
                 continue;
             }
-            // APS 只回填 SCHEDULE_DATE，不修改 MES/设备侧维护的 ACTUAL_DATE 和 COMPLETION_STATUS。
+            // APS 只回填自然日口径的 SCHEDULE_DATE，不修改 MES/设备侧维护的 ACTUAL_DATE 和 COMPLETION_STATUS。
             LhPrecisionPlan updatePlan = new LhPrecisionPlan();
             updatePlan.setId(precisionPlanId);
-            updatePlan.setScheduleDate(scheduleDate);
+            updatePlan.setScheduleDate(LhScheduleTimeUtil.clearTime(scheduleDate));
             int affectedRows = lhPrecisionPlanMapper.updateById(updatePlan);
             filledCount += affectedRows;
-            log.info("硫化精准计划安排日期回填完成，计划ID: {}，工厂: {}，机台: {}，最终保养开始: {}，影响行数: {}",
+            log.info("硫化精准计划安排日期回填完成，计划ID: {}，工厂: {}，机台: {}，安排自然日: {}，影响行数: {}",
                     precisionPlanId,
                     fillData.get("factoryCode"),
                     fillData.get("machineCode"),
-                    LhScheduleTimeUtil.formatDateTime(scheduleDate), affectedRows);
+                    LhScheduleTimeUtil.formatDate(scheduleDate), affectedRows);
         }
         return filledCount;
     }
