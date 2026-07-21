@@ -963,14 +963,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 int switchDurationHours = maintenanceOverlapSwitch
                         ? LhScheduleTimeUtil.getMaintenanceOverlapSwitchHours(context)
                         : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
-                if (totalScheduledQty > 0) {
-                    switchReadyTime = alignAddedMachineSwitchReadyTime(
-                            sku, switchReadyTime, shifts, totalScheduledQty,
-                            currentAddMachineProductionDate);
-                } else {
-                    switchReadyTime = alignFirstMachineSwitchReadyTimeByDailyPlan(
-                            context, sku, switchReadyTime, shifts, isEnding);
-                }
+                // 续作增机补偿的首台与后续机台统一按 dayN 首次增机日对齐换模。
+                switchReadyTime = alignSwitchReadyTimeByAddMachineDate(
+                        context, sku, switchReadyTime, shifts, totalScheduledQty,
+                        currentAddMachineProductionDate, isEnding);
                 mouldChangeStartTime = allocateNewSpecMouldChangeStartTime(
                         context, sku, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
                 if (Objects.nonNull(mouldChangeStartTime)
@@ -1123,12 +1119,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         machineMouldQty);
                 EarlyProductionDecision earlyProductionDecision = resolveEarlyProductionDecision(
                         context, sku, firstProductionStartTime, shifts, isEnding);
-                firstProductionStartTime = alignFirstProductionStartTimeByDailyPlan(
-                        context, sku, firstProductionStartTime, shifts, isEnding, earlyProductionDecision);
-                // 提前生产准入只放宽当前日开产，仍需服从逐日模拟确定的实际增机生效日期。
-                firstProductionStartTime = alignAddedMachineProductionStartTime(
-                        sku, firstProductionStartTime, shifts, totalScheduledQty,
-                        currentAddMachineProductionDate);
+                // 补偿 SKU 已由续作中心链路确定首次增机日，不得再被已消费的剩余日计划额度推迟。
+                firstProductionStartTime = alignProductionStartTimeByAddMachineDate(
+                        context, sku, firstProductionStartTime, shifts, totalScheduledQty,
+                        currentAddMachineProductionDate, isEnding, earlyProductionDecision);
                 if (firstProductionStartTime == null) {
                     log.debug("新增SKU排程窗口内无可开产时间, materialCode: {}, 机台: {}, 首检时间: {}, 班产: {}, 硫化时间: {}, 模数: {}",
                             sku.getMaterialCode(), machineCode,
@@ -4346,6 +4340,80 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         return LhSingleControlMachineUtil.isConfiguredSingleControlMachine(
                 context, candidateMachine.getMachineCode());
+    }
+
+    /**
+     * 按 dayN 增机生效日或普通首台日计划规则对齐换模就绪时间。
+     * <p>续作增机补偿的首台候选也已有明确的增机日，必须优先按该日期对齐，
+     * 不得再进入“剩余日计划额度为 0 则顺延”的普通首台路径。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前 SKU
+     * @param switchReadyTime 资源约束计算后的换模就绪时间
+     * @param shifts 排程窗口班次
+     * @param totalScheduledQty 当前 SKU 累计已排量
+     * @param addMachineProductionDate dayN 模拟确定的当前增机生效日
+     * @param isEnding 是否收尾
+     * @return 对齐后的换模就绪时间
+     */
+    private Date alignSwitchReadyTimeByAddMachineDate(LhScheduleContext context,
+                                                       SkuScheduleDTO sku,
+                                                       Date switchReadyTime,
+                                                       List<LhShiftConfigVO> shifts,
+                                                       int totalScheduledQty,
+                                                       LocalDate addMachineProductionDate,
+                                                       boolean isEnding) {
+        if (Objects.nonNull(addMachineProductionDate)) {
+            Date alignedSwitchReadyTime = alignAddedMachineSwitchReadyTime(
+                    sku, switchReadyTime, shifts, totalScheduledQty, addMachineProductionDate);
+            log.info("新增SKU按dayN增机生效日对齐换模, materialCode: {}, totalScheduledQty: {}, "
+                            + "addMachineProductionDate: {}, beforeSwitchReadyTime: {}, afterSwitchReadyTime: {}",
+                    Objects.isNull(sku) ? null : sku.getMaterialCode(), totalScheduledQty,
+                    addMachineProductionDate, LhScheduleTimeUtil.formatDateTime(switchReadyTime),
+                    LhScheduleTimeUtil.formatDateTime(alignedSwitchReadyTime));
+            return alignedSwitchReadyTime;
+        }
+        if (totalScheduledQty <= 0) {
+            return alignFirstMachineSwitchReadyTimeByDailyPlan(
+                    context, sku, switchReadyTime, shifts, isEnding);
+        }
+        return switchReadyTime;
+    }
+
+    /**
+     * 按 dayN 增机生效日或普通首台日计划规则对齐开产时间。
+     * <p>实际资源约束仍可将开产推迟到增机日之后，但已消费的日计划剩余额度不再二次推迟补偿机台。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前 SKU
+     * @param productionStartTime 资源约束计算后的开产时间
+     * @param shifts 排程窗口班次
+     * @param totalScheduledQty 当前 SKU 累计已排量
+     * @param addMachineProductionDate dayN 模拟确定的当前增机生效日
+     * @param isEnding 是否收尾
+     * @param earlyProductionDecision 提前生产判定结果
+     * @return 对齐后的开产时间
+     */
+    private Date alignProductionStartTimeByAddMachineDate(LhScheduleContext context,
+                                                           SkuScheduleDTO sku,
+                                                           Date productionStartTime,
+                                                           List<LhShiftConfigVO> shifts,
+                                                           int totalScheduledQty,
+                                                           LocalDate addMachineProductionDate,
+                                                           boolean isEnding,
+                                                           EarlyProductionDecision earlyProductionDecision) {
+        if (Objects.nonNull(addMachineProductionDate)) {
+            Date alignedProductionStartTime = alignAddedMachineProductionStartTime(
+                    sku, productionStartTime, shifts, totalScheduledQty, addMachineProductionDate);
+            log.info("新增SKU按dayN增机生效日对齐开产, materialCode: {}, totalScheduledQty: {}, "
+                            + "addMachineProductionDate: {}, beforeProductionStartTime: {}, afterProductionStartTime: {}",
+                    Objects.isNull(sku) ? null : sku.getMaterialCode(), totalScheduledQty,
+                    addMachineProductionDate, LhScheduleTimeUtil.formatDateTime(productionStartTime),
+                    LhScheduleTimeUtil.formatDateTime(alignedProductionStartTime));
+            return alignedProductionStartTime;
+        }
+        return alignFirstProductionStartTimeByDailyPlan(
+                context, sku, productionStartTime, shifts, isEnding, earlyProductionDecision);
     }
 
     /**

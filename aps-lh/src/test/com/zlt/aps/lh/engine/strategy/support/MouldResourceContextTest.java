@@ -2,6 +2,7 @@ package com.zlt.aps.lh.engine.strategy.support;
 
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
@@ -162,6 +163,36 @@ public class MouldResourceContextTest {
         Assertions.assertEquals(Collections.singletonList("M001"), result.getAllocatedMouldCodeList());
     }
 
+    /**
+     * 用例说明：机台换成新模具后，历史结果中的旧共用模具必须释放，候选预检不得修改运行态。
+     */
+    @Test
+    public void shouldPreviewWithLatestMachineBindingAndKeepPreviewSideEffectFree() {
+        LhScheduleContext context = buildContext(
+                Arrays.asList(
+                        buildRel("SKU-OLD", "M001"), buildRel("SKU-OLD", "M002"),
+                        buildRel("SKU-NEW", "M101"), buildRel("SKU-NEW", "M102"),
+                        buildRel("SKU-TARGET", "M001"), buildRel("SKU-TARGET", "M002")),
+                Arrays.asList(
+                        buildModel("M001", 1), buildModel("M002", 1),
+                        buildModel("M101", 1), buildModel("M102", 1)),
+                Arrays.asList(
+                        buildMachine("K1511", 2), buildMachine("K2201", 2), buildMachine("K2202", 2)));
+        context.getScheduleResultList().add(buildResult("K1511", "SKU-OLD", "M001,M002"));
+        context.getScheduleResultList().add(buildResult("K1511", "SKU-NEW", "M101,M102"));
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+
+        MouldResourceAllocationResult firstPreview = resourceContext.previewAllocate("SKU-TARGET", "K2201");
+        MouldResourceAllocationResult secondPreview = resourceContext.previewAllocate("SKU-TARGET", "K2201");
+        MouldResourceAllocationResult allocated = resourceContext.tryAllocate("SKU-TARGET", "K2201");
+        MouldResourceAllocationResult occupiedPreview = resourceContext.previewAllocate("SKU-TARGET", "K2202");
+
+        Assertions.assertTrue(firstPreview.isAllowed(), "K1511已换下的M001/M002应可被后续SKU复用");
+        Assertions.assertTrue(secondPreview.isAllowed(), "连续预检不得预占模具");
+        Assertions.assertEquals(Arrays.asList("M001", "M002"), allocated.getAllocatedMouldCodeList());
+        Assertions.assertFalse(occupiedPreview.isAllowed(), "正式分配后仍在机的模具必须继续互斥");
+    }
+
     private LhScheduleContext buildContext(List<MdmSkuMouldRel> relList,
                                            List<MdmModelInfo> modelList,
                                            List<MachineScheduleDTO> machineList) {
@@ -197,6 +228,14 @@ public class MouldResourceContextTest {
         modelInfo.setMouldCode(mouldCode);
         modelInfo.setMouldStatus(status);
         return modelInfo;
+    }
+
+    private LhScheduleResult buildResult(String machineCode, String materialCode, String mouldCode) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setLhMachineCode(machineCode);
+        result.setMaterialCode(materialCode);
+        result.setMouldCode(mouldCode);
+        return result;
     }
 
     private MachineScheduleDTO buildMachine(String machineCode, int maxMouldNum) {

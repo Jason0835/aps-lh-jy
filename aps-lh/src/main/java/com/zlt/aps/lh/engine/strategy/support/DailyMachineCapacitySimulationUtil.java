@@ -134,7 +134,8 @@ public final class DailyMachineCapacitySimulationUtil {
         int windowTotalCapacityQty = resolveWindowTotalCapacityQty(request, activeMachines);
         int windowMonthPlanQty = resolveWindowMonthPlanQty(request);
         int scheduleDayFinishQty = Math.max(0, request.getScheduleDayFinishQty());
-        int currentDayPlanQty = resolveCurrentDayPlanQty(decision, firstProductionDate, scheduleDayFinishQty);
+        // 日计划扩机模拟与公共 dayN 判断保持同一口径：使用原始日计划。
+        int currentDayPlanQty = Math.max(0, decision.getTodayPlanQty());
         // todayRequiredQty 是当前日需要承接的量：当前日判断计划量 + 前序模拟滚动下来的欠产量。
         int todayRequiredQty = decision.getCarryShortageQty() + currentDayPlanQty;
         int windowEffectiveCapacityQty = sumCapacityQty(request, firstProductionDate,
@@ -171,7 +172,7 @@ public final class DailyMachineCapacitySimulationUtil {
         } else if (currentDayPlanSatisfied) {
             /*
              * 欠产未超过阈值时，每个业务日先判断当前机台数是否已满足当前日月计划量。
-             * 窗口首日按日计划账本口径扣除T日晚班已完成量，避免完成量已覆盖的首日计划继续后看。
+             * T 日已完成量不从增机判断量中扣减，仅参与实际目标量、欠产和账本计算。
              * 当前日已满足则不继续后看下一日，避免因为后续高日计划提前在当前日盲目加机台。
              * dayN 只作节奏判断，T 日和后续日容量均使用当前机台数 * 正式日硫化标准，
              * 不能因真实换模或 T 日剩余班次较少而缩小加机台判断产能。
@@ -253,17 +254,6 @@ public final class DailyMachineCapacitySimulationUtil {
 
     private static boolean isWindowTotalCapacityInsufficient(int windowPlanQty, int windowTotalCapacityQty) {
         return windowPlanQty > 0 && windowTotalCapacityQty < windowPlanQty;
-    }
-
-    private static int resolveCurrentDayPlanQty(DailyMachineCapacityDayDecision decision,
-                                                LocalDate firstProductionDate,
-                                                int scheduleDayFinishQty) {
-        if (Objects.isNull(decision) || Objects.isNull(decision.getProductionDate())
-                || Objects.isNull(firstProductionDate)
-                || !decision.getProductionDate().equals(firstProductionDate)) {
-            return Math.max(0, Objects.isNull(decision) ? 0 : decision.getTodayPlanQty());
-        }
-        return Math.max(0, decision.getTodayPlanQty() - Math.max(0, scheduleDayFinishQty));
     }
 
     /**

@@ -16,6 +16,8 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
+import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
+import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.engine.strategy.support.SpecifiedMachineMatchResult;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.ShiftProductionControlUtil;
@@ -133,8 +135,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         Set<String> notAllowedMachineCodes = LhSpecifyMachineUtil.resolveNotAllowedMachineCodes(
                 context, sku.getMaterialCode());
-        List<String> skuMouldCodes = getSkuMouldCodes(context, sku.getMaterialCode());
-        Set<String> occupiedMouldCodes = getOccupiedMouldCodes(context);
+        MouldResourceContext mouldResourceContext = resolveMouldResourceContext(context);
         BigDecimal skuInch = parseInch(sku.getProSize());
         SpecialMaterialMatchResult matchResult = LhSpecialMaterialUtil.resolveMatchResult(context, sku);
         Date windowEndTime = resolveScheduleWindowEndTime(context);
@@ -142,7 +143,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return false;
         }
         MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
-                context, sku, skuMouldCodes, occupiedMouldCodes, skuInch, matchResult, machine);
+                context, sku, mouldResourceContext, skuInch, matchResult, machine);
         Date referenceTime = resolveAlignedCandidateReferenceTime(context, machine);
         return MachineAvailabilityReason.AVAILABLE == availabilityReason
                 && (Objects.isNull(windowEndTime) || Objects.isNull(referenceTime)
@@ -176,27 +177,8 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         Set<String> notAllowedMachineCodes = LhSpecifyMachineUtil.resolveNotAllowedMachineCodes(
                 context, sku.getMaterialCode());
 
-        // 2. 获取SKU的模具号列表
-        List<String> skuMouldCodes = getSkuMouldCodes(context, sku.getMaterialCode());
-
-        // 3. 获取已被其他计划占用的模具集合
-        Set<String> occupiedMouldCodes = getOccupiedMouldCodes(context);
-
-        // 模具匹配日志：记录SKU模具总数、已占用模具号，便于排查模具冲突问题
-        if (!skuMouldCodes.isEmpty() && !CollectionUtils.isEmpty(occupiedMouldCodes)) {
-            List<String> conflictedMouldCodes = new ArrayList<>();
-            for (String mouldCode : skuMouldCodes) {
-                if (occupiedMouldCodes.contains(mouldCode)) {
-                    conflictedMouldCodes.add(mouldCode);
-                }
-            }
-            int freeMouldCount = skuMouldCodes.size() - conflictedMouldCodes.size();
-            log.info("SKU模具占用检查, materialCode: {}, scheduleDate: {}, SKU模具总数: {}, 全局已占用模具号: {}, "
-                            + "冲突模具数: {}, 空闲模具数: {}, 冲突模具号: {}",
-                    sku.getMaterialCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
-                    skuMouldCodes.size(), occupiedMouldCodes,
-                    conflictedMouldCodes.size(), freeMouldCount, conflictedMouldCodes);
-        }
+        // 2. 候选预检与正式分配共用同一份模具运行态，换下的共用模具不再被历史结果永久占用。
+        MouldResourceContext mouldResourceContext = resolveMouldResourceContext(context);
         // 4. 过滤候选机台：状态启用 + 硬性指标匹配 + 模具未被占用。
         // 模套型号匹配作为硬过滤（到货模具不降级），同模壳仍参与后续最早收尾窗口内排序降级。
         // 这里只保留业务上可承接的机台，不在这里提前决定最终排产量。
@@ -225,7 +207,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 continue;
             }
             MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
-                    context, sku, skuMouldCodes, occupiedMouldCodes, skuInch,
+                    context, sku, mouldResourceContext, skuInch,
                     specialMaterialMatchResult, machine);
             if (MachineAvailabilityReason.AVAILABLE != availabilityReason) {
                 trace.recordAvailabilityReason(machine, availabilityReason);
@@ -306,12 +288,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             return SpecifiedMachineMatchResult.failed("历史指定机台命中SKU定点不可作业限制");
         }
 
-        List<String> skuMouldCodes = getSkuMouldCodes(context, sku.getMaterialCode());
-        Set<String> occupiedMouldCodes = getOccupiedMouldCodes(context);
+        MouldResourceContext mouldResourceContext = resolveMouldResourceContext(context);
         BigDecimal skuInch = parseInch(sku.getProSize());
         SpecialMaterialMatchResult matchResult = LhSpecialMaterialUtil.resolveMatchResult(context, sku);
         MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
-                context, sku, skuMouldCodes, occupiedMouldCodes, skuInch, matchResult, specifiedMachine);
+                context, sku, mouldResourceContext, skuInch, matchResult, specifiedMachine);
         if (MachineAvailabilityReason.AVAILABLE != availabilityReason) {
             return SpecifiedMachineMatchResult.failed(
                     resolveSpecifiedMachineFailureReason(availabilityReason));
@@ -331,7 +312,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 continue;
             }
             if (MachineAvailabilityReason.AVAILABLE == resolveMachineAvailabilityReason(
-                    context, sku, skuMouldCodes, occupiedMouldCodes, skuInch, matchResult, machine)) {
+                    context, sku, mouldResourceContext, skuInch, matchResult, machine)) {
                 hardMatchedCandidates.add(machine);
             }
         }
@@ -1113,43 +1094,16 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     }
 
     /**
-     * 获取SKU对应的模具号列表
+     * 获取本批次共享的模具运行态。
+     *
+     * @param context 排程上下文
+     * @return 模具运行态上下文
      */
-    private List<String> getSkuMouldCodes(LhScheduleContext context, String materialCode) {
-        List<MdmSkuMouldRel> mouldRels = context.getSkuMouldRelMap().get(materialCode);
-        if (mouldRels == null || mouldRels.isEmpty()) {
-            return new ArrayList<>();
+    private MouldResourceContext resolveMouldResourceContext(LhScheduleContext context) {
+        if (Objects.isNull(context.getMouldResourceContext())) {
+            context.setMouldResourceContext(MouldResourceContext.from(context));
         }
-        return mouldRels.stream()
-                .map(MdmSkuMouldRel::getMouldCode)
-                .collect(Collectors.toList());
-    }
-
-    /**
-     * 获取当前所有已分配排程中正在使用的模具号集合（共用模保护）
-     */
-    private Set<String> getOccupiedMouldCodes(LhScheduleContext context) {
-        Set<String> occupied = new HashSet<>();
-        for (Map.Entry<String, List<LhScheduleResult>> entry : context.getMachineAssignmentMap().entrySet()) {
-            for (LhScheduleResult result : entry.getValue()) {
-                if (shouldIgnoreReleasedContinuousPlaceholder(context, result)) {
-                    continue;
-                }
-                if (StringUtils.isNotEmpty(result.getMouldCode())) {
-                    String[] mouldCodeArray = StringUtils.split(result.getMouldCode(), ",");
-                    if (mouldCodeArray == null) {
-                        continue;
-                    }
-                    for (String mouldCode : mouldCodeArray) {
-                        String normalizedMouldCode = StringUtils.trim(mouldCode);
-                        if (StringUtils.isNotEmpty(normalizedMouldCode)) {
-                            occupied.add(normalizedMouldCode);
-                        }
-                    }
-                }
-            }
-        }
-        return occupied;
+        return context.getMouldResourceContext();
     }
 
     /**
@@ -1170,15 +1124,13 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      *
      * @param context 排程上下文
      * @param sku 待排SKU
-     * @param skuMouldCodes SKU模具列表
-     * @param occupiedMouldCodes 已占用模具
+     * @param mouldResourceContext 本批次模具运行态
      * @param skuInch SKU英寸
      * @param machine 候选机台
      * @return true-可用，false-不可用
      */
     private MachineAvailabilityReason resolveMachineAvailabilityReason(LhScheduleContext context, SkuScheduleDTO sku,
-                                                                      List<String> skuMouldCodes,
-                                                                      Set<String> occupiedMouldCodes,
+                                                                      MouldResourceContext mouldResourceContext,
                                                                       BigDecimal skuInch,
                                                                       SpecialMaterialMatchResult matchResult,
                                                                       MachineScheduleDTO machine) {
@@ -1202,7 +1154,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (MachineAvailabilityReason.AVAILABLE != specialSupportReason) {
             return specialSupportReason;
         }
-        return isMouldCompatible(sku, skuMouldCodes, machine, occupiedMouldCodes)
+        return isMouldCompatible(sku, machine, mouldResourceContext)
                 ? MachineAvailabilityReason.AVAILABLE
                 : MachineAvailabilityReason.MOULD_CONFLICT;
     }
@@ -1460,40 +1412,24 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
     /**
      * 检查SKU模具是否与已占用模具兼容。
      *
-     * <p>只要SKU至少有一个模具未被全局占用，就允许候选机台通过初筛；
-     * 精确的模具数量分配由 MouldResourceContext.tryAllocate 在后续逐台试算中控制。
-     * 只有当SKU所有模具均被占用时才返回false。</p>
+     * <p>候选预检与正式分配共用当前绑定、可释放旧模具、已占用模具和机台模数口径。
+     * 历史结果仅用于初始化机台最新绑定，不再将已换下的模具持续判定为占用。</p>
      *
      * @param sku 待排SKU
-     * @param skuMouldCodes SKU模具列表
      * @param machine 候选机台
-     * @param occupiedMouldCodes 已占用模具集合
-     * @return true-兼容（至少有一个空闲模具），false-不兼容（所有模具已被占用）
+     * @param mouldResourceContext 本批次模具运行态
+     * @return true-按机台模数可分配，false-模具资源不足
      */
-    private boolean isMouldCompatible(SkuScheduleDTO sku, List<String> skuMouldCodes, MachineScheduleDTO machine, Set<String> occupiedMouldCodes) {
-        if (skuMouldCodes.isEmpty()) {
+    private boolean isMouldCompatible(SkuScheduleDTO sku,
+                                      MachineScheduleDTO machine,
+                                      MouldResourceContext mouldResourceContext) {
+        if (!mouldResourceContext.hasMouldResourceDefinition(sku.getMaterialCode())) {
+            // 保持既有数据校验边界：无任何模具关系时不在候选初筛提前改变结果，由正式分配链路记录基础数据问题。
             return true;
         }
-        // 只要至少有一个模具未被全局占用，就允许候选机台通过；
-        // 精确的模数扣减和分配由 MouldResourceContext.tryAllocate 在增机台环节控制。
-        int freeMouldCount = 0;
-        List<String> occupiedOverlapMouldList = new ArrayList<>(4);
-        for (String mouldCode : skuMouldCodes) {
-            if (occupiedMouldCodes.contains(mouldCode)) {
-                occupiedOverlapMouldList.add(mouldCode);
-            } else {
-                freeMouldCount++;
-            }
-        }
-        boolean compatible = freeMouldCount > 0;
-        if (!compatible) {
-            log.info("SKU模具全部被占用, materialCode: {}, SKU模具总数: {}, 全部被占用模具号: {}",
-                    sku.getMaterialCode(), skuMouldCodes.size(), skuMouldCodes);
-        } else if (!occupiedOverlapMouldList.isEmpty()) {
-            log.debug("SKU模具部分占用, materialCode: {}, SKU模具总数: {}, 空闲模具数: {}, 占用重叠模具号: {}",
-                    sku.getMaterialCode(), skuMouldCodes.size(), freeMouldCount, occupiedOverlapMouldList);
-        }
-        return compatible;
+        MouldResourceAllocationResult previewResult = mouldResourceContext.previewAllocate(
+                sku.getMaterialCode(), machine.getMachineCode());
+        return previewResult.isAllowed();
     }
 
     /**

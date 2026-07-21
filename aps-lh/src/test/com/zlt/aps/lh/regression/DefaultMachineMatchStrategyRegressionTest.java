@@ -1002,11 +1002,45 @@ class DefaultMachineMatchStrategyRegressionTest {
                 mouldRel("MOULD-B"),
                 mouldRel("MOULD-C")
         ));
+        context.getModelInfoMap().put("MOULD-A", modelInfo("MOULD-A", null));
+        context.getModelInfoMap().put("MOULD-B", modelInfo("MOULD-B", null));
+        context.getModelInfoMap().put("MOULD-C", modelInfo("MOULD-C", null));
 
         List<MachineScheduleDTO> candidates = strategy.matchMachines(context, sku);
 
         assertEquals(1, candidates.size(), "应按SKU实际用模数判断，不应因模具关系条数多而误过滤机台");
         assertEquals("M1", candidates.get(0).getMachineCode());
+    }
+
+    @Test
+    void matchMachines_shouldReuseMouldReleasedByLatestMachineBinding() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        MachineScheduleDTO candidateMachine = machine(
+                "K2201", dateTime(2026, 7, 20, 6, 0), "SPEC-X", "22.5", "SKU-OTHER");
+        candidateMachine.setMaxMoldNum(2);
+        context.getMachineScheduleMap().put(candidateMachine.getMachineCode(), candidateMachine);
+        context.getSkuMouldRelMap().put("3302001585", Arrays.asList(
+                mouldRel("HM20210602409"), mouldRel("HM20210602410")));
+        context.getModelInfoMap().put("HM20210602409", modelInfo("HM20210602409", null));
+        context.getModelInfoMap().put("HM20210602410", modelInfo("HM20210602410", null));
+
+        LhScheduleResult oldResult = new LhScheduleResult();
+        oldResult.setLhMachineCode("K1511");
+        oldResult.setMaterialCode("3302002353");
+        oldResult.setMouldCode("HM20210602409,HM20210602410");
+        LhScheduleResult latestResult = new LhScheduleResult();
+        latestResult.setLhMachineCode("K1511");
+        latestResult.setMaterialCode("3302002325");
+        latestResult.setMouldCode("HM20221203749,HM20221203750");
+        context.getScheduleResultList().add(oldResult);
+        context.getScheduleResultList().add(latestResult);
+
+        List<MachineScheduleDTO> candidates = strategy.matchMachines(
+                context, sku("3302001585", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(), "K1511换下的共用模具不得被历史结果永久占用");
+        assertEquals("K2201", candidates.get(0).getMachineCode());
     }
 
     @Test
@@ -1819,6 +1853,7 @@ class DefaultMachineMatchStrategyRegressionTest {
         MdmModelInfo modelInfo = new MdmModelInfo();
         modelInfo.setMouldCode(mouldCode);
         modelInfo.setShellStandard(shellStandard);
+        modelInfo.setMouldStatus(1);
         return modelInfo;
     }
 

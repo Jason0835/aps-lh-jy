@@ -88,6 +88,58 @@ public class MouldResourceContext {
      * @return 分配结果
      */
     public synchronized MouldResourceAllocationResult tryAllocate(String materialCode, String machineCode) {
+        MouldResourceAllocationResult allocationResult = resolveAllocation(materialCode, machineCode);
+        if (!allocationResult.isAllowed()) {
+            return allocationResult;
+        }
+        // 正式候选成功时才改变运行态：先释放当前机台旧模具，再绑定新 SKU 模具。
+        if (!CollectionUtils.isEmpty(allocationResult.getReleasedMouldCodeList())) {
+            occupiedMouldCodeSet.removeAll(allocationResult.getReleasedMouldCodeList());
+        }
+        occupiedMouldCodeSet.addAll(allocationResult.getAllocatedMouldCodeList());
+        machineBoundMouldCodeMap.put(machineCode,
+                new LinkedHashSet<String>(allocationResult.getAllocatedMouldCodeList()));
+        log.info("模具运行态绑定更新, materialCode: {}, machineCode: {}, releasedMouldCodes: {}, "
+                        + "allocatedMouldCodes: {}",
+                materialCode, machineCode, allocationResult.getReleasedMouldCodeList(),
+                allocationResult.getAllocatedMouldCodeList());
+        return allocationResult;
+    }
+
+    /**
+     * 无副作用预检 SKU 在候选机台上的模具分配结果。
+     * <p>预检和正式分配共用同一套当前绑定、可释放旧模具、全局占用和机台模数计算，
+     * 但不修改已占用模具或机台绑定，确保候选失败不会产生脏状态。</p>
+     *
+     * @param materialCode SKU 编码
+     * @param machineCode 候选机台编码
+     * @return 与正式分配同口径的模具资源结果
+     */
+    public synchronized MouldResourceAllocationResult previewAllocate(String materialCode, String machineCode) {
+        return resolveAllocation(materialCode, machineCode);
+    }
+
+    /**
+     * 判断 SKU 是否存在需要进入模具运行态预检的模具关系定义。
+     * <p>没有任何模具关系的 SKU 保持原候选筛选语义，由后续正式分配链路暴露基础数据问题；
+     * 只要存在关系（包括台账缺失或禁用关系），候选筛选就必须执行实时模具预检。</p>
+     *
+     * @param materialCode SKU 编码
+     * @return true-存在模具关系定义，false-完全没有模具关系
+     */
+    public boolean hasMouldResourceDefinition(String materialCode) {
+        return skuAvailableMouldCodeMap.containsKey(materialCode)
+                || skuUnavailableMouldCodeMap.containsKey(materialCode);
+    }
+
+    /**
+     * 按当前模具运行态计算候选机台的分配结果。
+     *
+     * @param materialCode SKU 编码
+     * @param machineCode 候选机台编码
+     * @return 模具资源分配结果，本方法不修改运行态
+     */
+    private MouldResourceAllocationResult resolveAllocation(String materialCode, String machineCode) {
         int requiredMouldQty = resolveRequiredMouldQty(machineCode);
         List<String> availableMouldCodeList = skuAvailableMouldCodeMap.get(materialCode);
         int availableMouldQty = CollectionUtils.isEmpty(availableMouldCodeList) ? 0 : availableMouldCodeList.size();
@@ -132,12 +184,6 @@ public class MouldResourceContext {
         }
         List<String> releasedMouldCodeList = CollectionUtils.isEmpty(releasableMouldCodeSet)
                 ? Collections.<String>emptyList() : new ArrayList<String>(releasableMouldCodeSet);
-        // 真正换模成功时，先释放当前机台前物料实际模具，再绑定新SKU本次实际分配模具。
-        if (!CollectionUtils.isEmpty(releasedMouldCodeList)) {
-            occupiedMouldCodeSet.removeAll(releasedMouldCodeList);
-        }
-        occupiedMouldCodeSet.addAll(allocatedMouldCodeList);
-        machineBoundMouldCodeMap.put(machineCode, new LinkedHashSet<String>(allocatedMouldCodeList));
         MouldResourceAllocationResult allowedResult = MouldResourceAllocationResult.allowed(
                 requiredMouldQty,
                 availableMouldQty,

@@ -9341,8 +9341,27 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
     private LocalDate resolveContinuationAddMachineProductionDate(LhScheduleContext context,
                                                                   SkuScheduleDTO sourceSku) {
         int activeMachineCount = resolveContinuousMachineCount(context, sourceSku);
-        return DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+        LocalDate firstAddMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
                 context, sourceSku, activeMachineCount, ScheduleTypeEnum.CONTINUOUS.getCode());
+        if (Objects.nonNull(firstAddMachineDate) || !isContinuationForcedShortageMode(context, sourceSku)) {
+            return firstAddMachineDate;
+        }
+        /*
+         * 欠产超阈值只决定“必须继续尝试增机”，不能丢失增机的业务生效日期。
+         * 日期仍按同一套原始 dayN 逐日后看规则计算，避免补偿 SKU 进入 S4.5 后
+         * 被已经消费为 0 的日计划剩余额度顺延到更晚日期。
+         */
+        firstAddMachineDate = DailyMachineExpansionPlanner.resolveFirstOriginalDayPlanAddMachineDate(
+                context, sourceSku, activeMachineCount, ScheduleTypeEnum.CONTINUOUS.getCode());
+        if (Objects.nonNull(firstAddMachineDate)) {
+            log.info("续作强制增机补偿对齐原始dayN首次增机日期, scheduleDate: {}, materialCode: {}, "
+                            + "historyShortageQty: {}, threshold: {}, activeMachineCount: {}, firstAddMachineDate: {}",
+                    LhScheduleTimeUtil.formatDate(context.getScheduleDate()), sourceSku.getMaterialCode(),
+                    Math.max(0, sourceSku.getMonthlyHistoryShortageQty()),
+                    Math.max(0, DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context)),
+                    activeMachineCount, firstAddMachineDate);
+        }
+        return firstAddMachineDate;
     }
 
     /**
@@ -9360,6 +9379,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                                                              int activeMachineCount) {
         if (context == null || sourceSku == null || firstAddMachineProductionDate == null
                 || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
+            return 0;
+        }
+        if (isContinuationForcedShortageMode(context, sourceSku)) {
+            /*
+             * 强制增机仍按窗口后剩余欠产回落到阈值的既有目标量控制；
+             * 首次增机日期仅负责时间轴对齐，不能把强制补偿量收窄为 dayN 差额。
+             */
             return 0;
         }
         int dailyStandardQty = resolveContinuationDailyStandardQty(context, sourceSku);
@@ -9404,9 +9430,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         if (context == null || sourceSku == null || CollectionUtils.isEmpty(sourceSku.getDailyPlanQuotaMap())) {
             return false;
         }
-        int threshold = Math.max(0, DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context));
-        int historyShortageQty = Math.max(0, sourceSku.getMonthlyHistoryShortageQty());
-        if (threshold > 0 && historyShortageQty > threshold) {
+        if (isContinuationForcedShortageMode(context, sourceSku)) {
             return false;
         }
         int activeMachineCount = resolveContinuousMachineCount(context, sourceSku);
@@ -9422,6 +9446,23 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         return DailyMachineExpansionPlanner.isDailyLookAheadCapacitySatisfied(
                 context, sourceSku, activeMachineCount, ScheduleTypeEnum.CONTINUOUS.getCode());
+    }
+
+    /**
+     * 判断续作 SKU 是否进入欠产超阈值的强制增机模式。
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源续作 SKU
+     * @return true-欠产超过有效阈值；false-未进入强制增机模式
+     */
+    private boolean isContinuationForcedShortageMode(LhScheduleContext context,
+                                                      SkuScheduleDTO sourceSku) {
+        if (Objects.isNull(context) || Objects.isNull(sourceSku)) {
+            return false;
+        }
+        int threshold = Math.max(0, DailyMachineExpansionPlanner.resolveShortageAddMachineThreshold(context));
+        int historyShortageQty = Math.max(0, sourceSku.getMonthlyHistoryShortageQty());
+        return threshold > 0 && historyShortageQty > threshold;
     }
 
     /**

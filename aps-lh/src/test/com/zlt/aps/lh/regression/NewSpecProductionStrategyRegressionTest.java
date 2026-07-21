@@ -4242,6 +4242,39 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
+    void alignTimeByAddMachineDate_shouldNotDelayFirstCompensationMachineByConsumedQuota() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        Date scheduleDate = dateTime(2026, 7, 20, 0, 0);
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(dateTime(2026, 7, 21, 0, 0));
+        context.setWindowEndDate(dateTime(2026, 7, 22, 0, 0));
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001002");
+        sku.setContinuousCompensationSku(true);
+        sku.setDailyPlanQty(252);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(
+                context.getScheduleWindowShifts(), sku.getMaterialCode(), 0, 0, 288));
+        LocalDate firstAddMachineDate = toLocalDate(context.getScheduleWindowShifts().get(0));
+        Date switchReadyTime = context.getScheduleWindowShifts().get(0).getShiftStartDateTime();
+        Date productionStartTime = context.getScheduleWindowShifts().get(1).getShiftStartDateTime();
+
+        Date alignedSwitchReadyTime = ReflectionTestUtils.invokeMethod(strategy,
+                "alignSwitchReadyTimeByAddMachineDate", context, sku, switchReadyTime,
+                context.getScheduleWindowShifts(), 0, firstAddMachineDate, false);
+        Date alignedProductionStartTime = ReflectionTestUtils.invokeMethod(strategy,
+                "alignProductionStartTimeByAddMachineDate", context, sku, productionStartTime,
+                context.getScheduleWindowShifts(), 0, firstAddMachineDate, false, null);
+
+        assertEquals(switchReadyTime, alignedSwitchReadyTime,
+                "首台补偿机换模已对齐T日时，不得因T日剩余额度为0顺延到T+1");
+        assertEquals(productionStartTime, alignedProductionStartTime,
+                "首台补偿机开产已对齐T日时，不得被普通首台日计划路径推迟");
+    }
+
+    @Test
     void isSkuNeedScheduleOnFirstDay_shouldUseCompensationEarlyProductionAdmission() {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         LhScheduleContext context = buildContext();

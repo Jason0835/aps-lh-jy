@@ -1803,6 +1803,103 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * T 日已完成量只参与实际扣账，增机判断必须使用原始日计划。
+     */
+    @Test
+    public void shouldAddMachineOnTDayByOriginalPlanFor3302001002() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 252, 288, 288);
+        SkuScheduleDTO sku = buildContinuousSku("3302001002", 16, 828, quotaMap);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(828);
+        sku.setScheduleDayFinishQty(96);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001002");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(48);
+        context.getSkuLhCapacityMap().put("3302001002", capacity);
+
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 5, ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        LocalDate firstDay = new ArrayList<LocalDate>(quotaMap.keySet()).get(0);
+        Assertions.assertEquals(firstDay, addMachineDate,
+                "T日原始计划252超过5台日标240，即使已完成96也必须在T日增机");
+    }
+
+    /**
+     * T 日刚好满足、T+1 与 T+2 均不满足时，首次增机日必须是 T+1。
+     */
+    @Test
+    public void shouldAddMachineOnSecondDayFor3302001585() {
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 216, 270, 270);
+        SkuScheduleDTO sku = buildContinuousSku("3302001585", 18, 756, quotaMap);
+        sku.setMonthlyHistoryShortageQty(0);
+        sku.setWindowPlanQty(756);
+        sku.setScheduleDayFinishQty(0);
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001585");
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(54);
+        context.getSkuLhCapacityMap().put("3302001585", capacity);
+
+        LocalDate addMachineDate = DailyMachineExpansionPlanner.resolveFirstDailyLookAheadAddMachineDate(
+                context, sku, 4, ScheduleTypeEnum.CONTINUOUS.getCode());
+
+        LocalDate secondDay = new ArrayList<LocalDate>(quotaMap.keySet()).get(1);
+        Assertions.assertEquals(secondDay, addMachineDate,
+                "T日216被4台日标216刚好满足，T+1/T+2的270均不满足，应在T+1增机");
+    }
+
+    /**
+     * 欠产超过阈值时仍需把原始 dayN 首次缺机日期传给续作补偿，
+     * 强制增机目标量继续沿用窗口后欠产回落阈值口径，不能被收窄为 dayN 差额。
+     */
+    @Test
+    public void shouldCarrySecondDayAddMachineDateForForcedShortage3302001585() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 216, 270, 270);
+        SkuScheduleDTO sku = buildContinuousSku("3302001585", 18, 756, quotaMap);
+        sku.setMonthlyHistoryShortageQty(122);
+        sku.setWindowPlanQty(878);
+        sku.setScheduleDayFinishQty(69);
+        context.setScheduleConfig(new LhScheduleConfig(java.util.Collections.singletonMap(
+                LhScheduleParamConstant.NEW_SPEC_SHORTAGE_ADD_MACHINE_THRESHOLD, "100")));
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302001585");
+        capacity.setClassCapacity(18);
+        capacity.setStandardCapacity(54);
+        context.getSkuLhCapacityMap().put("3302001585", capacity);
+        for (String machineCode : new String[]{"K1107", "K1701", "K1715", "K1716"}) {
+            LhScheduleResult result = buildContinuousResult("3302001585", machineCode, 18, shifts, "0");
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        Method dateMethod = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "resolveContinuationAddMachineProductionDate", LhScheduleContext.class, SkuScheduleDTO.class);
+        dateMethod.setAccessible(true);
+        LocalDate addMachineDate = (LocalDate) dateMethod.invoke(strategy, context, sku);
+
+        LocalDate secondDay = new ArrayList<LocalDate>(quotaMap.keySet()).get(1);
+        Assertions.assertEquals(secondDay, addMachineDate,
+                "欠产122超过阈值100时，强制增机补偿仍必须携带T+1的dayN首次增机日期");
+
+        Method quantityMethod = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "resolveContinuationAddMachineCompensationQty", LhScheduleContext.class,
+                SkuScheduleDTO.class, LocalDate.class, int.class);
+        quantityMethod.setAccessible(true);
+        int dayNCompensationQty = (Integer) quantityMethod.invoke(strategy, context, sku, addMachineDate, 4);
+        Assertions.assertEquals(0, dayNCompensationQty,
+                "强制增机只复用dayN日期，不得把既有强制补偿目标量收窄为dayN差额");
+    }
+
+    /**
      * 严格收尾目标仍有余量时，只要一台续作机台已满足正式日硫化标准，就不得生成新增补偿机台。
      */
     @Test

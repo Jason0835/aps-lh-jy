@@ -360,6 +360,34 @@ class DailyMachineCapacitySimulationUtilRegressionTest {
     }
 
     @Test
+    void simulateExpansion_shouldUseOriginalTDayPlanWithoutDeductingCompletedQty() {
+        LocalDate day1 = LocalDate.of(2026, 7, 20);
+        LocalDate day2 = LocalDate.of(2026, 7, 21);
+        LocalDate day3 = LocalDate.of(2026, 7, 22);
+        DailyMachineCapacitySimulationRequest request = new DailyMachineCapacitySimulationRequest();
+        request.setMaterialCode("3302001002");
+        request.setDailyPlanQuotaMap(quotaMap(day1, day2, day3, 252, 288, 288));
+        request.setMachineDailyCapacityList(machineCapacityList(day1, day2, day3, 48, 48, 48, 6));
+        request.setInitialActiveMachines(5);
+        request.setShiftCapacity(16);
+        request.setScheduleDayFinishQty(96);
+        request.setShortageLookAheadDays(2);
+        request.setShortageAddMachineThreshold(150);
+        request.setMonthlyHistoryShortageQty(0);
+        request.setWindowEndDate(day3);
+        request.setSceneType("continuous");
+
+        DailyMachineCapacitySimulationResult result =
+                DailyMachineCapacitySimulationUtil.simulateExpansion(request);
+
+        assertEquals(6, result.getFinalActiveMachines(),
+                "T日原始计划252大于5台日标240，不得扣除已完成96后误判定为满足");
+        assertEquals(1, result.getTotalAddedMachineCount());
+        assertEquals(252, result.getDayDecisionList().get(0).getCurrentDayPlanQty());
+        assertEquals(day1, result.getDayDecisionList().get(0).getProductionDate());
+    }
+
+    @Test
     void simulateExpansion_shouldAddMachineWhenRolledCurrentAndNextDayPlanExceedDailyStandard() {
         LocalDate day1 = LocalDate.of(2026, 5, 9);
         LocalDate day2 = LocalDate.of(2026, 5, 10);
