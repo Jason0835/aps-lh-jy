@@ -216,10 +216,10 @@ public class LhScheduleConfig {
     /**
      * 获取胶囊使用次数上限。
      *
-     * <p>只有“当前使用次数 + 当前班次扣减前实际可排量”严格大于该值时，
-     * 当前班次才执行换胶囊；刚好达到上限不扣减班次计划量。</p>
+     * <p>本批初值取左右模次数最大值，后续按物理机台实际总产量累计。只有本批尚未处理阈值，
+     * 且“当前机台次数 + 候选物理总产量”严格大于该值时才首次扣量；刚好达到上限不触发。</p>
      *
-     * @return 胶囊使用次数上限，最小为1
+     * @return 胶囊使用次数上限，最小为1；本批按机台总量累计并仅首次严格跨限触发
      */
     public int getCapsuleUsageUpperLimit() {
         return Math.max(1, getParamIntValue(LhScheduleParamConstant.CAPSULE_FORCE_DOWN_COUNT,
@@ -232,7 +232,7 @@ public class LhScheduleConfig {
      * <p>默认值2代表换胶囊固定占用1小时，对应减少2条可排量；配置为0时仍可记录
      * 换胶囊动作，但不减少班次计划量。</p>
      *
-     * @return 换胶囊班次扣减量，最小为0
+     * @return 本批首次严格跨限的班次扣减量，最小为0
      */
     public int getCapsuleChangeLossQty() {
         return Math.max(0, getParamIntValue(LhScheduleParamConstant.CAPSULE_CHANGE_LOSS_QTY,

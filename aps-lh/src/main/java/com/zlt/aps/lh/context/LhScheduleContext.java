@@ -189,22 +189,22 @@ public class LhScheduleContext {
     /** 硫化机胶囊已使用次数Map, key=machineCode */
     private Map<String, LhRepairCapsule> capsuleUsageMap = new HashMap<>();
     /**
-     * 本批排程胶囊运行态使用次数，key=物理机台编码 + 胶囊位置（1/2）。
-     * <p>初值来自 {@link #capsuleUsageMap}，后续只按当前排程结果的实际班次计划量重建，
-     * 不回写胶囊维修表，避免候选预演或结果回滚污染基础数据。</p>
+     * 本批排程胶囊运行态使用次数，key=物理机台编码。
+     * <p>初值取 {@link #capsuleUsageMap} 左右模次数最大值，后续按物理机台实际总产量累计；
+     * 本批首次严格跨限后不重置，不回写胶囊维修表，下一批仍重新接受MES快照。</p>
      */
     private Map<String, Integer> capsuleRuntimeUsageMap = new LinkedHashMap<String, Integer>();
     /**
      * 已执行换胶囊的物理机台班次键集合，key=物理机台编码 + 工作日期 + 班次索引。
-     * <p>同一物理机台同一班次只允许扣减一次，即使该班存在多个结果行或L/R两侧结果。</p>
+     * <p>用于定位本批首次严格跨限实际发生的班次，并为后置产能防回扩提供事实依据。</p>
      */
     private Set<String> capsuleReplacementShiftKeySet = new LinkedHashSet<String>();
     /**
-     * 已在指定班次完成更换的胶囊位置集合，key=物理机台班次键 + 胶囊位置。
-     * <p>该集合用于区分双模机台本次究竟更换了左侧、右侧还是两侧胶囊，重建运行态时
-     * 仍能按实际产量正确计算新胶囊次数。</p>
+     * 本批已处理胶囊上限的物理机台集合，key=物理机台编码。
+     * <p>初始左右最大值已达到上限，或本批已执行首次严格跨限扣量时登记；集合内机台
+     * 后续只累计物理总产量，不再重复扣量或备注。</p>
      */
-    private Set<String> capsuleReplacementPositionShiftKeySet = new LinkedHashSet<String>();
+    private Set<String> capsuleThresholdHandledMachineSet = new LinkedHashSet<String>();
     /**
      * 已换胶囊结果班次允许写入的最大计划量，key=物理机台班次键 + 结果业务键。
      * <p>首次换胶囊时记录扣减后的精确上限，供日标准收敛、班次重分配和补量复用，

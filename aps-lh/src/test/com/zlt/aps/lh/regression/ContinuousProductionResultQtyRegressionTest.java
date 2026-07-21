@@ -1145,9 +1145,9 @@ class ContinuousProductionResultQtyRegressionTest {
         MachineScheduleDTO machine = context.getMachineScheduleMap().get("KRB01");
         machine.setEstimatedEndTime(dateTime(2026, 4, 11, 15, 30, 0));
         context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().put(result, 3);
-        context.getCapsuleRuntimeUsageMap().put("KRB01_1", 12);
+        context.getCapsuleRuntimeUsageMap().put("KRB01", 12);
         context.getCapsuleReplacementShiftKeySet().add("KRB01_2026-04-11_2");
-        context.getCapsuleReplacementPositionShiftKeySet().add("KRB01_2026-04-11_2_1");
+        context.getCapsuleThresholdHandledMachineSet().add("KRB01");
         context.getCapsuleReplacementShiftCapacityLimitMap().put("KRB01_2026-04-11_2_MAT-ROLLBACK", 14);
         context.getDailyMouldChangeCountMap().put("2026-04-12", new int[]{8, 6});
         LhMouldChangePlan inheritedPlan = new LhMouldChangePlan();
@@ -1171,12 +1171,12 @@ class ContinuousProductionResultQtyRegressionTest {
                 "后延失败后应恢复机台运行态结束时间");
         assertEquals(Integer.valueOf(3), context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().get(result),
                 "后延失败不得覆盖尝试前已有允许超量");
-        assertEquals(Integer.valueOf(12), context.getCapsuleRuntimeUsageMap().get("KRB01_1"),
+        assertEquals(Integer.valueOf(12), context.getCapsuleRuntimeUsageMap().get("KRB01"),
                 "后延失败后应恢复胶囊运行次数");
         assertEquals(1, context.getCapsuleReplacementShiftKeySet().size(),
                 "后延失败后换胶囊班次集合不得产生脏数据");
-        assertEquals(1, context.getCapsuleReplacementPositionShiftKeySet().size(),
-                "后延失败后换胶囊位置集合不得产生脏数据");
+        assertEquals(1, context.getCapsuleThresholdHandledMachineSet().size(),
+                "后延失败后已处理胶囊阈值的机台集合不得产生脏数据");
         assertEquals(1, context.getCapsuleReplacementShiftCapacityLimitMap().size(),
                 "后延失败后换胶囊产能上限不得产生脏数据");
         assertEquals(8, context.getDailyMouldChangeCountMap().get("2026-04-12")[0],

@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.IdentityHashMap;
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -35,10 +34,11 @@ import java.util.Set;
  * <ul>
  *   <li>判断基数必须是停机、清洗、保养、首检、日计划额度、余量和收尾目标等既有规则
  *   收口后的“扣减前实际可排量”；</li>
- *   <li>只有当前次数加扣减前实际可排量严格大于上限时才换胶囊，刚好达到上限不触发；</li>
- *   <li>触发后从当前候选计划量固定扣减配置值，余量账本只消费扣减后的实际排产量；</li>
- *   <li>同一物理机台同一班次只扣减一次，L/R两侧或同班多个结果行不得重复扣减；</li>
- *   <li>胶囊次数只按结果真实计划量累计，候选预演、选机模拟和产能模拟不得调用本类。</li>
+ *   <li>本批初始次数取左右模次数最大值，后续按物理机台实际总产量累计；</li>
+ *   <li>只有当前次数加扣减前物理总产量严格大于上限时才首次换胶囊，刚好达到上限不触发；</li>
+ *   <li>本批首次跨限从候选计划量固定扣减配置值，后续继续累计但不重置、不重复扣减；</li>
+ *   <li>L/R整机结果按左右实际量合计一次，结果复制和同班多个结果不得重复累计；</li>
+ *   <li>候选预演、选机模拟和产能模拟不得调用本类，避免污染正式运行态。</li>
  * </ul>
  *
  * <p>本组件不保存批次状态。所有可变状态均放在 {@link LhScheduleContext}，并且每次正式分配前
@@ -53,12 +53,6 @@ public class CapsuleReplacementRuleService {
     /** 排程结果班次备注 */
     public static final String CAPSULE_REPLACEMENT_ANALYSIS = "换胶囊";
 
-    /** 胶囊位置1，普通单模和普通双模第一侧均使用该位置 */
-    private static final String CAPSULE_POSITION_ONE = "1";
-
-    /** 胶囊位置2，普通双模第二侧及单控R侧使用该位置 */
-    private static final String CAPSULE_POSITION_TWO = "2";
-
     /** 运行态复合键分隔符 */
     private static final String KEY_SEPARATOR = "::";
 
@@ -72,7 +66,6 @@ public class CapsuleReplacementRuleService {
      * @param result 当前排程结果
      * @param shift 当前班次
      * @param candidateQty 扣减前实际可排量
-     * @param mouldQty 当前结果模台数
      * @param scene 调用场景，用于对账日志
      * @return 换胶囊规则收口后的实际排产量
      */
@@ -80,7 +73,6 @@ public class CapsuleReplacementRuleService {
                                     LhScheduleResult result,
                                     LhShiftConfigVO shift,
                                     int candidateQty,
-                                    int mouldQty,
                                     String scene) {
         int normalizedCandidateQty = Math.max(0, candidateQty);
         if (Objects.isNull(context) || Objects.isNull(result) || Objects.isNull(shift)
@@ -120,18 +112,20 @@ public class CapsuleReplacementRuleService {
         }
         int effectiveLossQty = resolveEffectiveLossQty(
                 configuredLossQty, wholeSingleControlPair, result.getLhMachineCode());
-        Map<String, Integer> candidateIncrementMap = resolveUsageIncrementMap(
-                result, normalizedCandidateQty, mouldQty, wholeSingleControlPair);
-        String beforeUsageText = formatPhysicalUsage(context, physicalMachineCode);
-
-        Set<String> crossingPositionSet = resolveCrossingPositionSet(
-                context, shiftKey, physicalMachineCode, candidateIncrementMap, usageUpperLimit);
-        boolean firstReplacementInShift = !shiftAlreadyReplaced && !crossingPositionSet.isEmpty();
-        int actualPlanQty = firstReplacementInShift
+        int beforeUsage = getMachineRuntimeUsage(context, physicalMachineCode);
+        int candidatePhysicalQty = resolvePhysicalPlanQty(normalizedCandidateQty, wholeSingleControlPair);
+        boolean thresholdHandled = context.getCapsuleThresholdHandledMachineSet()
+                .contains(physicalMachineCode);
+        boolean firstThresholdCrossing = !shiftAlreadyReplaced
+                && !thresholdHandled
+                && beforeUsage + candidatePhysicalQty > usageUpperLimit;
+        int actualPlanQty = firstThresholdCrossing
                 ? Math.max(0, normalizedCandidateQty - effectiveLossQty)
                 : normalizedCandidateQty;
 
-        if (firstReplacementInShift) {
+        if (firstThresholdCrossing) {
+            // 首次严格跨限后登记物理机台，本批后续班次只累计次数，不再重复扣量或备注。
+            context.getCapsuleThresholdHandledMachineSet().add(physicalMachineCode);
             context.getCapsuleReplacementShiftKeySet().add(shiftKey);
             int existingPlanQty = resolveShiftPlanQty(result, shift.getShiftIndex());
             context.getCapsuleReplacementShiftCapacityLimitMap().put(
@@ -139,27 +133,21 @@ public class CapsuleReplacementRuleService {
             ShiftFieldUtil.appendShiftAnalysis(
                     result, shift.getShiftIndex(), CAPSULE_REPLACEMENT_ANALYSIS);
         }
-        for (String position : crossingPositionSet) {
-            context.getCapsuleReplacementPositionShiftKeySet().add(
-                    buildReplacementPositionShiftKey(shiftKey, position));
-        }
+        int actualPhysicalQty = resolvePhysicalPlanQty(actualPlanQty, wholeSingleControlPair);
+        applyActualUsageIncrement(context, physicalMachineCode, actualPhysicalQty);
 
-        Map<String, Integer> actualIncrementMap = resolveUsageIncrementMap(
-                result, actualPlanQty, mouldQty, wholeSingleControlPair);
-        applyActualUsageIncrement(context, physicalMachineCode,
-                actualIncrementMap, usageUpperLimit, crossingPositionSet);
-
-        if (firstReplacementInShift || !crossingPositionSet.isEmpty()) {
+        if (firstThresholdCrossing) {
             log.info("换胶囊班次计划量收口, batchNo: {}, scheduleDate: {}, scene: {}, materialCode: {}, "
-                            + "machineCode: {}, physicalMachineCode: {}, shiftIndex: {}, 当前胶囊次数: {}, "
-                            + "胶囊上限: {}, 扣减前实际可排量: {}, 配置扣减量: {}, 本结果有效扣减量: {}, "
-                            + "实际排产量: {}, 触发胶囊位置: {}, 是否本班首次扣减: {}, 扣减后胶囊次数: {}",
+                            + "machineCode: {}, physicalMachineCode: {}, shiftIndex: {}, 当前机台胶囊次数: {}, "
+                            + "胶囊上限: {}, 扣减前结果可排量: {}, 扣减前物理总产量: {}, 配置扣减量: {}, "
+                            + "本结果有效扣减量: {}, 实际结果量: {}, 实际物理总产量: {}, "
+                            + "本批首次严格跨限: {}, 累计后机台胶囊次数: {}",
                     context.getBatchNo(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), scene,
                     result.getMaterialCode(), result.getLhMachineCode(), physicalMachineCode,
-                    shift.getShiftIndex(), beforeUsageText,
-                    usageUpperLimit, normalizedCandidateQty, configuredLossQty, effectiveLossQty,
-                    actualPlanQty, crossingPositionSet, firstReplacementInShift,
-                    formatPhysicalUsage(context, physicalMachineCode));
+                    shift.getShiftIndex(), beforeUsage,
+                    usageUpperLimit, normalizedCandidateQty, candidatePhysicalQty,
+                    configuredLossQty, effectiveLossQty, actualPlanQty, actualPhysicalQty,
+                    true, getMachineRuntimeUsage(context, physicalMachineCode));
         }
         return actualPlanQty;
     }
@@ -303,18 +291,13 @@ public class CapsuleReplacementRuleService {
         if (Objects.isNull(context)) {
             return;
         }
-        Set<String> previousReplacementPositionSet = new LinkedHashSet<String>(
-                context.getCapsuleReplacementPositionShiftKeySet());
         context.getCapsuleRuntimeUsageMap().clear();
         context.getCapsuleReplacementShiftKeySet().clear();
+        context.getCapsuleThresholdHandledMachineSet().clear();
 
         List<LhScheduleResult> resultList = collectCurrentResults(context, currentResult);
         List<LhShiftConfigVO> shifts = resolveScheduleShifts(context);
         Set<String> validReplacementShiftKeySet = new LinkedHashSet<String>();
-        Set<String> rebuiltReplacementPositionSet = new LinkedHashSet<String>();
-        Map<String, Set<String>> replacementPositionByShiftKeyMap =
-                new LinkedHashMap<String, Set<String>>(8);
-        Set<String> appliedReplacementPositionShiftKeySet = new LinkedHashSet<String>();
 
         for (LhShiftConfigVO shift : shifts) {
             if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
@@ -346,69 +329,17 @@ public class CapsuleReplacementRuleService {
                 if (StringUtils.isEmpty(shiftKey)) {
                     continue;
                 }
-                int usageUpperLimit = resolveUsageUpperLimit(context);
-                int mouldQty = resolveResultMouldQty(result);
-                Set<String> currentReplacementPositionSet = new LinkedHashSet<String>(2);
-                Set<String> replacementPositionSet = replacementPositionByShiftKeyMap.get(shiftKey);
-                if (replacementMarked && !context.getCapsuleReplacementShiftKeySet().contains(shiftKey)) {
-                    context.getCapsuleReplacementShiftKeySet().add(shiftKey);
-                    validReplacementShiftKeySet.add(shiftKey);
-                    replacementPositionSet = resolvePersistedReplacementPositionSet(
-                            previousReplacementPositionSet, shiftKey);
-                    if (replacementPositionSet.isEmpty()) {
-                        int effectiveLossQty = resolveEffectiveLossQty(
-                                resolveChangeLossQty(context), wholeSingleControlPair,
-                                result.getLhMachineCode());
-                        Map<String, Integer> originalCandidateIncrementMap = resolveUsageIncrementMap(
-                                result, actualQty + effectiveLossQty, mouldQty, wholeSingleControlPair);
-                        replacementPositionSet.addAll(resolveCrossingPositionSet(
-                                context, shiftKey, physicalMachineCode,
-                                originalCandidateIncrementMap, usageUpperLimit));
-                    }
-                    replacementPositionByShiftKeyMap.put(shiftKey, replacementPositionSet);
-                    for (String position : replacementPositionSet) {
-                        rebuiltReplacementPositionSet.add(
-                                buildReplacementPositionShiftKey(shiftKey, position));
+                if (replacementMarked) {
+                    // 结果备注是本批已执行首次跨限扣量的事实，重建时恢复机台级处理状态。
+                    context.getCapsuleThresholdHandledMachineSet().add(physicalMachineCode);
+                    if (context.getCapsuleReplacementShiftKeySet().add(shiftKey)) {
+                        validReplacementShiftKeySet.add(shiftKey);
                     }
                 }
-                Map<String, Integer> actualIncrementMap = resolveUsageIncrementMap(
-                        result, actualQty, mouldQty, wholeSingleControlPair);
-                /*
-                 * 同一物理机台同班可能先由L侧触发一次产能扣减，随后R侧才跨越上限。
-                 * 备注只能保留一处，因此重建时不能在备注结果上直接重置所有位置；必须等对应侧
-                 * 的实际结果出现后再重置，避免把另一侧后续产量继续累计到旧胶囊上。
-                 */
-                if (!CollectionUtils.isEmpty(replacementPositionSet)) {
-                    Map<String, Integer> replayCandidateIncrementMap =
-                            new LinkedHashMap<String, Integer>(actualIncrementMap);
-                    if (replacementMarked) {
-                        int effectiveLossQty = resolveEffectiveLossQty(
-                                resolveChangeLossQty(context), wholeSingleControlPair,
-                                result.getLhMachineCode());
-                        mergeUsageIncrement(replayCandidateIncrementMap, resolveUsageIncrementMap(
-                                result, effectiveLossQty, mouldQty, wholeSingleControlPair));
-                    }
-                    for (String position : replacementPositionSet) {
-                        String positionShiftKey = buildReplacementPositionShiftKey(shiftKey, position);
-                        if (appliedReplacementPositionShiftKeySet.contains(positionShiftKey)
-                                || !actualIncrementMap.containsKey(position)) {
-                            continue;
-                        }
-                        int currentUsage = context.getCapsuleRuntimeUsageMap().getOrDefault(
-                                buildUsageKey(physicalMachineCode, position), 0);
-                        int replayCandidateIncrement = replayCandidateIncrementMap.getOrDefault(position, 0);
-                        if (currentUsage + replayCandidateIncrement > usageUpperLimit) {
-                            currentReplacementPositionSet.add(position);
-                            appliedReplacementPositionShiftKeySet.add(positionShiftKey);
-                        }
-                    }
-                }
-                applyActualUsageIncrement(context, physicalMachineCode,
-                        actualIncrementMap, usageUpperLimit, currentReplacementPositionSet);
+                int actualPhysicalQty = resolvePhysicalPlanQty(actualQty, wholeSingleControlPair);
+                applyActualUsageIncrement(context, physicalMachineCode, actualPhysicalQty);
             }
         }
-        context.getCapsuleReplacementPositionShiftKeySet().clear();
-        context.getCapsuleReplacementPositionShiftKeySet().addAll(rebuiltReplacementPositionSet);
         context.getCapsuleReplacementShiftKeySet().retainAll(validReplacementShiftKeySet);
     }
 
@@ -433,10 +364,10 @@ public class CapsuleReplacementRuleService {
     }
 
     /**
-     * 清理同一物理机台同一班次的重复“换胶囊”备注。
+     * 清理同一物理机台在本批排程中的重复“换胶囊”备注。
      *
-     * <p>该核对只规范备注，不修改任何班次计划量。正常落班入口本身已经保证幂等；这里用于处理
-     * L/R结果复制、结果合并等后置动作可能带来的重复备注，保留遇到的第一条结果备注。</p>
+     * <p>首次严格跨限只允许扣减和备注一次。该核对只规范备注，不修改班次计划量；按班次、
+     * 结果开始时间顺序保留第一条备注，清理L/R复制、结果合并或后置处理产生的重复备注。</p>
      *
      * @param context 排程上下文
      * @return 清理的重复备注数量
@@ -445,21 +376,22 @@ public class CapsuleReplacementRuleService {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleResultList())) {
             return 0;
         }
-        Set<String> markedShiftKeySet = new LinkedHashSet<String>();
+        Set<String> markedPhysicalMachineSet = new LinkedHashSet<String>();
         int removedCount = 0;
         for (LhShiftConfigVO shift : resolveScheduleShifts(context)) {
             if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
                 continue;
             }
-            for (LhScheduleResult result : context.getScheduleResultList()) {
+            List<LhScheduleResult> orderedResults = resolveOrderedShiftResults(
+                    context.getScheduleResultList(), shift.getShiftIndex());
+            for (LhScheduleResult result : orderedResults) {
                 if (Objects.isNull(result) || StringUtils.isEmpty(result.getLhMachineCode())
                         || !containsReplacementAnalysis(result, shift.getShiftIndex())) {
                     continue;
                 }
                 String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(
                         result.getLhMachineCode());
-                String shiftKey = buildShiftKey(physicalMachineCode, shift);
-                if (StringUtils.isEmpty(shiftKey) || markedShiftKeySet.add(shiftKey)) {
+                if (markedPhysicalMachineSet.add(physicalMachineCode)) {
                     continue;
                 }
                 ShiftFieldUtil.removeShiftAnalysis(
@@ -471,100 +403,47 @@ public class CapsuleReplacementRuleService {
     }
 
     /**
-     * 获取指定机台胶囊位置的当前运行态次数，供单元测试和诊断使用。
+     * 获取指定物理机台的当前胶囊运行态次数，供单元测试和诊断使用。
      *
      * @param context 排程上下文
      * @param machineCode 运行态或物理机台编码
-     * @param position 胶囊位置，1或2
-     * @return 当前运行态使用次数
+     * @return 当前物理机台胶囊使用次数
      */
-    public int getRuntimeUsage(LhScheduleContext context, String machineCode, int position) {
+    public int getMachineRuntimeUsage(LhScheduleContext context, String machineCode) {
         if (Objects.isNull(context) || StringUtils.isEmpty(machineCode)) {
             return 0;
         }
         String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode);
-        return context.getCapsuleRuntimeUsageMap().getOrDefault(
-                buildUsageKey(physicalMachineCode, String.valueOf(position)), 0);
-    }
-
-    private void applyActualUsageIncrement(LhScheduleContext context,
-                                           String physicalMachineCode,
-                                           Map<String, Integer> actualIncrementMap,
-                                           int usageUpperLimit,
-                                           Set<String> currentReplacementPositionSet) {
-        for (Map.Entry<String, Integer> entry : actualIncrementMap.entrySet()) {
-            String position = entry.getKey();
-            int actualIncrement = Math.max(0, entry.getValue());
-            String usageKey = buildUsageKey(physicalMachineCode, position);
-            int currentUsage = context.getCapsuleRuntimeUsageMap().getOrDefault(usageKey, 0);
-            boolean replaced = currentReplacementPositionSet.contains(position);
-            int newUsage = replaced
-                    ? Math.max(0, currentUsage + actualIncrement - usageUpperLimit)
-                    : currentUsage + actualIncrement;
-            context.getCapsuleRuntimeUsageMap().put(usageKey, newUsage);
-        }
-    }
-
-    private Set<String> resolveCrossingPositionSet(LhScheduleContext context,
-                                                    String shiftKey,
-                                                    String physicalMachineCode,
-                                                    Map<String, Integer> candidateIncrementMap,
-                                                    int usageUpperLimit) {
-        Set<String> crossingPositionSet = new LinkedHashSet<String>();
-        for (Map.Entry<String, Integer> entry : candidateIncrementMap.entrySet()) {
-            String position = entry.getKey();
-            String replacementPositionKey = buildReplacementPositionShiftKey(shiftKey, position);
-            if (context.getCapsuleReplacementPositionShiftKeySet().contains(replacementPositionKey)) {
-                continue;
-            }
-            int currentUsage = context.getCapsuleRuntimeUsageMap().getOrDefault(
-                    buildUsageKey(physicalMachineCode, position), 0);
-            if (currentUsage + Math.max(0, entry.getValue()) > usageUpperLimit) {
-                crossingPositionSet.add(position);
-            }
-        }
-        return crossingPositionSet;
-    }
-
-    private Map<String, Integer> resolveUsageIncrementMap(LhScheduleResult result,
-                                                           int planQty,
-                                                           int mouldQty,
-                                                           boolean wholeSingleControlPair) {
-        Map<String, Integer> incrementMap = new LinkedHashMap<String, Integer>(2);
-        int normalizedPlanQty = Math.max(0, planQty);
-        String machineCode = result.getLhMachineCode();
-        if (wholeSingleControlPair && LhSingleControlMachineUtil.isSingleMouldMachine(machineCode)) {
-            // L/R整机主结果记录的是单侧数量，配对侧随后复制相同数量；此处一次性累计左右两侧。
-            incrementMap.put(CAPSULE_POSITION_ONE, normalizedPlanQty);
-            incrementMap.put(CAPSULE_POSITION_TWO, normalizedPlanQty);
-            return incrementMap;
-        }
-        if (LhSingleControlMachineUtil.isSingleMouldMachine(machineCode)) {
-            incrementMap.put(LhSingleControlMachineUtil.isLeftSide(machineCode)
-                    ? CAPSULE_POSITION_ONE : CAPSULE_POSITION_TWO, normalizedPlanQty);
-            return incrementMap;
-        }
-        if (mouldQty > 1) {
-            // 普通双模按两侧实际产出拆分，不能把整机总计划量同时累计到两个胶囊。
-            incrementMap.put(CAPSULE_POSITION_ONE, (normalizedPlanQty + 1) / 2);
-            incrementMap.put(CAPSULE_POSITION_TWO, normalizedPlanQty / 2);
-            return incrementMap;
-        }
-        incrementMap.put(CAPSULE_POSITION_ONE, normalizedPlanQty);
-        return incrementMap;
+        return context.getCapsuleRuntimeUsageMap().getOrDefault(physicalMachineCode, 0);
     }
 
     /**
-     * 将胶囊位置增量合并到重建候选增量中。
+     * 按真实物理总产量累计机台胶囊次数，首次跨限后也不减去上限。
      *
-     * @param targetIncrementMap 待更新的胶囊位置增量
-     * @param addedIncrementMap 需要追加的胶囊位置增量
+     * @param context 排程上下文
+     * @param physicalMachineCode 物理机台编码
+     * @param actualPhysicalQty 本次实际物理总产量
      */
-    private void mergeUsageIncrement(Map<String, Integer> targetIncrementMap,
-                                     Map<String, Integer> addedIncrementMap) {
-        for (Map.Entry<String, Integer> entry : addedIncrementMap.entrySet()) {
-            targetIncrementMap.merge(entry.getKey(), Math.max(0, entry.getValue()), Integer::sum);
-        }
+    private void applyActualUsageIncrement(LhScheduleContext context,
+                                           String physicalMachineCode,
+                                           int actualPhysicalQty) {
+        int normalizedIncrement = Math.max(0, actualPhysicalQty);
+        context.getCapsuleRuntimeUsageMap().merge(
+                physicalMachineCode, normalizedIncrement, Integer::sum);
+    }
+
+    /**
+     * 将结果计划量转换为物理机台总产量。
+     * <p>普通机台结果已保存整机总量，可直接累计；L/R整机配对结果按单侧保存，
+     * 需要乘以2还原左右实际总产量。L/R独立排产由两侧结果分别进入规则并自然累加。</p>
+     *
+     * @param resultPlanQty 当前结果计划量
+     * @param wholeSingleControlPair 是否为L/R整机配对结果
+     * @return 本次物理机台总产量
+     */
+    private int resolvePhysicalPlanQty(int resultPlanQty, boolean wholeSingleControlPair) {
+        int normalizedPlanQty = Math.max(0, resultPlanQty);
+        return wholeSingleControlPair ? normalizedPlanQty * 2 : normalizedPlanQty;
     }
 
     private int resolveEffectiveLossQty(int configuredLossQty,
@@ -584,10 +463,7 @@ public class CapsuleReplacementRuleService {
     private void initializePhysicalMachineUsage(LhScheduleContext context,
                                                 String machineCode,
                                                 String physicalMachineCode) {
-        String positionOneKey = buildUsageKey(physicalMachineCode, CAPSULE_POSITION_ONE);
-        String positionTwoKey = buildUsageKey(physicalMachineCode, CAPSULE_POSITION_TWO);
-        if (context.getCapsuleRuntimeUsageMap().containsKey(positionOneKey)
-                && context.getCapsuleRuntimeUsageMap().containsKey(positionTwoKey)) {
+        if (context.getCapsuleRuntimeUsageMap().containsKey(physicalMachineCode)) {
             return;
         }
 
@@ -624,8 +500,15 @@ public class CapsuleReplacementRuleService {
                 positionTwoUsage = Math.max(0, machine.getCapsuleUsageCount2());
             }
         }
-        context.getCapsuleRuntimeUsageMap().put(positionOneKey, positionOneUsage);
-        context.getCapsuleRuntimeUsageMap().put(positionTwoKey, positionTwoUsage);
+        int machineUsage = Math.max(positionOneUsage, positionTwoUsage);
+        context.getCapsuleRuntimeUsageMap().put(physicalMachineCode, machineUsage);
+        if (machineUsage >= resolveUsageUpperLimit(context)) {
+            /*
+             * 初始快照已经达到或超过上限，说明本批开始前已越过阈值。
+             * 按确认口径仅继续累计，不在本批首个生产班次补扣换胶囊产能。
+             */
+            context.getCapsuleThresholdHandledMachineSet().add(physicalMachineCode);
+        }
     }
 
     private int resolveCapsuleCount(LhRepairCapsule capsule, boolean secondPosition) {
@@ -715,26 +598,6 @@ public class CapsuleReplacementRuleService {
         return orderedResultList;
     }
 
-    private Set<String> resolvePersistedReplacementPositionSet(Set<String> previousPositionSet,
-                                                               String shiftKey) {
-        Set<String> positionSet = new LinkedHashSet<String>(2);
-        String prefix = shiftKey + KEY_SEPARATOR;
-        for (String positionShiftKey : previousPositionSet) {
-            if (!StringUtils.startsWith(positionShiftKey, prefix)) {
-                continue;
-            }
-            positionSet.add(positionShiftKey.substring(prefix.length()));
-        }
-        return positionSet;
-    }
-
-    private int resolveResultMouldQty(LhScheduleResult result) {
-        if (Objects.isNull(result.getMouldQty()) || result.getMouldQty() <= 0) {
-            return 1;
-        }
-        return result.getMouldQty();
-    }
-
     private int resolveShiftPlanQty(LhScheduleResult result, int shiftIndex) {
         Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
         return Objects.isNull(planQty) ? 0 : Math.max(0, planQty);
@@ -777,14 +640,6 @@ public class CapsuleReplacementRuleService {
         return physicalMachineCode + KEY_SEPARATOR + dateText + KEY_SEPARATOR + shift.getShiftIndex();
     }
 
-    private String buildUsageKey(String physicalMachineCode, String position) {
-        return physicalMachineCode + KEY_SEPARATOR + position;
-    }
-
-    private String buildReplacementPositionShiftKey(String shiftKey, String position) {
-        return shiftKey + KEY_SEPARATOR + position;
-    }
-
     /**
      * 构建换胶囊结果班次精确产能上限键。
      *
@@ -799,12 +654,4 @@ public class CapsuleReplacementRuleService {
                 result.getMaterialCode(), result.getProductStatus());
     }
 
-    private String formatPhysicalUsage(LhScheduleContext context, String physicalMachineCode) {
-        Map<String, Integer> usageMap = new LinkedHashMap<String, Integer>(2);
-        usageMap.put(CAPSULE_POSITION_ONE, context.getCapsuleRuntimeUsageMap().getOrDefault(
-                buildUsageKey(physicalMachineCode, CAPSULE_POSITION_ONE), 0));
-        usageMap.put(CAPSULE_POSITION_TWO, context.getCapsuleRuntimeUsageMap().getOrDefault(
-                buildUsageKey(physicalMachineCode, CAPSULE_POSITION_TWO), 0));
-        return usageMap.toString();
-    }
 }

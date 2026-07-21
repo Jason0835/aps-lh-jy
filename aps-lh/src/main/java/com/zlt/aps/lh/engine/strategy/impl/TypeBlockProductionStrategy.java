@@ -3132,7 +3132,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         if (shouldWriteFirstInspectionBeforeProduction(firstInspectionShift, startTime, firstInspectionQty)) {
             // 首检先于正常生产独立落班时，也必须按实际首检条数判断和累计胶囊使用次数。
             firstInspectionQty = capsuleReplacementRuleService.resolveActualPlanQty(
-                    context, result, firstInspectionShift, firstInspectionQty, mouldQty,
+                    context, result, firstInspectionShift, firstInspectionQty,
                     "换活字块首检");
             if (firstInspectionQty > 0) {
                 setShiftPlanQty(result, firstInspectionShift.getShiftIndex(), firstInspectionQty,
@@ -3232,7 +3232,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     context, result, Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
             // 目标量、首检和物理产能全部收口后，再按本班实际候选量执行一次换胶囊扣减。
             shiftQty = capsuleReplacementRuleService.resolveActualPlanQty(
-                    context, result, shift, shiftQty, mouldQty, "换活字块排产");
+                    context, result, shift, shiftQty, "换活字块排产");
             if (shiftQty <= 0) {
                 logTypeBlockShiftSkip(result, shift, remaining, shiftCapacity,
                         physicalShiftMaxQty, shiftMaxQty, "目标量/硫化余量或换胶囊扣减后为0");

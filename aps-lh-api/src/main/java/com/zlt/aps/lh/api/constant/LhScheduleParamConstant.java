@@ -159,9 +159,9 @@ public final class LhScheduleParamConstant {
     public static final String PLANNED_REPAIR_FIXED_QTY = "SYS0308010";
     /** 胶囊预警次数 */
     public static final String CAPSULE_WARNING_COUNT = "SYS0309001";
-    /** 胶囊使用次数上限；仅在扣减前实际可排量使累计次数严格超限时触发更换 */
+    /** 胶囊使用次数上限；本批按左右最大值初始化，仅首次严格跨限时触发扣量 */
     public static final String CAPSULE_FORCE_DOWN_COUNT = "SYS0309002";
-    /** 换胶囊班次固定扣减计划量；默认2条，对应固定占用1小时 */
+    /** 本批首次严格跨限的固定扣减计划量；默认2条，对应固定占用1小时 */
     public static final String CAPSULE_CHANGE_LOSS_QTY = "SYS0309003";
     /** 停产前第3天产能比例 */
     public static final String SHUTDOWN_DAY_MINUS_3_RATE = "SYS0310001";
