@@ -70,3 +70,4 @@ aps:
     validation:
       validators:
         skuConstructionValidator: false
+        mouldRelationValidator: false
