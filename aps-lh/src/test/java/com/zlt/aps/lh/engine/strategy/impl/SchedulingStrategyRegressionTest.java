@@ -851,6 +851,67 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
+     * 复刻物料3302001317异常批次：原始dayN连续三天均为138、日标准量46时必须保留3台生产机台。
+     * <p>运行态dayN剩余额度已经被前置完成量或其他入口消费后，只能影响节奏账本，不能再把已按
+     * 原始dayN判定保留的非收尾机台顺序回裁成122、6、0。</p>
+     */
+    @Test
+    public void shouldKeepThreeFullContinuousMachinesForMaterial3302001317() throws Exception {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        injectContinuousNonEndingDependencies(strategy);
+        LhScheduleContext context = buildContinuousReduceContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LocalDate firstProductionDate = resolveShiftWorkDate(shifts, 1);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = buildQuotaMapByShifts(shifts, 138, 138, 138);
+        quotaMap.get(firstProductionDate).setRemainingQty(128);
+        quotaMap.get(resolveShiftWorkDate(shifts, 2)).setRemainingQty(0);
+        quotaMap.get(resolveShiftWorkDate(shifts, 3)).setRemainingQty(0);
+        SkuScheduleDTO sku = buildContinuousSku("3302001317", 16, 2380, quotaMap);
+        sku.setScheduleDayFinishQty(10);
+        appendMonthPlan(context, sku.getMaterialCode(), firstProductionDate, 138, 138, 138);
+        setMonthPlanDayQty(context.getMonthPlanList().get(0), firstProductionDate.minusDays(1), 138);
+
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(46);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        String[] machineCodes = new String[]{"K1512", "K1606", "K1906"};
+        for (String machineCode : machineCodes) {
+            LhScheduleResult result = buildContinuousResult(
+                    sku.getMaterialCode(), machineCode, 16, shifts, "0");
+            result.setMouldSurplusQty(2380);
+            result.setStandardCapacity(46);
+            context.getScheduleResultList().add(result);
+            context.getScheduleResultSourceSkuMap().put(result, sku);
+        }
+
+        strategy.scheduleReduceMould(context);
+
+        Assertions.assertEquals(3, context.getScheduleResultList().size(),
+                "dayN为138且日标准量为46时必须保留3台续作生产机台");
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            Assertions.assertEquals(Integer.valueOf(122), result.getDailyPlanQty(),
+                    "三台保留机台均应按8班真实有效产能排满: " + result.getLhMachineCode());
+            Assertions.assertEquals(Integer.valueOf(16), result.getClass1PlanQty());
+            Assertions.assertEquals(Integer.valueOf(14), result.getClass2PlanQty());
+            Assertions.assertEquals(Integer.valueOf(16), result.getClass3PlanQty());
+            Assertions.assertEquals(Integer.valueOf(16), result.getClass4PlanQty());
+            Assertions.assertEquals(Integer.valueOf(14), result.getClass5PlanQty());
+            Assertions.assertEquals(Integer.valueOf(16), result.getClass6PlanQty());
+            Assertions.assertEquals(Integer.valueOf(16), result.getClass7PlanQty());
+            Assertions.assertEquals(Integer.valueOf(14), result.getClass8PlanQty());
+            Assertions.assertFalse(context.getReleasedContinuousMachineCodeSet().contains(
+                            result.getLhMachineCode()),
+                    "生产保留机台不得登记为续作释放机台: " + result.getLhMachineCode());
+            Assertions.assertFalse(context.getReducedContinuationMachineBeforeSkuMap().containsKey(
+                            result.getLhMachineCode()),
+                    "生产保留机台不得登记为续作降模END_TYPE前物料快照: " + result.getLhMachineCode());
+        }
+    }
+
+    /**
      * 续作日计划恒定且 dayN 需要两台机台时，不得因首日完成量扣减或后续追补需求为0误降到一台。
      */
     @Test

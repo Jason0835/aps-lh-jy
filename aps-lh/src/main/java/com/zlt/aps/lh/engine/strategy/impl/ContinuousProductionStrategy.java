@@ -6099,6 +6099,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         for (int resultIndex = 0; resultIndex < keptResults.size(); resultIndex++) {
             LhScheduleResult result = keptResults.get(resultIndex);
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, ShiftFieldUtil.resolveScheduledQty(result)));
+            // 整窗入口与逐日入口统一复用保留机台分配规则，避免dayN剩余额度再次截断非收尾实际排量。
             int allocation = resolveKeptContinuationAllocation(
                     fillKeptMachineCapacity, false, demandQty, remainingDemandQty,
                     machineCapacity, keptResults.size() - resultIndex);
@@ -6107,10 +6108,12 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 capResultShiftQtyToTarget(context, result, shifts, allocation);
             }
             remainingDemandQty = Math.max(0, remainingDemandQty - allocation);
-            log.info("续作多机台保留机台排量, materialCode: {}, machineCode: {}, allocation: {}, "
-                            + "machineCapacity: {}, 是否补满班产: {}, 是否收尾: {}",
-                    sourceSku.getMaterialCode(), result.getLhMachineCode(), allocation,
-                    machineCapacity, fillKeptMachineCapacity, ending);
+            log.info("续作多机台保留机台排量, scheduleDate: {}, materialCode: {}, machineCode: {}, "
+                            + "dayN需求量: {}, 当前剩余需求量: {}, machineCapacity: {}, allocation: {}, "
+                            + "是否补满班产: {}, 是否收尾: {}",
+                    context.getScheduleDate(), sourceSku.getMaterialCode(), result.getLhMachineCode(),
+                    demandQty, remainingDemandQty, machineCapacity, allocation,
+                    fillKeptMachineCapacity, ending);
         }
         List<LhScheduleResult> removedResults = selectMachinesToRemoveForContinuation(
                 context, sourceSku, skuResults, keptResults);
@@ -6366,6 +6369,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             // 前一日保机、当前日计划恢复时先解除保机硬占用，再按原续作机台直接恢复班次排产。
             context.markContinuousStopHoldMachineProductionResumed(result.getLhMachineCode());
             int machineCapacity = Math.max(0, capacityMap.getOrDefault(result, 0));
+            // 逐日入口复用统一分配规则，生产保留机台不得因运行态dayN剩余额度为0而被提前清空。
             int allocation = resolveKeptContinuationAllocation(
                     fillKeptMachineCapacity, keepAllActiveMachinesForCurrentDay,
                     effectiveDemandQty, remainingDemandQty, machineCapacity,
