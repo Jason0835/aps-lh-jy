@@ -2,8 +2,10 @@ package com.zlt.aps.lh.component;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhSkuDecrement;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
+import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.mapper.LhSkuDecrementMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -73,6 +75,7 @@ public class SkuDecrementChecker {
         // 按工厂编号查全部减量清单，避免逐个 SKU 查询数据库
         LambdaQueryWrapper<LhSkuDecrement> queryWrapper = new LambdaQueryWrapper<>();
         queryWrapper.eq(LhSkuDecrement::getFactoryCode, context.getFactoryCode());
+        queryWrapper.eq(LhSkuDecrement::getIsDelete, DeleteFlagEnum.NORMAL.getCode());
         List<LhSkuDecrement> decrementList = skuDecrementMapper.selectList(queryWrapper);
 
         Set<String> indexSet = new HashSet<>(decrementList.size() * 2);
