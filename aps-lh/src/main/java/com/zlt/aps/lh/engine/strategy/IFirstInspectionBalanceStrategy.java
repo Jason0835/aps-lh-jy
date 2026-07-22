@@ -16,6 +16,22 @@ import java.util.Date;
 public interface IFirstInspectionBalanceStrategy {
 
     /**
+     * 无副作用预演首检均衡后的实际执行时间。
+     * <p>候选机台在正式占用首检资源前使用本方法判断首检班次；实现类不得修改
+     * 首检计数、排程结果或其他运行态。默认实现保持传入时间，兼容无需均衡的策略。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编号
+     * @param mouldChangeTime 换模完成及首检基准时间
+     * @return 预演后的首检执行时间；无可用班次时返回null
+     */
+    default Date previewInspection(LhScheduleContext context,
+                                   String machineCode,
+                                   Date mouldChangeTime) {
+        return mouldChangeTime;
+    }
+
+    /**
      * 分配首检到均衡的班次
      * <p>
      * 规则:

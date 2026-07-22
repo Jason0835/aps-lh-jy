@@ -1,6 +1,6 @@
 # 同班次总计划量上限起排班次限制规则
 
-**状态：已实现** | **实现日期：2026-07-09** | **适用链路：新增排产**
+**状态：已实现** | **实现日期：2026-07-09** | **更新日期：2026-07-22** | **适用链路：新增排产**
 
 ## Purpose
 
@@ -58,6 +58,19 @@ SKU 上机的判定条件包括以下任一：
 - **And** 系统 MUST 允许当前班次保留首检计划量，不排常规产量
 - **And** SKU MUST 视为已经上机
 - **And** 后续班次 MUST 继续连续排产，不再受 `SYS0303004` 限制
+
+#### Scenario: 强制首检数量本身超过起排班次上限
+
+- **Given** `SYS0303004 = 100`
+- **And** 当前班次已排总量 = 100
+- **And** 当前新增 SKU 首检条数 = 4
+- **When** 系统预检首检数量归属
+- **Then** 100 + 4 = 104 > 100，当前首检 MUST NOT 写入该班次
+- **And** 当前候选的换模、模具和首检资源占用 MUST 回滚
+- **And** 系统 MUST 从同机台下一有效班次的开始时间重新换模和预演，不得让换模继续占用已超限班次
+- **And** 晚班禁换模、维保、清洗或换模次数限制仍可将换模开始时间继续后移
+- **And** 窗口不足时继续尝试其他候选
+- **And** 系统 MUST NOT 把首检数量保持为 0 后从下一班次继续普通生产
 
 #### Scenario: 首检归属班次在起排班次之前时当前班次不再受限
 
@@ -185,6 +198,9 @@ SKU 上机的判定条件包括以下任一：
 | 类 | 方法 | 说明 |
 | --- | --- | --- |
 | `NewSpecProductionStrategy` | `distributeToShifts` | 班次循环中增加 `skuStartedOnMachine` 标识，仅起排班次判断 `SYS0303004` |
+| `NewSpecProductionStrategy` | `canLandRequiredFirstInspection` | 候选提交前无副作用预检强制首检数量和班次总量额度 |
+| `IFirstInspectionBalanceStrategy` | `previewInspection` | 无副作用预演首检资源落点 |
+| `DefaultFirstInspectionBalanceStrategy` | `previewInspection` | 预演与正式分配共用实时首检资源状态和班次边界 |
 | `NewSpecProductionStrategy` | `canIncreaseShiftQtyByClassTotalLimit` | 复用，判断完整拟排量是否超限 |
 | `NewSpecProductionStrategy` | `resolveClassTotalQtyLimit` | 复用，解析 `SYS0303004` 配置 |
 | `NewSpecProductionStrategy` | `resolveClassShiftScheduledQty` | 复用，统计班次已排总量 |
@@ -199,6 +215,8 @@ SKU 上机的判定条件包括以下任一：
    - 首检已排入（`firstInspectionQty > 0`）-> 当前班次仅保留首检，`skuStartedOnMachine = true`；
    - 无首检 -> 顺延到下一个班次继续判断；
 4. 常规排产写入后 `skuStartedOnMachine = true`，后续班次不再判断 `SYS0303004`。
+5. 强制首检数量本身超限时，不进入普通班次循环；回滚候选并顺延同机台切换时间；
+6. 首检资源和首检数量归属必须一致，只有预演通过后才正式增加首检资源计数。
 
 ## 不变规则
 

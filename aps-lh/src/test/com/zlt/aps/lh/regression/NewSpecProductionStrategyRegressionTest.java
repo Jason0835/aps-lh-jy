@@ -26,6 +26,7 @@ import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.ITrialProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultCapacityCalculateStrategy;
+import com.zlt.aps.lh.engine.strategy.impl.DefaultFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.DefaultMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.impl.LocalSearchMachineAllocatorStrategy;
@@ -5688,7 +5689,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void distributeToShifts_shouldRestoreOriginalShiftTimeWhenFirstInspectionExceedsClassTotalLimit() throws Exception {
+    void distributeToShifts_shouldStopNormalProductionWhenFirstInspectionExceedsClassTotalLimit() throws Exception {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         injectDependencies(strategy, false);
 
@@ -5733,6 +5734,70 @@ class NewSpecProductionStrategyRegressionTest {
                 "首检超限回滚后应恢复当前结果原班次开始时间");
         assertEquals(originalEndTime, ShiftFieldUtil.getShiftEndTime(currentResult, firstShift.getShiftIndex()),
                 "首检超限回滚后应恢复当前结果原班次结束时间");
+        assertEquals(0, resolveShiftQty(currentResult, 2),
+                "强制首检受限时不得从下一班次绕过首检继续普通生产");
+        assertTrue(context.getShiftFirstInspectionCountMap().isEmpty(),
+                "首检未实际写入时不得推进当班首检参数顺序");
+    }
+
+    @Test
+    void scheduleNewSpecs_shouldRetrySameMachineWhenRequiredInspectionExceedsClassTotalLimit() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        context.getLhParamsMap().put("SYS0303004", "100");
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+
+        LhScheduleResult existingResult = buildEndingResult(context, buildSku(), "K1001");
+        existingResult.setMaterialCode("3302000001");
+        existingResult.setScheduleType("01");
+        ShiftFieldUtil.setShiftPlanQty(existingResult, 1, 100,
+                shifts.get(0).getShiftStartDateTime(), shifts.get(0).getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(existingResult);
+        context.getScheduleResultList().add(existingResult);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302001002");
+        sku.setMaterialDesc("强制首检顺延同机台重试");
+        sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        sku.setProductStatus("S");
+        sku.setLhTimeSeconds(3600);
+        sku.setShiftCapacity(16);
+        sku.setMouldQty(1);
+        sku.setPendingQty(20);
+        sku.setDailyPlanQty(20);
+        sku.setTargetScheduleQty(20);
+        sku.setWindowPlanQty(20);
+        sku.setWindowRemainingPlanQty(20);
+        sku.setSurplusQty(20);
+        sku.setEmbryoStock(-1);
+        sku.setDailyPlanQuotaMap(buildThreeDayQuotaMap(shifts, sku.getMaterialCode(), 20, 0, 0));
+        context.getNewSpecSkuList().add(sku);
+
+        MachineScheduleDTO machine = buildMachine("K2201", shifts.get(0).getShiftStartDateTime());
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001002");
+
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
+                defaultMouldChangeBalance(), new DefaultFirstInspectionBalanceStrategy(),
+                skuCapacityCalculate());
+
+        LhScheduleResult scheduledResult = findScheduleResultByMaterialCode(
+                context.getScheduleResultList(), sku.getMaterialCode());
+        assertNotNull(scheduledResult, "早班首检额度不足后应保留同一机台并顺延重试");
+        assertEquals(dateTime(2026, 4, 17, 14, 0), scheduledResult.getMouldChangeStartTime(),
+                "早班强制首检超限后，同机台必须从下一有效班次开始换模");
+        assertEquals(0, resolveShiftQty(scheduledResult, 1), "早班达到总量上限后不得写入首检");
+        assertEquals(4, resolveShiftQty(scheduledResult, 2),
+                "中班完成换模后应在换模班次写入首检4条");
+        assertEquals(16, resolveShiftQty(scheduledResult, 3),
+                "首检成功后才能从后续有效班次继续普通生产");
+        assertEquals(1, context.getShiftFirstInspectionCountMap().size(),
+                "只有最终成功落地的首检才能推进首检顺序");
+        assertEquals(0, context.getDailyFirstInspectionCountMap().get("2026-04-17")[0],
+                "失败候选的早班首检资源预演不得留下占用");
+        assertEquals(1, context.getDailyFirstInspectionCountMap().get("2026-04-17")[1],
+                "最终成功候选只应占用一次中班首检资源");
     }
 
     @Test

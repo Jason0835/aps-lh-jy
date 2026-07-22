@@ -4,6 +4,7 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.date.DateUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
@@ -790,6 +791,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             MachineProductionSegment lastScheduledSegment = null;
             NewSpecCandidateCache candidateCache = NewSpecCandidateCache.from(candidates,
                     machine -> isSingleControlMachine(context, machine.getMachineCode()));
+            // 首检资源或SYS0303004不允许当前落点时，记录同机台下一次允许尝试的最早切换时间。
+            Map<String, Date> firstInspectionRetryReadyTimeMap = new HashMap<String, Date>(8);
             while (true) {
                 // 上一轮指定机台失败时，基于真实候选失败原因结算反选指令，然后继续普通新增选机。
                 finalizeRejectedHistoricalReverseDirectives(
@@ -959,13 +962,23 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 Date mouldChangeStartTime = null;
                 Date mouldChangeCompleteTime = null;
                 LhShiftConfigVO firstInspectionAttributionShift = null;
+                Date firstInspectionAttributionTime = null;
+                Date previewInspectionTime = null;
                 Date inspectionTime = null;
                 Date productionStartTime = null;
+                boolean firstInspectionRetryRequired = false;
                 NewSpecFailReasonEnum switchAllocateFailReason = null;
                 // 续作增机补偿的首台与后续机台统一按 dayN 首次增机日对齐换模。
                 switchReadyTime = alignSwitchReadyTimeByAddMachineDate(
                         context, sku, switchReadyTime, shifts, totalScheduledQty,
                         currentAddMachineProductionDate, isEnding);
+                Date firstInspectionRetryReadyTime = firstInspectionRetryReadyTimeMap.get(machineCode);
+                if (Objects.nonNull(firstInspectionRetryReadyTime)
+                        && (Objects.isNull(switchReadyTime)
+                        || firstInspectionRetryReadyTime.after(switchReadyTime))) {
+                    // 前一次首检无法合法落位时，沿用同一候选机台并从下一合法切换时间重新分配。
+                    switchReadyTime = firstInspectionRetryReadyTime;
+                }
                 mouldChangeStartTime = allocateNewSpecMouldChangeStartTime(
                         context, sku, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
                 if (Objects.nonNull(mouldChangeStartTime)
@@ -1025,8 +1038,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     }
                     firstInspectionAttributionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
                             context, sku, shifts, firstInspectionBaseTime, ScheduleTypeEnum.NEW_SPEC.getCode());
-                    Date firstInspectionAttributionTime = FirstInspectionQtyUtil.resolveFirstInspectionAttributionTime(
+                    firstInspectionAttributionTime = FirstInspectionQtyUtil.resolveFirstInspectionAttributionTime(
                             context, sku, shifts, firstInspectionBaseTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+                    firstInspectionAttributionTime = alignInspectionBalanceTimeToAttributionShift(
+                            context, sku, shifts, firstInspectionAttributionShift,
+                            firstInspectionAttributionTime);
                     if (firstInspectionAttributionTime == null) {
                         log.debug("新增SKU首检归属班次为空, materialCode: {}, 机台: {}, 换模开始: {}, 换模完成: {}",
                                 sku.getMaterialCode(), machineCode,
@@ -1036,16 +1052,40 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         mouldChangeStartTime = null;
                         switchAllocateFailReason = NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED;
                     } else {
-                        inspectionTime = inspectionBalance.allocateInspection(
+                        /*
+                         * 先无副作用预演首检均衡落点。若资源均衡要求后移到其他班次，则当前换模完成时间
+                         * 已无法与首检数量归属保持一致，必须回滚本次换模并从下一合法切换时间重试。
+                         */
+                        previewInspectionTime = inspectionBalance.previewInspection(
                                 context, machineCode, firstInspectionAttributionTime);
-                        if (inspectionTime == null) {
-                            log.debug("新增SKU首检分配失败, materialCode: {}, 机台: {}, 换模开始: {}, 换模完成: {}",
+                        LhShiftConfigVO previewInspectionShift = FirstInspectionQtyUtil
+                                .resolveFirstInspectionAttributionShift(
+                                        context, sku, shifts, previewInspectionTime,
+                                        ScheduleTypeEnum.NEW_SPEC.getCode());
+                        if (Objects.isNull(previewInspectionTime) || Objects.isNull(previewInspectionShift)) {
+                            log.debug("新增SKU首检预演失败, materialCode: {}, 机台: {}, 换模开始: {}, 换模完成: {}",
                                     sku.getMaterialCode(), machineCode,
                                     LhScheduleTimeUtil.formatDateTime(mouldChangeStartTime),
                                     LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime));
                             rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                             mouldChangeStartTime = null;
                             switchAllocateFailReason = NewSpecFailReasonEnum.FIRST_INSPECTION_SHIFT_ALLOCATE_FAILED;
+                        } else if (!Objects.equals(firstInspectionAttributionShift.getShiftIndex(),
+                                previewInspectionShift.getShiftIndex())) {
+                            firstInspectionRetryRequired = true;
+                            Date nextSwitchReadyTime = resolveNextFirstInspectionRetryReadyTime(
+                                    firstInspectionAttributionShift, mouldChangeStartTime);
+                            firstInspectionRetryReadyTimeMap.put(machineCode, nextSwitchReadyTime);
+                            log.info("新增SKU首检资源班次与数量归属班次不一致，回滚候选并顺延切换, "
+                                            + "batchNo: {}, materialCode: {}, machineCode: {}, switchCompleteTime: {}, "
+                                            + "quantityShift: class{}, resourceShift: class{}, nextSwitchReadyTime: {}",
+                                    context.getBatchNo(), sku.getMaterialCode(), machineCode,
+                                    LhScheduleTimeUtil.formatDateTime(mouldChangeCompleteTime),
+                                    firstInspectionAttributionShift.getShiftIndex(),
+                                    previewInspectionShift.getShiftIndex(),
+                                    LhScheduleTimeUtil.formatDateTime(nextSwitchReadyTime));
+                            rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                            mouldChangeStartTime = null;
                         } else {
                             /*
                              * 普通 SKU 的正常换模时长已包含首检，首检均衡只占用首检资源，不再推迟生产；
@@ -1116,6 +1156,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 if (mouldChangeStartTime == null) {
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult,
                             pairMouldResourceAllocationResult);
+                    if (firstInspectionRetryRequired) {
+                        // 首检只是在当前时间无法落位，保留同一候选机台并按后移时间重新走完整资源链。
+                        candidateCache.clearCapacityCache();
+                        continue;
+                    }
                     excludedMachineCodes.add(machineCode);
                     candidateCache.removeMachine(machineCode);
                     recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
@@ -1278,6 +1323,57 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             inspectionTime, firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty, null);
                     failReason = selectHigherPriorityFailReason(
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
+                    continue;
+                }
+                /*
+                 * 首检是新规格实际上机的强制前置条件。候选结果、首检计数和日计划账本提交前，
+                 * 先按最终本机台目标量预演首检条数及SYS0303004剩余额度；当前班次放不下时，
+                 * 回滚换模和模具预占，并保留同一机台从下一合法切换时间重新竞争。
+                 */
+                if (!canLandRequiredFirstInspection(
+                        context, sku, firstInspectionAttributionShift, runtimeShiftCapacity,
+                        machinePlanQty, machineCode)) {
+                    Date nextSwitchReadyTime = resolveNextFirstInspectionRetryReadyTime(
+                            firstInspectionAttributionShift, mouldChangeStartTime);
+                    firstInspectionRetryReadyTimeMap.put(machineCode, nextSwitchReadyTime);
+                    log.info("新增SKU强制首检受SYS0303004限制，回滚候选并顺延切换, "
+                                    + "batchNo: {}, materialCode: {}, machineCode: {}, firstInspectionShift: class{}, "
+                                    + "nextSwitchReadyTime: {}",
+                            context.getBatchNo(), sku.getMaterialCode(), machineCode,
+                            firstInspectionAttributionShift.getShiftIndex(),
+                            LhScheduleTimeUtil.formatDateTime(nextSwitchReadyTime));
+                    rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult,
+                            pairMouldResourceAllocationResult);
+                    candidateCache.clearCapacityCache();
+                    continue;
+                }
+
+                // 预演全部通过后才正式占用首检资源，失败候选不会提前消费首检班次配额。
+                inspectionTime = inspectionBalance.allocateInspection(
+                        context, machineCode, firstInspectionAttributionTime);
+                LhShiftConfigVO allocatedInspectionShift = FirstInspectionQtyUtil
+                        .resolveFirstInspectionAttributionShift(
+                                context, sku, shifts, inspectionTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+                if (Objects.isNull(inspectionTime) || Objects.isNull(allocatedInspectionShift)
+                        || !Objects.equals(firstInspectionAttributionShift.getShiftIndex(),
+                        allocatedInspectionShift.getShiftIndex())) {
+                    inspectionBalance.rollbackInspection(context, inspectionTime);
+                    Date nextSwitchReadyTime = resolveNextFirstInspectionRetryReadyTime(
+                            firstInspectionAttributionShift, mouldChangeStartTime);
+                    firstInspectionRetryReadyTimeMap.put(machineCode, nextSwitchReadyTime);
+                    log.info("新增SKU首检正式分配与预演不一致，回滚候选并顺延切换, "
+                                    + "batchNo: {}, materialCode: {}, machineCode: {}, expectedShift: class{}, "
+                                    + "actualShift: {}, nextSwitchReadyTime: {}",
+                            context.getBatchNo(), sku.getMaterialCode(), machineCode,
+                            firstInspectionAttributionShift.getShiftIndex(),
+                            Objects.isNull(allocatedInspectionShift)
+                                    ? null : "class" + allocatedInspectionShift.getShiftIndex(),
+                            LhScheduleTimeUtil.formatDateTime(nextSwitchReadyTime));
+                    rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult,
+                            pairMouldResourceAllocationResult);
+                    candidateCache.clearCapacityCache();
                     continue;
                 }
                 // 从这里开始 targetScheduleQty 临时改为“本机台计划量”，仅用于结果构建和班次分配。
@@ -9864,6 +9960,103 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 将首检均衡基准时间对齐到首检数量归属班次。
+     * <p>试制早班切换会把首检调整到中班；当调整后的时间正好等于中班起点时，
+     * 根据“边界归前一班”规则增加1秒，避免首检资源仍被计入早班。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param shifts 排程窗口班次
+     * @param attributionShift 首检数量归属班次
+     * @param inspectionTime 首检均衡基准时间
+     * @return 与数量归属班次一致的首检均衡时间
+     */
+    private Date alignInspectionBalanceTimeToAttributionShift(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            List<LhShiftConfigVO> shifts,
+            LhShiftConfigVO attributionShift,
+            Date inspectionTime) {
+        if (Objects.isNull(attributionShift) || Objects.isNull(inspectionTime)) {
+            return inspectionTime;
+        }
+        LhShiftConfigVO rawAttributionShift = FirstInspectionQtyUtil.resolveAttributionShift(
+                shifts, inspectionTime);
+        if (Objects.nonNull(rawAttributionShift)
+                && Objects.equals(rawAttributionShift.getShiftIndex(), attributionShift.getShiftIndex())) {
+            return inspectionTime;
+        }
+        Date attributionShiftStartTime = attributionShift.getShiftStartDateTime();
+        if (Objects.nonNull(attributionShiftStartTime)
+                && !inspectionTime.after(attributionShiftStartTime)) {
+            Date alignedTime = DateUtil.offsetSecond(attributionShiftStartTime, 1);
+            log.debug("首检均衡时间对齐数量归属班次, batchNo: {}, materialCode: {}, "
+                            + "originalTime: {}, attributionShift: class{}, alignedTime: {}",
+                    Objects.isNull(context) ? null : context.getBatchNo(),
+                    Objects.isNull(sku) ? null : sku.getMaterialCode(),
+                    LhScheduleTimeUtil.formatDateTime(inspectionTime), attributionShift.getShiftIndex(),
+                    LhScheduleTimeUtil.formatDateTime(alignedTime));
+            return alignedTime;
+        }
+        return inspectionTime;
+    }
+
+    /**
+     * 解析强制首检受限后的下一有效切换重试时间。
+     * <p>当前班次无法容纳强制首检时，说明该班次不允许新规格实际上机。
+     * 因此必须从下一班次开始时间重新换模，不能通过反推换模完成时间，
+     * 让换模仍占用已超限班次。晚班禁换模、维保及换模次数等真实资源约束，
+     * 仍由现有换模分配器在该起点基础上继续后移。</p>
+     *
+     * @param attributionShift 当前首检归属班次
+     * @param currentSwitchStartTime 当前切换开始时间
+     * @return 下一次切换最早重试时间
+     */
+    private Date resolveNextFirstInspectionRetryReadyTime(LhShiftConfigVO attributionShift,
+                                                          Date currentSwitchStartTime) {
+        if (Objects.isNull(attributionShift)
+                || Objects.isNull(attributionShift.getShiftEndDateTime())) {
+            return currentSwitchStartTime;
+        }
+        return attributionShift.getShiftEndDateTime();
+    }
+
+    /**
+     * 无副作用预检强制首检数量是否能落入归属班次。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @param attributionShift 首检归属班次
+     * @param shiftCapacity 运行态班产
+     * @param remainingQty 当前机台最终目标量
+     * @param machineCode 候选机台编码
+     * @return true-无需首检条数或首检可合法写入；false-受SYS0303004限制需顺延
+     */
+    private boolean canLandRequiredFirstInspection(LhScheduleContext context,
+                                                   SkuScheduleDTO sku,
+                                                   LhShiftConfigVO attributionShift,
+                                                   int shiftCapacity,
+                                                   int remainingQty,
+                                                   String machineCode) {
+        int previewFirstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
+                context, sku, attributionShift, shiftCapacity, remainingQty,
+                ScheduleTypeEnum.NEW_SPEC.getCode(), machineCode);
+        if (previewFirstInspectionQty <= 0) {
+            // 试制SKU使用固定2小时首检产能，不生成首检条数，不进入SYS0303004数量校验。
+            return true;
+        }
+        if (Objects.isNull(attributionShift)) {
+            return false;
+        }
+        LhScheduleResult previewResult = new LhScheduleResult();
+        previewResult.setMaterialCode(Objects.isNull(sku) ? null : sku.getMaterialCode());
+        previewResult.setLhMachineCode(machineCode);
+        return canIncreaseShiftQtyByClassTotalLimit(
+                context, sku, previewResult, attributionShift.getShiftIndex(),
+                previewFirstInspectionQty, "新增排产强制首检落位预检");
+    }
+
+    /**
      * 将计划量分配到各班次（从开产时间开始）。
      * <p>试制非收尾SKU会根据日计划额度限制每个班次的排产量；计划性维修场景由调用方传入
      * 预热完成后的首检归属班次，避免维修完成时刻被错误用于首检占班。</p>
@@ -9917,9 +10110,20 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         int remainingBeforeFirstInspection = remaining;
         int firstInspectionQty = 0;
         int firstInspectionCapsuleLossQty = 0;
-        if (previewFirstInspectionQty > 0 && Objects.nonNull(firstInspectionShift)
-                && canIncreaseShiftQtyByClassTotalLimit(context, sku, result, firstInspectionShift.getShiftIndex(),
-                previewFirstInspectionQty, "新增排产首检数量归属")) {
+        if (previewFirstInspectionQty > 0 && Objects.nonNull(firstInspectionShift)) {
+            if (!canIncreaseShiftQtyByClassTotalLimit(
+                    context, sku, result, firstInspectionShift.getShiftIndex(),
+                    previewFirstInspectionQty, "新增排产首检数量归属")) {
+                /*
+                 * 强制首检无法写入时禁止继续排普通生产。主流程已在候选提交前预检并顺延；
+                 * 这里作为最终写入不变量保护，避免后续调用链变化再次产生“换模后无首检生产”。
+                 */
+                log.warn("新增SKU强制首检无法写入，终止当前候选班次分配, batchNo: {}, "
+                                + "materialCode: {}, machineCode: {}, firstInspectionShift: class{}, qty: {}",
+                        context.getBatchNo(), result.getMaterialCode(), result.getLhMachineCode(),
+                        firstInspectionShift.getShiftIndex(), previewFirstInspectionQty);
+                return remaining;
+            }
             /*
              * 首检条数属于真实生产量，也可能在首检生产过程中跨越胶囊上限。
              * 此处先记录实际扣减量，后续同班常规产量还要同时扣除这部分班产和需求上限，
@@ -9928,12 +10132,24 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             int adjustedFirstInspectionQty = capsuleReplacementRuleService.resolveActualPlanQty(
                     context, result, firstInspectionShift, previewFirstInspectionQty,
                     "新增排产首检");
+            if (adjustedFirstInspectionQty <= 0) {
+                log.warn("新增SKU强制首检经换胶囊规则收口后为0，终止当前候选班次分配, "
+                                + "batchNo: {}, materialCode: {}, machineCode: {}, firstInspectionShift: class{}",
+                        context.getBatchNo(), result.getMaterialCode(), result.getLhMachineCode(),
+                        firstInspectionShift.getShiftIndex());
+                return remaining;
+            }
             firstInspectionCapsuleLossQty = Math.max(0,
                     previewFirstInspectionQty - adjustedFirstInspectionQty);
-            if (adjustedFirstInspectionQty > 0) {
-                firstInspectionQty = FirstInspectionQtyUtil.addFirstInspectionQtyToResult(
-                        context, sku, result, firstInspectionShift, mouldChangeCompleteTime, shiftCapacity,
-                        adjustedFirstInspectionQty, ScheduleTypeEnum.NEW_SPEC.getCode());
+            firstInspectionQty = FirstInspectionQtyUtil.addFirstInspectionQtyToResult(
+                    context, sku, result, firstInspectionShift, mouldChangeCompleteTime, shiftCapacity,
+                    adjustedFirstInspectionQty, ScheduleTypeEnum.NEW_SPEC.getCode());
+            if (firstInspectionQty <= 0) {
+                log.warn("新增SKU强制首检实际写入为0，终止当前候选班次分配, batchNo: {}, "
+                                + "materialCode: {}, machineCode: {}, firstInspectionShift: class{}",
+                        context.getBatchNo(), result.getMaterialCode(), result.getLhMachineCode(),
+                        firstInspectionShift.getShiftIndex());
+                return remaining;
             }
         }
         remaining -= firstInspectionQty;
