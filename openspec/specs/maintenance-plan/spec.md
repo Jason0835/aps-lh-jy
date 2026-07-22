@@ -29,13 +29,14 @@
 | APS 安排日期 | `scheduleDate` | APS 本次实际安排保养的自然日，统一回填为当天00:00:00 |
 
 APS MUST 只读取 `actualDate` 和 `completionStatus` 判断计划是否实际完成，MUST NOT 修改这两个字段。
-排程成功事件只回填 `scheduleDate`；运行态只加载 `scheduleDate` 为空的计划，因此已经成功安排的计划
-MUST NOT 在后续滚动排程中重复加载或覆盖。
+排程成功事件只回填 `scheduleDate`；`scheduleDate` 仅记录 APS 最近一次安排的自然日，MUST NOT 作为运行态
+加载或去重的过滤条件。已安排但设备侧尚未执行（`completionStatus=0` 且 `actualDate IS NULL`）的计划
+SHALL 在后续滚动排程中重新加载，允许基于最新数据重新评估保养日期并覆盖回填 `scheduleDate`。
 
 运行态精准计划查询 MUST 以排程引擎窗口起点T（`context.scheduleDate`）为边界，并同时满足：
-工厂和年度匹配、未删除、`planDate >= T日00:00:00`、
-`scheduleDate IS NULL`、`completionStatus=0` 且 `actualDate IS NULL`。年度计划完整性审计 MUST 继续基于
-全年原始计划单独统计，MUST NOT 因运行态过滤把已经安排或早于T日的计划误报为年度计划缺失。
+工厂和年度匹配、未删除、`planDate >= T日00:00:00`、`completionStatus=0` 且 `actualDate IS NULL`；
+MUST NOT 再包含 `scheduleDate IS NULL` 条件。年度计划完整性审计 MUST 继续基于
+全年原始计划单独统计，MUST NOT 因运行态过滤把早于T日的计划误报为年度计划缺失。
 
 用于日志和结果展示的有效到期日 MUST 按以下顺序解析：
 
@@ -59,6 +60,13 @@ DUE_DATE → PLAN_DATE → 排程日 + DAYS_TO_DUE
 - **Given** 当年计划的 `actualDate` 非空或 `completionStatus` 不为 `0`
 - **When** APS 加载保养计划
 - **Then** 该计划 MUST NOT 进入 `maintenancePlanMap`
+
+#### Scenario: 已安排但未执行的计划仍重新加载
+
+- **Given** 当年计划已被上一轮排程回填 `scheduleDate`，但 `completionStatus=0` 且 `actualDate` 为空，且 `planDate >= T日`
+- **When** APS 在后续滚动排程加载保养计划
+- **Then** 该计划 MUST 重新进入 `maintenancePlanMap`
+- **And** 系统 MUST NOT 因 `scheduleDate` 非空而排除该计划
 
 ### Requirement: 每台启用硫化机每个自然年度应有一条计划
 

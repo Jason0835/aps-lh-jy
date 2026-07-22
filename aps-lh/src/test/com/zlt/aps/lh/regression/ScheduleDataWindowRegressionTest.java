@@ -188,8 +188,9 @@ class ScheduleDataWindowRegressionTest {
     }
 
     /**
-     * 已排程（排程日期非空）的设备停机、清洗候选，以及早于T日、已排程或已完成的精度计划，
-     * 不得进入排程运行态基础数据；年度完整性审计仍保留全年原始查询口径。
+     * 已排程（排程日期非空）的设备停机、清洗候选不得进入运行态基础数据；精度计划则以完成状态
+     * 与实际执行日期为完成判据，早于T日或已完成的计划不加载，已安排但未执行的计划仍需加载；
+     * 年度完整性审计仍保留全年原始查询口径。
      * <p>本用例直接调用三个基础数据查询入口，只验证 Mapper 条件，避免排程窗口回归中
      * 其他基础数据的前置校验影响筛选口径的回归结果。</p>
      */
@@ -217,7 +218,9 @@ class ScheduleDataWindowRegressionTest {
         assertWrapperFiltersUnscheduled(devicePlanShutWrappers.get(1));
         assertWrapperNotContainsColumn(annualAuditWrapper, "schedule_date");
         assertWrapperNotContainsColumn(annualAuditWrapper, "plan_date");
-        assertWrapperFiltersUnscheduled(runtimeWrapper);
+        // 已安排但未执行的计划不再按排程日期排除，运行态查询不得再包含 schedule_date 条件；
+        // 完成判据仍以完成状态与实际执行日期为准。
+        assertWrapperNotContainsColumn(runtimeWrapper, "schedule_date");
         assertWrapperFiltersUnfinishedActualDate(runtimeWrapper);
         assertWrapperContainsColumn(runtimeWrapper, "plan_date");
         assertWrapperContainsDate(runtimeWrapper, scheduleDate);

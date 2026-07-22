@@ -2384,8 +2384,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     /**
      * 加载硫化精度保养计划，按机台编号建立Map。
-     * <p>年度完整性审计读取全年原始计划；运行态只加载计划日期大于等于T日、排程日期为空、
-     * 完成状态为未完成且实际执行日期为空的计划，避免历史或已安排计划重复占用机台。</p>
+     * <p>年度完整性审计读取全年原始计划；运行态只加载计划日期大于等于T日、
+     * 完成状态为未完成且实际执行日期为空的计划，避免历史或已执行计划重复占用机台。
+     * 已安排但设备侧未执行的计划不再按排程日期排除，允许在滚动排程中基于最新数据重新评估。</p>
      *
      * @param context     排程上下文
      * @param factoryCode 分厂编号
@@ -2402,14 +2403,14 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .eq(LhPrecisionPlan::getYear, BigDecimal.valueOf(scheduleYear))
                         .eq(LhPrecisionPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
 
-        // 运行态只加载T日起尚未被APS安排且设备侧未完成的精准计划，避免历史计划和已回填计划重复占用机台。
+        // 运行态只加载T日起设备侧未完成的精准计划；完成判据统一为完成状态与实际执行日期，
+        // 已安排但未执行的计划不再按排程日期排除，允许滚动排程基于最新数据重新评估保养日期。
         List<LhPrecisionPlan> maintenancePlanList = lhPrecisionPlanMapper.selectList(
                 new LambdaQueryWrapper<LhPrecisionPlan>()
                         .eq(LhPrecisionPlan::getFactoryCode, factoryCode)
                         .eq(LhPrecisionPlan::getYear, BigDecimal.valueOf(scheduleYear))
                         .eq(LhPrecisionPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
                         .ge(LhPrecisionPlan::getPlanDate, scheduleDate)
-                        .isNull(LhPrecisionPlan::getScheduleDate)
                         .eq(LhPrecisionPlan::getCompletionStatus, "0")
                         .isNull(LhPrecisionPlan::getActualDate));
         Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>(32);
@@ -2431,7 +2432,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
         context.setMaintenancePlanMap(maintenancePlanMap);
         context.setAnnualMaintenancePlanCountMap(annualPlanCountMap);
-        log.debug("硫化精度保养计划加载完成, 年度: {}, T日: {}, 年度计划数: {}, T日起待安排计划数: {}",
+        log.debug("硫化精度保养计划加载完成, 年度: {}, T日: {}, 年度计划数: {}, T日起未执行计划数: {}",
                 scheduleYear, LhScheduleTimeUtil.formatDate(scheduleDate),
                 Objects.isNull(annualMaintenancePlanList) ? 0 : annualMaintenancePlanList.size(),
                 maintenancePlanMap.size());
