@@ -356,8 +356,7 @@ public class SpecialMaterialMachineSubstitutionService {
 
         for (LhScheduleResult result : context.getScheduleResultList()) {
             // 结构保留机台在统一释放时间前不得被特殊材料置换链撤销或改排。
-            if (context.isStructureMinMachineRetained(result.getLhMachineCode())
-                    || context.isEndingStructureProtectedMachine(result.getLhMachineCode())) {
+            if (context.isStructureMinMachineRetained(result.getLhMachineCode())) {
                 continue;
             }
             // 排除特殊材料SKU的机台

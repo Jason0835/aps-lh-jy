@@ -136,11 +136,12 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         pruneSharedEmbryoZeroSurplusSkus(context);
 
         /*
-         * S4.3.3.2 冻结当前3天、8班窗口可全部收尾的结构，并按月计划结构类型读取最低机台数。
-         * 必须在续作/新增分类前完成，后续结构待排视图会随着SKU出队而动态缩小，不能再作为全量结构快照。
+         * S4.3.3.2 冻结全部有效结构并按月计划结构类型读取最低机台数。
+         * 本规则不再依赖“3天内收尾”标记；必须在续作/新增分类前完成，因为后续待排结构视图会随
+         * SKU出队动态缩小，而真实下机判断必须始终能够找到当前SKU的原始结构配置。
          */
         if (Objects.nonNull(structureMinMachineRetentionService)) {
-            structureMinMachineRetentionService.initializeEligibleStructures(context);
+            structureMinMachineRetentionService.initializeStructureMinimumMachineConfigs(context);
         }
 
         // S4.3.4 区分续作SKU和新增SKU

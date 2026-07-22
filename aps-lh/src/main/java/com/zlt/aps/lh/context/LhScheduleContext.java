@@ -263,27 +263,13 @@ public class LhScheduleContext {
     /** SKU按结构归集, key=structureName, value=SKU排程DTO列表 */
     private Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
     /**
-     * 当前3天、8班窗口内可全部收尾的结构SKU快照。
-     * <p>该快照在S4.3按现有结构分组和{@code isCurrentWindowEnding}口径一次性冻结，
-     * 不随后续待排结构视图出队而删除，供S4.4/S4.5判断结构是否已完成及配置归属。</p>
+     * 结构最低机台规则使用的全量结构SKU快照。
+     * <p>该快照在S4.3按现有结构分组一次性冻结，不受后续待排结构视图出队影响；规则不再以
+     * “当前3天内可收尾”为准入条件，S4.4/S4.5每次真实下机前均从该快照解析结构归属。</p>
      */
-    private Map<String, List<SkuScheduleDTO>> currentWindowEndingStructureSkuMap = new LinkedHashMap<>();
+    private Map<String, List<SkuScheduleDTO>> structureMinMachineSkuSnapshotMap = new LinkedHashMap<>();
     /** 结构最低硫化机台数，key=结构名称，value=周期结构配置或常规结构工厂参数解析值 */
     private Map<String, Integer> structureMinVulcanizingMachineMap = new LinkedHashMap<>();
-    /**
-     * 尚未完成全部SKU排产的收尾结构临时保护机台，key=运行态机台编码，value=结构名称。
-     * <p>临时保护阻止后续SKU提前选走已占用机台；结构完成后按最终判断清除或转为统一释放时间，
-     * 窗口末班机台数已达到最低值时可提前确认不命中并清除。</p>
-     */
-    private Map<String, String> endingStructureProtectedMachineMap = new LinkedHashMap<>();
-    /**
-     * 已可提前确认不命中最低机台保留规则的结构集合。
-     *
-     * <p>仅当结构当前已有量的最晚班次已经是排程窗口最后一班，且该班有量物理机台数
-     * 已达到最低配置时登记。后续待排SKU只能增加窗口末班机台数，不能把最晚班次继续后移，
-     * 因此这些结构无需继续临时锁住提前收尾机台，避免影响正常换活字块、历史反选和新增选机。</p>
-     */
-    private Set<String> structureMinMachineConfirmedNonRetainedStructureSet = new LinkedHashSet<>();
     /** 命中结构最低机台数保留规则的结构名称集合 */
     private Set<String> structureMinMachineRetainedStructureSet = new LinkedHashSet<>();
     /** 命中规则后的机台统一释放时间，key=运行态机台编码，value=结构最晚有量班次结束时间 */
@@ -991,22 +977,6 @@ public class LhScheduleContext {
             rebuiltStructureSkuMap.computeIfAbsent(sku.getStructureName(), key -> new ArrayList<>()).add(sku);
         }
         structureSkuMap = rebuiltStructureSkuMap;
-    }
-
-    /**
-     * 判断机台是否正被尚未完成排产的三天内收尾结构临时保护。
-     * <p>一旦进入临时保护，任何后续SKU均不得提前选择该机台；待结构全部SKU处理完成后，
-     * 再由最终最低机台数判断决定清除保护或延迟至结构最晚班次结束。若窗口末班生产机台数
-     * 已达到最低值，则提前确认不命中并清除保护，保持原机台释放逻辑。</p>
-     *
-     * @param machineCode 运行态机台编码
-     * @return true-机台处于临时保护，当前SKU不得选择；false-不受临时保护限制
-     */
-    public boolean isEndingStructureProtectedMachine(String machineCode) {
-        if (StringUtils.isEmpty(machineCode) || CollectionUtils.isEmpty(endingStructureProtectedMachineMap)) {
-            return false;
-        }
-        return StringUtils.isNotEmpty(endingStructureProtectedMachineMap.get(machineCode));
     }
 
     /**

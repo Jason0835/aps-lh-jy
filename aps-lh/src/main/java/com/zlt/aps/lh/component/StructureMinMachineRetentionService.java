@@ -8,9 +8,9 @@ import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.DeleteFlagEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
-import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
+import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.maindata.mapper.FactoryParamMapper;
 import com.zlt.aps.maindata.mapper.MdmMonCycleSchStruConfEntityMapper;
@@ -22,6 +22,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -32,19 +34,14 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * 结构收尾最低机台数保留服务。
+ * 结构最低硫化机台数保留服务。
  *
- * <p>本服务统一负责三个阶段：</p>
- * <ol>
- *   <li>S4.3复用现有3天、8班SKU收尾判断，冻结可在当前窗口全部收尾的结构及最低机台配置；</li>
- *   <li>S4.4/S4.5结构尚有待排SKU且尚不能确认最终不命中时，临时保护该结构已经占用的机台，
- *       阻止后续SKU提前选走；</li>
- *   <li>结构全部SKU处理完成后，只按计划量大于0的班次统计最晚班次和物理机台数，命中时复用
- *       原结果行补计划量0、班次起止时间和占位备注，并把机台释放时间统一推迟到最晚班次结束。</li>
- * </ol>
+ * <p>本服务只在“已有排程结果的机台准备下机”时做实时判断，不再使用结构3天内收尾条件，
+ * 也不在续作或新增阶段结束后按聚合快照二次推测。每次判断都会重新读取当前结果、机台物料关系、
+ * 真实降模边界、停产保机状态和业务停机窗口，因此连续下机动作能够使用上一次处理后的最新状态。</p>
  *
- * <p>计划量0只表达机台占用。本服务不调用日计划账本、SKU剩余量、胎胚库存或完成量扣减方法，
- * 也不新增排程结果行，因此不会改变任何产量统计口径。</p>
+ * <p>命中规则后继续复用原结果行补计划量0、顺延结果和机台结束时间，并登记机台占用结束时间。
+ * 计划量0只表达资源占用，本服务不修改SKU余量、日计划额度、胎胚库存或完成量账本。</p>
  *
  * @author APS
  */
@@ -62,100 +59,186 @@ public class StructureMinMachineRetentionService {
     private static final String NOT_RETAINED_FLAG = "0";
     /** 规则命中标识 */
     private static final String RETAINED_FLAG = "1";
+    /** 未生产状态，用于全零保机结果通过结果完整性校验 */
+    private static final String NOT_PRODUCED_STATUS = "0";
+    /** 非收尾结果标识，用于表达机台仍被当前结构占用 */
+    private static final String NOT_END_FLAG = "0";
     /** 计划量0占位班次原因 */
     public static final String RETENTION_ANALYSIS = "结构最低机台数保留";
     /** 最低机台数解析失败（配置或数据异常）时的跳过哨兵值 */
     private static final int SKIP_MIN_MACHINE_COUNT = -1;
 
     @Resource
-    private IEndingJudgmentStrategy endingJudgmentStrategy;
-    @Resource
     private MdmMonCycleSchStruConfEntityMapper cycleStructureConfigMapper;
     @Resource
     private FactoryParamMapper factoryParamMapper;
 
     /**
-     * 初始化当前窗口可全部收尾的结构及最低机台数。
+     * 初始化全部有效结构的SKU快照及最低硫化机台数。
      *
-     * <p>结构维度直接复用S4.3现有{@code structureSkuMap}；结构内每个SKU均通过
-     * {@link IEndingJudgmentStrategy#isCurrentWindowEnding(LhScheduleContext, SkuScheduleDTO)}
-     * 才纳入规则，避免错误复用仅用于排序的可配置结构收尾天数。</p>
+     * <p>调用方必须在续作、新增分类前执行，避免后续SKU出队导致结构配置丢失。这里只校验结构配置
+     * 是否完整一致，不再调用结构收尾判断；配置异常仍沿用现有行为，记录告警并跳过该结构。</p>
      *
      * @param context 排程上下文
      */
-    public void initializeEligibleStructures(LhScheduleContext context) {
-        Map<String, List<SkuScheduleDTO>> eligibleStructureMap = new LinkedHashMap<String, List<SkuScheduleDTO>>(16);
+    public void initializeStructureMinimumMachineConfigs(LhScheduleContext context) {
+        Map<String, List<SkuScheduleDTO>> structureSnapshotMap =
+                new LinkedHashMap<String, List<SkuScheduleDTO>>(16);
         Map<String, Integer> minimumMachineMap = new LinkedHashMap<String, Integer>(16);
         if (Objects.isNull(context)) {
             return;
         }
         if (CollectionUtils.isEmpty(context.getStructureSkuMap())) {
-            context.setCurrentWindowEndingStructureSkuMap(eligibleStructureMap);
+            context.setStructureMinMachineSkuSnapshotMap(structureSnapshotMap);
             context.setStructureMinVulcanizingMachineMap(minimumMachineMap);
             return;
         }
         for (Map.Entry<String, List<SkuScheduleDTO>> entry : context.getStructureSkuMap().entrySet()) {
             String structureName = entry.getKey();
             List<SkuScheduleDTO> structureSkuList = entry.getValue();
-            if (StringUtils.isEmpty(structureName) || CollectionUtils.isEmpty(structureSkuList)
-                    || !isAllSkuCurrentWindowEnding(context, structureSkuList)) {
+            if (StringUtils.isEmpty(structureName) || CollectionUtils.isEmpty(structureSkuList)) {
                 continue;
             }
             List<SkuScheduleDTO> structureSnapshot = new ArrayList<SkuScheduleDTO>(structureSkuList);
             int minimumMachineCount = resolveMinimumMachineCount(context, structureName, structureSnapshot);
-            // 配置或数据异常返回SKIP哨兵时，不将该结构纳入最低机台保留规则，回退原排程逻辑
+            // 配置或结构数据异常时沿用现有安全跳过行为，不改变本批其他结构的排程。
             if (minimumMachineCount < 0) {
                 continue;
             }
-            eligibleStructureMap.put(structureName, structureSnapshot);
+            structureSnapshotMap.put(structureName, structureSnapshot);
             minimumMachineMap.put(structureName, minimumMachineCount);
         }
-        context.setCurrentWindowEndingStructureSkuMap(eligibleStructureMap);
+        context.setStructureMinMachineSkuSnapshotMap(structureSnapshotMap);
         context.setStructureMinVulcanizingMachineMap(minimumMachineMap);
-        log.info("结构最低机台数规则初始化完成, factoryCode: {}, scheduleDate: {}, eligibleStructureCount: {}, config: {}",
+        log.info("结构最低机台数规则初始化完成, factoryCode: {}, scheduleDate: {}, structureCount: {}, config: {}",
                 context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
-                eligibleStructureMap.size(), minimumMachineMap);
+                structureSnapshotMap.size(), minimumMachineMap);
     }
 
     /**
-     * 按当前最终结果刷新结构机台保护或计划量0占位。
+     * 收集指定结构在目标班次仍保持在机关系的物理机台编码。
      *
-     * <p>该方法允许在续作、换活字块、新增排产阶段重复调用。结构未完成且最终命中状态尚不确定时
-     * 才登记临时保护；若当前最晚有量班次已经是窗口末班，且该班物理机台数已达到最低值，则可提前
-     * 确认不命中并释放临时保护。结构完成后仍执行一次最终统计。已经补过的班次只校验并补齐同一
-     * 原结果行，不会新增或复制结果行。</p>
+     * <p>统计优先使用实际排程结果：班次计划量大于0直接计入；计划量为0或空时，只有机台仍归属
+     * 当前结构，且清洗、精度保养、计划性维修等业务停机与班次重叠，或者处于停产保机/结构保机
+     * 占用期内才计入。真实释放边界已早于目标班次或后物料已接管的机台会被排除。</p>
+     *
+     * <p>返回值统一转换为物理机台编码，因此单控L/R、重复结果行和同机台同班次天然去重。</p>
+     *
+     * @param context 排程上下文
+     * @param structureName 结构名称
+     * @param shiftIndex 目标班次索引
+     * @return 目标班次仍在机的去重物理机台编码集合
+     */
+    public Set<String> collectStructureInMachinePhysicalCodes(LhScheduleContext context,
+                                                               String structureName,
+                                                               int shiftIndex) {
+        Set<String> physicalMachineCodes = new LinkedHashSet<String>(8);
+        if (Objects.isNull(context) || StringUtils.isEmpty(structureName) || shiftIndex < 1
+                || Objects.isNull(resolveShift(context, shiftIndex))) {
+            return physicalMachineCodes;
+        }
+        for (String machineCode : collectStructureRuntimeMachineCodes(context, structureName)) {
+            if (isRuntimeMachineInStructureAtShift(context, structureName, machineCode, shiftIndex)) {
+                physicalMachineCodes.add(
+                        LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode));
+            }
+        }
+        return physicalMachineCodes;
+    }
+
+    /**
+     * 在已有排程结果的机台准备下机前，实时判断并执行结构最低机台数保留。
+     *
+     * <p>调用方应先完成本次下机对应的计划量清零，再在登记真实释放边界、解除当前物料关系或把机台
+     * 交给后物料之前调用本方法。方法会把待下机物理机台补入“下机前”集合，再模拟移除该物理机台；
+     * 单控另一侧仍保持同结构关系时，移除一侧不会减少物理机台数。</p>
+     *
+     * <p>本方法只处理已有结果行。窗口首班前已直接释放且本批没有结果行的场景不在本规则范围，
+     * 不会为了保机新增零量结果。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 准备下机的SKU
+     * @param result 准备下机的现有排程结果行
+     * @param offlineShiftIndex 准备下机的班次索引
+     * @param lastPositiveShiftIndex 清零前该机台最后一个有量班次索引
+     * @param offlineReason 下机原因，用于审计日志
+     * @return true-下机后低于最低值，已执行保机；false-允许按原逻辑正常下机
+     */
+    public boolean retainMachineBeforeOffline(LhScheduleContext context,
+                                              SkuScheduleDTO sourceSku,
+                                              LhScheduleResult result,
+                                              int offlineShiftIndex,
+                                              int lastPositiveShiftIndex,
+                                              String offlineReason) {
+        if (Objects.isNull(context) || Objects.isNull(result)
+                || StringUtils.isEmpty(result.getLhMachineCode())
+                || offlineShiftIndex < 1 || lastPositiveShiftIndex < 1) {
+            return false;
+        }
+        String structureName = resolveStructureName(sourceSku, result);
+        String materialCode = resolveMaterialCode(sourceSku, result);
+        Integer minimumMachineCount = context.getStructureMinVulcanizingMachineMap().get(structureName);
+        if (StringUtils.isEmpty(structureName) || Objects.isNull(minimumMachineCount)
+                || minimumMachineCount <= 0) {
+            result.setIsStructureMinMachineRetained(NOT_RETAINED_FLAG);
+            return false;
+        }
+
+        Set<String> beforePhysicalCodes = collectStructureInMachinePhysicalCodes(
+                context, structureName, offlineShiftIndex);
+        String machineCode = result.getLhMachineCode();
+        String offlinePhysicalMachineCode =
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode);
+        // 调用点已把待下机班次清零，但物料关系尚未解除，因此显式补回待下机物理机台形成真实下机前口径。
+        beforePhysicalCodes.add(offlinePhysicalMachineCode);
+        Set<String> afterPhysicalCodes = new LinkedHashSet<String>(beforePhysicalCodes);
+        if (!hasOtherActiveRuntimeSide(context, structureName, machineCode, offlineShiftIndex)) {
+            afterPhysicalCodes.remove(offlinePhysicalMachineCode);
+        }
+
+        boolean retained = afterPhysicalCodes.size() < minimumMachineCount;
+        if (retained) {
+            int retentionLastShiftIndex = Math.max(offlineShiftIndex,
+                    resolveStructureLastOccupiedShiftIndex(context, structureName));
+            applyRetention(context, structureName, result, offlineShiftIndex, retentionLastShiftIndex);
+        } else if (!context.getStructureMinMachineRetainedStructureSet().contains(structureName)) {
+            result.setIsStructureMinMachineRetained(NOT_RETAINED_FLAG);
+        }
+        log.info("结构最低机台数下机判断, factoryCode: {}, batchNo: {}, structureName: {}, materialCode: {}, "
+                        + "offlineReason: {}, offlineShift: {}, minimumMachineCount: {}, beforeMachineCount: {}, "
+                        + "afterMachineCount: {}, retained: {}, retainedMachine: {}",
+                context.getFactoryCode(), context.getBatchNo(), structureName, materialCode,
+                StringUtils.defaultString(offlineReason), offlineShiftIndex, minimumMachineCount,
+                beforePhysicalCodes.size(), afterPhysicalCodes.size(), retained,
+                retained ? machineCode : "-");
+        return retained;
+    }
+
+    /**
+     * 在新增阶段结束后幂等校正已命中结构的结果标识和被保留机台结束时间。
+     *
+     * <p>本方法不重新统计机台数，也不产生新的保机决策；它只处理首次命中后同结构又新增结果的
+     * 标识一致性，并再次确保普通后置状态同步没有把被保留机台的结果或运行态结束时间提前。</p>
      *
      * @param context 排程上下文
      */
-    public void refreshRetention(LhScheduleContext context) {
-        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getCurrentWindowEndingStructureSkuMap())) {
+    public void synchronizeRetainedState(LhScheduleContext context) {
+        if (Objects.isNull(context)
+                || CollectionUtils.isEmpty(context.getStructureMinMachineRetainedStructureSet())) {
             return;
         }
-        for (String structureName : context.getCurrentWindowEndingStructureSkuMap().keySet()) {
-            List<LhScheduleResult> structureResults = collectStructureResults(context, structureName);
-            Set<String> occupiedMachineCodes = collectOccupiedMachineCodes(structureResults);
-            if (CollectionUtils.isEmpty(occupiedMachineCodes)) {
-                clearTemporaryProtection(context, structureName);
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.isNull(result) || !context.getStructureMinMachineRetainedStructureSet()
+                    .contains(result.getStructureName())) {
                 continue;
             }
-            if (isStructurePending(context, structureName)) {
-                /*
-                 * 当前最晚班次若已到窗口最后一班且生产机台数已达标，后续SKU不可能把最晚班次继续
-                 * 后移，也不会减少已经稳定落地的末班结果。此时提前确认最终不命中，避免把本应按
-                 * 原逻辑释放的机台错误挡在换活字块、历史反选或新增候选之外。
-                 */
-                if (context.getStructureMinMachineConfirmedNonRetainedStructureSet().contains(structureName)
-                        || confirmNonRetentionAtWindowLastShift(
-                        context, structureName, structureResults)) {
-                    clearTemporaryProtection(context, structureName);
-                    markStructureResults(structureResults, NOT_RETAINED_FLAG);
-                    continue;
-                }
-                protectOccupiedMachines(context, structureName, occupiedMachineCodes);
-                continue;
+            result.setIsStructureMinMachineRetained(RETAINED_FLAG);
+            Date retentionEndTime = context.getStructureMinMachineRetentionEndTimeMap()
+                    .get(result.getLhMachineCode());
+            if (Objects.nonNull(retentionEndTime)) {
+                delayResultRelease(result, retentionEndTime);
+                delayMachineRelease(context, result.getLhMachineCode(), retentionEndTime);
             }
-            clearTemporaryProtection(context, structureName);
-            applyFinalRetention(context, structureName, structureResults, occupiedMachineCodes);
         }
     }
 
@@ -165,14 +248,16 @@ public class StructureMinMachineRetentionService {
      * @param context 排程上下文
      * @param structureName 结构名称
      * @param structureSkuList 结构SKU快照
-     * @return 配置的最低硫化机台数；配置或数据异常时返回SKIP哨兵值{@link #SKIP_MIN_MACHINE_COUNT}，
-     *         由调用方安全跳过该结构，不中断整体排程
+     * @return 配置的最低硫化机台数；配置或数据异常时返回跳过哨兵值
      */
     public int resolveMinimumMachineCount(LhScheduleContext context,
                                           String structureName,
                                           List<SkuScheduleDTO> structureSkuList) {
+        if (CollectionUtils.isEmpty(structureSkuList)) {
+            warnConfigSkip(context, structureName, "结构SKU为空，无法解析最低机台数");
+            return SKIP_MIN_MACHINE_COUNT;
+        }
         SkuScheduleDTO firstSku = structureSkuList.get(0);
-        // 同结构SKU配置不一致时安全跳过，返回SKIP哨兵，不中断整体排程
         if (!isConsistentStructureConfig(context, structureName, structureSkuList, firstSku)) {
             return SKIP_MIN_MACHINE_COUNT;
         }
@@ -182,37 +267,504 @@ public class StructureMinMachineRetentionService {
         if (StringUtils.equals(REGULAR_STRUCTURE_TYPE, firstSku.getStructureType())) {
             return resolveRegularStructureMinimum(context, structureName);
         }
-        // STRUCTURE_TYPE为空或不支持时安全跳过该结构
         warnConfigSkip(context, structureName,
                 "月计划STRUCTURE_TYPE为空或不支持，实际值=" + firstSku.getStructureType());
         return SKIP_MIN_MACHINE_COUNT;
     }
 
     /**
-     * 判断结构内全部SKU是否均可在当前3天、8班窗口内收尾。
-     *
-     * @param context 排程上下文
-     * @param structureSkuList 结构SKU列表
-     * @return true-全部SKU当前窗口可收尾；false-至少一个SKU不可收尾
-     */
-    private boolean isAllSkuCurrentWindowEnding(LhScheduleContext context,
-                                                List<SkuScheduleDTO> structureSkuList) {
-        for (SkuScheduleDTO sku : structureSkuList) {
-            if (Objects.isNull(sku) || !endingJudgmentStrategy.isCurrentWindowEnding(context, sku)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * 校验同结构SKU的结构类型及年月一致，避免同一结构混用不同配置。
+     * 执行命中后的零量占位、结果顺延、机台占用顺延和结果标识。
      *
      * @param context 排程上下文
      * @param structureName 结构名称
-     * @param structureSkuList 结构SKU列表
-     * @param firstSku 首个SKU
-     * @return true-配置一致可继续解析；false-配置异常需安全跳过
+     * @param result 被保留机台的结果行
+     * @param offlineShiftIndex 下机班次
+     * @param retentionLastShiftIndex 结构本窗口最后占用班次
+     */
+    private void applyRetention(LhScheduleContext context,
+                                String structureName,
+                                LhScheduleResult result,
+                                int offlineShiftIndex,
+                                int retentionLastShiftIndex) {
+        LhShiftConfigVO retentionLastShift = resolveShift(context, retentionLastShiftIndex);
+        if (Objects.isNull(retentionLastShift) || Objects.isNull(retentionLastShift.getShiftEndDateTime())) {
+            warnConfigSkip(context, structureName,
+                    "保机结束班次缺少结束时间，shiftIndex=" + retentionLastShiftIndex);
+            return;
+        }
+        fillMachinePlaceholderShifts(context, structureName, result,
+                offlineShiftIndex, retentionLastShiftIndex);
+        Date retentionEndTime = retentionLastShift.getShiftEndDateTime();
+        delayMachineRelease(context, result.getLhMachineCode(), retentionEndTime);
+        MachineScheduleDTO retainedMachine = context.getMachineScheduleMap().get(result.getLhMachineCode());
+        if (Objects.nonNull(retainedMachine)) {
+            // 普通下机状态同步可能已回退机台物料；命中后必须恢复当前SKU占用，明确机台未实际释放。
+            retainedMachine.setCurrentMaterialCode(result.getMaterialCode());
+            retainedMachine.setCurrentMaterialDesc(result.getMaterialDesc());
+        }
+        delayResultRelease(result, retentionEndTime);
+        markStructureResults(collectStructureResults(context, structureName), RETAINED_FLAG);
+        context.getStructureMinMachineRetainedStructureSet().add(structureName);
+    }
+
+    /**
+     * 在被保留机台的原结果行补齐下机班次至结构最后占用班次的零量占位。
+     *
+     * @param context 排程上下文
+     * @param structureName 结构名称
+     * @param carrierResult 原结果行
+     * @param offlineShiftIndex 下机班次
+     * @param retentionLastShiftIndex 保机结束班次
+     */
+    private void fillMachinePlaceholderShifts(LhScheduleContext context,
+                                              String structureName,
+                                              LhScheduleResult carrierResult,
+                                              int offlineShiftIndex,
+                                              int retentionLastShiftIndex) {
+        for (int shiftIndex = offlineShiftIndex;
+             shiftIndex <= retentionLastShiftIndex; shiftIndex++) {
+            if (hasPositiveOtherMaterialPlan(context, carrierResult, shiftIndex)) {
+                log.warn("结构[{}]保留机台[{}]班次[{}]已被后物料接管，跳过零量占位：factoryCode={}, batchNo={}",
+                        structureName, carrierResult.getLhMachineCode(), shiftIndex,
+                        context.getFactoryCode(), context.getBatchNo());
+                continue;
+            }
+            LhShiftConfigVO shift = resolveShift(context, shiftIndex);
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
+                    || Objects.isNull(shift.getShiftEndDateTime())) {
+                warnConfigSkip(context, structureName, "占位班次缺少起止时间，shiftIndex=" + shiftIndex);
+                continue;
+            }
+            Integer existingPlanQty = ShiftFieldUtil.getShiftPlanQty(carrierResult, shiftIndex);
+            if (Objects.isNull(existingPlanQty) || existingPlanQty == 0) {
+                ShiftFieldUtil.setShiftPlanQty(carrierResult, shiftIndex, 0,
+                        shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+            }
+            ShiftFieldUtil.appendShiftAnalysis(carrierResult, shiftIndex, RETENTION_ANALYSIS);
+        }
+    }
+
+    /**
+     * 顺延机台可用时间并保持当前占用状态。
+     *
+     * @param context 排程上下文
+     * @param machineCode 运行态机台编码
+     * @param retentionEndTime 保机结束时间
+     */
+    private void delayMachineRelease(LhScheduleContext context,
+                                     String machineCode,
+                                     Date retentionEndTime) {
+        Date existingRetentionEndTime = context.getStructureMinMachineRetentionEndTimeMap().get(machineCode);
+        if (Objects.isNull(existingRetentionEndTime) || existingRetentionEndTime.before(retentionEndTime)) {
+            context.getStructureMinMachineRetentionEndTimeMap().put(machineCode, retentionEndTime);
+        }
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        if (Objects.nonNull(machine) && (Objects.isNull(machine.getEstimatedEndTime())
+                || machine.getEstimatedEndTime().before(retentionEndTime))) {
+            machine.setEstimatedEndTime(retentionEndTime);
+        }
+        if (Objects.nonNull(machine)) {
+            machine.setEnding(true);
+        }
+    }
+
+    /**
+     * 顺延结果收尾时间；全零结果继续作为合法的未生产占位结果保留。
+     *
+     * @param result 被保留机台结果
+     * @param retentionEndTime 保机结束时间
+     */
+    private void delayResultRelease(LhScheduleResult result, Date retentionEndTime) {
+        if (Objects.isNull(result.getSpecEndTime()) || result.getSpecEndTime().before(retentionEndTime)) {
+            result.setSpecEndTime(retentionEndTime);
+        }
+        if (Objects.isNull(result.getTdaySpecEndTime()) || result.getTdaySpecEndTime().before(retentionEndTime)) {
+            result.setTdaySpecEndTime(retentionEndTime);
+        }
+        if (ShiftFieldUtil.resolveScheduledQty(result) <= 0) {
+            result.setDailyPlanQty(0);
+            result.setProductionStatus(NOT_PRODUCED_STATUS);
+            result.setIsEnd(NOT_END_FLAG);
+        }
+        result.setIsStructureMinMachineRetained(RETAINED_FLAG);
+    }
+
+    /**
+     * 判断指定运行态机台在目标班次是否仍属于结构在机机台。
+     *
+     * @param context 排程上下文
+     * @param structureName 结构名称
+     * @param machineCode 运行态机台编码
+     * @param shiftIndex 班次索引
+     * @return true-仍在机；false-已释放或被后物料接管
+     */
+    private boolean isRuntimeMachineInStructureAtShift(LhScheduleContext context,
+                                                        String structureName,
+                                                        String machineCode,
+                                                        int shiftIndex) {
+        if (hasPositiveStructurePlan(context, structureName, machineCode, shiftIndex)) {
+            return true;
+        }
+        if (hasPositiveOtherStructurePlan(context, structureName, machineCode, shiftIndex)
+                || !isStructureRelationshipIntact(context, structureName, machineCode, shiftIndex)) {
+            return false;
+        }
+        LhShiftConfigVO shift = resolveShift(context, shiftIndex);
+        if (isStructureRetentionCoveringShift(context, machineCode, shift)) {
+            return true;
+        }
+        Integer releaseBoundary = context.getContinuousReducedMachineReleaseBoundaryShiftIndex(machineCode);
+        if (Objects.nonNull(releaseBoundary) && releaseBoundary < shiftIndex) {
+            return false;
+        }
+        if (isContinuousStopHoldAtShift(context, machineCode, shift)) {
+            return true;
+        }
+        return hasBusinessDowntimeAtShift(context, machineCode, shift);
+    }
+
+    /**
+     * 判断同一物理机台是否还有另一运行态侧保持当前结构关系。
+     *
+     * @param context 排程上下文
+     * @param structureName 结构名称
+     * @param offlineMachineCode 当前下机运行态机台编码
+     * @param shiftIndex 下机班次
+     * @return true-另一侧仍在机，物理机台数不能减少；false-物理机台随本次下机减少
+     */
+    private boolean hasOtherActiveRuntimeSide(LhScheduleContext context,
+                                              String structureName,
+                                              String offlineMachineCode,
+                                              int shiftIndex) {
+        String physicalMachineCode =
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(offlineMachineCode);
+        for (String machineCode : collectStructureRuntimeMachineCodes(context, structureName)) {
+            if (!StringUtils.equals(machineCode, offlineMachineCode)
+                    && StringUtils.equals(physicalMachineCode,
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode))
+                    && isRuntimeMachineInStructureAtShift(context, structureName, machineCode, shiftIndex)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断零量/空量班次下机台与结构的物料关系是否仍未解除。
+     *
+     * @param context 排程上下文
+     * @param structureName 结构名称
+     * @param machineCode 机台编码
+     * @param shiftIndex 班次索引
+     * @return true-仍属于当前结构；false-已无结构占用关系
+     */
+    private boolean isStructureRelationshipIntact(LhScheduleContext context,
+                                                   String structureName,
+                                                   String machineCode,
+                                                   int shiftIndex) {
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        if (Objects.nonNull(machine) && StringUtils.isNotEmpty(machine.getCurrentMaterialCode())) {
+            return isStructureMaterial(context, structureName, machine.getCurrentMaterialCode());
+        }
+        LhScheduleResult latestOwner = resolveLatestOwnerResult(context, machineCode, shiftIndex);
+        if (Objects.nonNull(latestOwner)) {
+            return StringUtils.equals(structureName, latestOwner.getStructureName());
+        }
+        for (LhScheduleResult result : collectStructureResults(context, structureName)) {
+            if (StringUtils.equals(machineCode, result.getLhMachineCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析目标班次前最后一个实际生产结果，作为机台物料关系来源。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param shiftIndex 目标班次
+     * @return 最后生产结果；不存在返回null
+     */
+    private LhScheduleResult resolveLatestOwnerResult(LhScheduleContext context,
+                                                      String machineCode,
+                                                      int shiftIndex) {
+        LhScheduleResult latestOwner = null;
+        int latestOwnerShiftIndex = -1;
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.isNull(result) || !StringUtils.equals(machineCode, result.getLhMachineCode())) {
+                continue;
+            }
+            for (int currentShiftIndex = 1; currentShiftIndex <= shiftIndex; currentShiftIndex++) {
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, currentShiftIndex);
+                if (Objects.nonNull(planQty) && planQty > 0 && currentShiftIndex >= latestOwnerShiftIndex) {
+                    latestOwner = result;
+                    latestOwnerShiftIndex = currentShiftIndex;
+                }
+            }
+        }
+        return latestOwner;
+    }
+
+    /**
+     * 判断业务停机是否与目标班次重叠。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param shift 班次配置
+     * @return true-清洗、精度保养或设备停机与班次重叠；false-无重叠
+     */
+    private boolean hasBusinessDowntimeAtShift(LhScheduleContext context,
+                                               String machineCode,
+                                               LhShiftConfigVO shift) {
+        if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
+                || Objects.isNull(shift.getShiftEndDateTime())) {
+            return false;
+        }
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        List<com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO> cleaningWindowList =
+                Objects.isNull(machine) ? null : machine.getCleaningWindowList();
+        List<com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO> maintenanceWindowList =
+                Objects.isNull(machine) ? null : machine.getMaintenanceWindowList();
+        long overlapSeconds = ShiftCapacityResolverUtil.resolveDowntimeOverlapSeconds(
+                context.getDevicePlanShutList(), cleaningWindowList, maintenanceWindowList, machineCode,
+                shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+        if (overlapSeconds > 0) {
+            return true;
+        }
+        String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode);
+        return !StringUtils.equals(machineCode, physicalMachineCode)
+                && ShiftCapacityResolverUtil.resolveDowntimeOverlapSeconds(
+                context.getDevicePlanShutList(), cleaningWindowList, maintenanceWindowList, physicalMachineCode,
+                shift.getShiftStartDateTime(), shift.getShiftEndDateTime()) > 0;
+    }
+
+    /**
+     * 判断停产保机状态是否覆盖目标班次。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param shift 班次配置
+     * @return true-目标业务日登记停产保机；false-未登记
+     */
+    private boolean isContinuousStopHoldAtShift(LhScheduleContext context,
+                                                String machineCode,
+                                                LhShiftConfigVO shift) {
+        if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())) {
+            return context.isContinuousStopHoldMachine(machineCode);
+        }
+        LocalDate productionDate = shift.getShiftStartDateTime().toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDate();
+        return context.isContinuousStopHoldDate(machineCode, productionDate)
+                || context.isContinuousStopHoldMachine(machineCode);
+    }
+
+    /**
+     * 判断结构最低机台保留时间是否覆盖目标班次。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param shift 班次配置
+     * @return true-保留结束时间不早于班次结束；false-未覆盖
+     */
+    private boolean isStructureRetentionCoveringShift(LhScheduleContext context,
+                                                       String machineCode,
+                                                       LhShiftConfigVO shift) {
+        Date retentionEndTime = context.getStructureMinMachineRetentionEndTimeMap().get(machineCode);
+        return Objects.nonNull(retentionEndTime) && Objects.nonNull(shift)
+                && Objects.nonNull(shift.getShiftEndDateTime())
+                && !retentionEndTime.before(shift.getShiftEndDateTime());
+    }
+
+    /**
+     * 收集结构相关的运行态机台编码。
+     *
+     * @param context 排程上下文
+     * @param structureName 结构名称
+     * @return 运行态机台编码集合
+     */
+    private Set<String> collectStructureRuntimeMachineCodes(LhScheduleContext context,
+                                                            String structureName) {
+        Set<String> machineCodes = new LinkedHashSet<String>(8);
+        for (LhScheduleResult result : collectStructureResults(context, structureName)) {
+            if (StringUtils.isNotEmpty(result.getLhMachineCode())) {
+                machineCodes.add(result.getLhMachineCode());
+            }
+        }
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            if (Objects.nonNull(machine) && StringUtils.isNotEmpty(machine.getMachineCode())
+                    && isStructureMaterial(context, structureName, machine.getCurrentMaterialCode())) {
+                machineCodes.add(machine.getMachineCode());
+            }
+        }
+        return machineCodes;
+    }
+
+    /**
+     * 判断物料是否属于指定结构。
+     *
+     * @param context 排程上下文
+     * @param structureName 结构名称
+     * @param materialCode 物料编码
+     * @return true-属于结构；false-不属于或物料为空
+     */
+    private boolean isStructureMaterial(LhScheduleContext context,
+                                        String structureName,
+                                        String materialCode) {
+        if (StringUtils.isEmpty(materialCode)) {
+            return false;
+        }
+        List<SkuScheduleDTO> snapshotList =
+                context.getStructureMinMachineSkuSnapshotMap().get(structureName);
+        if (!CollectionUtils.isEmpty(snapshotList)) {
+            for (SkuScheduleDTO sku : snapshotList) {
+                if (Objects.nonNull(sku) && StringUtils.equals(materialCode, sku.getMaterialCode())) {
+                    return true;
+                }
+            }
+        }
+        for (LhScheduleResult result : collectStructureResults(context, structureName)) {
+            if (StringUtils.equals(materialCode, result.getMaterialCode())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断结构在指定机台班次是否有正量计划。
+     */
+    private boolean hasPositiveStructurePlan(LhScheduleContext context,
+                                             String structureName,
+                                             String machineCode,
+                                             int shiftIndex) {
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.nonNull(result) && StringUtils.equals(machineCode, result.getLhMachineCode())
+                    && StringUtils.equals(structureName, result.getStructureName())) {
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+                if (Objects.nonNull(planQty) && planQty > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断其他结构是否已在指定机台班次接管生产。
+     */
+    private boolean hasPositiveOtherStructurePlan(LhScheduleContext context,
+                                                  String structureName,
+                                                  String machineCode,
+                                                  int shiftIndex) {
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.nonNull(result) && StringUtils.equals(machineCode, result.getLhMachineCode())
+                    && !StringUtils.equals(structureName, result.getStructureName())) {
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+                if (Objects.nonNull(planQty) && planQty > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断同一机台班次是否存在与占位结果不同物料的正量计划。
+     */
+    private boolean hasPositiveOtherMaterialPlan(LhScheduleContext context,
+                                                 LhScheduleResult carrierResult,
+                                                 int shiftIndex) {
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.nonNull(result)
+                    && StringUtils.equals(carrierResult.getLhMachineCode(), result.getLhMachineCode())
+                    && !StringUtils.equals(carrierResult.getMaterialCode(), result.getMaterialCode())) {
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+                if (Objects.nonNull(planQty) && planQty > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析结构当前结果和已登记保机占用的最后班次。
+     */
+    private int resolveStructureLastOccupiedShiftIndex(LhScheduleContext context,
+                                                       String structureName) {
+        int latestShiftIndex = -1;
+        for (LhScheduleResult result : collectStructureResults(context, structureName)) {
+            latestShiftIndex = Math.max(latestShiftIndex,
+                    ShiftFieldUtil.resolveLastPlannedShiftIndex(result));
+            Date retentionEndTime = context.getStructureMinMachineRetentionEndTimeMap()
+                    .get(result.getLhMachineCode());
+            if (Objects.nonNull(retentionEndTime)) {
+                latestShiftIndex = Math.max(latestShiftIndex,
+                        resolveShiftIndexCoveredByEndTime(context, retentionEndTime));
+            }
+        }
+        return latestShiftIndex;
+    }
+
+    /**
+     * 按结束时间反查其覆盖的最后班次索引。
+     */
+    private int resolveShiftIndexCoveredByEndTime(LhScheduleContext context, Date endTime) {
+        int latestShiftIndex = -1;
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.nonNull(shift) && Objects.nonNull(shift.getShiftIndex())
+                    && Objects.nonNull(shift.getShiftEndDateTime())
+                    && !shift.getShiftEndDateTime().after(endTime)) {
+                latestShiftIndex = Math.max(latestShiftIndex, shift.getShiftIndex());
+            }
+        }
+        return latestShiftIndex;
+    }
+
+    /**
+     * 收集指定结构的全部排程结果。
+     */
+    private List<LhScheduleResult> collectStructureResults(LhScheduleContext context,
+                                                           String structureName) {
+        List<LhScheduleResult> structureResults = new ArrayList<LhScheduleResult>(8);
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleResultList())) {
+            return structureResults;
+        }
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (Objects.nonNull(result) && StringUtils.equals(structureName, result.getStructureName())) {
+                structureResults.add(result);
+            }
+        }
+        return structureResults;
+    }
+
+    /**
+     * 按班次索引读取当前窗口班次。
+     */
+    private LhShiftConfigVO resolveShift(LhScheduleContext context, int shiftIndex) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.nonNull(shift) && Objects.equals(shift.getShiftIndex(), shiftIndex)) {
+                return shift;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 标记结构本窗口全部结果的保机状态。
+     */
+    private void markStructureResults(List<LhScheduleResult> structureResults, String retainedFlag) {
+        for (LhScheduleResult result : structureResults) {
+            result.setIsStructureMinMachineRetained(retainedFlag);
+        }
+    }
+
+    /**
+     * 校验同结构SKU的结构类型及年月一致。
      */
     private boolean isConsistentStructureConfig(LhScheduleContext context,
                                                 String structureName,
@@ -236,11 +788,6 @@ public class StructureMinMachineRetentionService {
 
     /**
      * 查询周期结构最低硫化机台数。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @param sku 结构SKU
-     * @return 周期结构最低硫化机台数
      */
     private int resolveCycleStructureMinimum(LhScheduleContext context,
                                              String structureName,
@@ -259,20 +806,17 @@ public class StructureMinMachineRetentionService {
                         .eq(MdmMonCycleSchStruConf::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         if (CollectionUtils.isEmpty(configs) || configs.size() != 1) {
             warnConfigSkip(context, structureName,
-                    "周期结构最低机台配置应唯一，实际记录数=" + (CollectionUtils.isEmpty(configs) ? 0 : configs.size()));
+                    "周期结构最低机台配置应唯一，实际记录数="
+                            + (CollectionUtils.isEmpty(configs) ? 0 : configs.size()));
             return SKIP_MIN_MACHINE_COUNT;
         }
-        Integer minimumMachineCount = configs.get(0).getMinVulcanizingMachine();
-        return validateMinimumMachineCount(context, structureName, minimumMachineCount,
+        return validateMinimumMachineCount(context, structureName,
+                configs.get(0).getMinVulcanizingMachine(),
                 "T_DP_MONTH_CYCLE_STRUCT_CONFIG.MIN_VULCANIZING_MACHINE");
     }
 
     /**
-     * 查询并解析常规结构最低硫化机台数。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @return 常规结构最低硫化机台数
+     * 查询常规结构最低硫化机台数。
      */
     private int resolveRegularStructureMinimum(LhScheduleContext context, String structureName) {
         List<FactoryParam> params = factoryParamMapper.selectList(
@@ -283,7 +827,8 @@ public class StructureMinMachineRetentionService {
                         .eq(FactoryParam::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
         if (CollectionUtils.isEmpty(params) || params.size() != 1) {
             warnConfigSkip(context, structureName,
-                    "工厂参数SYS0204012应唯一，实际记录数=" + (CollectionUtils.isEmpty(params) ? 0 : params.size()));
+                    "工厂参数SYS0204012应唯一，实际记录数="
+                            + (CollectionUtils.isEmpty(params) ? 0 : params.size()));
             return SKIP_MIN_MACHINE_COUNT;
         }
         String paramValue = StringUtils.trim(params.get(0).getParamValue());
@@ -295,7 +840,6 @@ public class StructureMinMachineRetentionService {
             return validateMinimumMachineCount(context, structureName, Integer.valueOf(paramValue),
                     "T_MP_FACTORY_PARAM.SYS0204012");
         } catch (NumberFormatException e) {
-            // 工厂参数SYS0204012格式错误时安全跳过该结构，仅告警不中断排程
             warnConfigSkip(context, structureName,
                     "工厂参数SYS0204012格式错误，paramValue=" + paramValue);
             return SKIP_MIN_MACHINE_COUNT;
@@ -304,12 +848,6 @@ public class StructureMinMachineRetentionService {
 
     /**
      * 校验最低机台数配置。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @param minimumMachineCount 配置值
-     * @param configSource 配置来源
-     * @return 合法配置值
      */
     private int validateMinimumMachineCount(LhScheduleContext context,
                                             String structureName,
@@ -324,415 +862,27 @@ public class StructureMinMachineRetentionService {
     }
 
     /**
-     * 对结构最终结果执行最低机台数判断并补占位班次。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @param structureResults 结构结果列表
-     * @param occupiedMachineCodes 结构已占用运行态机台编码
+     * 解析下机SKU的结构名称。
      */
-    private void applyFinalRetention(LhScheduleContext context,
-                                     String structureName,
-                                     List<LhScheduleResult> structureResults,
-                                     Set<String> occupiedMachineCodes) {
-        int latestPositiveShiftIndex = resolveLatestPositiveShiftIndex(structureResults);
-        if (latestPositiveShiftIndex < 1) {
-            return;
-        }
-        Integer configuredMinimumMachineCount = context.getStructureMinVulcanizingMachineMap().get(structureName);
-        if (Objects.isNull(configuredMinimumMachineCount)) {
-            // 未初始化最低机台数时安全跳过该结构最终保留，标记未命中并回退原排程逻辑
-            warnConfigSkip(context, structureName, "已纳入规则但未初始化最低机台数");
-            markStructureResults(structureResults, NOT_RETAINED_FLAG);
-            return;
-        }
-        int minimumMachineCount = configuredMinimumMachineCount;
-        int latestShiftMachineCount = countLatestShiftPhysicalMachines(
-                structureResults, latestPositiveShiftIndex);
-        if (latestShiftMachineCount >= minimumMachineCount) {
-            markStructureResults(structureResults, NOT_RETAINED_FLAG);
-            log.info("结构最低机台数保留未命中, structureName: {}, latestShift: {}, latestShiftMachineCount: {}, minimumMachineCount: {}",
-                    structureName, latestPositiveShiftIndex, latestShiftMachineCount, minimumMachineCount);
-            return;
-        }
-        LhShiftConfigVO latestShift = resolveShift(context, latestPositiveShiftIndex);
-        if (Objects.isNull(latestShift) || Objects.isNull(latestShift.getShiftEndDateTime())) {
-            // 最晚有量班次缺少结束时间时安全跳过占位与延迟释放，标记未命中
-            warnConfigSkip(context, structureName,
-                    "最晚有量班次缺少结束时间，shiftIndex=" + latestPositiveShiftIndex);
-            markStructureResults(structureResults, NOT_RETAINED_FLAG);
-            return;
-        }
-        for (String machineCode : occupiedMachineCodes) {
-            fillMachinePlaceholderShifts(context, structureName, structureResults,
-                    machineCode, latestPositiveShiftIndex);
-            delayMachineRelease(context, machineCode, latestShift.getShiftEndDateTime());
-        }
-        markStructureResults(structureResults, RETAINED_FLAG);
-        context.getStructureMinMachineRetainedStructureSet().add(structureName);
-        log.info("结构最低机台数保留命中, factoryCode: {}, scheduleDate: {}, structureName: {}, latestShift: {}, "
-                        + "latestShiftMachineCount: {}, minimumMachineCount: {}, occupiedMachines: {}, releaseTime: {}",
-                context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), structureName,
-                latestPositiveShiftIndex, latestShiftMachineCount, minimumMachineCount, occupiedMachineCodes,
-                LhScheduleTimeUtil.formatDateTime(latestShift.getShiftEndDateTime()));
+    private String resolveStructureName(SkuScheduleDTO sourceSku, LhScheduleResult result) {
+        return Objects.nonNull(sourceSku) && StringUtils.isNotEmpty(sourceSku.getStructureName())
+                ? sourceSku.getStructureName() : result.getStructureName();
     }
 
     /**
-     * 在提前收尾机台原结果行补计划量0、完整班次时间和占位备注。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @param structureResults 结构结果列表
-     * @param machineCode 运行态机台编码
-     * @param latestPositiveShiftIndex 结构最晚有量班次
+     * 解析下机SKU物料编码。
      */
-    private void fillMachinePlaceholderShifts(LhScheduleContext context,
-                                              String structureName,
-                                              List<LhScheduleResult> structureResults,
-                                              String machineCode,
-                                              int latestPositiveShiftIndex) {
-        LhScheduleResult carrierResult = resolveMachineCarrierResult(structureResults, machineCode);
-        if (Objects.isNull(carrierResult)) {
-            return;
-        }
-        int machineLastPositiveShiftIndex = resolveMachineLastPositiveShiftIndex(structureResults, machineCode);
-        if (machineLastPositiveShiftIndex < 1 || machineLastPositiveShiftIndex >= latestPositiveShiftIndex) {
-            return;
-        }
-        for (int shiftIndex = machineLastPositiveShiftIndex + 1;
-             shiftIndex <= latestPositiveShiftIndex; shiftIndex++) {
-            if (hasPositiveMachinePlan(context, machineCode, shiftIndex)) {
-                // 班次已被其它有效排程占用时跳过该班占位，避免覆盖真实计划量
-                log.warn("结构[{}]保留机台[{}]班次[{}]已被其它有效排程占用，跳过计划量0占位：factoryCode={}, batchNo={}",
-                        structureName, machineCode, shiftIndex, context.getFactoryCode(), context.getBatchNo());
-                continue;
-            }
-            LhShiftConfigVO shift = resolveShift(context, shiftIndex);
-            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftStartDateTime())
-                    || Objects.isNull(shift.getShiftEndDateTime())) {
-                // 占位班次缺少起止时间时跳过该班占位
-                warnConfigSkip(context, structureName, "占位班次缺少起止时间，shiftIndex=" + shiftIndex);
-                continue;
-            }
-            Integer existingPlanQty = ShiftFieldUtil.getShiftPlanQty(carrierResult, shiftIndex);
-            if (Objects.isNull(existingPlanQty)) {
-                ShiftFieldUtil.setShiftPlanQty(carrierResult, shiftIndex, 0,
-                        shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
-            } else if (existingPlanQty == 0) {
-                // 重复执行时仍校正班次时间，保证历史空班或不完整占位不会留下有量字段之外的脏时间。
-                ShiftFieldUtil.setShiftPlanQty(carrierResult, shiftIndex, 0,
-                        shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
-            }
-            ShiftFieldUtil.appendShiftAnalysis(carrierResult, shiftIndex, RETENTION_ANALYSIS);
-        }
-    }
-
-    /**
-     * 将机台释放时间延迟至结构最晚班次结束。
-     *
-     * @param context 排程上下文
-     * @param machineCode 运行态机台编码
-     * @param retentionEndTime 统一释放时间
-     */
-    private void delayMachineRelease(LhScheduleContext context,
-                                     String machineCode,
-                                     Date retentionEndTime) {
-        context.getStructureMinMachineRetentionEndTimeMap().put(machineCode, retentionEndTime);
-        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
-        if (Objects.nonNull(machine) && (Objects.isNull(machine.getEstimatedEndTime())
-                || machine.getEstimatedEndTime().before(retentionEndTime))) {
-            machine.setEstimatedEndTime(retentionEndTime);
-            machine.setEnding(true);
-        }
-    }
-
-    /**
-     * 收集指定结构的全部排程结果。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @return 结构结果列表
-     */
-    private List<LhScheduleResult> collectStructureResults(LhScheduleContext context, String structureName) {
-        List<LhScheduleResult> structureResults = new ArrayList<LhScheduleResult>(8);
-        if (CollectionUtils.isEmpty(context.getScheduleResultList())) {
-            return structureResults;
-        }
-        for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (Objects.nonNull(result) && StringUtils.equals(structureName, result.getStructureName())) {
-                structureResults.add(result);
-            }
-        }
-        return structureResults;
-    }
-
-    /**
-     * 收集结构有实际计划量的运行态机台编码。
-     *
-     * @param structureResults 结构结果列表
-     * @return 运行态机台编码集合
-     */
-    private Set<String> collectOccupiedMachineCodes(List<LhScheduleResult> structureResults) {
-        Set<String> occupiedMachineCodes = new LinkedHashSet<String>(8);
-        for (LhScheduleResult result : structureResults) {
-            if (Objects.nonNull(result) && StringUtils.isNotEmpty(result.getLhMachineCode())
-                    && ShiftFieldUtil.resolveScheduledQty(result) > 0) {
-                occupiedMachineCodes.add(result.getLhMachineCode());
-            }
-        }
-        return occupiedMachineCodes;
-    }
-
-    /**
-     * 解析结构最晚有计划量班次。
-     *
-     * @param structureResults 结构结果列表
-     * @return 最晚有量班次；不存在返回-1
-     */
-    private int resolveLatestPositiveShiftIndex(List<LhScheduleResult> structureResults) {
-        int latestShiftIndex = -1;
-        for (LhScheduleResult result : structureResults) {
-            latestShiftIndex = Math.max(latestShiftIndex, ShiftFieldUtil.resolveLastPlannedShiftIndex(result));
-        }
-        return latestShiftIndex;
-    }
-
-    /**
-     * 统计结构最晚班次实际生产的去重物理机台数。
-     *
-     * @param structureResults 结构结果列表
-     * @param latestShiftIndex 最晚有量班次
-     * @return 去重物理机台数
-     */
-    private int countLatestShiftPhysicalMachines(List<LhScheduleResult> structureResults,
-                                                 int latestShiftIndex) {
-        Set<String> physicalMachineCodes = new LinkedHashSet<String>(8);
-        for (LhScheduleResult result : structureResults) {
-            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, latestShiftIndex);
-            if (Objects.nonNull(planQty) && planQty > 0 && StringUtils.isNotEmpty(result.getLhMachineCode())) {
-                physicalMachineCodes.add(
-                        LhSingleControlMachineUtil.resolvePhysicalMachineCode(result.getLhMachineCode()));
-            }
-        }
-        return physicalMachineCodes.size();
-    }
-
-    /**
-     * 判断未完成结构是否已可在窗口末班提前确认不命中保留规则。
-     *
-     * <p>该提前结论只使用单调不变的条件：当前最晚有量班次必须等于本次窗口最大班次，且该班
-     * 已稳定落地的去重物理机台数达到最低配置。后续待排SKU最多继续增加末班生产机台，不会出现
-     * 更晚班次，因此无需继续保护该结构的提前收尾机台。其他情况仍保持原临时保护逻辑。</p>
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @param structureResults 当前结构已落地结果
-     * @return true-已提前确认不命中；false-最终状态仍不确定
-     */
-    private boolean confirmNonRetentionAtWindowLastShift(LhScheduleContext context,
-                                                          String structureName,
-                                                          List<LhScheduleResult> structureResults) {
-        int latestPositiveShiftIndex = resolveLatestPositiveShiftIndex(structureResults);
-        int maximumShiftIndex = resolveMaximumShiftIndex(context);
-        if (latestPositiveShiftIndex < 1 || maximumShiftIndex < 1
-                || latestPositiveShiftIndex != maximumShiftIndex) {
-            return false;
-        }
-        Integer configuredMinimumMachineCount =
-                context.getStructureMinVulcanizingMachineMap().get(structureName);
-        if (Objects.isNull(configuredMinimumMachineCount)) {
-            // 未初始化最低机台数时无法提前判断，保持本轮临时保护，结构完成后由最终逻辑安全跳过
-            warnConfigSkip(context, structureName, "已纳入规则但未初始化最低机台数");
-            return false;
-        }
-        int latestShiftMachineCount = countLatestShiftPhysicalMachines(
-                structureResults, latestPositiveShiftIndex);
-        if (latestShiftMachineCount < configuredMinimumMachineCount) {
-            return false;
-        }
-        context.getStructureMinMachineConfirmedNonRetainedStructureSet().add(structureName);
-        log.info("结构最低机台数保留提前确认未命中, factoryCode: {}, scheduleDate: {}, structureName: {}, "
-                        + "latestShift: {}, latestShiftMachineCount: {}, minimumMachineCount: {}",
-                context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), structureName,
-                latestPositiveShiftIndex, latestShiftMachineCount, configuredMinimumMachineCount);
-        return true;
-    }
-
-    /**
-     * 解析当前排程窗口最大班次索引，不写死3天8班的末班编号。
-     *
-     * @param context 排程上下文
-     * @return 最大班次索引；窗口为空时返回-1
-     */
-    private int resolveMaximumShiftIndex(LhScheduleContext context) {
-        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
-            return -1;
-        }
-        int maximumShiftIndex = -1;
-        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
-            if (Objects.nonNull(shift) && Objects.nonNull(shift.getShiftIndex())) {
-                maximumShiftIndex = Math.max(maximumShiftIndex, shift.getShiftIndex());
-            }
-        }
-        return maximumShiftIndex;
-    }
-
-    /**
-     * 解析机台最后一个实际生产班次。
-     *
-     * @param structureResults 结构结果列表
-     * @param machineCode 运行态机台编码
-     * @return 最后有量班次；不存在返回-1
-     */
-    private int resolveMachineLastPositiveShiftIndex(List<LhScheduleResult> structureResults,
-                                                     String machineCode) {
-        int latestShiftIndex = -1;
-        for (LhScheduleResult result : structureResults) {
-            if (Objects.nonNull(result) && StringUtils.equals(machineCode, result.getLhMachineCode())) {
-                latestShiftIndex = Math.max(latestShiftIndex,
-                        ShiftFieldUtil.resolveLastPlannedShiftIndex(result));
-            }
-        }
-        return latestShiftIndex;
-    }
-
-    /**
-     * 选择机台最后实际生产的原结果行作为计划量0占位载体。
-     *
-     * @param structureResults 结构结果列表
-     * @param machineCode 运行态机台编码
-     * @return 原结果行；不存在返回null
-     */
-    private LhScheduleResult resolveMachineCarrierResult(List<LhScheduleResult> structureResults,
-                                                         String machineCode) {
-        LhScheduleResult carrierResult = null;
-        int carrierLastShiftIndex = -1;
-        for (LhScheduleResult result : structureResults) {
-            if (Objects.isNull(result) || !StringUtils.equals(machineCode, result.getLhMachineCode())) {
-                continue;
-            }
-            int lastShiftIndex = ShiftFieldUtil.resolveLastPlannedShiftIndex(result);
-            if (lastShiftIndex > carrierLastShiftIndex) {
-                carrierResult = result;
-                carrierLastShiftIndex = lastShiftIndex;
-            }
-        }
-        return carrierResult;
-    }
-
-    /**
-     * 判断机台指定班次是否已存在实际计划量，计划量0不算占用冲突。
-     *
-     * @param context 排程上下文
-     * @param machineCode 运行态机台编码
-     * @param shiftIndex 班次索引
-     * @return true-存在计划量大于0的结果
-     */
-    private boolean hasPositiveMachinePlan(LhScheduleContext context,
-                                           String machineCode,
-                                           int shiftIndex) {
-        for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (Objects.nonNull(result) && StringUtils.equals(machineCode, result.getLhMachineCode())) {
-                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
-                if (Objects.nonNull(planQty) && planQty > 0) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 按班次索引读取当前窗口班次。
-     *
-     * @param context 排程上下文
-     * @param shiftIndex 班次索引
-     * @return 班次配置；不存在返回null
-     */
-    private LhShiftConfigVO resolveShift(LhScheduleContext context, int shiftIndex) {
-        if (CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
-            return null;
-        }
-        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
-            if (Objects.nonNull(shift) && Objects.equals(shift.getShiftIndex(), shiftIndex)) {
-                return shift;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 判断结构是否仍有待排SKU。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @return true-仍有待排SKU；false-结构已完成本轮处理
-     */
-    private boolean isStructurePending(LhScheduleContext context, String structureName) {
-        return !CollectionUtils.isEmpty(context.getStructureSkuMap())
-                && !CollectionUtils.isEmpty(context.getStructureSkuMap().get(structureName));
-    }
-
-    /**
-     * 临时保护结构已经实际占用的机台，阻止后续SKU提前释放、换模或换活字块。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @param occupiedMachineCodes 结构已占用机台
-     */
-    private void protectOccupiedMachines(LhScheduleContext context,
-                                          String structureName,
-                                          Set<String> occupiedMachineCodes) {
-        clearTemporaryProtection(context, structureName);
-        for (String machineCode : occupiedMachineCodes) {
-            context.getEndingStructureProtectedMachineMap().put(machineCode, structureName);
-        }
-    }
-
-    /**
-     * 清理指定结构的临时保护，最终是否保留由最低机台数判断决定。
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     */
-    private void clearTemporaryProtection(LhScheduleContext context, String structureName) {
-        if (CollectionUtils.isEmpty(context.getEndingStructureProtectedMachineMap())) {
-            return;
-        }
-        List<String> removableMachineCodes = new ArrayList<String>(8);
-        for (Map.Entry<String, String> entry : context.getEndingStructureProtectedMachineMap().entrySet()) {
-            if (StringUtils.equals(structureName, entry.getValue())) {
-                removableMachineCodes.add(entry.getKey());
-            }
-        }
-        for (String machineCode : removableMachineCodes) {
-            context.getEndingStructureProtectedMachineMap().remove(machineCode);
-        }
-    }
-
-    /**
-     * 标记结构本窗口的全部结果。
-     *
-     * @param structureResults 结构结果列表
-     * @param retainedFlag 0-未命中，1-命中
-     */
-    private void markStructureResults(List<LhScheduleResult> structureResults, String retainedFlag) {
-        for (LhScheduleResult result : structureResults) {
-            result.setIsStructureMinMachineRetained(retainedFlag);
-        }
+    private String resolveMaterialCode(SkuScheduleDTO sourceSku, LhScheduleResult result) {
+        return Objects.nonNull(sourceSku) && StringUtils.isNotEmpty(sourceSku.getMaterialCode())
+                ? sourceSku.getMaterialCode() : result.getMaterialCode();
     }
 
     /**
      * 记录结构最低机台数配置异常并安全跳过，不抛异常中断整体排程。
-     *
-     * <p>配置或数据异常时该结构等价规则未命中，回退到原排程逻辑，仅通过告警日志保留可追溯性。</p>
-     *
-     * @param context 排程上下文
-     * @param structureName 结构名称
-     * @param reason 异常原因
      */
     private void warnConfigSkip(LhScheduleContext context, String structureName, String reason) {
         log.warn("结构[{}]最低硫化机台数配置异常，安全跳过最低机台保留（等价规则未命中）：factoryCode={}, batchNo={}, reason={}",
-                structureName, context.getFactoryCode(), context.getBatchNo(), reason);
+                structureName, Objects.isNull(context) ? null : context.getFactoryCode(),
+                Objects.isNull(context) ? null : context.getBatchNo(), reason);
     }
 }

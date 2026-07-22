@@ -91,8 +91,11 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
                 context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
                 context.getUnscheduledResultList().size());
         strategy.scheduleReduceMould(context);
-        // 新增后置库存裁剪和机台状态同步完成后再刷新一次，确保统一释放时间不会被后置同步提前覆盖。
-        structureMinMachineRetentionService.refreshRetention(context);
+        /*
+         * 最终只做已命中结构的幂等状态校正，不再按阶段聚合数量进行第二次决策；用于统一后续新增
+         * 结果标识，并防止普通机台状态同步覆盖实时下机入口已经顺延的保机结束时间。
+         */
+        structureMinMachineRetentionService.synchronizeRetainedState(context);
         log.info("新增规格排产处理完成, 排程结果数: {}, 未排产数: {}",
                 context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
     }

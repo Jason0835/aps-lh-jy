@@ -3,19 +3,22 @@ package com.zlt.aps.lh.component;
 import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
+import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
+import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
+import com.zlt.aps.lh.context.EmbryoStockConsumeLedger;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
-import com.zlt.aps.lh.context.EmbryoStockConsumeLedger;
-import com.zlt.aps.maindata.mapper.FactoryParamMapper;
-import com.zlt.aps.maindata.mapper.MdmMonCycleSchStruConfEntityMapper;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
-import com.zlt.aps.mp.api.domain.entity.MdmMonCycleSchStruConf;
+import com.zlt.aps.maindata.mapper.FactoryParamMapper;
+import com.zlt.aps.maindata.mapper.MdmMonCycleSchStruConfEntityMapper;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import com.zlt.aps.mp.api.domain.entity.FactoryParam;
+import com.zlt.aps.mp.api.domain.entity.MdmMonCycleSchStruConf;
 import org.apache.ibatis.builder.MapperBuilderAssistant;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -31,6 +34,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -38,10 +42,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * 结构收尾最低机台数保留规则测试。
+ * 结构最低机台数实时下机规则测试。
  *
- * <p>覆盖周期/常规配置读取、最晚有量班次统计、计划量0占位、单控物理机台口径、
- * 临时候选保护、统一释放、全结构标识和重复执行幂等性。</p>
+ * <p>覆盖全结构配置初始化、下机后等于最低值放行、清洗/精度/计划性维修零量在机、真实释放排除、
+ * 保机零量占位与状态顺延、连续下机实时重算、单控物理机台去重和数量账本隔离。</p>
  *
  * @author APS
  */
@@ -54,7 +58,7 @@ public class StructureMinMachineRetentionServiceTest {
         service = new StructureMinMachineRetentionService();
     }
 
-    /** 周期结构按分厂、年月、结构和来源类型01读取MIN_VULCANIZING_MACHINE。 */
+    /** 周期结构继续按分厂、年月、结构和来源类型01读取最低硫化机台数。 */
     @Test
     public void shouldReadCycleStructureMinimumMachineCountFromLocalMapper() {
         MdmMonCycleSchStruConfEntityMapper cycleMapper = mock(MdmMonCycleSchStruConfEntityMapper.class);
@@ -64,18 +68,11 @@ public class StructureMinMachineRetentionServiceTest {
         ReflectionTestUtils.setField(service, "cycleStructureConfigMapper", cycleMapper);
 
         LhScheduleContext context = baseContext();
-        SkuScheduleDTO sku = structureSku("S1", "01", 2026, 7);
-
         int minimumMachineCount = service.resolveMinimumMachineCount(
-                context, "S1", Arrays.asList(sku));
+                context, "S1", Arrays.asList(structureSku("SKU1", "S1", "01")));
 
         Assertions.assertEquals(4, minimumMachineCount);
-        /*
-         * 不只验证返回值，还直接核对本地Mapper查询条件，防止实体字段调整后仍误查旧来源列。
-         * 参数值同时覆盖分厂、年月、结构和SOURCE_TYPE=01，确保周期配置维度与业务口径一致。
-         */
-        LambdaQueryWrapper<MdmMonCycleSchStruConf> wrapper =
-                captureCycleStructureConfigWrapper(cycleMapper);
+        LambdaQueryWrapper<MdmMonCycleSchStruConf> wrapper = captureCycleStructureConfigWrapper(cycleMapper);
         Assertions.assertTrue(wrapper.getSqlSegment().toUpperCase().contains("SOURCE_TYPE"));
         Assertions.assertTrue(wrapper.getParamNameValuePairs().containsValue("116"));
         Assertions.assertTrue(wrapper.getParamNameValuePairs().containsValue(2026));
@@ -84,7 +81,7 @@ public class StructureMinMachineRetentionServiceTest {
         Assertions.assertTrue(wrapper.getParamNameValuePairs().containsValue("01"));
     }
 
-    /** 常规结构按分厂和SYS0204012读取并解析最低机台数。 */
+    /** 常规结构继续按分厂和SYS0204012读取最低硫化机台数。 */
     @Test
     public void shouldReadRegularStructureMinimumMachineCountFromLocalMapper() {
         FactoryParamMapper factoryParamMapper = mock(FactoryParamMapper.class);
@@ -93,190 +90,263 @@ public class StructureMinMachineRetentionServiceTest {
         when(factoryParamMapper.selectList(any())).thenReturn(Arrays.asList(param));
         ReflectionTestUtils.setField(service, "factoryParamMapper", factoryParamMapper);
 
-        LhScheduleContext context = baseContext();
-        SkuScheduleDTO sku = structureSku("S1", "02", 2026, 7);
-
         int minimumMachineCount = service.resolveMinimumMachineCount(
-                context, "S1", Arrays.asList(sku));
+                baseContext(), "S1", Arrays.asList(structureSku("SKU1", "S1", "02")));
 
         Assertions.assertEquals(5, minimumMachineCount);
     }
 
-    /** 最晚班次机台数小于最低值时，在提前收尾机台原结果行补计划量0、时间和备注。 */
+    /** 不再调用3天内收尾判断，结构分组中的全部有效结构均初始化最低机台配置。 */
     @Test
-    public void shouldFillZeroPlaceholderOnOriginalResultWhenLatestShiftMachineCountBelowMinimum() {
-        LhScheduleContext context = retentionContext(4);
-        LhScheduleResult machine1 = plannedResult(context, "K1001", 1, 6, 10);
-        LhScheduleResult machine2 = plannedResult(context, "K1002", 1, 6, 10);
-        LhScheduleResult machine3 = plannedResult(context, "K1003", 1, 2, 10);
-        context.getScheduleResultList().addAll(Arrays.asList(machine1, machine2, machine3));
-        registerMachine(context, "K1001");
-        registerMachine(context, "K1002");
-        registerMachine(context, "K1003");
-        int originalResultCount = context.getScheduleResultList().size();
+    public void shouldInitializeAllStructuresWithoutThreeDayEndingGate() {
+        FactoryParamMapper factoryParamMapper = mock(FactoryParamMapper.class);
+        FactoryParam param = new FactoryParam();
+        param.setParamValue("2");
+        when(factoryParamMapper.selectList(any())).thenReturn(Arrays.asList(param));
+        ReflectionTestUtils.setField(service, "factoryParamMapper", factoryParamMapper);
+        LhScheduleContext context = baseContext();
+        context.getStructureSkuMap().put("S1", Arrays.asList(structureSku("SKU1", "S1", "02")));
 
-        service.refreshRetention(context);
+        service.initializeStructureMinimumMachineConfigs(context);
 
-        Assertions.assertEquals(originalResultCount, context.getScheduleResultList().size());
-        for (int shiftIndex = 3; shiftIndex <= 6; shiftIndex++) {
-            LhShiftConfigVO shift = context.getScheduleWindowShifts().get(shiftIndex - 1);
-            Assertions.assertEquals(0, ShiftFieldUtil.getShiftPlanQty(machine3, shiftIndex));
-            Assertions.assertEquals(shift.getShiftStartDateTime(),
-                    ShiftFieldUtil.getShiftStartTime(machine3, shiftIndex));
-            Assertions.assertEquals(shift.getShiftEndDateTime(),
-                    ShiftFieldUtil.getShiftEndTime(machine3, shiftIndex));
-            Assertions.assertEquals(StructureMinMachineRetentionService.RETENTION_ANALYSIS,
-                    ShiftFieldUtil.getShiftAnalysis(machine3, shiftIndex));
-        }
-        Assertions.assertEquals("1", machine1.getIsStructureMinMachineRetained());
-        Assertions.assertEquals("1", machine2.getIsStructureMinMachineRetained());
-        Assertions.assertEquals("1", machine3.getIsStructureMinMachineRetained());
-        Assertions.assertEquals(context.getScheduleWindowShifts().get(5).getShiftEndDateTime(),
-                context.getStructureMinMachineRetentionEndTimeMap().get("K1003"));
+        Assertions.assertEquals(1, context.getStructureMinMachineSkuSnapshotMap().size());
+        Assertions.assertEquals(2, context.getStructureMinVulcanizingMachineMap().get("S1"));
     }
 
-    /** 最晚班次实际机台数等于最低值时不触发占位和延迟释放。 */
+    /** 下机后物理机台数恰好等于最低值时必须正常放行。 */
     @Test
-    public void shouldNotRetainWhenLatestShiftMachineCountEqualsMinimum() {
+    public void shouldAllowOfflineWhenAfterCountEqualsMinimum() {
         LhScheduleContext context = retentionContext(2);
-        LhScheduleResult machine1 = plannedResult(context, "K1001", 1, 6, 10);
-        LhScheduleResult machine2 = plannedResult(context, "K1002", 1, 6, 10);
-        LhScheduleResult machine3 = plannedResult(context, "K1003", 1, 2, 10);
-        context.getScheduleResultList().addAll(Arrays.asList(machine1, machine2, machine3));
+        LhScheduleResult offlineResult = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 10);
+        LhScheduleResult machine2 = plannedResult(context, "K1002", "SKU1", "S1", 2, 2, 10);
+        LhScheduleResult machine3 = plannedResult(context, "K1003", "SKU1", "S1", 2, 2, 10);
+        context.getScheduleResultList().addAll(Arrays.asList(offlineResult, machine2, machine3));
+        registerMachine(context, "K1001", "SKU1");
+        registerMachine(context, "K1002", "SKU1");
+        registerMachine(context, "K1003", "SKU1");
 
-        service.refreshRetention(context);
+        boolean retained = service.retainMachineBeforeOffline(
+                context, sourceSku(), offlineResult, 2, 1, "等于最低值测试");
 
-        Assertions.assertNull(ShiftFieldUtil.getShiftPlanQty(machine3, 3));
-        Assertions.assertEquals("0", machine1.getIsStructureMinMachineRetained());
+        Assertions.assertFalse(retained);
         Assertions.assertTrue(context.getStructureMinMachineRetentionEndTimeMap().isEmpty());
     }
 
-    /** 计划量0不参与最晚班次、生产机台数、产量及运行态数量账本统计。 */
+    /** 清洗导致班次计划量为0时，只要物料关系未解除仍应统计为在机。 */
     @Test
-    public void shouldExcludeZeroPlanFromStatisticsAndQuantityLedgers() {
-        LhScheduleContext context = retentionContext(4);
-        LhScheduleResult machine1 = plannedResult(context, "K1001", 1, 6, 10);
-        LhScheduleResult machine2 = plannedResult(context, "K1002", 1, 6, 10);
-        LhScheduleResult machine3 = plannedResult(context, "K1003", 1, 2, 10);
-        LhScheduleResult zeroOnlyMachine = plannedResult(context, "K1004", -1, -1, 0);
-        LhShiftConfigVO shift8 = context.getScheduleWindowShifts().get(7);
-        ShiftFieldUtil.setShiftPlanQty(zeroOnlyMachine, 8, 0,
-                shift8.getShiftStartDateTime(), shift8.getShiftEndDateTime());
-        context.getScheduleResultList().addAll(Arrays.asList(
-                machine1, machine2, machine3, zeroOnlyMachine));
-        context.getSkuProductionRemainingQtyMap().put("SKU1_S", 100);
-        EmbryoStockConsumeLedger embryoLedger = new EmbryoStockConsumeLedger();
-        embryoLedger.setEmbryoCode("EMB-01");
-        embryoLedger.setTargetQty(100);
-        embryoLedger.setConsumedQty(5);
-        embryoLedger.setRemainQty(95);
-        context.getEmbryoStockConsumeLedgerMap().put("EMB-01_2026-07-20", embryoLedger);
-        int originalScheduledQty = totalScheduledQty(context.getScheduleResultList());
-        int originalRemainingQty = context.getSkuProductionRemainingQtyMap().get("SKU1_S");
-        int originalEmbryoConsumedQty = embryoLedger.getConsumedQty();
-        int originalEmbryoRemainQty = embryoLedger.getRemainQty();
+    public void shouldCountZeroPlanCleaningMachineAsInMachine() {
+        LhScheduleContext context = retentionContext(1);
+        LhScheduleResult result = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 10);
+        setZeroPlan(context, result, 2);
+        context.getScheduleResultList().add(result);
+        MachineScheduleDTO machine = registerMachine(context, "K1001", "SKU1");
+        LhShiftConfigVO shift = shift(context, 2);
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanStartTime(shift.getShiftStartDateTime());
+        cleaningWindow.setCleanEndTime(shift.getShiftEndDateTime());
+        machine.getCleaningWindowList().add(cleaningWindow);
 
-        service.refreshRetention(context);
+        Set<String> machineCodes = service.collectStructureInMachinePhysicalCodes(context, "S1", 2);
 
-        Assertions.assertEquals(originalScheduledQty, totalScheduledQty(context.getScheduleResultList()));
-        Assertions.assertEquals(originalRemainingQty,
-                context.getSkuProductionRemainingQtyMap().get("SKU1_S"));
-        Assertions.assertEquals(originalEmbryoConsumedQty, embryoLedger.getConsumedQty());
-        Assertions.assertEquals(originalEmbryoRemainQty, embryoLedger.getRemainQty());
-        Assertions.assertFalse(context.getStructureMinMachineRetentionEndTimeMap().containsKey("K1004"));
-        Assertions.assertEquals(6, ShiftFieldUtil.resolveLastPlannedShiftIndex(machine1));
-        Assertions.assertEquals(-1, ShiftFieldUtil.resolveLastPlannedShiftIndex(zeroOnlyMachine));
+        Assertions.assertEquals(1, machineCodes.size());
+        Assertions.assertTrue(machineCodes.contains("K1001"));
     }
 
-    /** 结构未完成时机台不能被其它结构选择，完成后按最晚班次结束时间释放。 */
+    /** 精度计划导致班次计划量为空时，只要物料关系未解除仍应统计为在机。 */
     @Test
-    public void shouldProtectMachineUntilStructureFinalReleaseTime() {
-        LhScheduleContext context = retentionContext(4);
-        SkuScheduleDTO pendingSku = structureSku("S1", "02", 2026, 7);
-        context.getStructureSkuMap().put("S1", Arrays.asList(pendingSku));
-        context.getScheduleResultList().add(plannedResult(context, "K1003", 1, 2, 10));
-        registerMachine(context, "K1003");
+    public void shouldCountNullPlanPrecisionMachineAsInMachine() {
+        LhScheduleContext context = retentionContext(1);
+        LhScheduleResult result = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 10);
+        context.getScheduleResultList().add(result);
+        MachineScheduleDTO machine = registerMachine(context, "K1001", "SKU1");
+        LhShiftConfigVO shift = shift(context, 2);
+        MachineMaintenanceWindowDTO precisionWindow = new MachineMaintenanceWindowDTO();
+        precisionWindow.setMachineCode("K1001");
+        precisionWindow.setMaintenanceStartTime(shift.getShiftStartDateTime());
+        precisionWindow.setMaintenanceEndTime(shift.getShiftEndDateTime());
+        machine.getMaintenanceWindowList().add(precisionWindow);
 
-        service.refreshRetention(context);
+        Set<String> machineCodes = service.collectStructureInMachinePhysicalCodes(context, "S1", 2);
 
-        Assertions.assertTrue(context.isEndingStructureProtectedMachine("K1003"));
-
-        context.getStructureSkuMap().clear();
-        service.refreshRetention(context);
-
-        Assertions.assertFalse(context.isEndingStructureProtectedMachine("K1003"));
-        Assertions.assertEquals(context.getScheduleWindowShifts().get(1).getShiftEndDateTime(),
-                context.getStructureMinMachineRetentionEndTimeMap().get("K1003"));
-        Assertions.assertEquals(context.getScheduleWindowShifts().get(1).getShiftEndDateTime(),
-                context.getMachineScheduleMap().get("K1003").getEstimatedEndTime());
+        Assertions.assertEquals(1, machineCodes.size());
     }
 
-    /** 窗口末班生产机台数已达最低值时，应提前确认不命中并释放临时保护。 */
+    /** 计划性维修导致班次计划量为0或空时，只要物料关系未解除仍应统计为在机。 */
     @Test
-    public void shouldConfirmNonRetentionEarlyWhenWindowLastShiftAlreadyMeetsMinimum() {
-        LhScheduleContext context = retentionContext(4);
-        SkuScheduleDTO pendingSku = structureSku("S1", "02", 2026, 7);
-        context.getStructureSkuMap().put("S1", Arrays.asList(pendingSku));
-        LhScheduleResult machine1 = plannedResult(context, "K1001", 1, 8, 10);
-        LhScheduleResult machine2 = plannedResult(context, "K1002", 1, 8, 10);
-        LhScheduleResult machine3 = plannedResult(context, "K1003", 1, 8, 10);
-        LhScheduleResult machine4 = plannedResult(context, "K1004", 1, 8, 10);
-        LhScheduleResult earlyMachine = plannedResult(context, "K1005", 1, 2, 10);
-        context.getScheduleResultList().addAll(Arrays.asList(
-                machine1, machine2, machine3, machine4, earlyMachine));
+    public void shouldCountPlannedRepairMachineAsInMachine() {
+        LhScheduleContext context = retentionContext(1);
+        LhScheduleResult result = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 10);
+        setZeroPlan(context, result, 2);
+        context.getScheduleResultList().add(result);
+        registerMachine(context, "K1001", "SKU1");
+        LhShiftConfigVO shift = shift(context, 2);
+        MdmDevicePlanShut repair = new MdmDevicePlanShut();
+        repair.setMachineCode("K1001");
+        repair.setMachineStopType("05");
+        repair.setBeginDate(shift.getShiftStartDateTime());
+        repair.setEndDate(shift.getShiftEndDateTime());
+        context.getDevicePlanShutList().add(repair);
 
-        service.refreshRetention(context);
+        Set<String> machineCodes = service.collectStructureInMachinePhysicalCodes(context, "S1", 2);
 
-        Assertions.assertTrue(context.getStructureMinMachineConfirmedNonRetainedStructureSet().contains("S1"));
-        Assertions.assertTrue(context.getEndingStructureProtectedMachineMap().isEmpty(),
-                "末班机台数已经达标时，不得继续拦截正常换活字块、历史反选和新增选机");
-        Assertions.assertNull(ShiftFieldUtil.getShiftPlanQty(earlyMachine, 3),
-                "提前确认未命中只释放临时保护，不得补计划量0占位");
-        Assertions.assertTrue(context.getStructureMinMachineRetentionEndTimeMap().isEmpty());
-        for (LhScheduleResult result : context.getScheduleResultList()) {
-            Assertions.assertEquals("0", result.getIsStructureMinMachineRetained());
-        }
-
-        // 重复刷新仍应保持提前未命中状态，不能重新把已释放机台加入临时保护。
-        service.refreshRetention(context);
-        Assertions.assertTrue(context.getEndingStructureProtectedMachineMap().isEmpty());
+        Assertions.assertEquals(1, machineCodes.size());
     }
 
-    /** 单控L/R按物理整机去重；命中结构的正常、收尾和占位结果全部标记为1。 */
+    /** 已登记真实释放边界的机台即使存在停机窗口也不得继续计入。 */
     @Test
-    public void shouldCountSingleControlSidesAsOnePhysicalMachineAndMarkAllResults() {
+    public void shouldExcludeTrulyReleasedMachineFromInMachineCount() {
+        LhScheduleContext context = retentionContext(1);
+        LhScheduleResult result = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 10);
+        setZeroPlan(context, result, 2);
+        context.getScheduleResultList().add(result);
+        MachineScheduleDTO machine = registerMachine(context, "K1001", "SKU1");
+        LhShiftConfigVO shift = shift(context, 2);
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanStartTime(shift.getShiftStartDateTime());
+        cleaningWindow.setCleanEndTime(shift.getShiftEndDateTime());
+        machine.getCleaningWindowList().add(cleaningWindow);
+        context.registerContinuousReducedMachineReleaseBoundary("K1001", 1);
+
+        Set<String> machineCodes = service.collectStructureInMachinePhysicalCodes(context, "S1", 2);
+
+        Assertions.assertTrue(machineCodes.isEmpty());
+    }
+
+    /** 后物料已在目标班次前接管机台时，即使仍有业务停机窗口也不得计入原结构。 */
+    @Test
+    public void shouldExcludeMachineTakenOverByLaterMaterial() {
+        LhScheduleContext context = retentionContext(1);
+        SkuScheduleDTO nextSku = structureSku("SKU2", "S2", "02");
+        context.getStructureMinMachineSkuSnapshotMap().put("S2", Arrays.asList(nextSku));
+        LhScheduleResult result = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 10);
+        setZeroPlan(context, result, 2);
+        context.getScheduleResultList().add(result);
+        MachineScheduleDTO machine = registerMachine(context, "K1001", "SKU2");
+        LhShiftConfigVO shift = shift(context, 2);
+        MachineCleaningWindowDTO cleaningWindow = new MachineCleaningWindowDTO();
+        cleaningWindow.setCleanStartTime(shift.getShiftStartDateTime());
+        cleaningWindow.setCleanEndTime(shift.getShiftEndDateTime());
+        machine.getCleaningWindowList().add(cleaningWindow);
+
+        Set<String> machineCodes = service.collectStructureInMachinePhysicalCodes(context, "S1", 2);
+
+        Assertions.assertTrue(machineCodes.isEmpty());
+    }
+
+    /** 命中保机后计划量保持0，结果结束时间、机台可用时间和占用状态统一顺延。 */
+    @Test
+    public void shouldRetainZeroPlanResultAndDelayMachineOccupation() {
         LhScheduleContext context = retentionContext(2);
-        LhScheduleResult left = plannedResult(context, "K1501L", 1, 6, 10);
-        LhScheduleResult right = plannedResult(context, "K1501R", 1, 6, 10);
-        LhScheduleResult early = plannedResult(context, "K1502L", 1, 2, 10);
-        context.getScheduleResultList().addAll(Arrays.asList(left, right, early));
+        LhScheduleResult offlineResult = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 10);
+        LhScheduleResult runningResult = plannedResult(context, "K1002", "SKU1", "S1", 1, 4, 10);
+        setZeroPlan(context, offlineResult, 2);
+        context.getScheduleResultList().addAll(Arrays.asList(offlineResult, runningResult));
+        MachineScheduleDTO offlineMachine = registerMachine(context, "K1001", "SKU1");
+        registerMachine(context, "K1002", "SKU1");
 
-        service.refreshRetention(context);
+        boolean retained = service.retainMachineBeforeOffline(
+                context, sourceSku(), offlineResult, 2, 1, "保机状态顺延测试");
 
-        Assertions.assertEquals("1", left.getIsStructureMinMachineRetained());
-        Assertions.assertEquals("1", right.getIsStructureMinMachineRetained());
-        Assertions.assertEquals("1", early.getIsStructureMinMachineRetained());
-        Assertions.assertEquals(0, ShiftFieldUtil.getShiftPlanQty(early, 6));
-    }
-
-    /** 重复刷新不新增结果行、不重复占位备注，也不改变实际排产量。 */
-    @Test
-    public void shouldBeIdempotentWithoutDuplicateResultOrAnalysis() {
-        LhScheduleContext context = retentionContext(4);
-        LhScheduleResult machine1 = plannedResult(context, "K1001", 1, 6, 10);
-        LhScheduleResult machine2 = plannedResult(context, "K1002", 1, 6, 10);
-        LhScheduleResult machine3 = plannedResult(context, "K1003", 1, 2, 10);
-        context.getScheduleResultList().addAll(Arrays.asList(machine1, machine2, machine3));
-        int originalResultCount = context.getScheduleResultList().size();
-        int originalScheduledQty = totalScheduledQty(context.getScheduleResultList());
-
-        service.refreshRetention(context);
-        service.refreshRetention(context);
-
-        Assertions.assertEquals(originalResultCount, context.getScheduleResultList().size());
-        Assertions.assertEquals(originalScheduledQty, totalScheduledQty(context.getScheduleResultList()));
+        Date retentionEndTime = shift(context, 4).getShiftEndDateTime();
+        Assertions.assertTrue(retained);
+        Assertions.assertEquals(0, ShiftFieldUtil.getShiftPlanQty(offlineResult, 2));
+        Assertions.assertEquals(0, ShiftFieldUtil.getShiftPlanQty(offlineResult, 4));
         Assertions.assertEquals(StructureMinMachineRetentionService.RETENTION_ANALYSIS,
-                ShiftFieldUtil.getShiftAnalysis(machine3, 3));
+                ShiftFieldUtil.getShiftAnalysis(offlineResult, 3));
+        Assertions.assertEquals(retentionEndTime, offlineResult.getSpecEndTime());
+        Assertions.assertEquals(retentionEndTime, offlineResult.getTdaySpecEndTime());
+        Assertions.assertEquals(retentionEndTime, offlineMachine.getEstimatedEndTime());
+        Assertions.assertTrue(offlineMachine.isEnding());
+        Assertions.assertEquals("SKU1", offlineMachine.getCurrentMaterialCode());
+        Assertions.assertEquals("1", offlineResult.getIsStructureMinMachineRetained());
+    }
+
+    /** 全零结果收口命中后仍保留原结果行，重复判断不新增结果或重复备注。 */
+    @Test
+    public void shouldKeepAllZeroResultAndRemainIdempotentWhenOfflineClosingHits() {
+        LhScheduleContext context = retentionContext(2);
+        LhScheduleResult zeroResult = plannedResult(context, "K1001", "SKU1", "S1", 1, 1, 0);
+        LhScheduleResult runningResult = plannedResult(context, "K1002", "SKU1", "S1", 1, 3, 10);
+        context.getScheduleResultList().addAll(Arrays.asList(zeroResult, runningResult));
+        registerMachine(context, "K1001", "SKU1");
+        registerMachine(context, "K1002", "SKU1");
+        int originalResultCount = context.getScheduleResultList().size();
+
+        boolean firstRetained = service.retainMachineBeforeOffline(
+                context, sourceSku(), zeroResult, 1, 1, "全零结果收口");
+        boolean secondRetained = service.retainMachineBeforeOffline(
+                context, sourceSku(), zeroResult, 1, 1, "全零结果重复收口");
+        LhScheduleResult laterResult = plannedResult(context, "K1003", "SKU1", "S1", 3, 3, 10);
+        context.getScheduleResultList().add(laterResult);
+        service.synchronizeRetainedState(context);
+
+        Assertions.assertTrue(firstRetained);
+        Assertions.assertTrue(secondRetained);
+        Assertions.assertEquals(originalResultCount + 1, context.getScheduleResultList().size());
+        Assertions.assertEquals(0, zeroResult.getDailyPlanQty());
+        Assertions.assertEquals("0", zeroResult.getProductionStatus());
+        Assertions.assertEquals("0", zeroResult.getIsEnd());
+        Assertions.assertEquals(StructureMinMachineRetentionService.RETENTION_ANALYSIS,
+                ShiftFieldUtil.getShiftAnalysis(zeroResult, 2));
+        Assertions.assertEquals("1", laterResult.getIsStructureMinMachineRetained());
+    }
+
+    /** 同一结构连续下机时，每次基于最新释放边界和上次保机状态重新计算。 */
+    @Test
+    public void shouldRecalculateLatestStateForConsecutiveOfflineActions() {
+        LhScheduleContext context = retentionContext(2);
+        LhScheduleResult machine1 = plannedResult(context, "K1001", "SKU1", "S1", 1, 2, 10);
+        LhScheduleResult machine2 = plannedResult(context, "K1002", "SKU1", "S1", 1, 2, 10);
+        LhScheduleResult machine3 = plannedResult(context, "K1003", "SKU1", "S1", 1, 3, 10);
+        context.getScheduleResultList().addAll(Arrays.asList(machine1, machine2, machine3));
+        registerMachine(context, "K1001", "SKU1");
+        registerMachine(context, "K1002", "SKU1");
+        registerMachine(context, "K1003", "SKU1");
+        setZeroPlan(context, machine1, 2);
+
+        boolean firstRetained = service.retainMachineBeforeOffline(
+                context, sourceSku(), machine1, 2, 2, "连续下机-第一次");
+        Assertions.assertFalse(firstRetained);
+        context.registerContinuousReducedMachineReleaseBoundary("K1001", 1);
+        setZeroPlan(context, machine2, 2);
+
+        boolean secondRetained = service.retainMachineBeforeOffline(
+                context, sourceSku(), machine2, 2, 2, "连续下机-第二次");
+
+        Assertions.assertTrue(secondRetained);
+        Assertions.assertTrue(context.isStructureMinMachineRetained("K1002"));
+    }
+
+    /** 单控L/R按物理整机去重，重复保机不新增结果、不重复扣数量账本。 */
+    @Test
+    public void shouldDeduplicateSingleControlAndKeepIdempotentWithoutQuantitySideEffect() {
+        LhScheduleContext context = retentionContext(2);
+        LhScheduleResult left = plannedResult(context, "K1501L", "SKU1", "S1", 1, 1, 10);
+        LhScheduleResult right = plannedResult(context, "K1501R", "SKU1", "S1", 2, 2, 10);
+        LhScheduleResult other = plannedResult(context, "K1502L", "SKU1", "S1", 2, 3, 10);
+        context.getScheduleResultList().addAll(Arrays.asList(left, right, other));
+        registerMachine(context, "K1501L", "SKU1");
+        registerMachine(context, "K1501R", "SKU1");
+        registerMachine(context, "K1502L", "SKU1");
+        EmbryoStockConsumeLedger ledger = new EmbryoStockConsumeLedger();
+        ledger.setConsumedQty(5);
+        ledger.setRemainQty(95);
+        context.getEmbryoStockConsumeLedgerMap().put("EMB-01_2026-07-20", ledger);
+        int originalResultCount = context.getScheduleResultList().size();
+        int originalScheduledQty = totalScheduledQty(context.getScheduleResultList());
+
+        Set<String> physicalCodes = service.collectStructureInMachinePhysicalCodes(context, "S1", 2);
+        Assertions.assertEquals(2, physicalCodes.size());
+        setZeroPlan(context, left, 2);
+        boolean retained = service.retainMachineBeforeOffline(
+                context, sourceSku(), left, 2, 1, "单控单侧下机");
+        service.retainMachineBeforeOffline(context, sourceSku(), left, 2, 1, "单控重复判断");
+
+        Assertions.assertFalse(retained, "配对侧仍在机时，单侧下机不减少物理机台数");
+        Assertions.assertEquals(originalResultCount, context.getScheduleResultList().size());
+        Assertions.assertEquals(originalScheduledQty, totalScheduledQty(context.getScheduleResultList()));
+        Assertions.assertEquals(5, ledger.getConsumedQty());
+        Assertions.assertEquals(95, ledger.getRemainQty());
     }
 
     /**
@@ -298,92 +368,101 @@ public class StructureMinMachineRetentionServiceTest {
     }
 
     /**
-     * 构建可直接执行最终保留判断的上下文。
+     * 构建已初始化结构配置的上下文。
      *
-     * @param minimumMachineCount 结构最低机台数
+     * @param minimumMachineCount 最低机台数
      * @return 排程上下文
      */
     private LhScheduleContext retentionContext(int minimumMachineCount) {
         LhScheduleContext context = baseContext();
-        SkuScheduleDTO sku = structureSku("S1", "02", 2026, 7);
-        context.getCurrentWindowEndingStructureSkuMap().put("S1", Arrays.asList(sku));
+        SkuScheduleDTO sku = sourceSku();
+        context.getStructureMinMachineSkuSnapshotMap().put("S1", Arrays.asList(sku));
         context.getStructureMinVulcanizingMachineMap().put("S1", minimumMachineCount);
         context.setStructureSkuMap(new LinkedHashMap<String, List<SkuScheduleDTO>>(0));
         return context;
     }
 
+    /** 构建规则测试SKU。 */
+    private SkuScheduleDTO sourceSku() {
+        return structureSku("SKU1", "S1", "02");
+    }
+
     /**
      * 构建结构SKU。
      *
+     * @param materialCode 物料编码
      * @param structureName 结构名称
      * @param structureType 结构类型
-     * @param year 月计划年
-     * @param month 月计划月
      * @return SKU
      */
-    private SkuScheduleDTO structureSku(String structureName, String structureType, int year, int month) {
+    private SkuScheduleDTO structureSku(String materialCode, String structureName, String structureType) {
         SkuScheduleDTO sku = new SkuScheduleDTO();
-        sku.setMaterialCode("SKU1");
+        sku.setMaterialCode(materialCode);
         sku.setProductStatus("S");
         sku.setStructureName(structureName);
         sku.setStructureType(structureType);
-        sku.setMonthPlanYear(year);
-        sku.setMonthPlanMonth(month);
+        sku.setMonthPlanYear(2026);
+        sku.setMonthPlanMonth(7);
         return sku;
     }
 
     /**
-     * 构建结构结果并写入连续有量班次。
-     *
-     * @param context 排程上下文
-     * @param machineCode 机台编码
-     * @param firstShift 首个有量班次；小于1表示无有量班次
-     * @param lastShift 最后有量班次
-     * @param qty 每班计划量
-     * @return 排程结果
+     * 构建带连续正量班次的结果。
      */
     private LhScheduleResult plannedResult(LhScheduleContext context,
                                            String machineCode,
+                                           String materialCode,
+                                           String structureName,
                                            int firstShift,
                                            int lastShift,
                                            int qty) {
         LhScheduleResult result = new LhScheduleResult();
         result.setLhMachineCode(machineCode);
-        result.setMaterialCode("SKU1");
+        result.setMaterialCode(materialCode);
+        result.setMaterialDesc(materialCode);
         result.setProductStatus("S");
-        result.setStructureName("S1");
+        result.setStructureName(structureName);
         result.setDailyPlanQty(0);
-        if (firstShift >= 1 && lastShift >= firstShift) {
-            int dailyPlanQty = 0;
-            for (int shiftIndex = firstShift; shiftIndex <= lastShift; shiftIndex++) {
-                LhShiftConfigVO shift = context.getScheduleWindowShifts().get(shiftIndex - 1);
-                ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, qty,
-                        shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
-                dailyPlanQty += qty;
-            }
-            result.setDailyPlanQty(dailyPlanQty);
+        int dailyPlanQty = 0;
+        for (int shiftIndex = firstShift; shiftIndex <= lastShift; shiftIndex++) {
+            LhShiftConfigVO shift = shift(context, shiftIndex);
+            ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, qty,
+                    shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+            dailyPlanQty += qty;
         }
+        result.setDailyPlanQty(dailyPlanQty);
         return result;
     }
 
     /**
-     * 注册测试机台。
-     *
-     * @param context 排程上下文
-     * @param machineCode 机台编码
+     * 将指定班次设置为零量占位并同步结果总量。
      */
-    private void registerMachine(LhScheduleContext context, String machineCode) {
-        MachineScheduleDTO machine = new MachineScheduleDTO();
-        machine.setMachineCode(machineCode);
-        context.getMachineScheduleMap().put(machineCode, machine);
+    private void setZeroPlan(LhScheduleContext context, LhScheduleResult result, int shiftIndex) {
+        LhShiftConfigVO shift = shift(context, shiftIndex);
+        ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, 0,
+                shift.getShiftStartDateTime(), shift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(result);
     }
 
     /**
-     * 汇总全部结果的实际计划量，计划量0自然不增加汇总值。
-     *
-     * @param results 结果列表
-     * @return 实际计划量
+     * 注册机台及当前物料关系。
      */
+    private MachineScheduleDTO registerMachine(LhScheduleContext context,
+                                               String machineCode,
+                                               String materialCode) {
+        MachineScheduleDTO machine = new MachineScheduleDTO();
+        machine.setMachineCode(machineCode);
+        machine.setCurrentMaterialCode(materialCode);
+        context.getMachineScheduleMap().put(machineCode, machine);
+        return machine;
+    }
+
+    /** 按索引读取测试班次。 */
+    private LhShiftConfigVO shift(LhScheduleContext context, int shiftIndex) {
+        return context.getScheduleWindowShifts().get(shiftIndex - 1);
+    }
+
+    /** 汇总全部实际排产量。 */
     private int totalScheduledQty(List<LhScheduleResult> results) {
         int totalQty = 0;
         for (LhScheduleResult result : results) {
@@ -392,12 +471,7 @@ public class StructureMinMachineRetentionServiceTest {
         return totalQty;
     }
 
-    /**
-     * 捕获周期结构配置本地Mapper的查询条件。
-     *
-     * @param cycleMapper 周期结构配置Mapper
-     * @return 周期结构配置查询条件
-     */
+    /** 捕获周期结构配置查询条件。 */
     @SuppressWarnings("unchecked")
     private LambdaQueryWrapper<MdmMonCycleSchStruConf> captureCycleStructureConfigWrapper(
             MdmMonCycleSchStruConfEntityMapper cycleMapper) {
@@ -407,11 +481,7 @@ public class StructureMinMachineRetentionServiceTest {
         return (LambdaQueryWrapper<MdmMonCycleSchStruConf>) captor.getValue();
     }
 
-    /**
-     * 初始化实体表信息，避免非Spring单测解析Lambda查询字段时缺少列缓存。
-     *
-     * @param entityClass 实体类型
-     */
+    /** 初始化实体表信息。 */
     private void initializeTableInfo(Class<?> entityClass) {
         if (Objects.nonNull(TableInfoHelper.getTableInfo(entityClass))) {
             return;
@@ -420,5 +490,4 @@ public class StructureMinMachineRetentionServiceTest {
                 new MybatisConfiguration(), entityClass.getName());
         TableInfoHelper.initTableInfo(assistant, entityClass);
     }
-
 }
