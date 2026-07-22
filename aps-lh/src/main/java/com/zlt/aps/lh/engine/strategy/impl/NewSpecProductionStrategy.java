@@ -141,6 +141,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String TARGET_SKU_MOULD_ALL_OCCUPIED_UNSCHEDULED_REASON =
             "目标 SKU 模具全部被占用";
     private static final int NEW_SPEC_CHANGEOVER_PROBE_LIMIT = 16;
+
     /** 反向匹配规格层级:同规格 */
     private static final int REVERSE_MATCH_SPEC_LEVEL_SAME_SPEC = 0;
     /** 反向匹配规格层级:同断面宽 */
@@ -363,11 +364,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     context, machineMatch, mouldChangeBalance, inspectionBalance, capacityCalculate,
                     shifts, unscheduledReasonCountMap, deferredCompensationSkuList);
             scheduledCount += roundSummary.getScheduledCount();
-            if (CollectionUtils.isEmpty(deferredCompensationSkuList)) {
+            boolean compensationDeferred = !CollectionUtils.isEmpty(deferredCompensationSkuList);
+            if (!roundSummary.isHistoricalFallbackDeferred() && !compensationDeferred) {
                 return scheduledCount;
             }
-            appendDeferredCompensationSkuList(context, deferredCompensationSkuList);
-            deferredCompensationSkuList.clear();
+            if (compensationDeferred) {
+                appendDeferredCompensationSkuList(context, deferredCompensationSkuList);
+                deferredCompensationSkuList.clear();
+            }
             roundNo++;
         }
     }
@@ -625,9 +629,28 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Map<String, String> reverseMatchPreferredMachineMap = new HashMap<String, String>(4);
         // 单控反向匹配预留机台编码集合:配对侧机台被反向匹配推荐后,非推荐目标SKU选机时排除,使配对侧留给推荐目标SKU
         Set<String> reverseMatchReservedMachineCodes = new HashSet<String>(4);
+        /*
+         * 只要本轮已有SKU为等待其他历史指令而延后普通回落，本轮后续SKU也只执行历史指定机台尝试。
+         * 下一轮从队首重新开始普通新增，保证所有历史指令都先获得一次完整主链校验机会。
+         */
+        boolean historicalFallbackDeferredInRound = false;
+        boolean historicalFallbackDeferred = false;
         while (iterator.hasNext()) {
             SkuScheduleDTO sku = iterator.next();
             boolean currentSkuRemoved = false;
+            boolean ordinaryFallbackDeferred = false;
+            if (historicalFallbackDeferredInRound
+                    && !hasPendingHistoricalReverseDirectiveForSku(context, sku)) {
+                /*
+                 * 本轮已经进入历史指令优先阶段，普通SKU不再重复执行收尾目标、候选匹配等初始化。
+                 * SKU保留在原队列，下一轮从队首按既有业务排序完整处理。
+                 */
+                historicalFallbackDeferred = true;
+                log.info("历史反选阶段跳过普通新增SKU, materialCode: {}, productStatus: {}, "
+                                + "reason: 下一轮恢复普通新增",
+                        sku.getMaterialCode(), sku.getProductStatus());
+                continue;
+            }
             // 兜底校验：动态生成的补偿SKU若命中减量清单，写未排并跳过（去重set保证不重复写未排）
             if (skuDecrementChecker.isDecrementHit(context, sku)) {
                 boolean written = skuDecrementChecker.handleDecrementHit(context, sku);
@@ -836,6 +859,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     fillSelectedCandidateOrder(availableCandidates, candidateMachine, orderedCandidates);
                 }
                 if (candidateMachine == null) {
+                    /*
+                     * 历史指定机台必须全部先获得一次执行机会，之后才允许任何SKU进入普通回落。
+                     * 当前SKU保留在待排队列，下一轮从队首按既有业务顺序重新执行普通新增，既避免
+                     * 抢占后续历史机台，也保留历史反选失败后的普通候选回落能力。
+                     */
+                    if (historicalFallbackDeferredInRound
+                            || hasPendingHistoricalReverseDirectiveForOtherSku(context, sku)) {
+                        historicalFallbackDeferredInRound = true;
+                        historicalFallbackDeferred = true;
+                        ordinaryFallbackDeferred = true;
+                        log.info("历史反选普通回落延后到下一轮, materialCode: {}, productStatus: {}, "
+                                        + "reason: 等待全部历史指定机台完成首次尝试",
+                                sku.getMaterialCode(), sku.getProductStatus());
+                        break;
+                    }
                     // 非反向匹配推荐目标SKU选机时,排除被反向匹配预留的单控机台,使配对侧留给推荐目标SKU
                     if (LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)
                             && !CollectionUtils.isEmpty(reverseMatchReservedMachineCodes)) {
@@ -953,7 +991,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
                         context, switchReadyTime, sku);
                 switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
-                // 历史只继承映射班次，不继承具体时刻；本批切换最早起点按当前映射班次开始时间重新对齐。
+                // 历史映射班次只作为指定机台首次尝试起点，不继承具体时刻，也不限制本批实际合法班次。
                 switchReadyTime = alignHistoricalReverseSwitchReadyTime(
                         context, historicalDirective, switchReadyTime);
 
@@ -981,29 +1019,24 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 }
                 mouldChangeStartTime = allocateNewSpecMouldChangeStartTime(
                         context, sku, machineCode, switchReadyTime, switchDurationHours, mouldChangeBalance);
+                boolean historicalMouldChangeInMappedShift =
+                        isHistoricalReverseMouldChangeInMappedShift(
+                                context, historicalDirective, mouldChangeStartTime);
                 if (Objects.nonNull(mouldChangeStartTime)
-                        && !isHistoricalReverseMouldChangeInMappedShift(
-                        context, historicalDirective, mouldChangeStartTime)) {
+                        && Objects.nonNull(historicalDirective)
+                        && !historicalMouldChangeInMappedShift) {
                     /*
-                     * 分配器可能因晚班禁换模、停机、保养或换模配额把切换推迟到后续班次。
-                     * 映射班次是本需求硬约束，因此完整回滚本候选的换模和模具预占，再让SKU进入普通候选。
+                     * 历史反选继承的是“机台+后物料”关系，历史映射班次只作为本批首次尝试起点。
+                     * 停机、保养、换模配额或首检约束导致实际班次后移时，继续在同一指定机台执行主链。
                      */
-                    rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
-                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult,
-                            pairMouldResourceAllocationResult);
-                    excludedMachineCodes.add(machineCode);
-                    candidateCache.removeMachine(machineCode);
-                    String mappedShiftFailureReason =
-                            "按本批机台状态重新分配后，换模开始时间未落在历史映射班次";
-                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
-                            mappedShiftFailureReason,
-                            machineReadyTime, switchReadyTime, mouldChangeStartTime, null,
-                            null, null, null, null, null);
-                    markHistoricalReverseDirectiveFailed(
-                            context, historicalDirective, mappedShiftFailureReason);
-                    failReason = selectHigherPriorityFailReason(
-                            failReason, NewSpecFailReasonEnum.MOULD_CHANGE_SHIFT_ALLOCATE_FAILED);
-                    continue;
+                    log.info("前日交替计划指定机台按本批资源重算班次, materialCode: {}, machineCode: {}, "
+                                    + "historicalShift: {}, mappedShift: {}, actualShift: {}, switchReadyTime: {}",
+                            sku.getMaterialCode(), machineCode,
+                            historicalDirective.getHistoricalShiftIndex(),
+                            historicalDirective.getMappedShiftIndex(),
+                            LhScheduleTimeUtil.getShiftIndex(
+                                    context, context.getScheduleDate(), mouldChangeStartTime),
+                            LhScheduleTimeUtil.formatDateTime(switchReadyTime));
                 }
                 if (mouldChangeStartTime == null) {
                     log.debug("新增SKU换模窗口分配失败, materialCode: {}, 机台: {}, 机台就绪: {}, 目标量: {}",
@@ -1606,6 +1639,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 adjustSameSkuMultiMachineAllocation(context, sku, shifts, quantityPolicy, isEnding);
                 rebuildScheduledMachineCountMap(context, shifts);
             }
+            if (ordinaryFallbackDeferred) {
+                /*
+                 * 指令尝试状态已经发生真实推进，因此本轮视为有进展；SKU不写未排、不移出队列，
+                 * 下一轮会在全部历史指令完成后重新获得完整普通候选集。
+                 */
+                progressed = true;
+                continue;
+            }
             if (!scheduled) {
                 // 所有候选机台都失败，记录未排产原因并移出待排队列
                 log.warn("新增SKU排产失败, materialCode: {}, 结构: {}, 规格: {}, 目标量: {}, 候选机台数: {}, 排除机台: {}, 原因: {}",
@@ -1642,11 +1683,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         excludedMachineCodes, excludedMachineReasonMap, null, true,
                         PriorityTraceLogHelper.formatDateTime(finalProductionStartTime));
                 if (!CollectionUtils.isEmpty(deferredCompensationSkuList)) {
-                    return new RoundScheduleSummary(scheduledCount, true);
+                    return new RoundScheduleSummary(scheduledCount, true, historicalFallbackDeferred);
                 }
             }
         }
-        return new RoundScheduleSummary(scheduledCount, progressed);
+        return new RoundScheduleSummary(scheduledCount, progressed, historicalFallbackDeferred);
     }
 
     /**
@@ -2245,6 +2286,63 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 判断是否仍有其他待排SKU对应的历史正规换模指令尚未尝试。
+     *
+     * <p>只认当前待排队列中仍存在的目标SKU，避免目标SKU已被前置未排规则移除后，
+     * 残留指令导致普通新增轮次永久延后。</p>
+     *
+     * @param context 排程上下文
+     * @param currentSku 当前SKU
+     * @return true-应先等待其他历史指令；false-可以进入普通新增回落
+     */
+    private boolean hasPendingHistoricalReverseDirectiveForOtherSku(
+            LhScheduleContext context,
+            SkuScheduleDTO currentSku) {
+        List<HistoricalReverseSelectionDirective> directives =
+                context.getHistoricalReverseSelectionDirectiveList();
+        if (CollectionUtils.isEmpty(directives)
+                || CollectionUtils.isEmpty(context.getNewSpecSkuList())) {
+            return false;
+        }
+        for (HistoricalReverseSelectionDirective directive : directives) {
+            if (Objects.isNull(directive) || directive.isAttempted()
+                    || !StringUtils.equals(MouldChangeTypeEnum.REGULAR.getCode(),
+                    directive.getActualChangeType())
+                    || isSameHistoricalReverseSku(directive, currentSku)) {
+                continue;
+            }
+            for (SkuScheduleDTO pendingSku : context.getNewSpecSkuList()) {
+                if (pendingSku != currentSku && isSameHistoricalReverseSku(directive, pendingSku)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断当前SKU是否仍有历史正规换模指定机台待尝试。
+     *
+     * @param context 排程上下文
+     * @param sku 当前SKU
+     * @return true-当前轮次仍需执行历史指定机台；false-仅剩普通新增
+     */
+    private boolean hasPendingHistoricalReverseDirectiveForSku(
+            LhScheduleContext context,
+            SkuScheduleDTO sku) {
+        if (CollectionUtils.isEmpty(context.getHistoricalReverseSelectionDirectiveList())) {
+            return false;
+        }
+        for (HistoricalReverseSelectionDirective directive
+                : context.getHistoricalReverseSelectionDirectiveList()) {
+            if (isPendingHistoricalReverseDirectiveForSku(directive, sku)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * 按当前SKU和实际候选机台查找反选指令。
      *
      * @param context 排程上下文
@@ -2348,12 +2446,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
-     * 校验实际换模开始时间是否仍落在历史映射班次。
+     * 判断实际换模开始时间是否落在历史映射班次。
+     *
+     * <p>该结果仅用于记录本批资源导致的班次重算，不作为正规新增换模的失败条件。</p>
      *
      * @param context 排程上下文
      * @param directive 当前反选指令
      * @param mouldChangeStartTime 当前规则实际分配的换模开始时间
-     * @return true-普通候选或落在映射班次；false-指定机台硬约束失败
+     * @return true-普通候选或落在映射班次；false-指定机台的实际换模班次已重算
      */
     private boolean isHistoricalReverseMouldChangeInMappedShift(
             LhScheduleContext context,
@@ -7467,9 +7567,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static class RoundScheduleSummary {
         private final int scheduledCount;
         private final boolean progressed;
-        private RoundScheduleSummary(int scheduledCount, boolean progressed) {
+        private final boolean historicalFallbackDeferred;
+        private RoundScheduleSummary(int scheduledCount,
+                                     boolean progressed,
+                                     boolean historicalFallbackDeferred) {
             this.scheduledCount = scheduledCount;
             this.progressed = progressed;
+            this.historicalFallbackDeferred = historicalFallbackDeferred;
         }
 
         private int getScheduledCount() {
@@ -7478,6 +7582,10 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
 
         private boolean isProgressed() {
             return progressed;
+        }
+
+        private boolean isHistoricalFallbackDeferred() {
+            return historicalFallbackDeferred;
         }
     }
 

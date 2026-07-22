@@ -3,7 +3,6 @@ package com.zlt.aps.lh.handler;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
-import com.zlt.aps.lh.engine.strategy.IHistoricalMouldChangeReverseSelectionStrategy;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
 import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
@@ -35,8 +34,6 @@ class ContinuousProductionHandlerTest {
     @Mock
     private ITypeBlockProductionStrategy typeBlockProductionStrategy;
     @Mock
-    private IHistoricalMouldChangeReverseSelectionStrategy historicalReverseSelectionStrategy;
-    @Mock
     private IMachineMatchStrategy machineMatchStrategy;
 
     @InjectMocks
@@ -52,14 +49,13 @@ class ContinuousProductionHandlerTest {
 
         InOrder inOrder = inOrder(
                 skuPriorityStrategy, strategy, typeBlockProductionStrategy,
-                historicalReverseSelectionStrategy, machineMatchStrategy);
+                machineMatchStrategy);
         inOrder.verify(skuPriorityStrategy).sortByPriority(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleContinuousEnding(any(LhScheduleContext.class));
         inOrder.verify(strategy).allocateShiftPlanQty(any(LhScheduleContext.class));
         inOrder.verify(strategy).adjustEmbryoStock(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleReduceMould(any(LhScheduleContext.class));
         inOrder.verify(typeBlockProductionStrategy).scheduleTypeBlockChange(any(LhScheduleContext.class));
-        inOrder.verify(historicalReverseSelectionStrategy).reverseSelect(any(LhScheduleContext.class));
         inOrder.verify(machineMatchStrategy).traceEnabledMachineSort(any(LhScheduleContext.class));
     }
 }

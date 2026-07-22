@@ -2654,8 +2654,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             // 首日保护标识只与当前循环日期组合使用；进入 T+1 后局部判断自然恢复为 false，不会锁定整个窗口。
             boolean skipReduceMachineForCurrentDay = skipReduceMachineForFirstDay
                     && productionDate.equals(firstProductionDate);
-            int dailyStandardRequiredMachineCount = resolveContinuationLookAheadMinimumMachineCount(
+            int lookAheadRequiredMachineCount = resolveContinuationLookAheadMinimumMachineCount(
                     context, sourceSku, activeResults, shiftMapByDate, productionDate, shortageLookAheadDays);
+            // 停产保机命中时，低计划日必须按当日理论机台数生产；后看恢复计划只保留物理占用，不能提前恢复生产。
+            int dailyStandardRequiredMachineCount = resolveContinuousProductionMachineCount(
+                    context, sourceSku, activeResults, productionDate, lookAheadRequiredMachineCount);
             boolean hasWholeDayUnavailableMachine = capacityMap.values().stream()
                     .anyMatch(capacity -> Objects.isNull(capacity) || capacity <= 0);
             boolean applyDailyStandardMachineCountDecision = !skipReduceMachineForCurrentDay
@@ -2744,8 +2747,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 context, sourceSku, activeResults, productionDate, checkDays, false);
         int futureMaxMachineCount = resolveContinuationAroundMaxMachineCount(
                 context, sourceSku, activeResults, productionDate, checkDays, true);
-        if (previousMaxMachineCount != futureMaxMachineCount
-                || previousMaxMachineCount <= currentRequiredMachineCount) {
+        if (!isContinuousStopHoldScenario(activeResults.size(), currentRequiredMachineCount,
+                previousMaxMachineCount, futureMaxMachineCount)) {
             log.info("续作停产保机二次校验未命中, factoryCode: {}, batchNo: {}, materialCode: {}, "
                             + "productStatus: {}, 日期: {}, checkDays: {}, 当前理论机台数: {}, "
                             + "前N天最大机台数: {}, 后N天最大机台数: {}, 现有生产机台: {}, 当前有效机台: {}",
@@ -3064,6 +3067,74 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     requiredMachineCount);
         }
         return Math.min(activeResults.size(), requiredMachineCount);
+    }
+
+    /**
+     * 解析当前业务日最终生产机台数。
+     * <p>普通场景继续使用当前日与欠产后看日的最大理论机台数；当计划呈现“前后峰值一致、
+     * 当前日短期下降”的停产保机形态时，生产机台数必须回到当前日理论值，额外机台仅保留
+     * 原SKU和模具物理占用。这样既不关闭SYS0304019的普通欠产保护，也不会让保机机台在
+     * 计划真正恢复前提前生产。</p>
+     *
+     * @param context 排程上下文
+     * @param sourceSku 来源SKU
+     * @param activeResults 当前有效续作机台
+     * @param productionDate 当前业务日
+     * @param lookAheadRequiredMachineCount 当前日与欠产后看日的最大理论机台数
+     * @return 当前业务日最终生产机台数
+     */
+    private int resolveContinuousProductionMachineCount(
+            LhScheduleContext context,
+            SkuScheduleDTO sourceSku,
+            List<LhScheduleResult> activeResults,
+            LocalDate productionDate,
+            int lookAheadRequiredMachineCount) {
+        if (Objects.isNull(context) || Objects.isNull(sourceSku) || Objects.isNull(productionDate)
+                || CollectionUtils.isEmpty(activeResults)) {
+            return Math.max(0, lookAheadRequiredMachineCount);
+        }
+        int currentDayPlanQty = resolveOriginalMonthPlanDayQty(context, sourceSku, productionDate);
+        int currentRequiredMachineCount = resolveContinuationDayMinimumMachineCount(
+                context, sourceSku, currentDayPlanQty, activeResults);
+        if (currentRequiredMachineCount <= 0) {
+            return Math.max(0, lookAheadRequiredMachineCount);
+        }
+        int checkDays = context.getScheduleConfig().getContinuousMouldOfflineCheckDays();
+        int previousMaxMachineCount = resolveContinuationAroundMaxMachineCount(
+                context, sourceSku, activeResults, productionDate, checkDays, false);
+        int futureMaxMachineCount = resolveContinuationAroundMaxMachineCount(
+                context, sourceSku, activeResults, productionDate, checkDays, true);
+        if (!isContinuousStopHoldScenario(activeResults.size(), currentRequiredMachineCount,
+                previousMaxMachineCount, futureMaxMachineCount)) {
+            return Math.max(0, lookAheadRequiredMachineCount);
+        }
+        log.info("续作停产保机优先生产机台数, factoryCode: {}, batchNo: {}, materialCode: {}, "
+                        + "productStatus: {}, 日期: {}, 当前理论机台数: {}, 前N天最大机台数: {}, "
+                        + "后N天最大机台数: {}, 后看原生产机台数: {}, 最终生产机台数: {}, "
+                        + "原因: 低计划日仅停产保机，计划恢复日再恢复生产",
+                context.getFactoryCode(), context.getBatchNo(), sourceSku.getMaterialCode(),
+                sourceSku.getProductStatus(), productionDate, currentRequiredMachineCount,
+                previousMaxMachineCount, futureMaxMachineCount, lookAheadRequiredMachineCount,
+                currentRequiredMachineCount);
+        return currentRequiredMachineCount;
+    }
+
+    /**
+     * 判断当前业务日是否满足停产保机形态。
+     *
+     * @param activeMachineCount 当前有效续作机台数
+     * @param currentRequiredMachineCount 当日理论生产机台数
+     * @param previousMaxMachineCount 前N天最大理论机台数
+     * @param futureMaxMachineCount 后N天最大理论机台数
+     * @return true-应按当日理论机台数生产并保留额外机台；false-沿用普通后看决策
+     */
+    private boolean isContinuousStopHoldScenario(int activeMachineCount,
+                                                 int currentRequiredMachineCount,
+                                                 int previousMaxMachineCount,
+                                                 int futureMaxMachineCount) {
+        return activeMachineCount > currentRequiredMachineCount
+                && previousMaxMachineCount == futureMaxMachineCount
+                && previousMaxMachineCount > currentRequiredMachineCount;
     }
 
     /**
@@ -8963,6 +9034,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
 
     /**
      * 刷新结果行的汇总计划量和收尾时间。
+     * <p>停产保机结果的结束时间表示机台和模具物理占用边界，不等同于最后正计划班次的生产完成时间。
+     * 因此每次汇总后都必须恢复保机占用，避免最终日计划账本同步覆盖窗口末班边界。</p>
      *
      * @param result 排程结果
      * @param shifts 班次列表
@@ -8973,6 +9046,11 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         }
         ShiftFieldUtil.syncDailyPlanQty(result);
         if (result.getDailyPlanQty() == null || result.getDailyPlanQty() <= 0) {
+            if (Objects.nonNull(context)
+                    && context.isContinuousStopHoldMachine(result.getLhMachineCode())) {
+                retainContinuousStopHoldZeroResult(context, result, shifts);
+                return;
+            }
             // 零计划结果不参与完工时刻语义。
             result.setSpecEndTime(null);
             result.setTdaySpecEndTime(null);
@@ -8990,6 +9068,10 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         result.setSpecEndTime(specEndTime);
         result.setTdaySpecEndTime(specEndTime);
         syncResultDowntimeSummary(context, result);
+        if (Objects.nonNull(context)
+                && context.isContinuousStopHoldMachine(result.getLhMachineCode())) {
+            extendContinuousStopHoldOccupancyToWindowEnd(context, result, shifts);
+        }
     }
 
     /**

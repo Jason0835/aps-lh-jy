@@ -1,9 +1,11 @@
 package com.zlt.aps.lh.handler;
 
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
+import com.zlt.aps.lh.engine.strategy.IHistoricalMouldChangeReverseSelectionStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
@@ -15,7 +17,11 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.Arrays;
+
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.when;
 
@@ -33,6 +39,9 @@ class NewProductionHandlerTest {
 
     @Mock
     private ISkuPriorityStrategy skuPriorityStrategy;
+
+    @Mock
+    private IHistoricalMouldChangeReverseSelectionStrategy historicalReverseSelectionStrategy;
 
     @Mock
     private IMachineMatchStrategy machineMatchStrategy;
@@ -60,8 +69,10 @@ class NewProductionHandlerTest {
 
         handler.handle(new LhScheduleContext());
 
-        InOrder inOrder = inOrder(skuPriorityStrategy, strategy);
+        InOrder inOrder = inOrder(
+                skuPriorityStrategy, historicalReverseSelectionStrategy, strategy);
         inOrder.verify(skuPriorityStrategy).sortByPriority(any(LhScheduleContext.class));
+        inOrder.verify(historicalReverseSelectionStrategy).reverseSelect(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleNewSpecs(any(LhScheduleContext.class),
                 any(IMachineMatchStrategy.class),
                 any(IMouldChangeBalanceStrategy.class),
@@ -70,5 +81,51 @@ class NewProductionHandlerTest {
         inOrder.verify(strategy).allocateShiftPlanQty(any(LhScheduleContext.class));
         inOrder.verify(strategy).adjustEmbryoStock(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleReduceMould(any(LhScheduleContext.class));
+    }
+
+    /**
+     * 验证新增业务排序完成后，历史反选仍能把目标SKU恢复到普通新增SKU之前。
+     */
+    @Test
+    void handle_shouldKeepHistoricalReverseSkuAheadAfterBusinessPrioritySort() {
+        when(strategyFactory.getProductionStrategy("02")).thenReturn(strategy);
+        when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
+        when(strategyFactory.getMachineMatchStrategy()).thenReturn(machineMatchStrategy);
+        when(strategyFactory.getMouldChangeBalanceStrategy()).thenReturn(mouldChangeBalanceStrategy);
+        when(strategyFactory.getFirstInspectionBalanceStrategy()).thenReturn(firstInspectionBalanceStrategy);
+        when(strategyFactory.getCapacityCalculateStrategy()).thenReturn(capacityCalculateStrategy);
+
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO normalHighPrioritySku = new SkuScheduleDTO();
+        normalHighPrioritySku.setMaterialCode("3302001589");
+        SkuScheduleDTO historicalReverseSku = new SkuScheduleDTO();
+        historicalReverseSku.setMaterialCode("3302001274");
+        context.getNewSpecSkuList().addAll(
+                Arrays.asList(historicalReverseSku, normalHighPrioritySku));
+
+        doAnswer(invocation -> {
+            context.getNewSpecSkuList().clear();
+            context.getNewSpecSkuList().addAll(
+                    Arrays.asList(normalHighPrioritySku, historicalReverseSku));
+            return null;
+        }).when(skuPriorityStrategy).sortByPriority(context);
+        doAnswer(invocation -> {
+            context.getNewSpecSkuList().clear();
+            context.getNewSpecSkuList().addAll(
+                    Arrays.asList(historicalReverseSku, normalHighPrioritySku));
+            return null;
+        }).when(historicalReverseSelectionStrategy).reverseSelect(context);
+        doAnswer(invocation -> {
+            assertSame(historicalReverseSku, context.getNewSpecSkuList().get(0),
+                    "历史反选SKU必须在普通新增选机前保持第一顺位");
+            assertSame(normalHighPrioritySku, context.getNewSpecSkuList().get(1),
+                    "普通高优先级SKU不得再次覆盖历史反选执行顺序");
+            return null;
+        }).when(strategy).scheduleNewSpecs(
+                any(LhScheduleContext.class), any(IMachineMatchStrategy.class),
+                any(IMouldChangeBalanceStrategy.class), any(IFirstInspectionBalanceStrategy.class),
+                any(ICapacityCalculateStrategy.class));
+
+        handler.handle(context);
     }
 }

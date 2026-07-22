@@ -58,7 +58,7 @@ class HistoricalReverseSelectionNewSpecSupportTest {
     }
 
     @Test
-    void mappedShift_shouldBeHardConstraintForActualMouldChangeStart() {
+    void mappedShift_shouldOnlyIdentifyInitialPreferredMouldChangeShift() {
         LhScheduleContext context = baseContext();
         HistoricalReverseSelectionDirective directive = directive("MAT-A", "S", "K1003", 1);
 
@@ -71,6 +71,46 @@ class HistoricalReverseSelectionNewSpecSupportTest {
 
         assertTrue(Boolean.TRUE.equals(inMappedShift));
         assertFalse(Boolean.TRUE.equals(outsideMappedShift));
+    }
+
+    /**
+     * 其他历史指定机台尚未尝试时，当前SKU必须延后普通回落。
+     */
+    @Test
+    void normalFallback_shouldWaitUntilOtherHistoricalDirectivesAreAttempted() {
+        LhScheduleContext context = baseContext();
+        SkuScheduleDTO currentSku = new SkuScheduleDTO();
+        currentSku.setMaterialCode("MAT-CURRENT");
+        currentSku.setProductStatus("S");
+        SkuScheduleDTO nextSku = new SkuScheduleDTO();
+        nextSku.setMaterialCode("MAT-NEXT");
+        nextSku.setProductStatus("S");
+        HistoricalReverseSelectionDirective currentDirective =
+                directive("MAT-CURRENT", "S", "K1001", 1);
+        currentDirective.setAttempted(true);
+        HistoricalReverseSelectionDirective otherPendingDirective =
+                directive("MAT-NEXT", "S", "K1002", 1);
+        context.getHistoricalReverseSelectionDirectiveList().addAll(
+                Arrays.asList(currentDirective, otherPendingDirective));
+        context.getNewSpecSkuList().addAll(Arrays.asList(currentSku, nextSku));
+
+        Boolean shouldWait = ReflectionTestUtils.invokeMethod(strategy,
+                "hasPendingHistoricalReverseDirectiveForOtherSku", context, currentSku);
+        assertTrue(Boolean.TRUE.equals(shouldWait),
+                "其他目标SKU仍在待排队列且指令未尝试时，当前SKU不得立即普通回落");
+
+        otherPendingDirective.setAttempted(true);
+        Boolean releasedAfterAttempt = ReflectionTestUtils.invokeMethod(strategy,
+                "hasPendingHistoricalReverseDirectiveForOtherSku", context, currentSku);
+        assertFalse(Boolean.TRUE.equals(releasedAfterAttempt),
+                "全部历史指令完成尝试后，当前SKU必须恢复普通回落资格");
+
+        otherPendingDirective.setAttempted(false);
+        context.getNewSpecSkuList().remove(nextSku);
+        Boolean releasedAfterTargetRemoved = ReflectionTestUtils.invokeMethod(strategy,
+                "hasPendingHistoricalReverseDirectiveForOtherSku", context, currentSku);
+        assertFalse(Boolean.TRUE.equals(releasedAfterTargetRemoved),
+                "历史目标SKU已被前置规则移出待排队列时，不得因残留指令永久阻塞普通回落");
     }
 
     /**
