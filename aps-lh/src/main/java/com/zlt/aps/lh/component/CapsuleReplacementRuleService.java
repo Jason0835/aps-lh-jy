@@ -11,6 +11,7 @@ import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
+import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
@@ -34,8 +35,8 @@ import java.util.Set;
  * <ul>
  *   <li>判断基数必须是停机、清洗、保养、首检、日计划额度、余量和收尾目标等既有规则
  *   收口后的“扣减前实际可排量”；</li>
- *   <li>本批初始次数取左右模次数最大值，后续按物理机台实际总产量累计；</li>
- *   <li>只有当前次数加扣减前物理总产量严格大于上限时才首次换胶囊，刚好达到上限不触发；</li>
+ *   <li>本批初始次数取左右模次数最大值，普通双模按单侧生产循环数累计，其他机台沿用现有累计口径；</li>
+ *   <li>只有当前次数加扣减前胶囊次数增量严格大于上限时才首次换胶囊，刚好达到上限不触发；</li>
  *   <li>本批首次跨限从候选计划量固定扣减配置值，后续继续累计但不重置、不重复扣减；</li>
  *   <li>L/R整机结果按左右实际量合计一次，结果复制和同班多个结果不得重复累计；</li>
  *   <li>候选预演、选机模拟和产能模拟不得调用本类，避免污染正式运行态。</li>
@@ -55,6 +56,9 @@ public class CapsuleReplacementRuleService {
 
     /** 运行态复合键分隔符 */
     private static final String KEY_SEPARATOR = "::";
+
+    /** 普通双模结果的模台数 */
+    private static final int DOUBLE_MOULD_QTY = 2;
 
     /**
      * 对正式落班候选量执行换胶囊判断、固定扣减和次数累计。
@@ -113,12 +117,14 @@ public class CapsuleReplacementRuleService {
         int effectiveLossQty = resolveEffectiveLossQty(
                 configuredLossQty, wholeSingleControlPair, result.getLhMachineCode());
         int beforeUsage = getMachineRuntimeUsage(context, physicalMachineCode);
-        int candidatePhysicalQty = resolvePhysicalPlanQty(normalizedCandidateQty, wholeSingleControlPair);
+        // 使用统一胶囊增量口径判断是否跨限，普通双模按单侧生产循环数计算。
+        int candidateUsageIncrement = resolveCapsuleUsageIncrement(
+                result, normalizedCandidateQty, wholeSingleControlPair);
         boolean thresholdHandled = context.getCapsuleThresholdHandledMachineSet()
                 .contains(physicalMachineCode);
         boolean firstThresholdCrossing = !shiftAlreadyReplaced
                 && !thresholdHandled
-                && beforeUsage + candidatePhysicalQty > usageUpperLimit;
+                && beforeUsage + candidateUsageIncrement > usageUpperLimit;
         int actualPlanQty = firstThresholdCrossing
                 ? Math.max(0, normalizedCandidateQty - effectiveLossQty)
                 : normalizedCandidateQty;
@@ -133,20 +139,22 @@ public class CapsuleReplacementRuleService {
             ShiftFieldUtil.appendShiftAnalysis(
                     result, shift.getShiftIndex(), CAPSULE_REPLACEMENT_ANALYSIS);
         }
-        int actualPhysicalQty = resolvePhysicalPlanQty(actualPlanQty, wholeSingleControlPair);
-        applyActualUsageIncrement(context, physicalMachineCode, actualPhysicalQty);
+        // 按扣量后的实际计划量重新计算增量，避免把换胶囊损失计入使用次数。
+        int actualUsageIncrement = resolveCapsuleUsageIncrement(
+                result, actualPlanQty, wholeSingleControlPair);
+        applyActualUsageIncrement(context, physicalMachineCode, actualUsageIncrement);
 
         if (firstThresholdCrossing) {
             log.info("换胶囊班次计划量收口, batchNo: {}, scheduleDate: {}, scene: {}, materialCode: {}, "
                             + "machineCode: {}, physicalMachineCode: {}, shiftIndex: {}, 当前机台胶囊次数: {}, "
-                            + "胶囊上限: {}, 扣减前结果可排量: {}, 扣减前物理总产量: {}, 配置扣减量: {}, "
-                            + "本结果有效扣减量: {}, 实际结果量: {}, 实际物理总产量: {}, "
+                            + "胶囊上限: {}, 扣减前结果可排量: {}, 候选胶囊次数增量: {}, 配置扣减量: {}, "
+                            + "本结果有效扣减量: {}, 实际结果量: {}, 实际胶囊次数增量: {}, "
                             + "本批首次严格跨限: {}, 累计后机台胶囊次数: {}",
                     context.getBatchNo(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()), scene,
                     result.getMaterialCode(), result.getLhMachineCode(), physicalMachineCode,
                     shift.getShiftIndex(), beforeUsage,
-                    usageUpperLimit, normalizedCandidateQty, candidatePhysicalQty,
-                    configuredLossQty, effectiveLossQty, actualPlanQty, actualPhysicalQty,
+                    usageUpperLimit, normalizedCandidateQty, candidateUsageIncrement,
+                    configuredLossQty, effectiveLossQty, actualPlanQty, actualUsageIncrement,
                     true, getMachineRuntimeUsage(context, physicalMachineCode));
         }
         return actualPlanQty;
@@ -280,7 +288,7 @@ public class CapsuleReplacementRuleService {
     /**
      * 根据当前排程结果重建胶囊运行态。
      *
-     * <p>重建以基础胶囊次数为起点，按班次、物理机台和结果开始时间顺序累计实际计划量。
+     * <p>重建以基础胶囊次数为起点，按班次、物理机台和结果开始时间顺序累计实际胶囊次数增量。
      * 结果中的“换胶囊”备注是该班已执行更换的事实标识；同一物理机台同班存在多个结果时
      * 只识别第一条备注。L/R整机结果按一个物理排产组处理，避免左右结果重复累计。</p>
      *
@@ -336,8 +344,10 @@ public class CapsuleReplacementRuleService {
                         validReplacementShiftKeySet.add(shiftKey);
                     }
                 }
-                int actualPhysicalQty = resolvePhysicalPlanQty(actualQty, wholeSingleControlPair);
-                applyActualUsageIncrement(context, physicalMachineCode, actualPhysicalQty);
+                // 重建与正式落班复用同一胶囊增量口径，防止后置缩量后运行态漂移。
+                int actualUsageIncrement = resolveCapsuleUsageIncrement(
+                        result, actualQty, wholeSingleControlPair);
+                applyActualUsageIncrement(context, physicalMachineCode, actualUsageIncrement);
             }
         }
         context.getCapsuleReplacementShiftKeySet().retainAll(validReplacementShiftKeySet);
@@ -418,32 +428,60 @@ public class CapsuleReplacementRuleService {
     }
 
     /**
-     * 按真实物理总产量累计机台胶囊次数，首次跨限后也不减去上限。
+     * 按当前结果对应的胶囊次数增量累计，首次跨限后也不减去上限。
      *
      * @param context 排程上下文
      * @param physicalMachineCode 物理机台编码
-     * @param actualPhysicalQty 本次实际物理总产量
+     * @param actualUsageIncrement 本次实际胶囊次数增量
      */
     private void applyActualUsageIncrement(LhScheduleContext context,
                                            String physicalMachineCode,
-                                           int actualPhysicalQty) {
-        int normalizedIncrement = Math.max(0, actualPhysicalQty);
+                                           int actualUsageIncrement) {
+        int normalizedIncrement = Math.max(0, actualUsageIncrement);
         context.getCapsuleRuntimeUsageMap().merge(
                 physicalMachineCode, normalizedIncrement, Integer::sum);
     }
 
     /**
-     * 将结果计划量转换为物理机台总产量。
-     * <p>普通机台结果已保存整机总量，可直接累计；L/R整机配对结果按单侧保存，
-     * 需要乘以2还原左右实际总产量。L/R独立排产由两侧结果分别进入规则并自然累加。</p>
+     * 将结果计划量转换为胶囊使用次数增量。
+     * <p>普通双模一个生产循环同时生产两条，单个胶囊只累计其中一侧对应的循环次数；
+     * 奇数计划量复用现有模台数向上收敛规则后再折半，等价于取左右侧实际次数的较大值。
+     * 普通单模直接按结果量累计；L/R整机配对结果按单侧保存，需要乘以2还原既有物理机台
+     * 累计口径；L/R独立排产仍由两侧结果分别进入规则并自然累加。</p>
      *
+     * @param result 当前排程结果
      * @param resultPlanQty 当前结果计划量
      * @param wholeSingleControlPair 是否为L/R整机配对结果
-     * @return 本次物理机台总产量
+     * @return 本次胶囊使用次数增量
      */
-    private int resolvePhysicalPlanQty(int resultPlanQty, boolean wholeSingleControlPair) {
+    private int resolveCapsuleUsageIncrement(LhScheduleResult result,
+                                             int resultPlanQty,
+                                             boolean wholeSingleControlPair) {
         int normalizedPlanQty = Math.max(0, resultPlanQty);
-        return wholeSingleControlPair ? normalizedPlanQty * 2 : normalizedPlanQty;
+        if (wholeSingleControlPair) {
+            return normalizedPlanQty * DOUBLE_MOULD_QTY;
+        }
+        if (isOrdinaryDoubleMouldResult(result)) {
+            int normalizedDoubleMouldQty = ShiftCapacityResolverUtil.roundUpQtyToMouldMultiple(
+                    normalizedPlanQty, DOUBLE_MOULD_QTY);
+            return normalizedDoubleMouldQty / DOUBLE_MOULD_QTY;
+        }
+        return normalizedPlanQty;
+    }
+
+    /**
+     * 判断当前结果是否为普通双模机台结果。
+     * <p>单控运行态机台以L/R结尾，必须继续沿用单控累计口径；只有非单控且结果模台数
+     * 明确为2时，才应用普通双模单侧循环次数规则，不扩大到普通单模或多模结果。</p>
+     *
+     * @param result 当前排程结果
+     * @return true-普通双模结果；false-其他机台结果
+     */
+    private boolean isOrdinaryDoubleMouldResult(LhScheduleResult result) {
+        return Objects.nonNull(result)
+                && !LhSingleControlMachineUtil.isSingleMouldMachine(result.getLhMachineCode())
+                && Objects.nonNull(result.getMouldQty())
+                && result.getMouldQty() == DOUBLE_MOULD_QTY;
     }
 
     private int resolveEffectiveLossQty(int configuredLossQty,

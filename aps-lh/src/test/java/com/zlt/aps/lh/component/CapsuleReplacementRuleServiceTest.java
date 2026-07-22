@@ -201,16 +201,88 @@ public class CapsuleReplacementRuleServiceTest {
         Assertions.assertEquals("换胶囊", ShiftFieldUtil.getShiftAnalysis(secondResult, 1));
     }
 
-    /** 普通双模按整机总量累计，初始最大445加实际14后应为459。 */
+    /** 普通双模按单侧生产循环数累计，初始最大445加实际14条对应的7次后应为452。 */
     @Test
-    public void shouldAccumulateDoubleMouldByPhysicalTotalQty() {
+    public void shouldAccumulateDoubleMouldBySingleSideCycleQty() {
         registerCapsule("K1701", 445, 445);
         LhScheduleResult result = result("K1701", 2);
 
         int actualQty = service.resolveActualPlanQty(context, result, shifts.get(0), 16, "测试双模");
 
         Assertions.assertEquals(14, actualQty);
-        Assertions.assertEquals(459, service.getMachineRuntimeUsage(context, "K1701"));
+        Assertions.assertEquals(452, service.getMachineRuntimeUsage(context, "K1701"));
+        Assertions.assertEquals("换胶囊", ShiftFieldUtil.getShiftAnalysis(result, 1));
+    }
+
+    /** 普通双模左右初值不一致时仍取较大值，16条只累计单侧8次且不得提前换胶囊。 */
+    @Test
+    public void shouldUseMaximumInitialUsageForOrdinaryDoubleMould() {
+        registerCapsule("K1701", 100, 440);
+        LhScheduleResult result = result("K1701", 2);
+
+        int actualQty = service.resolveActualPlanQty(context, result, shifts.get(0), 16, "测试双模初值");
+
+        Assertions.assertEquals(16, actualQty);
+        Assertions.assertEquals(448, service.getMachineRuntimeUsage(context, "K1701"));
+        Assertions.assertNull(ShiftFieldUtil.getShiftAnalysis(result, 1));
+    }
+
+    /** 普通双模候选增量后刚好达到上限时必须正常排满，不得备注换胶囊。 */
+    @Test
+    public void shouldNotReplaceWhenDoubleMouldUsageExactlyReachesLimit() {
+        registerCapsule("K1701", 442, 100);
+        LhScheduleResult result = result("K1701", 2);
+
+        int actualQty = service.resolveActualPlanQty(context, result, shifts.get(0), 16, "测试双模刚好达限");
+
+        Assertions.assertEquals(16, actualQty);
+        Assertions.assertEquals(450, service.getMachineRuntimeUsage(context, "K1701"));
+        Assertions.assertNull(ShiftFieldUtil.getShiftAnalysis(result, 1));
+    }
+
+    /** 普通双模奇数计划量复用现有向上收敛规则，15条按单侧最大8次累计。 */
+    @Test
+    public void shouldRoundOddDoubleMouldQtyByExistingMouldRule() {
+        registerCapsule("K1701", 442, 100);
+        LhScheduleResult result = result("K1701", 2);
+
+        int actualQty = service.resolveActualPlanQty(context, result, shifts.get(0), 15, "测试双模奇数计划量");
+
+        Assertions.assertEquals(15, actualQty);
+        Assertions.assertEquals(450, service.getMachineRuntimeUsage(context, "K1701"));
+        Assertions.assertNull(ShiftFieldUtil.getShiftAnalysis(result, 1));
+    }
+
+    /** 普通双模连续多班只在首次严格跨限班次扣量，最终重建必须保持相同累计结果。 */
+    @Test
+    public void shouldAccumulateDoubleMouldAcrossShiftsAndRebuildConsistently() {
+        registerCapsule("K1701", 435, 100);
+        LhScheduleResult result = result("K1701", 2);
+
+        int firstShiftQty = service.resolveActualPlanQty(
+                context, result, shifts.get(0), 16, "测试双模第一班");
+        ShiftFieldUtil.setShiftPlanQty(result, 1, firstShiftQty,
+                shifts.get(0).getShiftStartDateTime(), shifts.get(0).getShiftEndDateTime());
+        int secondShiftQty = service.resolveActualPlanQty(
+                context, result, shifts.get(1), 16, "测试双模第二班");
+        ShiftFieldUtil.setShiftPlanQty(result, 2, secondShiftQty,
+                shifts.get(1).getShiftStartDateTime(), shifts.get(1).getShiftEndDateTime());
+        int thirdShiftQty = service.resolveActualPlanQty(
+                context, result, shifts.get(2), 16, "测试双模第三班");
+        ShiftFieldUtil.setShiftPlanQty(result, 3, thirdShiftQty,
+                shifts.get(2).getShiftStartDateTime(), shifts.get(2).getShiftEndDateTime());
+        context.getScheduleResultList().add(result);
+
+        service.verifyFinalState(context);
+
+        Assertions.assertEquals(16, firstShiftQty);
+        Assertions.assertEquals(14, secondShiftQty);
+        Assertions.assertEquals(16, thirdShiftQty);
+        Assertions.assertEquals(458, service.getMachineRuntimeUsage(context, "K1701"));
+        Assertions.assertNull(ShiftFieldUtil.getShiftAnalysis(result, 1));
+        Assertions.assertEquals("换胶囊", ShiftFieldUtil.getShiftAnalysis(result, 2));
+        Assertions.assertNull(ShiftFieldUtil.getShiftAnalysis(result, 3));
+        Assertions.assertEquals(1, context.getCapsuleReplacementShiftKeySet().size());
     }
 
     /** L/R整机候选为单侧8条时，物理整机固定扣2条应折算为单侧扣1条。 */
@@ -292,7 +364,7 @@ public class CapsuleReplacementRuleServiceTest {
         Assertions.assertEquals(454, service.getMachineRuntimeUsage(context, "K1501"));
     }
 
-    /** 同一物理机台跨班出现重复备注时，全批只保留首次严格跨限班次的备注。 */
+    /** 普通双模跨班出现重复备注时，只保留首次备注并按各班单侧循环数重建累计次数。 */
     @Test
     public void shouldRemoveDuplicateAnalysisAcrossShiftsForSamePhysicalMachine() {
         registerCapsule("K1101", 440, 100);
@@ -311,7 +383,7 @@ public class CapsuleReplacementRuleServiceTest {
 
         Assertions.assertEquals("换胶囊", ShiftFieldUtil.getShiftAnalysis(firstResult, 1));
         Assertions.assertNull(ShiftFieldUtil.getShiftAnalysis(secondResult, 2));
-        Assertions.assertEquals(470, service.getMachineRuntimeUsage(context, "K1101"));
+        Assertions.assertEquals(455, service.getMachineRuntimeUsage(context, "K1101"));
         Assertions.assertEquals(1, context.getCapsuleReplacementShiftKeySet().size());
     }
 
