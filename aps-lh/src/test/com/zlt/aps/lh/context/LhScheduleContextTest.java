@@ -43,15 +43,38 @@ class LhScheduleContextTest {
     void removePendingSkuFromStructureMap_shouldFallbackToMaterialCodeMatch() {
         LhScheduleContext context = new LhScheduleContext();
         SkuScheduleDTO storedSku = sku("MAT-A", "S1");
+        storedSku.setProductStatus("X");
 
         Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
         structureSkuMap.put("S1", new java.util.ArrayList<>(Arrays.asList(storedSku)));
         context.setStructureSkuMap(structureSkuMap);
 
         // 模拟调用侧传入了同物料的新实例，仍需能把结构分组中的旧实例同步移除。
-        context.removePendingSkuFromStructureMap(sku("MAT-A", "S1"));
+        SkuScheduleDTO targetSku = sku("MAT-A", "S1");
+        targetSku.setProductStatus("X");
+        context.removePendingSkuFromStructureMap(targetSku);
 
         assertTrue(context.getStructureSkuMap().isEmpty());
+    }
+
+    /**
+     * 同物料多产品状态并存时，只允许移除物料和产品状态都匹配的SKU。
+     */
+    @Test
+    void removePendingSkuFromStructureMap_shouldKeepOtherProductStatus() {
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO formalSku = sku("MAT-A", "S1");
+        formalSku.setProductStatus("S");
+        SkuScheduleDTO trialSku = sku("MAT-A", "S1");
+        trialSku.setProductStatus("X");
+        Map<String, List<SkuScheduleDTO>> structureSkuMap = new LinkedHashMap<>();
+        structureSkuMap.put("S1", new ArrayList<SkuScheduleDTO>(Arrays.asList(formalSku, trialSku)));
+        context.setStructureSkuMap(structureSkuMap);
+
+        context.removePendingSkuFromStructureMap(trialSku);
+
+        assertEquals(1, context.getStructureSkuMap().get("S1").size());
+        assertEquals("S", context.getStructureSkuMap().get("S1").get(0).getProductStatus());
     }
 
     @Test

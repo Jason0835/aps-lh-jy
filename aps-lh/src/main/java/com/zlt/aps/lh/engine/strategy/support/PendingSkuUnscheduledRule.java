@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -30,6 +31,10 @@ public final class PendingSkuUnscheduledRule {
     /** 非续作SKU在排程及提前生产范围内无日计划、且无前日交替承接关系的统一未排原因 */
     public static final String DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON =
             "排程窗口及提前生产范围内无日计划量，且无前日排程T+1交替计划";
+
+    /** 续作试制、量试SKU完整判断范围无日计划量的统一未排原因 */
+    public static final String CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON =
+            "试制、量试月计划排产量全部为0，跳过排产";
 
     /** 仅历史欠产且最近一次已有完成量的统一未排原因 */
     public static final String HISTORY_SHORTAGE_UNSCHEDULED_REASON =
@@ -58,7 +63,6 @@ public final class PendingSkuUnscheduledRule {
     public static LhUnscheduledResult evaluateDailyPlanAdmission(LhScheduleContext context,
                                                                   SkuScheduleDTO sku) {
         if (Objects.isNull(context) || Objects.isNull(sku)
-                || sku.getWindowPlanQty() > 0
                 || Objects.isNull(context.getWindowEndDate())) {
             return null;
         }
@@ -68,10 +72,8 @@ public final class PendingSkuUnscheduledRule {
             return null;
         }
 
-        // 以窗口最后一天为基准继续后看N天，与提前生产准入共用同一参数、跨月取数和产品状态口径。
-        LocalDate firstFuturePlanDate = EarlyProductionChecker.resolveFirstFuturePlanDate(
-                context, sku, windowEndDate);
-        if (Objects.nonNull(firstFuturePlanDate)) {
+        // 窗口内原始日计划和窗口后N天任一有量时，保留SKU继续走现有排产主链。
+        if (hasPositiveDailyPlanInAdmissionRange(context, sku, windowEndDate)) {
             return null;
         }
 
@@ -102,6 +104,86 @@ public final class PendingSkuUnscheduledRule {
         unscheduledResult.setMonthPlanVersion(sku.getMonthPlanVersion());
         unscheduledResult.setProductionVersion(sku.getProductionVersion());
         return unscheduledResult;
+    }
+
+    /**
+     * 评估续作试制、量试SKU是否因完整准入范围无日计划量而直接进入未排。
+     * <p>本规则仅按施工阶段识别试制和量试，判断范围与非续作日计划准入完全一致。
+     * 前日T+1交替计划只是非续作候选的放行条件，不得放行全范围为零的续作试制、量试SKU。</p>
+     * <p>本方法只负责判断和构造未排结果，不修改续作列表、机台或日计划账本。</p>
+     *
+     * @param context 排程上下文，提供排程窗口、提前生产参数和跨月月计划数据
+     * @param sku 已识别为续作的SKU
+     * @return 命中规则时返回未排结果；非试制量试或范围内有计划时返回null
+     */
+    public static LhUnscheduledResult evaluateContinuousTrialDailyPlanAdmission(
+            LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(context) || Objects.isNull(sku)
+                || !isTrialOrMassTrialSku(sku)
+                || Objects.isNull(context.getWindowEndDate())) {
+            return null;
+        }
+        LocalDate windowStartDate = toLocalDate(context.getScheduleDate());
+        LocalDate windowEndDate = toLocalDate(context.getWindowEndDate());
+        if (Objects.isNull(windowEndDate)
+                || hasPositiveDailyPlanInAdmissionRange(context, sku, windowEndDate)) {
+            return null;
+        }
+
+        int earlyProductionDaysThreshold = EarlyProductionChecker.resolveEarlyProductionDaysThreshold(context);
+        LocalDate admissionEndDate = windowEndDate.plusDays(earlyProductionDaysThreshold);
+        String detail = String.format("工厂: %s, 批次: %s, 物料: %s, 产品状态: %s, 施工阶段: %s, "
+                        + "续作机台: %s, 排程窗口: %s～%s, 提前生产天数: %d, 准入截止日: %s, 原因: %s",
+                context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(),
+                sku.getConstructionStage(), sku.getContinuousMachineCode(), windowStartDate, windowEndDate,
+                earlyProductionDaysThreshold, admissionEndDate,
+                CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
+        log.info("续作试制量试SKU日计划准入拦截, factoryCode: {}, batchNo: {}, materialCode: {}, "
+                        + "productStatus: {}, constructionStage: {}, continuousMachineCode: {}, windowStartDate: {}, "
+                        + "windowEndDate: {}, earlyProductionDaysThreshold: {}, admissionEndDate: {}, reason: {}",
+                context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(),
+                sku.getConstructionStage(), sku.getContinuousMachineCode(), windowStartDate, windowEndDate,
+                earlyProductionDaysThreshold, admissionEndDate,
+                CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
+        PriorityTraceLogHelper.appendProcessLog(context, "续作试制量试无计划量不排产", detail);
+        LhUnscheduledResult unscheduledResult = buildUnscheduledResult(
+                context, sku, 0, CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
+        unscheduledResult.setMonthPlanVersion(sku.getMonthPlanVersion());
+        unscheduledResult.setProductionVersion(sku.getProductionVersion());
+        return unscheduledResult;
+    }
+
+    /**
+     * 判断完整准入范围内是否存在正日计划量。
+     * <p>窗口内使用SKU初始化时按月计划DAY_N汇总的原始计划量；窗口结束后
+     * 继续复用提前生产判断器，按物料、产品状态和实际年月读取后续DAY_N。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待判断SKU
+     * @param windowEndDate 排程窗口结束日
+     * @return true-范围内至少一天有正日计划量；false-全范围无正日计划量
+     */
+    private static boolean hasPositiveDailyPlanInAdmissionRange(LhScheduleContext context,
+                                                                 SkuScheduleDTO sku,
+                                                                 LocalDate windowEndDate) {
+        if (sku.getWindowPlanQty() > 0) {
+            return true;
+        }
+        // 以窗口最后一天为基准后看N天，复用提前生产参数、跨月取数和产品状态口径。
+        return Objects.nonNull(EarlyProductionChecker.resolveFirstFuturePlanDate(
+                context, sku, windowEndDate));
+    }
+
+    /**
+     * 判断SKU施工阶段是否为试制或量试。
+     *
+     * @param sku SKU排程信息
+     * @return true-试制或量试；false-其他施工阶段
+     */
+    private static boolean isTrialOrMassTrialSku(SkuScheduleDTO sku) {
+        return Objects.nonNull(sku)
+                && (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || StringUtils.equals(ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage()));
     }
 
     /**

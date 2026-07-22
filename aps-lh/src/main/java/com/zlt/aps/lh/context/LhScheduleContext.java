@@ -943,6 +943,8 @@ public class LhScheduleContext {
 
     /**
      * 判断结构分组中的SKU是否与目标SKU一致。
+     * <p>同一物料可能同时存在正规、试制和量试月计划，非同一实例的降级匹配必须使用
+     * “物料+产品状态”复合键，禁止移除其他产品状态的待排SKU。</p>
      *
      * @param currentSku 结构分组中的SKU
      * @param targetSku  目标SKU
@@ -955,7 +957,9 @@ public class LhScheduleContext {
         if (Objects.isNull(currentSku) || Objects.isNull(targetSku)) {
             return false;
         }
-        return StringUtils.equals(currentSku.getMaterialCode(), targetSku.getMaterialCode());
+        return StringUtils.equals(currentSku.getMaterialCode(), targetSku.getMaterialCode())
+                && StringUtils.equals(StringUtils.trimToEmpty(currentSku.getProductStatus()),
+                StringUtils.trimToEmpty(targetSku.getProductStatus()));
     }
 
     /**

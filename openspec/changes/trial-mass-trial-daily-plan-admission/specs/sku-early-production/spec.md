@@ -31,4 +31,29 @@
 
 - **WHEN** 试制或量试 SKU 已匹配到 MES 或滚动续作机台
 - **THEN** 系统 SHALL 跳过本新增 SKU 日计划未排规则
-- **AND** 系统 SHALL 保持原续作排产逻辑
+- **AND** 系统 SHALL 继续执行下述续作试制量试专用日计划准入
+
+### Requirement: 续作试制量试 SKU 必须检查完整日计划范围
+
+系统 SHALL 在完成 MES 和滚动续作识别后、进入续作排产策略前，对 `constructionStage=01/02` 的续作 SKU 检查 `scheduleDate` 至 `windowEndDate + earlyProductionDaysThreshold` 的原始月计划日计划量。
+
+系统 SHALL 复用非续作准入的窗口日计划汇总、提前生产阈值、跨月跨年取数及“物料+产品状态”口径，不得使用历史欠产、余量、胎胚库存或扣减后额度替代原始 `DAY_N`。
+
+#### Scenario: 续作试制量试完整范围全零
+
+- **WHEN** 已识别为续作的试制或量试 SKU 完整判断范围日计划量全部小于等于 0
+- **THEN** 系统 SHALL 在进入续作排产前移除该 SKU 的全部续作机台副本
+- **AND** 系统 SHALL 按物料和产品状态只写入一条未排
+- **AND** 未排原因 SHALL 为“试制、量试月计划排产量全部为0，跳过排产”
+- **AND** 前日 T+1 交替计划 SHALL NOT 放行该 SKU
+
+#### Scenario: 续作试制量试范围内有量
+
+- **WHEN** 已识别为续作的试制或量试 SKU 在完整判断范围任一天日计划量大于 0
+- **THEN** 系统 SHALL 保留原续作列表顺序并继续执行现有排产逻辑
+
+#### Scenario: 正规续作不受影响
+
+- **WHEN** 施工阶段非 `01/02` 的续作 SKU 完整判断范围全零
+- **THEN** 系统 SHALL NOT 应用本专用规则
+- **AND** 系统 SHALL 保持原有续作无计划处理逻辑

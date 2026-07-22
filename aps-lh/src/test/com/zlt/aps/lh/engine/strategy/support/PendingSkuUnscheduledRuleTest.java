@@ -200,6 +200,101 @@ class PendingSkuUnscheduledRuleTest {
     }
 
     /**
+     * 续作试制SKU完整准入范围无日计划量时，必须生成专用未排结果。
+     */
+    @Test
+    void evaluateContinuousTrialDailyPlanAdmission_shouldBlockTrialSkuWhenAllPlanQtyIsZero() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 23);
+        LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO trialSku = buildSku(
+                "3302002468", "X", ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setMonthPlanVersion("MP-X");
+        trialSku.setProductionVersion("PP-X");
+
+        LhUnscheduledResult result =
+                PendingSkuUnscheduledRule.evaluateContinuousTrialDailyPlanAdmission(context, trialSku);
+
+        assertNotNull(result);
+        assertEquals(0, result.getUnscheduledQty().intValue());
+        assertEquals(PendingSkuUnscheduledRule.CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
+                result.getUnscheduledReason());
+        assertEquals("MP-X", result.getMonthPlanVersion());
+        assertEquals("PP-X", result.getProductionVersion());
+    }
+
+    /**
+     * 续作量试SKU完整准入范围无日计划量时，必须生成专用未排结果。
+     */
+    @Test
+    void evaluateContinuousTrialDailyPlanAdmission_shouldBlockMassTrialSkuWhenAllPlanQtyIsZero() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 23);
+        LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO massTrialSku = buildSku(
+                "3302002469", "T", ConstructionStageEnum.MASS_TRIAL.getCode());
+
+        LhUnscheduledResult result =
+                PendingSkuUnscheduledRule.evaluateContinuousTrialDailyPlanAdmission(context, massTrialSku);
+
+        assertNotNull(result);
+        assertEquals(PendingSkuUnscheduledRule.CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
+                result.getUnscheduledReason());
+    }
+
+    /**
+     * 续作试制、量试SKU在提前生产范围任一天有量时，应继续现有续作逻辑。
+     */
+    @Test
+    void evaluateContinuousTrialDailyPlanAdmission_shouldAllowWhenFuturePlanExists() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 23);
+        LocalDate windowEndDate = scheduleDate.plusDays(2);
+        LhScheduleContext context = buildContext(scheduleDate, windowEndDate, 2);
+        SkuScheduleDTO trialSku = buildSku(
+                "3302002470", "X", ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setDailyPlanQuotaMap(quotaMap(windowEndDate.plusDays(2), 20));
+
+        LhUnscheduledResult result =
+                PendingSkuUnscheduledRule.evaluateContinuousTrialDailyPlanAdmission(context, trialSku);
+
+        assertNull(result);
+    }
+
+    /**
+     * 正规续作SKU即使判断范围全零，也不得命中试制量试专用规则。
+     */
+    @Test
+    void evaluateContinuousTrialDailyPlanAdmission_shouldIgnoreFormalSku() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 23);
+        LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO formalSku = buildSku(
+                "3302002471", "S", ConstructionStageEnum.FORMAL.getCode());
+
+        LhUnscheduledResult result =
+                PendingSkuUnscheduledRule.evaluateContinuousTrialDailyPlanAdmission(context, formalSku);
+
+        assertNull(result);
+    }
+
+    /**
+     * 前日T+1交替计划只放行非续作候选，不得放行全范围为零的续作试制SKU。
+     */
+    @Test
+    void evaluateContinuousTrialDailyPlanAdmission_shouldNotAllowPreviousT1Changeover() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 23);
+        LhScheduleContext context = buildContext(scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO trialSku = buildSku(
+                "3302002472", "X", ConstructionStageEnum.TRIAL.getCode());
+        LhMouldChangePlan plan = new LhMouldChangePlan();
+        plan.setAfterMaterialCode(trialSku.getMaterialCode());
+        plan.setPlanDate(toDate(scheduleDate));
+        context.setHistoricalReverseMouldChangePlanList(Arrays.asList(plan));
+
+        LhUnscheduledResult result =
+                PendingSkuUnscheduledRule.evaluateContinuousTrialDailyPlanAdmission(context, trialSku);
+
+        assertNotNull(result);
+    }
+
+    /**
      * 构造排程上下文。
      *
      * @param scheduleDate 排程窗口首日

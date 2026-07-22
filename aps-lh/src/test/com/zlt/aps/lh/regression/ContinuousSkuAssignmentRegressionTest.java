@@ -492,10 +492,10 @@ class ContinuousSkuAssignmentRegressionTest {
     }
 
     /**
-     * 已按物料和产品状态识别为续作的试制SKU，不执行新增SKU日计划未排规则。
+     * 已识别为续作的试制SKU窗口内有日计划时，应保持现有续作逻辑。
      */
     @Test
-    void classifyContinuousAndNewSkus_shouldKeepTrialContinuousSku() {
+    void classifyContinuousAndNewSkus_shouldKeepTrialContinuousSkuWhenWindowPlanExists() {
         LhScheduleContext context = buildClassificationContext();
         SkuScheduleDTO trialSku = buildSku("3302003002", "STRUCT-TRIAL", "X");
         trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
@@ -508,6 +508,137 @@ class ContinuousSkuAssignmentRegressionTest {
 
         assertEquals(1, context.getContinuousSkuList().size());
         assertEquals("3302003002", context.getContinuousSkuList().get(0).getMaterialCode());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+        assertTrue(context.getUnscheduledResultList().isEmpty());
+    }
+
+    /**
+     * 续作试制SKU完整判断范围无日计划量时，必须移出续作主链并写入专用未排。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldBlockTrialContinuousSkuWhenAllPlanQtyIsZero() {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO trialSku = buildSku("3302002468", "STRUCT-TRIAL", "X");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setWindowPlanQty(0);
+        trialSku.setEmbryoCode("EMBRYO-2468");
+        context.getStructureSkuMap().put(trialSku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(trialSku)));
+        context.getActiveEmbryoSkuMap().put(trialSku.getEmbryoCode(),
+                new ArrayList<String>(Collections.singletonList(
+                        MonthPlanDateResolver.buildMaterialStatusKey(
+                                trialSku.getMaterialCode(), trialSku.getProductStatus()))));
+        context.getMachineOnlineInfoMap().put(
+                "K1101", buildOnlineInfo("K1101", trialSku.getMaterialCode(), "X"));
+        context.getMachineScheduleMap().put("K1101", buildMachine("K1101", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertTrue(context.getContinuousSkuList().isEmpty());
+        assertTrue(context.getNewSpecSkuList().isEmpty());
+        assertTrue(context.getStructureSkuMap().isEmpty());
+        assertTrue(context.getActiveEmbryoSkuMap().isEmpty());
+        assertTrue(context.getAllSkuScheduleDtoMap().isEmpty());
+        assertEquals(0, trialSku.resolveTargetScheduleQty());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals(PendingSkuUnscheduledRule.CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    /**
+     * 续作量试SKU完整判断范围无日计划量时，必须移出续作主链。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldBlockMassTrialContinuousSkuWhenAllPlanQtyIsZero() {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO massTrialSku = buildSku("3302002469", "STRUCT-MASS-TRIAL", "T");
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        massTrialSku.setWindowPlanQty(0);
+        context.getStructureSkuMap().put(massTrialSku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(massTrialSku)));
+        context.getMachineOnlineInfoMap().put(
+                "K1102", buildOnlineInfo("K1102", massTrialSku.getMaterialCode(), "T"));
+        context.getMachineScheduleMap().put("K1102", buildMachine("K1102", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertTrue(context.getContinuousSkuList().isEmpty());
+        assertEquals(1, context.getUnscheduledResultList().size());
+        assertEquals("T", context.getUnscheduledResultList().get(0).getProductStatus());
+        assertEquals(PendingSkuUnscheduledRule.CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON,
+                context.getUnscheduledResultList().get(0).getUnscheduledReason());
+    }
+
+    /**
+     * 同一试制SKU匹配多台续作机台时，全零规则只能生成一条未排。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldDeduplicateBlockedTrialContinuousMachines() {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO trialSku = buildSku("3302002470", "STRUCT-TRIAL", "X");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setWindowPlanQty(0);
+        context.getStructureSkuMap().put(trialSku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(trialSku)));
+        context.getMachineOnlineInfoMap().put(
+                "K1103", buildOnlineInfo("K1103", trialSku.getMaterialCode(), "X"));
+        context.getMachineOnlineInfoMap().put(
+                "K1104", buildOnlineInfo("K1104", trialSku.getMaterialCode(), "X"));
+        context.getMachineScheduleMap().put("K1103", buildMachine("K1103", "1"));
+        context.getMachineScheduleMap().put("K1104", buildMachine("K1104", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertTrue(context.getContinuousSkuList().isEmpty());
+        assertEquals(1, context.getUnscheduledResultList().size());
+    }
+
+    /**
+     * 同物料正规和试制并存时，过滤全零试制续作不得移除正规SKU。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepFormalSkuWhenTrialStatusIsBlocked() {
+        LhScheduleContext context = buildClassificationContext();
+        String materialCode = "3302002471";
+        SkuScheduleDTO formalSku = buildSku(materialCode, "STRUCT-MULTI", "S");
+        formalSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        SkuScheduleDTO trialSku = buildSku(materialCode, "STRUCT-MULTI", "X");
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        trialSku.setWindowPlanQty(0);
+        context.getStructureSkuMap().put("STRUCT-MULTI",
+                new ArrayList<SkuScheduleDTO>(Arrays.asList(formalSku, trialSku)));
+        context.getMachineOnlineInfoMap().put(
+                "K1105", buildOnlineInfo("K1105", materialCode, "X"));
+        context.getMachineScheduleMap().put("K1105", buildMachine("K1105", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertTrue(context.getContinuousSkuList().isEmpty());
+        assertEquals(1, context.getNewSpecSkuList().size());
+        assertEquals("S", context.getNewSpecSkuList().get(0).getProductStatus());
+        assertEquals(1, context.getStructureSkuMap().get("STRUCT-MULTI").size());
+        assertEquals("S", context.getStructureSkuMap().get("STRUCT-MULTI").get(0).getProductStatus());
+        assertEquals("X", context.getUnscheduledResultList().get(0).getProductStatus());
+    }
+
+    /**
+     * 正规续作SKU判断范围全零时，应保留给现有续作策略继续处理。
+     */
+    @Test
+    void classifyContinuousAndNewSkus_shouldKeepFormalContinuousSkuWhenAllPlanQtyIsZero() {
+        LhScheduleContext context = buildClassificationContext();
+        SkuScheduleDTO formalSku = buildSku("3302002472", "STRUCT-FORMAL", "S");
+        formalSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        formalSku.setWindowPlanQty(0);
+        context.getStructureSkuMap().put(formalSku.getStructureName(),
+                new ArrayList<SkuScheduleDTO>(Collections.singletonList(formalSku)));
+        context.getMachineOnlineInfoMap().put(
+                "K1106", buildOnlineInfo("K1106", formalSku.getMaterialCode(), "S"));
+        context.getMachineScheduleMap().put("K1106", buildMachine("K1106", "1"));
+
+        ReflectionTestUtils.invokeMethod(handler, "classifyContinuousAndNewSkus", context);
+
+        assertEquals(1, context.getContinuousSkuList().size());
         assertTrue(context.getNewSpecSkuList().isEmpty());
         assertTrue(context.getUnscheduledResultList().isEmpty());
     }
