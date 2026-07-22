@@ -205,10 +205,10 @@ public class StructureMinMachineRetentionService {
             result.setIsStructureMinMachineRetained(NOT_RETAINED_FLAG);
         }
         log.info("结构最低机台数下机判断, factoryCode: {}, batchNo: {}, structureName: {}, materialCode: {}, "
-                        + "offlineReason: {}, offlineShift: {}, minimumMachineCount: {}, beforeMachineCount: {}, "
+                        + "offlineMachine: {}, offlineReason: {}, offlineShift: {}, minimumMachineCount: {}, beforeMachineCount: {}, "
                         + "afterMachineCount: {}, retained: {}, retainedMachine: {}",
                 context.getFactoryCode(), context.getBatchNo(), structureName, materialCode,
-                StringUtils.defaultString(offlineReason), offlineShiftIndex, minimumMachineCount,
+                machineCode, StringUtils.defaultString(offlineReason), offlineShiftIndex, minimumMachineCount,
                 beforePhysicalCodes.size(), afterPhysicalCodes.size(), retained,
                 retained ? machineCode : "-");
         return retained;
