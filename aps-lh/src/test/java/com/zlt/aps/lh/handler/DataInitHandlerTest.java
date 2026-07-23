@@ -86,6 +86,53 @@ public class DataInitHandlerTest {
     }
 
     /**
+     * 用例说明：强制重排时，机台没有 MES 在机记录，不能继承前批次晚班结束时间占用本次窗口。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldUseWindowStartWhenForceRescheduleMachineHasNoOnlineMaterial() throws Exception {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("116");
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "1");
+        context.setScheduleWindowShifts(Collections.singletonList(buildShift(1, 0,
+                "06:00:00", "14:00:00")));
+
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setLhMachineCode("K1002");
+        previousResult.setMaterialCode("3202000072");
+        previousResult.setSpecEndTime(toDate(2026, 6, 11, 22, 0, 0));
+        context.setPreviousScheduleResultList(Collections.singletonList(previousResult));
+
+        Date estimatedEndTime = invokeResolveInitialEstimatedEndTime(context, "K1002");
+
+        Assertions.assertEquals(toDate(2026, 6, 11, 6, 0, 0), estimatedEndTime);
+    }
+
+    /**
+     * 用例说明：非强制重排仍保留原滚动衔接口径，无 MES 在机记录时不改变历史结束时间读取规则。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldKeepPreviousEndTimeWithoutForceRescheduleWhenMachineHasNoOnlineMaterial() throws Exception {
+        LhScheduleContext context = new LhScheduleContext();
+        context.getLhParamsMap().put(LhScheduleParamConstant.FORCE_RESCHEDULE, "0");
+        context.setScheduleWindowShifts(Collections.singletonList(buildShift(1, 0,
+                "06:00:00", "14:00:00")));
+
+        LhScheduleResult previousResult = new LhScheduleResult();
+        previousResult.setLhMachineCode("K1002");
+        previousResult.setMaterialCode("3202000072");
+        previousResult.setSpecEndTime(toDate(2026, 6, 11, 22, 0, 0));
+        context.setPreviousScheduleResultList(Collections.singletonList(previousResult));
+
+        Date estimatedEndTime = invokeResolveInitialEstimatedEndTime(context, "K1002");
+
+        Assertions.assertEquals(toDate(2026, 6, 11, 22, 0, 0), estimatedEndTime);
+    }
+
+    /**
      * 用例说明：强制重排时，前批次结束时间早于排程窗口首班，不允许把窗口外时间带入本次排程。
      *
      * @throws Exception 反射调用异常
