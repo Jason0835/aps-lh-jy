@@ -989,8 +989,11 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         if (!PriorityTraceLogHelper.isEnabled(context) || Objects.isNull(sku)) {
             return;
         }
+        // 只有真正写入选机顺序日志时才累加，局部搜索静默分支不会消耗序号。
+        int selectionCount = context.nextNewSpecMachineSelectionCount(sku);
         String title = "【" + resolvePriorityTraceTitleValue(sku.getMaterialCode())
-                + "】【" + resolvePriorityTraceTitleValue(sku.getProductStatus()) + "】选机优先级顺序";
+                + "】【" + resolvePriorityTraceTitleValue(sku.getProductStatus())
+                + "】选机优先级顺序 【" + selectionCount + "】";
         if (CollectionUtils.isEmpty(orderedCandidates)) {
             PriorityTraceLogHelper.logSortSummary(log, context, title, "无可用候选机台");
             return;
@@ -1013,24 +1016,42 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
             int capsuleScore = resolveCapsuleAffinityScore(context, sku, machine);
             int proSizeMatchScore = resolveProSizeMatchScore(sku, machine);
             double inchDistance = resolveInchDistance(sku, machine);
+            String embryoMatchedValue = resolveEmbryoMatchedValue(context, sku, machine);
+            String mouldShellMatchedValue = resolveMouldShellMatchedValue(context, sku, machine);
+            String specMatchedValue = resolveSpecMatchedValue(sku, machine);
+            String proSizeMatchedValue = resolveProSizeMatchedValue(sku, machine);
 
             detailBuilder.append(i + 1).append(". ")
                     .append(resolvePriorityTraceTitleValue(machine.getMachineCode()))
                     .append("｜收尾时间：").append(resolveEndingTimeShiftText(context, profile.getReferenceTime()))
                     .append("｜单控拆分：").append(resolveYesNo(isSingleControlMachine(context, machine.getMachineCode())))
                     .append("（排序值：").append(singleControlScore).append("）")
-                    .append("｜同胎胚：").append(resolveYesNo(embryoMatchScore == 0))
-                    .append("｜同模壳：").append(resolveYesNo(mouldShellMatchScore == 0))
-                    .append("｜同规格：").append(resolveYesNo(specMatchScore == 0))
+                    .append("｜同胎胚：").append(resolveMatchedValueText(embryoMatchScore == 0, embryoMatchedValue))
+                    .append("｜同模壳：").append(resolveMatchedValueText(mouldShellMatchScore == 0, mouldShellMatchedValue))
+                    .append("｜同规格：").append(resolveMatchedValueText(specMatchScore == 0, specMatchedValue))
                     .append("｜胶囊共用性：").append(capsuleScore)
                     .append("（").append(resolveYesNo(capsuleScore == 0)).append("）")
-                    .append("｜同英寸：").append(resolveYesNo(proSizeMatchScore == 0))
+                    .append("｜同英寸：").append(resolveMatchedValueText(proSizeMatchScore == 0, proSizeMatchedValue))
                     .append("｜相近英寸：").append(resolvePriorityInchDistance(inchDistance));
             if (i < orderedCandidates.size() - 1) {
                 detailBuilder.append('\n');
             }
         }
         PriorityTraceLogHelper.logSortSummary(log, context, title, detailBuilder.toString());
+    }
+
+    /**
+     * 格式化选机匹配项及其实际命中值。
+     *
+     * @param matched 是否命中
+     * @param matchedValue 本次排序判断实际使用的命中值
+     * @return 未命中返回“否”，命中返回“是（实际值）”
+     */
+    private String resolveMatchedValueText(boolean matched, String matchedValue) {
+        if (!matched) {
+            return "否";
+        }
+        return StringUtils.isEmpty(matchedValue) ? "是" : "是（" + matchedValue + "）";
     }
 
     /**
@@ -1955,9 +1976,24 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @return 0-一致，1-不一致
      */
     private int resolveSpecMatchScore(SkuScheduleDTO sku, MachineScheduleDTO machine) {
+        return StringUtils.isNotEmpty(resolveSpecMatchedValue(sku, machine)) ? 0 : 1;
+    }
+
+    /**
+     * 解析规格完全一致时实际参与比较的规格值。
+     *
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @return 实际命中的规格，未命中返回null
+     */
+    private String resolveSpecMatchedValue(SkuScheduleDTO sku, MachineScheduleDTO machine) {
+        if (Objects.isNull(sku) || Objects.isNull(machine)) {
+            return null;
+        }
         String skuSpec = normalizeToken(sku.getSpecCode());
         String machineSpec = normalizeToken(machine.getPreviousSpecCode());
-        return StringUtils.isNotEmpty(skuSpec) && StringUtils.equals(skuSpec, machineSpec) ? 0 : 1;
+        return StringUtils.isNotEmpty(skuSpec) && StringUtils.equals(skuSpec, machineSpec)
+                ? skuSpec : null;
     }
 
     /**
@@ -1969,21 +2005,37 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @return 0-同胎胚，1-不同胎胚
      */
     private int resolveEmbryoMatchScore(LhScheduleContext context, SkuScheduleDTO sku, MachineScheduleDTO machine) {
+        return StringUtils.isNotEmpty(resolveEmbryoMatchedValue(context, sku, machine)) ? 0 : 1;
+    }
+
+    /**
+     * 解析同胎胚实际命中值。
+     * <p>优先按胎胚编码匹配；编码未命中时沿用现有胎胚描述兜底口径，并在日志中明确标识描述来源。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @return 胎胚编码或“胎胚描述：实际值”，未命中返回null
+     */
+    private String resolveEmbryoMatchedValue(LhScheduleContext context,
+                                             SkuScheduleDTO sku,
+                                             MachineScheduleDTO machine) {
         if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(machine)
                 || StringUtils.isEmpty(machine.getPreviousMaterialCode())) {
-            return 1;
+            return null;
         }
         MdmMaterialInfo machineMaterialInfo = context.getMaterialInfoMap().get(machine.getPreviousMaterialCode());
         String skuEmbryoCode = normalizeToken(sku.getEmbryoCode());
         String machineEmbryoCode = normalizeToken(Objects.isNull(machineMaterialInfo)
                 ? null : machineMaterialInfo.getEmbryoCode());
         if (StringUtils.isNotEmpty(skuEmbryoCode) && StringUtils.equals(skuEmbryoCode, machineEmbryoCode)) {
-            return 0;
+            return skuEmbryoCode;
         }
         String skuEmbryoDesc = normalizeToken(sku.getMainMaterialDesc());
         String machineEmbryoDesc = normalizeToken(Objects.isNull(machineMaterialInfo)
                 ? null : machineMaterialInfo.getEmbryoDesc());
-        return StringUtils.isNotEmpty(skuEmbryoDesc) && StringUtils.equals(skuEmbryoDesc, machineEmbryoDesc) ? 0 : 1;
+        return StringUtils.isNotEmpty(skuEmbryoDesc) && StringUtils.equals(skuEmbryoDesc, machineEmbryoDesc)
+                ? "胎胚描述：" + skuEmbryoDesc : null;
     }
 
     /**
@@ -1995,7 +2047,21 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @return 0-模壳匹配或不受模壳限制，1-模壳不匹配
      */
     private int resolveMouldShellMatchScore(LhScheduleContext context, SkuScheduleDTO sku, MachineScheduleDTO machine) {
-        return LhMachineHardMatchUtil.isMouldSetPriorityMatched(context, sku, machine) ? 0 : 1;
+        return StringUtils.isNotEmpty(resolveMouldShellMatchedValue(context, sku, machine)) ? 0 : 1;
+    }
+
+    /**
+     * 解析模壳与机台模套的实际命中值。
+     *
+     * @param context 排程上下文
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @return 实际命中的模壳型号集合或通用说明，未命中返回null
+     */
+    private String resolveMouldShellMatchedValue(LhScheduleContext context,
+                                                 SkuScheduleDTO sku,
+                                                 MachineScheduleDTO machine) {
+        return LhMachineHardMatchUtil.resolveMouldSetPriorityMatchedValue(context, sku, machine);
     }
 
     /**
@@ -2006,7 +2072,26 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @return 0-一致，1-不一致
      */
     private int resolveProSizeMatchScore(SkuScheduleDTO sku, MachineScheduleDTO machine) {
-        return isSameInch(parseInch(sku.getProSize()), parseInch(machine.getPreviousProSize())) ? 0 : 1;
+        return StringUtils.isNotEmpty(resolveProSizeMatchedValue(sku, machine)) ? 0 : 1;
+    }
+
+    /**
+     * 解析英寸完全一致时实际参与比较的英寸值。
+     *
+     * @param sku 待排SKU
+     * @param machine 候选机台
+     * @return 归一化后的英寸值，未命中返回null
+     */
+    private String resolveProSizeMatchedValue(SkuScheduleDTO sku, MachineScheduleDTO machine) {
+        if (Objects.isNull(sku) || Objects.isNull(machine)) {
+            return null;
+        }
+        BigDecimal skuInch = parseInch(sku.getProSize());
+        BigDecimal machineInch = parseInch(machine.getPreviousProSize());
+        if (!isSameInch(skuInch, machineInch) || Objects.isNull(skuInch)) {
+            return null;
+        }
+        return skuInch.stripTrailingZeros().toPlainString();
     }
 
     /**

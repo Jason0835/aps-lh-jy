@@ -478,6 +478,11 @@ public class LhScheduleContext {
     private List<String> validationErrorList = new ArrayList<>();
     /** 优先级跟踪日志静默深度（局部搜索模拟分支时递增） */
     private int priorityTraceMuteDepth = 0;
+    /**
+     * 新增排产SKU选机日志次数，key=物料编码+产品状态。
+     * <p>仅用于当前排程上下文内的过程日志编号，不参与候选过滤、选机排序和排产结果计算。</p>
+     */
+    private Map<String, Integer> newSpecMachineSelectionCountMap = new LinkedHashMap<String, Integer>(16);
 
     /**
      * 累加结构计划硫化机台数。
@@ -905,6 +910,26 @@ public class LhScheduleContext {
      */
     public boolean isPriorityTraceMuted() {
         return priorityTraceMuteDepth > 0;
+    }
+
+    /**
+     * 累加并返回新增排产SKU本次选机日志序号。
+     * <p>物料编码与产品状态共同构成计数维度，避免同物料不同产品状态共用序号。
+     * 本方法只允许在真正写选机顺序日志前调用，局部搜索等静默分支不得调用。</p>
+     *
+     * @param sku 当前进入选机流程的SKU
+     * @return 当前SKU本次选机序号；SKU为空时返回0
+     */
+    public int nextNewSpecMachineSelectionCount(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                sku.getMaterialCode(), sku.getProductStatus());
+        Integer currentCount = newSpecMachineSelectionCountMap.get(skuKey);
+        int nextCount = Math.max(0, Objects.isNull(currentCount) ? 0 : currentCount) + 1;
+        newSpecMachineSelectionCountMap.put(skuKey, nextCount);
+        return nextCount;
     }
 
     /**

@@ -1469,31 +1469,44 @@ class DefaultMachineMatchStrategyRegressionTest {
         SkuScheduleDTO sku = sku("MAT-TRACE", "SPEC-A", "22.5");
         sku.setProductStatus("01");
         sku.setEmbryoCode("EMBRYO-A");
+        sku.setMainMaterialDesc("胎胚-A");
 
         MachineScheduleDTO firstSelectedMachine = machine("M-SECOND", dateTime(2026, 4, 21, 8, 15),
                 "SPEC-X", "22.0", "MAT-B");
+        firstSelectedMachine.setShellStandard("H381,H380");
         MachineScheduleDTO remainingMachine = machine("M-FIRST", dateTime(2026, 4, 21, 8, 0),
                 "SPEC-A", "22.5", "MAT-A");
+        MachineScheduleDTO embryoDescMatchedMachine = machine("M-DESC", dateTime(2026, 4, 21, 8, 30),
+                "SPEC-X", "21.0", "MAT-DESC");
         material(context, "MAT-A", "EMBRYO-A", "胎胚-A");
         material(context, "MAT-B", "EMBRYO-B", "胎胚-B");
+        material(context, "MAT-DESC", "EMBRYO-DESC", "胎胚-A");
+        context.getSkuMouldRelMap().put(sku.getMaterialCode(),
+                Arrays.asList(mouldRel("MOULD-H380"), mouldRel("MOULD-H381")));
+        context.getModelInfoMap().put("MOULD-H380", modelInfo("MOULD-H380", "H380"));
+        context.getModelInfoMap().put("MOULD-H381", modelInfo("MOULD-H381", "H381"));
 
         // 调用处直接传入本次实际选机使用的顺序，日志方法不得重新按收尾时间或排序得分改写。
         strategy.traceMachinePriorityOrder(context, sku,
-                Arrays.asList(firstSelectedMachine, remainingMachine));
+                Arrays.asList(firstSelectedMachine, remainingMachine, embryoDescMatchedMachine));
 
         assertEquals(1, context.getScheduleLogList().size());
         LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
-        assertEquals("【MAT-TRACE】【01】选机优先级顺序", processLog.getTitle());
+        assertEquals("【MAT-TRACE】【01】选机优先级顺序 【1】", processLog.getTitle());
         String detail = processLog.getLogDetail();
         assertTrue(detail.indexOf("1. M-SECOND") < detail.indexOf("2. M-FIRST"),
                 "日志必须保持调用方实际选机使用的完整顺序");
         assertTrue(detail.contains("收尾时间：2026-04-21 08:15:00（T日早班）"));
         assertTrue(detail.contains("单控拆分：否（排序值：3）"));
         assertTrue(detail.contains("同胎胚：否"));
-        assertTrue(detail.contains("同模壳：是"));
+        assertTrue(detail.contains("同胎胚：是（EMBRYO-A）"));
+        assertTrue(detail.contains("同胎胚：是（胎胚描述：胎胚-A）"));
+        assertTrue(detail.contains("同模壳：是（H380,H381）"));
         assertTrue(detail.contains("同规格：否"));
+        assertTrue(detail.contains("同规格：是（SPEC-A）"));
         assertTrue(detail.contains("胶囊共用性：1（否）"));
         assertTrue(detail.contains("同英寸：否"));
+        assertTrue(detail.contains("同英寸：是（22.5）"));
         assertTrue(detail.contains("相近英寸：0.5"));
     }
 
@@ -1508,8 +1521,69 @@ class DefaultMachineMatchStrategyRegressionTest {
 
         assertEquals(1, context.getScheduleLogList().size());
         LhScheduleProcessLog processLog = context.getScheduleLogList().get(0);
-        assertEquals("【MAT-EMPTY】【X】选机优先级顺序", processLog.getTitle());
+        assertEquals("【MAT-EMPTY】【X】选机优先级顺序 【1】", processLog.getTitle());
         assertEquals("无可用候选机台", processLog.getLogDetail());
+    }
+
+    @Test
+    void traceMachinePriorityOrder_shouldCountByMaterialAndProductStatus() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildTraceContext();
+        SkuScheduleDTO formalSku = sku("MAT-COUNT", "SPEC-A", "22.5");
+        formalSku.setProductStatus("S");
+        SkuScheduleDTO trialSku = sku("MAT-COUNT", "SPEC-A", "22.5");
+        trialSku.setProductStatus("X");
+
+        context.enterPriorityTraceMuteScope();
+        strategy.traceMachinePriorityOrder(context, formalSku, Collections.<MachineScheduleDTO>emptyList());
+        context.exitPriorityTraceMuteScope();
+        // 同物料同状态按真实日志调用顺序递增，不同产品状态使用独立计数。
+        strategy.traceMachinePriorityOrder(context, formalSku, Collections.<MachineScheduleDTO>emptyList());
+        strategy.traceMachinePriorityOrder(context, formalSku, Collections.<MachineScheduleDTO>emptyList());
+        strategy.traceMachinePriorityOrder(context, trialSku, Collections.<MachineScheduleDTO>emptyList());
+
+        assertEquals(3, context.getScheduleLogList().size());
+        assertEquals("【MAT-COUNT】【S】选机优先级顺序 【1】",
+                context.getScheduleLogList().get(0).getTitle());
+        assertEquals("【MAT-COUNT】【S】选机优先级顺序 【2】",
+                context.getScheduleLogList().get(1).getTitle());
+        assertEquals("【MAT-COUNT】【X】选机优先级顺序 【1】",
+                context.getScheduleLogList().get(2).getTitle());
+    }
+
+    @Test
+    void resolveMouldSetPriorityMatchedValue_shouldKeepExistingBusinessSemantics() {
+        LhScheduleContext context = buildTraceContext();
+        SkuScheduleDTO sku = sku("MAT-SHELL-VALUE", "SPEC-A", "22.5");
+        MachineScheduleDTO multiShellMachine = machine(
+                "M-SHELL", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-A");
+        multiShellMachine.setShellStandard("H381,H380");
+        context.getSkuMouldRelMap().put(sku.getMaterialCode(),
+                Arrays.asList(mouldRel("MOULD-H381"), mouldRel("MOULD-H380")));
+        context.getModelInfoMap().put("MOULD-H381", modelInfo("MOULD-H381", "H381"));
+        context.getModelInfoMap().put("MOULD-H380", modelInfo("MOULD-H380", "H380"));
+
+        assertEquals("H380,H381",
+                com.zlt.aps.lh.util.LhMachineHardMatchUtil.resolveMouldSetPriorityMatchedValue(
+                        context, sku, multiShellMachine),
+                "多个命中模壳必须按稳定顺序输出实际交集");
+
+        MachineScheduleDTO universalMachine = machine(
+                "M-UNIVERSAL", dateTime(2026, 4, 21, 8, 0), "SPEC-A", "22.5", "MAT-A");
+        universalMachine.setShellStandard("通用");
+        assertEquals("通用",
+                com.zlt.aps.lh.util.LhMachineHardMatchUtil.resolveMouldSetPriorityMatchedValue(
+                        context, sku, universalMachine),
+                "通用模套应保留原有不降级语义");
+
+        SkuScheduleDTO deliverySku = sku("MAT-DELIVERY-VALUE", "SPEC-A", "22.5");
+        context.getSkuMouldRelMap().put(deliverySku.getMaterialCode(),
+                Collections.singletonList(deliveryMouldRel(
+                        "MOULD-DELIVERY", dateTime(2026, 4, 21, 0, 0))));
+        assertEquals("模具到货不降级",
+                com.zlt.aps.lh.util.LhMachineHardMatchUtil.resolveMouldSetPriorityMatchedValue(
+                        context, deliverySku, multiShellMachine),
+                "仅到货模具不参与模壳降级时应输出对应业务说明");
     }
 
     @Test

@@ -163,9 +163,13 @@ class NewSpecProductionStrategyRegressionTest {
         injectDependencies(strategy, false);
 
         LhScheduleContext context = buildContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1")));
         SkuScheduleDTO sku = buildSku();
+        sku.setShiftCapacity(1);
         sku.setSurplusQty(1);
         context.getNewSpecSkuList().add(sku);
+        attachAvailableMould(context, sku.getMaterialCode(), "MOULD-MAT-1");
 
         MachineScheduleDTO noCapacityMachine = new MachineScheduleDTO();
         noCapacityMachine.setMachineCode("M-NO-CAP");
@@ -176,6 +180,7 @@ class NewSpecProductionStrategyRegressionTest {
         availableMachine.setMachineCode("M-OK");
         availableMachine.setMachineName("可排机台");
         availableMachine.setEstimatedEndTime(dateTime(2026, 4, 17, 6, 0));
+        List<List<String>> tracedCandidateCodes = new ArrayList<List<String>>();
 
         IMachineMatchStrategy machineMatchStrategy = new IMachineMatchStrategy() {
             @Override
@@ -197,6 +202,17 @@ class NewSpecProductionStrategyRegressionTest {
                     return candidate;
                 }
                 return null;
+            }
+
+            @Override
+            public void traceMachinePriorityOrder(LhScheduleContext ctx,
+                                                  SkuScheduleDTO scheduleSku,
+                                                  List<MachineScheduleDTO> orderedCandidates) {
+                List<String> machineCodes = new ArrayList<String>(orderedCandidates.size());
+                for (MachineScheduleDTO candidate : orderedCandidates) {
+                    machineCodes.add(candidate.getMachineCode());
+                }
+                tracedCandidateCodes.add(machineCodes);
             }
 
             @Override
@@ -254,6 +270,13 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(0, context.getUnscheduledResultList().size(), "存在后续可排机台时，不应生成未排产记录");
         assertEquals("M-OK", context.getScheduleResultList().get(0).getLhMachineCode());
         assertEquals("0", context.getScheduleResultList().get(0).getIsEnd(), "非收尾SKU应写入is_end=0");
+        assertEquals(1, tracedCandidateCodes.size(), "无产能机台应在真实选机前排除，不得产生一次失败选机日志");
+        assertEquals(Collections.singletonList("M-OK"), tracedCandidateCodes.get(0),
+                "选机日志必须只记录窗口内仍有产能的真实候选机台");
+        assertTrue(context.getScheduleLogList().stream()
+                        .filter(log -> StringUtils.contains(log.getTitle(), "无剩余产能候选过滤"))
+                        .anyMatch(log -> StringUtils.contains(log.getLogDetail(), "M-NO-CAP")),
+                "无产能过滤过程日志必须记录实际被排除的机台");
     }
 
     @Test
@@ -5656,6 +5679,8 @@ class NewSpecProductionStrategyRegressionTest {
 
         LhScheduleContext context = buildContext();
         context.getLhParamsMap().put("SYS0303004", "100");
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1")));
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
 
         LhScheduleResult existingResult = buildEndingResult(context, buildSku(), "K1001");
@@ -5777,8 +5802,9 @@ class NewSpecProductionStrategyRegressionTest {
 
         MachineScheduleDTO machine = buildMachine("K2201", shifts.get(0).getShiftStartDateTime());
         attachAvailableMould(context, sku.getMaterialCode(), "MOULD-3302001002");
+        int[] machinePriorityTraceCount = new int[1];
 
-        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine),
+        strategy.scheduleNewSpecs(context, singletonMachineMatch(machine, machinePriorityTraceCount),
                 defaultMouldChangeBalance(), new DefaultFirstInspectionBalanceStrategy(),
                 skuCapacityCalculate());
 
@@ -5798,6 +5824,16 @@ class NewSpecProductionStrategyRegressionTest {
                 "失败候选的早班首检资源预演不得留下占用");
         assertEquals(1, context.getDailyFirstInspectionCountMap().get("2026-04-17")[1],
                 "最终成功候选只应占用一次中班首检资源");
+        assertEquals(1, machinePriorityTraceCount[0],
+                "同机台首检顺延只重算切换时间，不得重复进入选机排序日志");
+        long retryLogCount = context.getScheduleLogList().stream()
+                .filter(log -> StringUtils.contains(log.getTitle(), "【K2201】首检顺延重试"))
+                .count();
+        assertEquals(1L, retryLogCount, "同机台顺延重试必须记录独立过程日志");
+        assertTrue(context.getScheduleLogList().stream()
+                        .filter(log -> StringUtils.contains(log.getTitle(), "【K2201】首检顺延重试"))
+                        .anyMatch(log -> StringUtils.contains(log.getLogDetail(), "选机次数：不递增")),
+                "顺延重试日志必须明确说明不消耗选机次数");
     }
 
     @Test
@@ -6714,6 +6750,18 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     private IMachineMatchStrategy singletonMachineMatch(MachineScheduleDTO machine) {
+        return singletonMachineMatch(machine, null);
+    }
+
+    /**
+     * 构造单候选机台测试策略，并按需记录真实选机排序日志调用次数。
+     *
+     * @param machine 唯一候选机台
+     * @param machinePriorityTraceCount 选机排序日志调用次数容器，允许为空
+     * @return 单候选机台测试策略
+     */
+    private IMachineMatchStrategy singletonMachineMatch(MachineScheduleDTO machine,
+                                                        int[] machinePriorityTraceCount) {
         return new IMachineMatchStrategy() {
             @Override
             public java.util.List<MachineScheduleDTO> matchMachines(LhScheduleContext ctx, SkuScheduleDTO scheduleSku) {
@@ -6728,6 +6776,16 @@ class NewSpecProductionStrategyRegressionTest {
                     return null;
                 }
                 return machine;
+            }
+
+            @Override
+            public void traceMachinePriorityOrder(LhScheduleContext context,
+                                                  SkuScheduleDTO sku,
+                                                  List<MachineScheduleDTO> orderedCandidates) {
+                if (Objects.nonNull(machinePriorityTraceCount)
+                        && machinePriorityTraceCount.length > 0) {
+                    machinePriorityTraceCount[0]++;
+                }
             }
 
             @Override

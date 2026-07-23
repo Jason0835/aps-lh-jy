@@ -423,6 +423,34 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     }
 
     /**
+     * 记录新增SKU同机台首检顺延重试。
+     * <p>该场景只调整同一候选机台的最早切换时间，不重新选择机台，因此不得重复输出候选排序，
+     * 也不得消耗“物料编码+产品状态”维度的选机次数。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待排SKU
+     * @param machine 当前保持不变的候选机台
+     * @param retryReadyTime 本次顺延后的最早切换时间
+     */
+    private void traceFirstInspectionSameMachineRetry(LhScheduleContext context,
+                                                      SkuScheduleDTO sku,
+                                                      MachineScheduleDTO machine,
+                                                      Date retryReadyTime) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(machine)) {
+            return;
+        }
+        String title = "【" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())
+                + "】【" + PriorityTraceLogHelper.safeText(sku.getProductStatus())
+                + "】【" + PriorityTraceLogHelper.safeText(machine.getMachineCode())
+                + "】首检顺延重试";
+        String detail = "重试机台：" + PriorityTraceLogHelper.safeText(machine.getMachineCode())
+                + "｜最早切换时间：" + PriorityTraceLogHelper.formatDateTime(retryReadyTime)
+                + "｜选机次数：不递增"
+                + "｜说明：前次首检资源或班次总量限制未通过，保持原候选机台及排序重新计算";
+        PriorityTraceLogHelper.logSortSummary(log, context, title, detail);
+    }
+
+    /**
      * 输出收尾释放机台在 S4.5 新增排产后的尾部产能利用核查日志。
      * <p>该日志只做可观测性补充，不改变候选机台排序和排产结果；用于说明收尾机台
      * 为什么有后续新增结果，或者为什么没有被新增排产承接。</p>
@@ -816,22 +844,30 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     machine -> isSingleControlMachine(context, machine.getMachineCode()));
             // 首检资源或SYS0303004不允许当前落点时，记录同机台下一次允许尝试的最早切换时间。
             Map<String, Date> firstInspectionRetryReadyTimeMap = new HashMap<String, Date>(8);
+            // 仅标记紧接着发生的同机台首检顺延重试，避免把时间后移重算误记为一次新的选机。
+            String pendingFirstInspectionRetryMachineCode = null;
             while (true) {
                 // 上一轮指定机台失败时，基于真实候选失败原因结算反选指令，然后继续普通新增选机。
                 finalizeRejectedHistoricalReverseDirectives(
                         context, sku, excludedMachineCodes, excludedMachineReasonMap);
                 logNewSpecMachineCandidateSnapshot(context, sku, candidates, excludedMachineCodes, excludedMachineReasonMap);
+                /*
+                 * 在任何动态置顶、排序和日志输出前，先按正式窗口产能口径形成当前真实候选。
+                 * 后续选机与日志共同复用该列表，窗口剩余产能为0的机台不得仅出现在日志中。
+                 */
+                List<MachineScheduleDTO> currentSelectableCandidates =
+                        filterCurrentSelectableCandidates(
+                                context, sku, candidates, excludedMachineCodes, candidateCache);
                 MachineScheduleDTO candidateMachine = null;
                 List<MachineScheduleDTO> orderedCandidates = new ArrayList<>(candidates.size());
                 HistoricalReverseSelectionDirective historicalDirective =
                         findNextHistoricalReverseDirective(
-                                context, sku, candidates, excludedMachineCodes);
+                                context, sku, currentSelectableCandidates, EMPTY_STRING_SET);
                 if (Objects.nonNull(historicalDirective)) {
                     candidateMachine = findMachineInList(
-                            candidates, historicalDirective.getEffectiveMachineCode());
-                    List<MachineScheduleDTO> availableCandidates =
-                            filterExcludedCandidates(candidates, excludedMachineCodes);
-                    fillSelectedCandidateOrder(availableCandidates, candidateMachine, orderedCandidates);
+                            currentSelectableCandidates, historicalDirective.getEffectiveMachineCode());
+                    fillSelectedCandidateOrder(
+                            currentSelectableCandidates, candidateMachine, orderedCandidates);
                     log.info("前日交替计划指定机台优先尝试, materialCode: {}, productStatus: {}, "
                                     + "historicalShift: {}, mappedShift: {}, historicalMachine: {}, effectiveMachine: {}",
                             sku.getMaterialCode(), sku.getProductStatus(),
@@ -846,17 +882,16 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 if (Objects.isNull(candidateMachine)
                         && StringUtils.isNotEmpty(preferredPairMachineCode)
                         && LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)
-                        && containsMachine(candidates, preferredPairMachineCode)
+                        && containsMachine(currentSelectableCandidates, preferredPairMachineCode)
                         && !excludedMachineCodes.contains(preferredPairMachineCode)) {
-                    candidateMachine = findMachineInList(candidates, preferredPairMachineCode);
+                    candidateMachine = findMachineInList(currentSelectableCandidates, preferredPairMachineCode);
                     reverseMatchPreferredMachineMap.remove(reverseMatchSkuKey);
                     // 推荐目标SKU选中预留机台后,释放预留
                     reverseMatchReservedMachineCodes.remove(preferredPairMachineCode);
                     log.info("单控反向匹配推荐机台优先选择, materialCode: {}, machineCode: {}",
                             sku.getMaterialCode(), preferredPairMachineCode);
-                    List<MachineScheduleDTO> availableCandidates =
-                            filterExcludedCandidates(candidates, excludedMachineCodes);
-                    fillSelectedCandidateOrder(availableCandidates, candidateMachine, orderedCandidates);
+                    fillSelectedCandidateOrder(
+                            currentSelectableCandidates, candidateMachine, orderedCandidates);
                 }
                 if (candidateMachine == null) {
                     /*
@@ -878,19 +913,35 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     if (LhSingleControlMachineUtil.isSingleSideGranularitySku(context, sku)
                             && !CollectionUtils.isEmpty(reverseMatchReservedMachineCodes)) {
                         for (String reservedMachineCode : reverseMatchReservedMachineCodes) {
-                            if (containsMachine(candidates, reservedMachineCode)) {
+                            if (containsMachine(currentSelectableCandidates, reservedMachineCode)) {
                                 excludedMachineCodes.add(reservedMachineCode);
                             }
                         }
                     }
                     candidateMachine = selectCandidateMachine(
-                            context, sku, candidateCache, excludedMachineCodes, machineMatch,
+                            context, sku, candidateCache, currentSelectableCandidates,
+                            excludedMachineCodes, machineMatch,
                             preferredTrialMachine, quantityPolicy, orderedCandidates);
                 }
-                // 直接记录本次实际用于取首台机台的同一有序列表，不为日志重新过滤或排序。
-                machineMatch.traceMachinePriorityOrder(context, sku, orderedCandidates);
                 // 实际排产也直接读取该列表第一台，确保日志序号与后续选机使用的数据完全一致。
                 candidateMachine = CollectionUtils.isEmpty(orderedCandidates) ? null : orderedCandidates.get(0);
+                boolean sameMachineFirstInspectionRetry = Objects.nonNull(candidateMachine)
+                        && StringUtils.equals(
+                                pendingFirstInspectionRetryMachineCode, candidateMachine.getMachineCode());
+                if (sameMachineFirstInspectionRetry) {
+                    /*
+                     * 首检资源或班次总量限制只会后移同一机台的切换时间，候选选择并未发生变化。
+                     * 本轮不重复输出候选排序、不消耗选机次数，单独记录顺延重试原因供测试核对。
+                     */
+                    traceFirstInspectionSameMachineRetry(
+                            context, sku, candidateMachine,
+                            firstInspectionRetryReadyTimeMap.get(candidateMachine.getMachineCode()));
+                } else {
+                    // 直接记录本次实际用于取首台机台的同一有序列表，不为日志重新过滤或排序。
+                    machineMatch.traceMachinePriorityOrder(context, sku, orderedCandidates);
+                }
+                // 当前轮已消费上一轮重试标记；本轮若再次需要顺延，会在对应失败分支重新写入。
+                pendingFirstInspectionRetryMachineCode = null;
                 if (Objects.isNull(candidateMachine)) {
                     break;
                 }
@@ -1191,6 +1242,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             pairMouldResourceAllocationResult);
                     if (firstInspectionRetryRequired) {
                         // 首检只是在当前时间无法落位，保留同一候选机台并按后移时间重新走完整资源链。
+                        pendingFirstInspectionRetryMachineCode = machineCode;
                         candidateCache.clearCapacityCache();
                         continue;
                     }
@@ -1378,6 +1430,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult,
                             pairMouldResourceAllocationResult);
+                    pendingFirstInspectionRetryMachineCode = machineCode;
                     candidateCache.clearCapacityCache();
                     continue;
                 }
@@ -1406,6 +1459,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
                     rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult,
                             pairMouldResourceAllocationResult);
+                    pendingFirstInspectionRetryMachineCode = machineCode;
                     candidateCache.clearCapacityCache();
                     continue;
                 }
@@ -2856,23 +2910,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         };
     }
 
-    private MachineScheduleDTO selectCandidateMachine(LhScheduleContext context,
-                                                      SkuScheduleDTO sku,
-                                                      NewSpecCandidateCache candidateCache,
-                                                      Set<String> excludedMachineCodes,
-                                                      IMachineMatchStrategy machineMatch,
-                                                      MachineScheduleDTO preferredTrialMachine,
-                                                      ProductionQuantityPolicy quantityPolicy) {
-        return selectCandidateMachine(context, sku, candidateCache, excludedMachineCodes, machineMatch,
-                preferredTrialMachine, quantityPolicy, new ArrayList<MachineScheduleDTO>(0));
-    }
-
     /**
      * 选择当前实际尝试的机台，并同步回传同一次选机使用的候选顺序。
      *
      * @param context 排程上下文
      * @param sku 当前待选机SKU
      * @param candidateCache 当前SKU候选缓存
+     * @param currentSelectableCandidates 已完成动态排除及窗口产能过滤的真实候选列表
      * @param excludedMachineCodes 已排除机台编码
      * @param machineMatch 机台匹配策略
      * @param preferredTrialMachine 试制、量试或小批量预选机台
@@ -2883,15 +2927,27 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private MachineScheduleDTO selectCandidateMachine(LhScheduleContext context,
                                                        SkuScheduleDTO sku,
                                                        NewSpecCandidateCache candidateCache,
+                                                       List<MachineScheduleDTO> currentSelectableCandidates,
                                                        Set<String> excludedMachineCodes,
                                                        IMachineMatchStrategy machineMatch,
                                                        MachineScheduleDTO preferredTrialMachine,
                                                        ProductionQuantityPolicy quantityPolicy,
                                                        List<MachineScheduleDTO> orderedCandidates) {
-        List<MachineScheduleDTO> singleControlCandidates = filterExcludedCandidates(
-                candidateCache.getSingleControlCandidates(), excludedMachineCodes);
-        List<MachineScheduleDTO> normalCandidates = filterExcludedCandidates(
-                candidateCache.getNormalCandidates(), excludedMachineCodes);
+        List<MachineScheduleDTO> singleControlCandidates =
+                new ArrayList<MachineScheduleDTO>(currentSelectableCandidates.size());
+        List<MachineScheduleDTO> normalCandidates =
+                new ArrayList<MachineScheduleDTO>(currentSelectableCandidates.size());
+        for (MachineScheduleDTO candidate : currentSelectableCandidates) {
+            if (Objects.isNull(candidate) || StringUtils.isEmpty(candidate.getMachineCode())
+                    || excludedMachineCodes.contains(candidate.getMachineCode())) {
+                continue;
+            }
+            if (isSingleControlMachine(context, candidate.getMachineCode())) {
+                singleControlCandidates.add(candidate);
+            } else {
+                normalCandidates.add(candidate);
+            }
+        }
         logNewSpecMachineTypeSplit(context, sku, singleControlCandidates, normalCandidates,
                 excludedMachineCodes, candidateCache);
         if (shouldOnlyUseSingleControlCandidate(context, sku)) {
@@ -2996,6 +3052,64 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             filteredCandidates.add(candidate);
         }
         return filteredCandidates;
+    }
+
+    /**
+     * 形成当前真正进入新增选机排序和尝试流程的候选机台列表。
+     * <p>硬约束已经由机台匹配策略完成；本方法继续复用正式窗口产能计算及当前SKU候选缓存，
+     * 排除已失败、已使用以及窗口剩余产能不大于0的机台。返回列表保持原候选顺序，
+     * 供历史指定、反向推荐、普通选机和优先级日志共同使用。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待选机SKU
+     * @param candidates 硬约束过滤后的候选机台
+     * @param excludedMachineCodes 当前SKU已排除或已使用机台编码
+     * @param candidateCache 当前SKU候选缓存
+     * @return 当前真实可选候选机台列表
+     */
+    private List<MachineScheduleDTO> filterCurrentSelectableCandidates(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            List<MachineScheduleDTO> candidates,
+            Set<String> excludedMachineCodes,
+            NewSpecCandidateCache candidateCache) {
+        if (CollectionUtils.isEmpty(candidates)) {
+            return Collections.emptyList();
+        }
+        List<MachineScheduleDTO> selectableCandidates =
+                new ArrayList<MachineScheduleDTO>(candidates.size());
+        StringBuilder noCapacityMachineCodes = new StringBuilder();
+        for (MachineScheduleDTO candidate : candidates) {
+            if (Objects.isNull(candidate) || StringUtils.isEmpty(candidate.getMachineCode())
+                    || (!CollectionUtils.isEmpty(excludedMachineCodes)
+                    && excludedMachineCodes.contains(candidate.getMachineCode()))) {
+                continue;
+            }
+            int availableCapacity = resolveCachedMachineAvailableCapacityInWindow(
+                    context, sku, candidate, candidateCache);
+            if (availableCapacity <= 0) {
+                if (noCapacityMachineCodes.length() > 0) {
+                    noCapacityMachineCodes.append(",");
+                }
+                noCapacityMachineCodes.append(candidate.getMachineCode());
+                continue;
+            }
+            selectableCandidates.add(candidate);
+        }
+        if (noCapacityMachineCodes.length() > 0) {
+            log.info("新增SKU选机前排除无剩余产能机台, batchNo: {}, materialCode: {}, productStatus: {}, "
+                            + "excludedMachineCodes: {}",
+                    context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(), noCapacityMachineCodes);
+            if (PriorityTraceLogHelper.isEnabled(context)) {
+                String title = "【" + PriorityTraceLogHelper.safeText(sku.getMaterialCode())
+                        + "】【" + PriorityTraceLogHelper.safeText(sku.getProductStatus())
+                        + "】无剩余产能候选过滤";
+                String detail = "排除机台：" + noCapacityMachineCodes
+                        + "｜说明：复用正式窗口产能计算，剩余产能不大于0，不进入本次选机及排序日志";
+                PriorityTraceLogHelper.appendProcessLog(context, title, detail);
+            }
+        }
+        return selectableCandidates;
     }
 
     /**

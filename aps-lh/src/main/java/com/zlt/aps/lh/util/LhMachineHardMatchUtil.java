@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.LinkedHashSet;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * 硫化机台硬性匹配工具。
@@ -31,6 +32,8 @@ public final class LhMachineHardMatchUtil {
     private static final String VALUE_SEPARATOR = ",";
     /** 通用模套型号（等同空值，适配所有） */
     private static final String UNIVERSAL_MOULD_SET_CODE = "通用";
+    /** 仅存在模具到货关系时的模壳优先级命中说明 */
+    private static final String DELIVERY_MOULD_MATCH_VALUE = "模具到货不降级";
 
     private LhMachineHardMatchUtil() {
     }
@@ -124,29 +127,49 @@ public final class LhMachineHardMatchUtil {
     public static boolean isMouldSetPriorityMatched(LhScheduleContext context,
                                                     SkuScheduleDTO sku,
                                                     MachineScheduleDTO machine) {
+        return StringUtils.isNotEmpty(resolveMouldSetPriorityMatchedValue(context, sku, machine));
+    }
+
+    /**
+     * 解析SKU模壳与机台模套的实际优先级命中值。
+     * <p>该方法与{@link #isMouldSetPriorityMatched(LhScheduleContext, SkuScheduleDTO, MachineScheduleDTO)}
+     * 共用同一判断入口，供选机Comparator和日志复用，避免日志重新计算另一套模壳匹配口径。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程信息
+     * @param machine 候选机台
+     * @return 实际命中的模壳型号集合；通用模套返回“通用”，仅到货模具返回“模具到货不降级”，未命中返回null
+     */
+    public static String resolveMouldSetPriorityMatchedValue(LhScheduleContext context,
+                                                             SkuScheduleDTO sku,
+                                                             MachineScheduleDTO machine) {
         String machineMouldSetCode = normalizeToken(Objects.isNull(machine) ? null : machine.getShellStandard());
         if (StringUtils.isEmpty(machineMouldSetCode)
                 || StringUtils.equals(machineMouldSetCode, UNIVERSAL_MOULD_SET_CODE)) {
-            return true;
+            return UNIVERSAL_MOULD_SET_CODE;
         }
         Set<String> machineMouldSetSet = parseMachineMouldSetSet(machineMouldSetCode);
         if (machineMouldSetSet.contains(UNIVERSAL_MOULD_SET_CODE)) {
-            return true;
+            return UNIVERSAL_MOULD_SET_CODE;
         }
         if (CollectionUtils.isEmpty(machineMouldSetSet)) {
-            return false;
+            return null;
         }
         SkuShellStandardMatchResult matchResult = resolveSkuShellStandardMatchResult(context, sku);
         if (CollectionUtils.isEmpty(matchResult.getShellStandardSet())) {
             // 只有模具到货关系时不参与模壳降级；普通模具缺少模壳仍按未命中处理。
-            return matchResult.hasDeliveryMould() && !matchResult.hasOrdinaryMould();
+            return matchResult.hasDeliveryMould() && !matchResult.hasOrdinaryMould()
+                    ? DELIVERY_MOULD_MATCH_VALUE : null;
         }
+        // 使用有序集合输出实际交集，保证多模壳日志在不同运行环境下顺序稳定。
+        Set<String> matchedShellStandardSet = new TreeSet<String>();
         for (String shellStandard : matchResult.getShellStandardSet()) {
             if (machineMouldSetSet.contains(shellStandard)) {
-                return true;
+                matchedShellStandardSet.add(shellStandard);
             }
         }
-        return false;
+        return CollectionUtils.isEmpty(matchedShellStandardSet)
+                ? null : StringUtils.join(matchedShellStandardSet, VALUE_SEPARATOR);
     }
 
     /**
