@@ -14,8 +14,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.util.CollectionUtils;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.Collections;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -271,6 +273,67 @@ public final class DailyMachineExpansionPlanner {
                                                             int activeMachineCount,
                                                             String scheduleType) {
         return Objects.isNull(resolveFirstDailyLookAheadAddMachineDate(context, sku, activeMachineCount, scheduleType));
+    }
+
+    /**
+     * 按新增排产 dayN 节奏和窗口剩余目标量计算特殊材料置换所需机台数。
+     *
+     * <p>本方法复用新增/续作共同使用的正式日硫化标准和
+     * {@link #resolveFirstOriginalDayPlanAddMachineDate(LhScheduleContext, SkuScheduleDTO, int, String)}
+     * 逐日增机判断，不再由特殊材料置换服务维护一套“日产能×窗口天数”的独立简化公式。
+     * dayN 负责决定机台节奏，窗口剩余目标量只负责防止单机窗口总产能明显不足。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 特殊材料 SKU
+     * @param firstProductionDate 首个有月计划日计划量的业务日期
+     * @param remainingTargetQty 当前待排目标量
+     * @param availableCandidateCount 当前最多可置换的续作机台数
+     * @return 本轮需要尝试置换的机台数
+     */
+    public static int resolveSpecialMaterialRequiredMachineCount(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LocalDate firstProductionDate,
+            int remainingTargetQty,
+            int availableCandidateCount) {
+        if (Objects.isNull(context) || Objects.isNull(sku) || Objects.isNull(firstProductionDate)
+                || remainingTargetQty <= 0 || availableCandidateCount <= 0) {
+            return 0;
+        }
+        int dailyTheoryCapacityQty = resolveAddMachineDailyTheoryCapacityQty(context, sku);
+        if (dailyTheoryCapacityQty <= 0) {
+            return 1;
+        }
+
+        // 先按新增排产原始 dayN 节奏递增机台数，直到各业务日均不再要求加机。
+        int dailyRhythmMachineCount = 1;
+        while (dailyRhythmMachineCount < availableCandidateCount
+                && Objects.nonNull(resolveFirstOriginalDayPlanAddMachineDate(
+                context, sku, dailyRhythmMachineCount, ScheduleTypeEnum.NEW_SPEC.getCode()))) {
+            dailyRhythmMachineCount++;
+        }
+
+        // 再按目标日起实际排程窗口天数校验总产能，避免目标日起可用天数减少后仍固定只置换一台。
+        Set<LocalDate> availableProductionDateSet = new LinkedHashSet<LocalDate>(4);
+        for (com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())) {
+                continue;
+            }
+            LocalDate workDate = shift.getWorkDate().toInstant()
+                    .atZone(ZoneId.systemDefault()).toLocalDate();
+            if (!workDate.isBefore(firstProductionDate)) {
+                availableProductionDateSet.add(workDate);
+            }
+        }
+        int availableProductionDayCount = Math.max(1, availableProductionDateSet.size());
+        long singleMachineWindowCapacity =
+                (long) dailyTheoryCapacityQty * availableProductionDayCount;
+        int targetQtyMachineCount = (int) Math.min(
+                Integer.MAX_VALUE,
+                ((long) remainingTargetQty + singleMachineWindowCapacity - 1L)
+                        / singleMachineWindowCapacity);
+        int requiredMachineCount = Math.max(dailyRhythmMachineCount, targetQtyMachineCount);
+        return Math.max(1, Math.min(requiredMachineCount, availableCandidateCount));
     }
 
     /**

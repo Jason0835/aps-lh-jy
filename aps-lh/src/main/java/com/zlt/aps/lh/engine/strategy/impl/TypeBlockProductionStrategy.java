@@ -435,6 +435,109 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     }
 
     /**
+     * 在特殊材料置换选定的续作机台上尝试换活字块排产。
+     *
+     * <p>候选关系、切换均衡、20:00 后禁换模、设备停机、首检、班次产能和账本扣减全部复用
+     * 正式换活字块主链。与历史反选不同，本入口不锁死某一个班次，允许现有切换规则从
+     * {@code earliestSwitchTime} 起继续顺延到下一个合法班次。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 特殊材料准备接管的续作机台
+     * @param sku 特殊材料 SKU
+     * @param earliestSwitchTime 置换预演得出的最早允许切换时间
+     * @return 换活字块执行结果；不满足同胎胚、同模具等关系时返回不适用
+     */
+    /**
+     * 无副作用判断特殊材料置换是否适用换活字块时长。
+     *
+     * @param context 排程上下文
+     * @param machine 特殊材料准备接管的续作机台
+     * @param sku 特殊材料 SKU
+     * @return true-满足现有换活字块关系；false-应按正规换模预演
+     */
+    @Override
+    public boolean isSpecialMaterialSubstitutionTypeBlockApplicable(
+            LhScheduleContext context,
+            MachineScheduleDTO machine,
+            SkuScheduleDTO sku) {
+        // 只复用现有候选判断且关闭决策日志，不执行时间分配、计数登记或结果写入。
+        return Objects.nonNull(context)
+                && Objects.nonNull(machine)
+                && Objects.nonNull(sku)
+                && isTypeBlockCandidate(context, machine, sku, false);
+    }
+
+    @Override
+    public SpecifiedMachineScheduleResult tryScheduleSpecialMaterialSubstitution(
+            LhScheduleContext context,
+            MachineScheduleDTO machine,
+            SkuScheduleDTO sku,
+            Date earliestSwitchTime) {
+        if (Objects.isNull(context) || Objects.isNull(machine) || Objects.isNull(sku)
+                || Objects.isNull(earliestSwitchTime)) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "排程上下文、指定机台、目标SKU或最早切换时间为空");
+        }
+        if (!isTypeBlockCandidate(context, machine, sku)) {
+            return SpecifiedMachineScheduleResult.notApplicable(
+                    "当前机台物料与特殊材料SKU不满足换活字块条件");
+        }
+        Date machineEndTime = machine.getEstimatedEndTime();
+        if (Objects.isNull(machineEndTime)) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "特殊材料置换机台没有可用于计算的续作下机时间");
+        }
+        Date alignedEndTime = machineEndTime.before(earliestSwitchTime)
+                ? earliestSwitchTime : machineEndTime;
+        int resultStartIndex = context.getScheduleResultList().size();
+        int unscheduledStartIndex = context.getUnscheduledResultList().size();
+        boolean pendingBefore = context.getNewSpecSkuList().contains(sku);
+        Integer originalTargetQty = sku.getTargetScheduleQty();
+        Integer originalRemainingQty = sku.getRemainingScheduleQty();
+
+        // 调用正式切换分配入口，由现有规则决定早班、中班或顺延到下一允许班次。
+        Date switchStartTime = allocateTypeBlockSwitchStartTime(
+                context, machine, sku, alignedEndTime);
+        if (Objects.isNull(switchStartTime)) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "特殊材料置换未找到合法换活字块时间");
+        }
+        List<LhShiftConfigVO> shifts =
+                LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
+        Date productionStartTime = resolveTypeBlockProductionStartTime(
+                context, machine, sku, alignedEndTime, switchStartTime, shifts);
+        StringBuilder failureReason = new StringBuilder(128);
+        boolean success = appendTypeBlockResultWithRollback(
+                context, machine, sku, productionStartTime, switchStartTime, shifts,
+                true, failureReason);
+        if (!success) {
+            // 正式主链已回滚换模/首检配额，此处只恢复其可能写入的待排运行态。
+            clearAddedUnscheduledResults(context, unscheduledStartIndex);
+            sku.setTargetScheduleQty(originalTargetQty);
+            sku.setRemainingScheduleQty(originalRemainingQty);
+            if (pendingBefore && !context.getNewSpecSkuList().contains(sku)) {
+                context.getNewSpecSkuList().add(sku);
+            }
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    StringUtils.isNotEmpty(failureReason.toString())
+                            ? failureReason.toString() : "换活字块主链未生成有效排程结果");
+        }
+        LhScheduleResult result = findSpecifiedTypeBlockResult(
+                context, machine, sku, resultStartIndex);
+        if (Objects.isNull(result)) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "换活字块主链返回成功但未找到特殊材料置换结果");
+        }
+        return SpecifiedMachineScheduleResult.success(
+                result, MouldChangeTypeEnum.TYPE_BLOCK.getCode());
+    }
+
+    /**
      * 清除指定机台尝试期间新增的未排结果。
      *
      * @param context 排程上下文

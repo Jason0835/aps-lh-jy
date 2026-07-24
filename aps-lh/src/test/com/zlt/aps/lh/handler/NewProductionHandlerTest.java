@@ -1,6 +1,9 @@
 package com.zlt.aps.lh.handler;
 
+import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
@@ -16,10 +19,13 @@ import org.mockito.InjectMocks;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
@@ -81,6 +87,38 @@ class NewProductionHandlerTest {
         inOrder.verify(strategy).allocateShiftPlanQty(any(LhScheduleContext.class));
         inOrder.verify(strategy).adjustEmbryoStock(any(LhScheduleContext.class));
         inOrder.verify(strategy).scheduleReduceMould(any(LhScheduleContext.class));
+    }
+
+    /**
+     * 验证特殊材料置换快照只冻结排程开始时真实在机的续作结果。
+     */
+    @Test
+    void captureSpecialMaterialContinuationSnapshot_shouldExcludeNewProductionResult() {
+        LhScheduleContext context = new LhScheduleContext();
+        MachineScheduleDTO initialMachine = new MachineScheduleDTO();
+        initialMachine.setMachineCode("K1201");
+        initialMachine.setCurrentMaterialCode("CONT-SKU");
+        context.getInitialMachineScheduleMap().put("K1201", initialMachine);
+
+        LhScheduleResult continuationResult = new LhScheduleResult();
+        continuationResult.setLhMachineCode("K1201");
+        continuationResult.setMaterialCode("CONT-SKU");
+        continuationResult.setScheduleType(ScheduleTypeEnum.CONTINUOUS.getCode());
+        LhScheduleResult newProductionResult = new LhScheduleResult();
+        newProductionResult.setLhMachineCode("K1201");
+        newProductionResult.setMaterialCode("NEW-SKU");
+        newProductionResult.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
+        context.getScheduleResultList().add(continuationResult);
+        context.getScheduleResultList().add(newProductionResult);
+
+        // 直接调用冻结入口，验证对象身份集合不会把随后生成的新增结果纳入置换范围。
+        ReflectionTestUtils.invokeMethod(
+                handler, "captureSpecialMaterialContinuationSnapshot", context);
+
+        assertTrue(context.getSpecialMaterialContinuationResultSnapshot()
+                .contains(continuationResult));
+        assertFalse(context.getSpecialMaterialContinuationResultSnapshot()
+                .contains(newProductionResult));
     }
 
     /**

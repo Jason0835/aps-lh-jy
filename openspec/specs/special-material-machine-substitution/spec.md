@@ -1,225 +1,274 @@
-# 特殊材料硫化机置换规则
+# 特殊材料 SKU 硫化机置换规则
 
 ## Purpose
 
-硫化排程完成续作、换活字块、新增排产后，检查特殊材料清单中的物料。若特殊材料 SKU 仍有需排量，且在已排硫化排程结果中未匹配到任何机台，则触发硫化机置换逻辑。置换作为排程末尾的兜底补偿机制，从已排结果中寻找其他 SKU 的机台作为置换候选，确保特殊材料 SKU 尽量排上机台。
+硫化排程完成续作、换活字块和新增排产后，检查特殊材料清单中的 SKU。若特殊材料 SKU 仍有待排量，且当前已排结果中未按“物料编码+产品状态”匹配到机台，则从排程开始时已经在机的续作机台中选择候选，通过无副作用预演、局部截断和原子提交，使特殊材料 SKU 在满足现有排程约束的前提下接管机台。
+
+置换不得改变普通新增排产逻辑，不得使用新增排产机台，不得删除被置换机台整个排程窗口的结果。被截断的续作计划量必须恢复到原 SKU 的余量、日计划账本和未排结果中。
 
 ## Requirements
 
 ### Requirement: 置换步骤独立于排产主流程
 
-系统 MUST 在 S4.5 新增规格排产完成后、S4.6 结果校验保存前，新增独立步骤 S4.5.1 执行特殊材料硫化机置换。置换逻辑不侵入续作、换活字块、新增排产主流程。
+系统 MUST 在 S4.5 新增规格排产完成后、S4.6 结果校验保存前，通过独立步骤 S4.5.1 执行特殊材料硫化机置换。
 
-**Implementation:**
-- `ScheduleStepEnum.S4_5_1_SPECIAL_MATERIAL_SUBSTITUTION`：新增排程步骤枚举
-- `AbsLhScheduleTemplate.execute()`：在 S4.5 和 S4.6 之间插入 `doSpecialMaterialSubstitution()` 调用
-- `SpecialMaterialSubstitutionHandler`：置换步骤处理器
-- `SpecialMaterialMachineSubstitutionService`：置换核心服务
+系统 MUST 在 S4.5 新增排产开始前冻结允许置换的续作在机结果身份。快照来源 MUST 同时满足：
+
+1. 结果排程类型为续作；
+2. 机台存在排程开始时的在机快照；
+3. 续作结果物料与排程开始时的在机物料一致。
+
+换活字块结果、S4.5 新增结果以及新增排产后仅通过机台物料反推出的结果 MUST NOT 进入置换候选。
 
 #### Scenario: 排程主流程完成后触发置换
 
-- **WHEN** S4.4 续作和 S4.5 新增排产全部完成
-- **THEN** 系统执行 S4.5.1 特殊材料硫化机置换步骤
+- **WHEN** 续作、换活字块和新增排产全部完成
+- **THEN** 系统执行 S4.5.1 特殊材料硫化机置换
 - **AND** 置换完成后进入 S4.6 结果校验与保存
 
-### Requirement: 置换触发条件
+#### Scenario: 新增排产机台不得参与置换
+
+- **GIVEN** 某机台由 S4.5 新增排产占用
+- **WHEN** S4.5.1 构建置换候选
+- **THEN** 该机台及其新增结果不得被截断、删除或置换
+
+### Requirement: 置换触发条件按物料和产品状态隔离
 
 系统 MUST 仅对同时满足以下条件的特殊材料 SKU 触发置换：
-1. SKU 命中特殊材料清单（物料编码或结构名称匹配）
-2. SKU 仍有硫化余量或本次窗口需排量（未排数量 > 0）
-3. SKU 在当前已排硫化排程结果中未匹配到任何机台
 
-#### Scenario: 特殊材料 SKU 未排上且有需排量
+1. SKU 命中特殊材料清单；
+2. 以“物料编码+产品状态”为复合键仍有正待排量；
+3. 当前已排结果中不存在同一复合键的正计划量。
 
-- **WHEN** 特殊材料 SKU 在未排结果中
-- **AND** 未排数量大于 0
-- **AND** 该 SKU 不在排程结果列表中
-- **THEN** 系统对该 SKU 触发置换逻辑
+同物料不同产品状态之间的已排识别、余量恢复、未排合并和未排清理 MUST 相互隔离。
 
-#### Scenario: 特殊材料 SKU 已排上机台
+#### Scenario: 特殊材料仍有待排量且未匹配机台
 
-- **WHEN** 特殊材料 SKU 已在排程结果列表中
-- **THEN** 系统不对该 SKU 触发置换逻辑
+- **WHEN** 特殊材料 SKU 的待排量大于零
+- **AND** 当前结果中不存在同物料、同产品状态的正计划量
+- **THEN** 系统触发置换
 
-### Requirement: 候选机台筛选规则
+#### Scenario: 同物料其他产品状态已经排产
 
-系统 MUST 从当前已排硫化排程结果列表中筛选候选被置换机台，筛选条件：
-1. 被置换 SKU 不能是特殊材料 SKU（避免特殊材料之间互相置换）
-2. 机台硬匹配特殊材料 SKU（英寸范围、模具集合、特殊材料支持，复用 `LhMachineHardMatchUtil.isMachineHardMatched`）
-3. 优先非续作 SKU 机台（`scheduleType` 不为 01），找不到再从续作 SKU 机台中选择
+- **WHEN** 特殊材料 SKU 的某一产品状态仍有待排量
+- **AND** 只有同物料的其他产品状态已经排产
+- **THEN** 系统仍应处理该产品状态
 
-#### Scenario: 候选机台硬匹配通过
+### Requirement: 特殊材料起排日期取月计划首个正计划日
 
-- **WHEN** 候选机台的英寸范围、模具集合和特殊材料支持均匹配特殊材料 SKU
-- **THEN** 该机台进入候选列表
+系统 MUST 通过现有月计划日期解析逻辑，从排程窗口首日开始逐日扫描特殊材料 SKU 的月计划日计划量，并将窗口内首个日计划量大于零的日期作为置换目标日期。
 
-#### Scenario: 候选机台上的 SKU 为特殊材料
+特殊材料 SKU MUST NOT 早于目标日期生产。窗口内不存在正日计划量时，系统 MUST 不执行置换，并记录“排程窗口内无月计划日计划量”。
 
-- **WHEN** 候选机台上的 SKU 命中特殊材料清单
-- **THEN** 该机台被排除出候选列表
+#### Scenario: T 日有量
 
-### Requirement: 被置换机台4级优先级选择
+- **WHEN** T 日月计划日计划量大于零
+- **THEN** 系统从 T 日最早允许时点开始寻找切换机会
 
-系统 MUST 按以下优先级逐层匹配被置换机台，命中上层则不再比较下层：
+#### Scenario: T+1 日首次有量
 
-| 优先级 | 置换类型 | 触发条件 | 多命中时排序 | 备注前缀 |
-|-------|---------|---------|------------|---------|
-| 1 | 喷砂清洗置换 | 排程日期起3天内有喷砂清洗计划（`CleaningTypeEnum.SAND_BLAST`） | 喷砂时间越近越优先 | 喷砂+置换 |
-| 2 | 月计划降模置换 | 2天内存在月计划降模需求（多机台SKU的日计划量可由更少机台覆盖） | 降模时间越近越优先 | 月计划降模+置换 |
-| 3 | 精度计划置换 | 30天内有精度保养计划（`maintenancePlanMap`） | 精度计划时间越近越优先 | 精度计划+置换 |
-| 4 | 胎胚库存低置换 | 以上均未命中 | 胎胚库存低->SKU剩余可排量少->机台编码 | 胎胚库存低+置换 |
+- **WHEN** T 日无量且 T+1 日月计划日计划量大于零
+- **THEN** 系统完整保留 T 日续作计划
+- **AND** 从 T+1 日实际允许时点开始截断和置换
 
-**Implementation:**
-- `SubstitutionTypeEnum`：4级置换类型枚举，含 `buildRemark(machineCode, replacedMaterialCode)` 方法
-- `SpecialMaterialMachineSubstitutionService.selectByPriority()`：逐层匹配选择
+#### Scenario: T+2 日首次有量
 
-#### Scenario: 3天内喷砂清洗命中
+- **WHEN** T、T+1 日均无量且 T+2 日有量
+- **THEN** 特殊材料不得在 T 或 T+1 日生产
 
-- **WHEN** 候选机台在排程日期起3天内存在喷砂清洗计划
-- **THEN** 该机台被选为被置换机台
-- **AND** 置换类型为 `SAND_BLAST_SUBSTITUTION`
-- **AND** 多个机台命中时选择喷砂清洗计划时间最近的
+### Requirement: 置换机台数复用加机台规则
 
-#### Scenario: 2天内月计划降模命中
+系统 MUST 复用现有加机台的日期、目标量、真实有效产能和窗口剩余产能口径计算所需机台数，不得使用特殊材料置换独立的固定台数或简化台数公式。
 
-- **WHEN** 候选机台无3天内喷砂清洗
-- **AND** 该机台SKU有多台机台且2天内月计划日计划量可由更少机台覆盖
-- **THEN** 该机台被选为被置换机台
-- **AND** 置换类型为 `MONTH_PLAN_REDUCE_SUBSTITUTION`
+系统 MUST 按“预演一台、提交一台、重新计算剩余缺口”的方式执行；剩余目标量已经满足时 MUST 停止继续置换。
 
-#### Scenario: 30天内精度计划命中
+#### Scenario: 需要多台机台
 
-- **WHEN** 候选机台无3天内喷砂清洗和2天内月计划降模
-- **AND** 该机台在30天内有精度保养计划
-- **THEN** 该机台被选为被置换机台
-- **AND** 置换类型为 `PRECISION_PLAN_SUBSTITUTION`
+- **WHEN** 现有加机台规则计算特殊材料仍需要 N 台
+- **THEN** 系统最多尝试成功置换 N 台
+- **AND** 每成功一台后按最新余量重新计算需求
 
-#### Scenario: 胎胚库存低命中
+### Requirement: 候选仅来自目标日期仍生产的续作在机机台
 
-- **WHEN** 候选机台未命中前三级
-- **THEN** 按胎胚库存升序选择
-- **AND** 置换类型为 `LOW_EMBRYO_STOCK_SUBSTITUTION`
+候选机台 MUST 同时满足：
 
-### Requirement: 被置换 SKU 下机与状态回滚
+1. 属于 S4.5 前冻结的续作在机结果身份；
+2. 原续作 SKU 在目标日期仍有正计划量；
+3. 拟截断时点后不存在新增排产结果；
+4. 不是特殊材料机台、结构最小保留机台或本轮已经置换的机台；
+5. 满足现有定点、单控、模套/模壳、模具状态、设备状态和机台硬匹配约束。
 
-系统 MUST 将被置换 SKU 从目标机台下机，并同步回滚以下状态：
+任何条件不满足时，系统 MUST 跳过该机台，不得通过放宽条件或回落到新增机台完成置换。
 
-| 状态 | 回滚方式 |
-|------|---------|
-| `scheduleResultList` | 移除该机台所有排程结果 |
-| `scheduleResultSourceSkuMap` | 移除对应 entry |
-| `machineAssignmentMap` | 移除该机台 entry |
-| `machineScheduleMap` | 从 `initialMachineScheduleMap` 恢复初始快照 |
-| `dailyMouldChangeCountMap` | 调用 `IMouldChangeBalanceStrategy.rollbackMouldChange()` 按换模时间递减 |
-| `dailyFirstInspectionCountMap` | 调用 `IFirstInspectionBalanceStrategy.rollbackInspection()` 按首检时间递减 |
-| `mouldResourceContext` | 调用 `MouldResourceContext.release()` 释放被置换结果占用的模具号 |
+### Requirement: 被置换机台按四层优先级稳定选择
 
-被置换 SKU 若仍有未排余量，须记录未排原因"被特殊材料SKU置换下机，机台 {机台编码}"。
+系统 MUST 按下表逐层匹配。同一机台只进入最高命中层级；当前层级没有可行候选时，才继续下一层级。
 
-**Implementation:**
-- `SpecialMaterialMachineSubstitutionService.removeReplacedSkuFromMachine()`：移除结果并回滚状态
-- `SpecialMaterialMachineSubstitutionService.restoreMachineState()`：从初始快照恢复机台状态
-- `SpecialMaterialMachineSubstitutionService.releaseMouldResources()`：释放模具资源
+| 优先级 | 命中类型 | 有效范围 | 数据来源 | 同层排序 | 备注前缀 |
+|---|---|---|---|---|---|
+| 1 | 喷砂 | 目标日起 3 天内，包含目标日 | 设备停机计划中的喷砂类型 | 计划时间、机台编码 | 喷砂+置换 |
+| 2 | 月计划降模 | 目标日起 2 天内，包含目标日 | 现有月计划降模判断 | 命中日期、机台编码 | 月计划降模+置换 |
+| 3 | 维保 | 目标日起 30 天内，包含目标日 | `maintenancePlanMap` 中的精度/保养计划 | 计划日期、机台编码 | 维保+置换 |
+| 4 | 胎胚库存低 | 前三级均未命中 | 现有有效胎胚库存 | 库存升序、机台编码 | 胎胚库存低+置换 |
 
-#### Scenario: 被置换 SKU 下机并回滚
+喷砂和维保层级的机台 MUST 在特殊材料目标日期已经由原续作 SKU 上机生产，并命中对应计划。设备停机类型 `05` 计划性维修 MUST NOT 作为第三层维保命中来源。
 
-- **WHEN** 特殊材料 SKU 成功置换到目标机台
-- **THEN** 被置换 SKU 从该机台下机
-- **AND** 机台状态恢复到初始快照
-- **AND** 换模计数和首检计数递减
-- **AND** 模具资源释放
-- **AND** 被置换 SKU 记录未排原因
+#### Scenario: 05 计划性维修不纳入维保层
 
-### Requirement: 特殊材料 SKU 上机复用现有排产逻辑
+- **GIVEN** 某候选只有设备停机类型 `05` 计划性维修
+- **AND** `maintenancePlanMap` 中没有该机台的精度或保养计划
+- **WHEN** 系统判断第三优先级
+- **THEN** 该机台不得命中维保层
+- **AND** 系统继续判断胎胚库存低层
 
-系统 MUST 在被置换 SKU 下机后，将特殊材料 SKU 加回新增待排列表，重新调用 `IProductionStrategy.scheduleNewSpecs()` 排产策略，让特殊材料 SKU 按现有规则（SKU排序、机台匹配、换模均衡、首检均衡、产能计算、班次分配、胎胚库存调整）上机。
+#### Scenario: 精度或保养计划纳入维保层
 
-**Implementation:**
-- `SpecialMaterialMachineSubstitutionService.reScheduleSpecialMaterialSku()`：复用 S4.5 排产策略链
+- **GIVEN** `maintenancePlanMap` 中存在目标日起 30 天内的精度或保养计划
+- **WHEN** 系统判断第三优先级
+- **THEN** 该机台命中维保层
+- **AND** 备注使用“维保+置换 {机台编码}”
 
-#### Scenario: 特殊材料 SKU 成功上机
+### Requirement: 切换时点遵守换模均衡和禁换模约束
 
-- **WHEN** 被置换机台已释放
-- **AND** 特殊材料 SKU 通过现有排产逻辑匹配到该机台
-- **THEN** 特殊材料 SKU 排产结果写入 `scheduleResultList`
-- **AND** 机台状态更新为特殊材料 SKU
+系统 MUST 从特殊材料目标日期的最早允许时点开始，结合原续作实际生产结束点、换模或换活字块时长、停机窗口和可生产时间寻找实际切换时点。
 
-#### Scenario: 特殊材料 SKU 上机失败
+系统 MUST 复用现有换模均衡和时间约束：
 
-- **WHEN** 被置换机台已释放
-- **AND** 特殊材料 SKU 因换模约束、模具不足等原因未能上机
-- **THEN** 特殊材料 SKU 记录未排原因
-- **AND** 被置换 SKU 也记录未排原因
+1. 早班换模参考上限 8 次；
+2. 中班换模参考上限 7 次；
+3. 当日换模总次数不得超过 15 次；
+4. 早班加入后明显恶化早中班均衡时，继续尝试中班；
+5. 换模开始或实际执行时间落在 20:00 之后时不得换模，必须顺延到下一个允许班次或日期。
 
-### Requirement: 模具交替计划备注规则
+系统 MUST 使用最终实际换模完成时间确定特殊材料开产班次，不得因月计划当天有量而强制在不合法班次上机。
 
-系统 MUST 在特殊材料 SKU 置换成功后，将置换备注记录到 `LhScheduleContext.substitutionRemarkMap`（key=被置换机台编码，value=置换备注）。S4.6 生成模具交替计划时，调用 `ResultValidationHandler.appendSubstitutionRemark()` 将备注追加到对应机台的模具交替计划 `remark` 字段。
+#### Scenario: 早班均衡不合适时延至中班
 
-备注格式：`{置换类型前缀} {机台编码}，被置换SKU：{物料编码}`
+- **WHEN** 早班加入本次换模会明显恶化早中班均衡
+- **AND** 中班满足全部约束
+- **THEN** 系统在中班执行切换
+- **AND** 原续作继续生产到实际下机时点
+
+#### Scenario: 20:00 后禁止换模
+
+- **WHEN** 预计换模开始或实际执行时间落在 20:00 之后
+- **THEN** 系统不得执行本次换模
+- **AND** 顺延到下一个允许班次或尝试下一候选
+
+### Requirement: 候选必须先预演后提交
+
+系统 MUST 在真正截断续作结果前，对候选执行完整预演。预演 MUST 校验：
+
+1. 机台、模具和模具状态；
+2. 换模或换活字块时间；
+3. 停机窗口和可生产时间；
+4. 换模次数与换模均衡；
+5. 首检、单控、班产和收尾目标；
+6. 特殊材料能够在指定机台产生正计划量。
+
+预演期间不得修改主上下文。候选级提交前 MUST 保存排程结果、机台状态、计划量账本、胎胚账本、模具占用、首检/换模计数、已排机台集合、未排结果和置换记录等状态。
+
+候选预演或提交失败时，系统 MUST 完整恢复候选前状态并继续下一候选；失败候选不得产生交替计划、换模计数、模具占用或数量变化。
+
+### Requirement: 特殊材料在指定候选机台复用现有排产链
+
+系统 MUST 将候选机台和最早允许切换时点作为临时指定机台指令传入现有排产链。
+
+系统 MUST 先复用现有换活字块判断和排产能力；仅在不满足换活字块条件时，才复用现有正规换模新增排产链。指定机台不可行时 MUST 认定当前候选失败，不得改排到其他机台。
+
+特殊材料排产 MUST 继续遵守现有余量、目标量、班产、收尾、模具数量、模具状态、首检、单控机台、停机计划、换模次数和换模时间等约束。
+
+### Requirement: 续作结果只按实际下机时点局部截断
+
+置换成功时，系统 MUST：
+
+1. 保留下机时点之前原续作 SKU 已完成的全部计划量；
+2. 将下机时点之后的完整班次计划量截断；
+3. 下机时点落在班次内部时，复用现有时间产能和模次数口径保留切换前完整循环产量，只截断班次尾量；
+4. 刷新原续作结果的日计划量、最后生产班次、结束时间和机台占用时间；
+5. 仅当原续作结果已经没有任何保留量时才移除该结果；
+6. 将机台最终收尾或释放时间更新为特殊材料 SKU 的实际结束时间。
+
+系统 MUST NOT 删除被置换机台整个排程窗口的结果，也不得提前清空因换模均衡延后而仍可生产的中间班次。
+
+### Requirement: 被截断续作数量必须完整恢复
+
+原续作恢复量 MUST 严格等于被截断完整班次量与班次尾量之和，保留下机时点之前的数量不得回退。
+
+系统 MUST 将实际截断量同步恢复到：
+
+1. 原续作 SKU 剩余目标量；
+2. 对应月计划和日计划账本；
+3. 胎胚资源账本；
+4. 以“物料编码+产品状态”合并的未排结果。
+
+系统 MUST 保证截断前计划量等于截断后保留量、特殊材料新增量与原续作恢复量之间各自所属账本的守恒，不得丢失被置换 SKU 数量。
+
+### Requirement: 精确记录置换及模具交替计划
+
+置换成功后，系统 MUST 记录：
+
+- 命中类型；
+- 被置换机台；
+- 原续作 SKU；
+- 特殊材料 SKU 及产品状态；
+- 实际下机时间；
+- 实际换模开始时间；
+- 实际换模完成时间。
+
+备注格式 MUST 为：`{命中类型}+置换 {被置换机台编码}`。
 
 示例：
-- `喷砂+置换 K1201，被置换SKU：3302001318`
-- `月计划降模+置换 K1506，被置换SKU：3302001573`
-- `精度计划+置换 K1201，被置换SKU：3302001318`
-- `胎胚库存低+置换 K1201，被置换SKU：3302001318`
 
-**Implementation:**
-- `SubstitutionTypeEnum.buildRemark()`：构建备注文本
-- `LhScheduleContext.substitutionRemarkMap`：存储置换备注
-- `ResultValidationHandler.appendSubstitutionRemark()`：追加备注到交替计划
+- `喷砂+置换 K1201`
+- `月计划降模+置换 K1201`
+- `维保+置换 K1201`
+- `胎胚库存低+置换 K1201`
 
-#### Scenario: 置换备注写入交替计划
+S4.6 生成模具交替计划时，系统 MUST 按机台、接管 SKU、产品状态和实际换模时间精确匹配置换记录。交替计划时间 MUST 使用最终实际时间，不得使用因均衡或停机顺延前的预估时间，也不得按机台向多条交替计划批量追加备注。
 
-- **WHEN** 特殊材料 SKU 置换成功
-- **AND** S4.6 生成模具交替计划
-- **THEN** 对应机台的交替计划备注包含置换类型和被置换机台编码
+### Requirement: 置换失败记录明确未排原因
 
-### Requirement: 置换机台数按加机台规则计算
-
-系统 MUST 按现有加机台规则计算特殊材料 SKU 的应需机台数，需要几台就尝试置换几台。每台置换独立校验并执行换模/换活字块、首检、晚班禁换模、换模次数上限、模具数量、单控机台等约束。
-
-**Implementation:**
-- `SpecialMaterialMachineSubstitutionService.calculateRequiredMachineCount()`：计算需置换机台数
-
-#### Scenario: 需置换2台但仅成功1台
-
-- **WHEN** 按加机台规则需要2台
-- **AND** 最终只有1台满足置换和上机约束
-- **THEN** 系统只置换成功的1台
-- **AND** 剩余1台记录未排原因"特殊材料SKU置换不足：按加机台规则需要 2 台，实际仅成功置换 1 台"
-
-### Requirement: 置换失败输出明确未排原因
-
-系统 MUST 在置换失败时记录明确未排原因：
+系统 MUST 按失败原因保留特殊材料未排结果，包括但不限于：
 
 | 失败场景 | 未排原因 |
-|---------|---------|
-| 无可置换机台 | 特殊材料SKU未匹配到可置换机台 |
-| 置换后仍未能排上 | 特殊材料SKU置换后仍未能排上机台 |
+|---|---|
+| 排程窗口内无正月计划日计划量 | 排程窗口内无月计划日计划量 |
+| 无续作在机候选 | 特殊材料SKU未匹配到可置换机台 |
+| 所有候选均因约束失败 | 特殊材料SKU置换后仍未能排上机台 |
+| 所需 N 台仅成功部分机台 | 记录需要台数和实际成功台数 |
 
-#### Scenario: 无可置换机台
+失败原因不得通过新增无业务依据的兜底机台或绕过约束消除。
 
-- **WHEN** 没有任何候选机台硬匹配特殊材料 SKU
-- **THEN** 特殊材料 SKU 记录未排原因"特殊材料SKU未匹配到可置换机台"
+## 完整性检查场景
 
-### Requirement: 多个特殊材料 SKU 排序规则
+系统的专项测试和回归验证 MUST 覆盖：
 
-系统 MUST 对多个待置换特殊材料 SKU 按以下规则排序：未排数量大的优先 -> 物料编码兜底排序。
-
-#### Scenario: 多个特殊材料 SKU 同时未排
-
-- **WHEN** 多个特殊材料 SKU 同时未排上机台
-- **THEN** 系统按未排数量降序排序后逐个执行置换
+1. 不删除被置换机台整个窗口排产；
+2. 新增排产机台不纳入置换；
+3. 特殊材料不早于月计划首个有量日期生产；
+4. 不固定早班换模，并遵守换模均衡；
+5. 20:00 之后不执行换模；
+6. 换模延后时保留原续作中间班次和班次内可生产量；
+7. 置换失败完整恢复原续作和资源账本；
+8. 被置换 SKU 截断量恢复到余量及未排结果；
+9. 交替计划备注和时间与最终实际换模结果一致；
+10. 第三优先级只读取 `maintenancePlanMap` 中的精度/保养计划，设备停机类型 `05` 不纳入。
 
 ## Implementation Files
 
 | 文件 | 类型 | 说明 |
-|------|------|------|
-| `ScheduleStepEnum.java` | 修改 | 新增 `S4_5_1_SPECIAL_MATERIAL_SUBSTITUTION` 枚举 |
-| `SubstitutionTypeEnum.java` | 新建 | 4级置换类型枚举，含备注构建方法 |
-| `AbsLhScheduleTemplate.java` | 修改 | 新增 `doSpecialMaterialSubstitution()` 抽象方法和调用 |
-| `LhScheduleTemplateImpl.java` | 修改 | 绑定 `SpecialMaterialSubstitutionHandler` |
-| `SpecialMaterialSubstitutionHandler.java` | 新建 | S4.5.1 置换步骤处理器 |
-| `SpecialMaterialMachineSubstitutionService.java` | 新建 | 置换核心服务 |
-| `LhScheduleContext.java` | 修改 | 新增 `substitutionRemarkMap` 字段 |
-| `ResultValidationHandler.java` | 修改 | 新增 `appendSubstitutionRemark()` 追加置换备注到交替计划 |
+|---|---|---|
+| `NewProductionHandler.java` | 修改 | S4.5 写入新增结果前冻结续作在机结果身份 |
+| `LhScheduleContext.java` | 修改 | 保存续作快照、指定机台临时指令和精确置换记录 |
+| `SpecialMaterialMachineSubstitutionService.java` | 修改 | 目标日期、候选排序、预演、局部截断、账本恢复及提交编排 |
+| `SpecialMaterialSubstitutionAttemptSnapshot.java` | 新增 | 保存并恢复候选级排程和资源状态 |
+| `SpecialMaterialSubstitutionRecord.java` | 新增 | 记录实际下机、换模时间及置换双方 SKU |
+| `DailyMachineExpansionPlanner.java` | 修改 | 复用加机台规则测算特殊材料所需台数 |
+| `NewSpecProductionStrategy.java` | 修改 | 支持不回落其他机台的指定机台排产 |
+| `ITypeBlockProductionStrategy.java` | 修改 | 提供特殊材料指定机台换活字块入口 |
+| `TypeBlockProductionStrategy.java` | 修改 | 复用现有换活字块约束和结果提交链 |
+| `SubstitutionTypeEnum.java` | 修改 | 统一四层备注，第三层展示为“维保+置换” |
+| `ResultValidationHandler.java` | 修改 | 按机台、接管 SKU、产品状态和实际时间精确匹配交替计划 |
+
+本规则不新增数据库表、SQL/XML、HTTP 接口、第三方依赖或配置项，最终持久化继续使用现有排程保存事务。

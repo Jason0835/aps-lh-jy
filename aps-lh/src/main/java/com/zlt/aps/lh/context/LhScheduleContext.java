@@ -18,6 +18,7 @@ import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.engine.strategy.support.HistoricalReverseSelectionDirective;
+import com.zlt.aps.lh.engine.strategy.support.SpecialMaterialSubstitutionRecord;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.SkuConstructionRefResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -457,8 +458,28 @@ public class LhScheduleContext {
     private List<LhMouldChangePlan> mouldChangePlanList = new ArrayList<>();
     /** 排程日志列表 */
     private List<LhScheduleProcessLog> scheduleLogList = new ArrayList<>();
-    /** 特殊材料硫化机置换备注Map，key=被置换机台编码，value=置换备注（供S4.6生成模具交替计划时追加备注） */
-    private Map<String, String> substitutionRemarkMap;
+    /**
+     * S4.4 完成后冻结的续作在机结果快照。
+     * <p>使用对象身份保存，只允许 S4.5.1 从这些真实续作结果中选择被置换机台；S4.5 新增排产、
+     * 换活字块及后续生成的结果即使落在同一物理机台，也不得被特殊材料置换链删除或截断。</p>
+     */
+    private Set<LhScheduleResult> specialMaterialContinuationResultSnapshot =
+            Collections.newSetFromMap(new IdentityHashMap<LhScheduleResult, Boolean>());
+    /**
+     * 特殊材料指定机台排产指令中的目标机台。
+     * <p>仅在 S4.5.1 单台置换提交期间临时设置，新增排产主链据此只校验和尝试该机台；
+     * 提交完成或失败后必须立即清空，禁止影响普通 S4.5 新增排产。</p>
+     */
+    private String specialMaterialSpecifiedMachineCode;
+    /** 特殊材料指定机台排产指令中的“物料+产品状态”复合键 */
+    private String specialMaterialSpecifiedSkuKey;
+    /** 特殊材料指定机台排产允许的最早换模时间 */
+    private Date specialMaterialEarliestSwitchTime;
+    /**
+     * 特殊材料置换成功记录。
+     * <p>S4.6 按实际换模结果精确追加备注，不再使用“机台编码 -> 备注”的粗粒度 Map。</p>
+     */
+    private List<SpecialMaterialSubstitutionRecord> specialMaterialSubstitutionRecordList = new ArrayList<>();
     /** 全量SKU排程信息索引Map，key=materialCode_productStatus，供后置阶段精确查找来源SKU */
     private Map<String, SkuScheduleDTO> allSkuScheduleDtoMap = new LinkedHashMap<>();
     /** SKU减量清单索引集合，key=year+SEP+month+SEP+materialCode+SEP+productStatus（归一化）。S4.2批量加载，S4.3归集后统一过滤命中SKU */
@@ -483,6 +504,31 @@ public class LhScheduleContext {
      * <p>仅用于当前排程上下文内的过程日志编号，不参与候选过滤、选机排序和排产结果计算。</p>
      */
     private Map<String, Integer> newSpecMachineSelectionCountMap = new LinkedHashMap<String, Integer>(16);
+
+    /**
+     * 判断当前 SKU 是否命中特殊材料指定机台排产指令。
+     *
+     * @param sku 待排 SKU
+     * @return true-当前 SKU 必须只尝试置换指令中的指定机台；false-走普通新增选机
+     */
+    public boolean isSpecialMaterialSpecifiedSku(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || StringUtils.isEmpty(specialMaterialSpecifiedSkuKey)) {
+            return false;
+        }
+        return StringUtils.equals(specialMaterialSpecifiedSkuKey,
+                MonthPlanDateResolver.buildMaterialStatusKey(sku.getMaterialCode(), sku.getProductStatus()));
+    }
+
+    /**
+     * 清空特殊材料指定机台排产指令。
+     *
+     * <p>该方法只清理 S4.5.1 临时指令，不清理续作结果快照和已成功置换记录。</p>
+     */
+    public void clearSpecialMaterialSpecifiedMachineDirective() {
+        specialMaterialSpecifiedMachineCode = null;
+        specialMaterialSpecifiedSkuKey = null;
+        specialMaterialEarliestSwitchTime = null;
+    }
 
     /**
      * 累加结构计划硫化机台数。

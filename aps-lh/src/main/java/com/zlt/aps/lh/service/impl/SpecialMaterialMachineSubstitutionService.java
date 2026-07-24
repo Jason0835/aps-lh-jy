@@ -1,20 +1,20 @@
 package com.zlt.aps.lh.service.impl;
 
+import cn.hutool.core.bean.BeanUtil;
+import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SpecialMaterialMatchResult;
-import com.zlt.aps.lh.api.domain.entity.LhMouldCleanPlan;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
-import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
+import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SubstitutionTypeEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
-import com.zlt.aps.lh.component.MonthPlanDateResolver;
-import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
@@ -22,12 +22,20 @@ import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
-import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.engine.strategy.ITypeBlockProductionStrategy;
+import com.zlt.aps.lh.engine.strategy.support.DailyMachineExpansionPlanner;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
+import com.zlt.aps.lh.engine.strategy.support.SpecialMaterialSubstitutionRecord;
+import com.zlt.aps.lh.engine.strategy.support.SpecifiedMachineScheduleResult;
 import com.zlt.aps.lh.util.LhMachineHardMatchUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LhSpecialMaterialUtil;
+import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
+import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
@@ -35,38 +43,31 @@ import org.springframework.util.CollectionUtils;
 
 import javax.annotation.Resource;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
- * 特殊材料硫化机置换服务。
+ * 特殊材料 SKU 硫化机置换服务。
  *
- * <p>业务定位：</p>
- * <ul>
- *   <li>在 S4.4 续作、换活字块和 S4.5 新增排产全部完成后执行；</li>
- *   <li>扫描未排结果中仍未排上机台的特殊材料 SKU，触发硫化机置换兜底逻辑；</li>
- *   <li>从已排硫化排程结果中选择候选机台，按4级优先级确定被置换机台；</li>
- *   <li>被置换 SKU 下机后回滚状态，特殊材料 SKU 按现有逻辑重新排产上机；</li>
- *   <li>生成模具交替计划并备注命中的置换类型和被置换机台编码。</li>
- * </ul>
+ * <p>本服务在续作、换活字块和新增排产全部完成后执行。置换只允许使用 S4.5 开始前冻结的
+ * 原始续作在机结果，通过“无副作用预演 -> 局部截断续作尾量 -> 指定机台复用新增主链 ->
+ * 成功后恢复截断数量”的顺序完成，禁止删除机台整个排程窗口，也禁止回落到其他新增机台。</p>
  *
- * <p>4级被置换机台选择优先级（逐层匹配，命中上层则不再比较下层）：</p>
- * <ol>
- *   <li>3天内喷砂清洗计划，喷砂时间越近越优先；</li>
- *   <li>2天内月计划降模需求，降模时间越近越优先；</li>
- *   <li>30天内精度保养计划，精度计划时间越近越优先；</li>
- *   <li>胎胚库存低，库存越低越优先。</li>
- * </ol>
+ * <p>候选优先级：目标日起三天内喷砂、两天内月计划降模、三十天内精度/保养计划、
+ * 胎胚库存低。精度/保养只读取 {@code maintenancePlanMap}，设备停机类型05计划性维修
+ * 不属于本层候选来源。</p>
  *
  * @author APS
  */
@@ -74,27 +75,24 @@ import java.util.stream.Collectors;
 @Service
 public class SpecialMaterialMachineSubstitutionService {
 
-    /** 喷砂清洗置换：排程日期起3天内 */
+    /** 喷砂候选窗口天数，包含目标日 */
     private static final int SAND_BLAST_WITHIN_DAYS = 3;
-    /** 月计划降模置换：2天内 */
+    /** 月计划降模候选窗口天数，包含目标日 */
     private static final int MONTH_PLAN_REDUCE_WITHIN_DAYS = 2;
-    /** 精度计划置换：30天内 */
-    private static final int PRECISION_PLAN_WITHIN_DAYS = 30;
-
-    /** 未排原因：未匹配到可置换机台 */
-    private static final String UNSCHEDULED_REASON_NO_CANDIDATE = "特殊材料SKU未匹配到可置换机台";
-    /** 未排原因：模具不足 */
-    private static final String UNSCHEDULED_REASON_MOULD_INSUFFICIENT = "特殊材料SKU置换失败：模具不足";
-    /** 未排原因：晚班禁止换模 */
-    private static final String UNSCHEDULED_REASON_NIGHT_NO_CHANGE = "特殊材料SKU置换失败：晚班禁止换模";
-    /** 未排原因：换模次数超限 */
-    private static final String UNSCHEDULED_REASON_CHANGE_EXCEEDED = "特殊材料SKU置换失败：换模次数超限";
-    /** 未排原因：单控机台约束不满足 */
-    private static final String UNSCHEDULED_REASON_SINGLE_CONTROL = "特殊材料SKU置换失败：单控机台约束不满足";
-    /** 未排原因：置换后仍未能排上机台 */
-    private static final String UNSCHEDULED_REASON_STILL_UNSCHEDULED = "特殊材料SKU置换后仍未能排上机台";
-    /** 未排原因：被特殊材料SKU置换下机 */
-    private static final String UNSCHEDULED_REASON_REPLACED = "被特殊材料SKU置换下机";
+    /** 精度/保养候选窗口天数，包含目标日 */
+    private static final int MAINTENANCE_PLAN_WITHIN_DAYS = 30;
+    /** 未排原因：窗口内没有正向月计划日计划量 */
+    private static final String UNSCHEDULED_REASON_NO_PLAN_DATE =
+            "特殊材料SKU排程窗口内无月计划日计划量";
+    /** 未排原因：没有可置换的续作在机机台 */
+    private static final String UNSCHEDULED_REASON_NO_CANDIDATE =
+            "特殊材料SKU未匹配到可置换的续作在机机台";
+    /** 未排原因：候选均无法完成实际上机 */
+    private static final String UNSCHEDULED_REASON_STILL_UNSCHEDULED =
+            "特殊材料SKU置换后仍未能排上机台";
+    /** 被置换续作 SKU 未排原因前缀 */
+    private static final String UNSCHEDULED_REASON_REPLACED =
+            "被特殊材料SKU置换提前下机";
 
     @Resource
     private ScheduleStrategyFactory strategyFactory;
@@ -102,16 +100,12 @@ public class SpecialMaterialMachineSubstitutionService {
     @Resource
     private TargetScheduleQtyResolver targetScheduleQtyResolver;
 
+    /** 换活字块指定机台入口，置换时复用现有同胎胚、同模具判断和切换主链 */
+    @Resource
+    private ITypeBlockProductionStrategy typeBlockProductionStrategy;
+
     /**
-     * 执行特殊材料硫化机置换兜底逻辑。
-     *
-     * <p>流程：</p>
-     * <ol>
-     *   <li>识别未排结果中仍未排上机台的特殊材料 SKU；</li>
-     *   <li>排除已在排程结果中排上机台的特殊材料 SKU；</li>
-     *   <li>按优先级排序待置换特殊材料 SKU；</li>
-     *   <li>逐个执行置换。</li>
-     * </ol>
+     * 执行特殊材料硫化机置换。
      *
      * @param context 排程上下文
      */
@@ -119,81 +113,60 @@ public class SpecialMaterialMachineSubstitutionService {
         if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getSpecialMaterialBomList())) {
             return;
         }
-
-        // 识别未排结果中仍未排上机台的特殊材料 SKU
-        List<LhUnscheduledResult> unscheduledSpecialMaterialList = identifyUnscheduledSpecialMaterialSkus(context);
-        if (CollectionUtils.isEmpty(unscheduledSpecialMaterialList)) {
-            log.info("特殊材料硫化机置换：未发现需置换的特殊材料SKU");
+        List<LhUnscheduledResult> pendingList = identifyUnscheduledSpecialMaterialSkus(context);
+        if (CollectionUtils.isEmpty(pendingList)) {
+            log.info("特殊材料硫化机置换跳过，未发现仍有待排量且未匹配机台的特殊材料SKU");
             return;
         }
-
-        // 按优先级排序待置换特殊材料 SKU
-        sortUnscheduledSpecialMaterialList(context, unscheduledSpecialMaterialList);
-        log.info("特殊材料硫化机置换：待置换特殊材料SKU数: {}", unscheduledSpecialMaterialList.size());
-
-        // 逐个执行置换
-        int successCount = 0;
-        for (LhUnscheduledResult unscheduled : unscheduledSpecialMaterialList) {
-            boolean success = substituteOneSku(context, unscheduled);
-            if (success) {
-                successCount++;
+        sortUnscheduledSpecialMaterialList(pendingList);
+        int successSkuCount = 0;
+        for (LhUnscheduledResult unscheduled : pendingList) {
+            if (substituteOneSku(context, unscheduled)) {
+                successSkuCount++;
             }
         }
-        log.info("特殊材料硫化机置换完成, 成功置换: {}, 失败: {}", successCount,
-                unscheduledSpecialMaterialList.size() - successCount);
+        log.info("特殊材料硫化机置换完成, 工厂: {}, 批次: {}, 待置换SKU数: {}, 成功SKU数: {}, 失败SKU数: {}",
+                context.getFactoryCode(), context.getBatchNo(), pendingList.size(),
+                successSkuCount, pendingList.size() - successSkuCount);
     }
 
     /**
-     * 识别未排结果中仍未排上机台的特殊材料 SKU。
-     *
-     * <p>筛选条件：</p>
-     * <ul>
-     *   <li>未排结果中的 SKU 命中特殊材料清单；</li>
-     *   <li>该 SKU 在当前排程结果中未排上任何机台（避免重复置换）；</li>
-     *   <li>该 SKU 仍有需排量（未排数量 > 0）。</li>
-     * </ul>
+     * 识别仍需置换的特殊材料 SKU。
      *
      * @param context 排程上下文
-     * @return 待置换的未排结果列表
+     * @return 待置换未排结果
      */
     private List<LhUnscheduledResult> identifyUnscheduledSpecialMaterialSkus(LhScheduleContext context) {
-        List<LhUnscheduledResult> result = new ArrayList<LhUnscheduledResult>();
-        if (CollectionUtils.isEmpty(context.getUnscheduledResultList())) {
-            return result;
-        }
-
-        // 收集当前已排上机台的物料状态复合键，用于仅排除同一业务SKU。
+        List<LhUnscheduledResult> resultList = new ArrayList<LhUnscheduledResult>(8);
         Set<String> scheduledSkuKeySet = collectScheduledSkuKeys(context);
-
         for (LhUnscheduledResult unscheduled : context.getUnscheduledResultList()) {
-            // 未排数量不大于0的跳过
-            if (Objects.isNull(unscheduled.getUnscheduledQty()) || unscheduled.getUnscheduledQty() <= 0) {
+            if (Objects.isNull(unscheduled) || Objects.isNull(unscheduled.getUnscheduledQty())
+                    || unscheduled.getUnscheduledQty() <= 0) {
                 continue;
             }
-            // 已排上机台的特殊材料SKU不再参与置换
             String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
                     unscheduled.getMaterialCode(), unscheduled.getProductStatus());
-            if (scheduledSkuKeySet.contains(skuKey)) {
+            if (scheduledSkuKeySet.contains(skuKey)
+                    || !isSpecialMaterial(context, unscheduled.getMaterialCode(),
+                    unscheduled.getStructureName())) {
                 continue;
             }
-            // 判断是否命中特殊材料清单
-            if (isSpecialMaterial(context, unscheduled.getMaterialCode(), unscheduled.getStructureName())) {
-                result.add(unscheduled);
-            }
+            resultList.add(unscheduled);
         }
-        return result;
+        return resultList;
     }
 
     /**
-     * 收集当前排程结果中已排上机台的物料编码集合。
+     * 收集已经排上机台的业务 SKU 复合键。
      *
      * @param context 排程上下文
-     * @return 已排物料编码集合
+     * @return 物料和产品状态复合键集合
      */
     private Set<String> collectScheduledSkuKeys(LhScheduleContext context) {
         Set<String> skuKeySet = new HashSet<String>(64);
         for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (StringUtils.isNotEmpty(result.getMaterialCode())) {
+            if (Objects.nonNull(result) && StringUtils.isNotEmpty(result.getMaterialCode())
+                    && ShiftFieldUtil.resolveScheduledQty(result) > 0) {
                 skuKeySet.add(MonthPlanDateResolver.buildMaterialStatusKey(
                         result.getMaterialCode(), result.getProductStatus()));
             }
@@ -207,397 +180,498 @@ public class SpecialMaterialMachineSubstitutionService {
      * @param context 排程上下文
      * @param materialCode 物料编码
      * @param structureName 结构名称
-     * @return true-命中特殊材料清单，false-未命中
+     * @return true-特殊材料；false-普通物料
      */
-    private boolean isSpecialMaterial(LhScheduleContext context, String materialCode, String structureName) {
-        SkuScheduleDTO tempSku = new SkuScheduleDTO();
-        tempSku.setMaterialCode(materialCode);
-        tempSku.setStructureName(structureName);
-        SpecialMaterialMatchResult matchResult = LhSpecialMaterialUtil.resolveMatchResult(context, tempSku);
+    private boolean isSpecialMaterial(LhScheduleContext context,
+                                      String materialCode,
+                                      String structureName) {
+        SkuScheduleDTO probeSku = new SkuScheduleDTO();
+        probeSku.setMaterialCode(materialCode);
+        probeSku.setStructureName(structureName);
+        SpecialMaterialMatchResult matchResult =
+                LhSpecialMaterialUtil.resolveMatchResult(context, probeSku);
         return matchResult.isSpecial();
     }
 
     /**
-     * 按优先级排序待置换特殊材料 SKU。
+     * 按未排数量降序、物料编码和产品状态稳定排序。
      *
-     * <p>排序规则：特殊材料清单优先级 -> 锁交期/锁上机 -> 延误天数 -> 硫化余量大 -> 物料编码。
-     * 当前复用未排结果中的字段进行排序。</p>
-     *
-     * @param context 排程上下文
-     * @param unscheduledList 待置换未排结果列表
+     * @param unscheduledList 待置换未排结果
      */
-    private void sortUnscheduledSpecialMaterialList(LhScheduleContext context,
-                                                     List<LhUnscheduledResult> unscheduledList) {
+    private void sortUnscheduledSpecialMaterialList(List<LhUnscheduledResult> unscheduledList) {
         unscheduledList.sort(Comparator
-                // 未排数量大的优先
                 .comparing(LhUnscheduledResult::getUnscheduledQty,
                         Comparator.nullsLast(Comparator.reverseOrder()))
-                // 物料编码兜底排序
                 .thenComparing(LhUnscheduledResult::getMaterialCode,
+                        Comparator.nullsLast(String::compareTo))
+                .thenComparing(LhUnscheduledResult::getProductStatus,
                         Comparator.nullsLast(String::compareTo)));
     }
 
     /**
-     * 对单个特殊材料 SKU 执行置换。
-     *
-     * <p>流程：</p>
-     * <ol>
-     *   <li>计算需置换机台数；</li>
-     *   <li>查找候选机台并按4级优先级选择；</li>
-     *   <li>逐台执行置换：被置换SKU下机 -> 特殊材料SKU上机 -> 生成模具交替计划备注；</li>
-     *   <li>置换不足或失败时记录未排原因。</li>
-     * </ol>
+     * 对单个特殊材料 SKU 执行多台置换。
      *
      * @param context 排程上下文
-     * @param unscheduled 未排结果
-     * @return true-至少成功置换一台，false-全部失败
+     * @param unscheduled 特殊材料未排结果
+     * @return true-至少成功置换一台；false-全部候选失败
      */
     private boolean substituteOneSku(LhScheduleContext context, LhUnscheduledResult unscheduled) {
-        // 构建 SKU DTO 用于机台匹配和排产
         SkuScheduleDTO sku = resolveSkuScheduleDto(
                 context, unscheduled.getMaterialCode(), unscheduled.getProductStatus());
         if (Objects.isNull(sku)) {
-            log.warn("特殊材料置换：未找到SKU排程信息, materialCode: {}", unscheduled.getMaterialCode());
+            log.warn("特殊材料置换跳过，未找到SKU排程信息, materialCode: {}, productStatus: {}",
+                    unscheduled.getMaterialCode(), unscheduled.getProductStatus());
+            return false;
+        }
+        int remainingTargetQty = targetScheduleQtyResolver.resolveProductionRemainingQty(context, sku);
+        if (remainingTargetQty <= 0) {
+            log.info("特殊材料置换跳过，SKU运行态剩余量已为0, materialCode: {}, productStatus: {}",
+                    sku.getMaterialCode(), sku.getProductStatus());
             return false;
         }
 
-        // 特殊材料SKU必须有余量才触发置换
-        int targetQty = sku.resolveTargetScheduleQty();
-        if (targetQty <= 0) {
-            log.info("特殊材料置换：SKU无余量, 跳过置换, materialCode: {}", unscheduled.getMaterialCode());
+        LocalDate firstPlanDate = resolveFirstPositivePlanDate(context, sku);
+        if (Objects.isNull(firstPlanDate)) {
+            updateUnscheduledReason(unscheduled, UNSCHEDULED_REASON_NO_PLAN_DATE);
+            log.info("特殊材料置换失败，排程窗口内无月计划日计划量, materialCode: {}, productStatus: {}",
+                    sku.getMaterialCode(), sku.getProductStatus());
             return false;
         }
 
-        // 计算需置换机台数
-        int requiredMachineCount = calculateRequiredMachineCount(context, sku);
-        log.info("特殊材料置换开始, materialCode: {}, 目标量: {}, 需置换机台数: {}",
-                unscheduled.getMaterialCode(), targetQty, requiredMachineCount);
+        List<LhScheduleResult> allCandidates =
+                collectContinuationCandidates(context, sku, firstPlanDate, Collections.<String>emptySet());
+        int requiredMachineCount = DailyMachineExpansionPlanner.resolveSpecialMaterialRequiredMachineCount(
+                context, sku, firstPlanDate, remainingTargetQty, allCandidates.size());
+        if (requiredMachineCount <= 0) {
+            updateUnscheduledReason(unscheduled, UNSCHEDULED_REASON_NO_CANDIDATE);
+            return false;
+        }
 
-        int successCount = 0;
+        log.info("特殊材料置换开始, materialCode: {}, productStatus: {}, 首个有量日期: {}, "
+                        + "待排量: {}, 续作候选数: {}, 需置换机台数: {}",
+                sku.getMaterialCode(), sku.getProductStatus(), firstPlanDate,
+                remainingTargetQty, allCandidates.size(), requiredMachineCount);
 
-        for (int i = 0; i < requiredMachineCount; i++) {
-            // 查找候选机台并按4级优先级选择
-            LhScheduleResult targetResult = selectBestCandidateMachine(context, sku);
-            if (Objects.isNull(targetResult)) {
-                log.info("特殊材料置换：无可置换机台, materialCode: {}, 已成功: {}/{}",
-                        unscheduled.getMaterialCode(), successCount, requiredMachineCount);
+        Set<String> attemptedMachineCodeSet = new LinkedHashSet<String>(allCandidates.size());
+        int successMachineCount = 0;
+        while (successMachineCount < requiredMachineCount
+                && targetScheduleQtyResolver.resolveProductionRemainingQty(context, sku) > 0) {
+            LhScheduleResult candidate = selectBestCandidateMachine(
+                    context, sku, firstPlanDate, attemptedMachineCodeSet);
+            if (Objects.isNull(candidate)) {
                 break;
             }
-
-            // 记录被置换信息用于备注
-            String replacedMachineCode = targetResult.getLhMachineCode();
-            String replacedMaterialCode = targetResult.getMaterialCode();
-            SubstitutionTypeEnum substitutionType = resolveSubstitutionType(context, targetResult);
-
-            // 执行置换：被置换SKU下机 -> 特殊材料SKU上机
-            boolean success = executeSubstitution(context, sku, targetResult);
-            if (success) {
-                successCount++;
-                // 每台置换成功后立即记录备注，避免多台置换时只记录最后一台
-                recordSubstitutionInfo(context, unscheduled.getMaterialCode(),
-                        substitutionType, replacedMachineCode, replacedMaterialCode);
-                log.info("特殊材料置换成功, materialCode: {}, 机台: {}, 置换类型: {}, 被置换SKU: {}",
-                        unscheduled.getMaterialCode(), replacedMachineCode,
-                        substitutionType.getDescription(), replacedMaterialCode);
-            } else {
-                log.info("特殊材料置换失败, materialCode: {}, 目标机台: {}, 被置换SKU: {}",
-                        unscheduled.getMaterialCode(), replacedMachineCode, replacedMaterialCode);
+            attemptedMachineCodeSet.add(candidate.getLhMachineCode());
+            SubstitutionTypeEnum substitutionType =
+                    resolveSubstitutionType(context, candidate, firstPlanDate);
+            Date previewChangeStartTime = previewSubstitution(
+                    context, sku, candidate, firstPlanDate);
+            if (Objects.isNull(previewChangeStartTime)) {
+                log.info("特殊材料置换候选预演失败，继续下一候选, materialCode: {}, productStatus: {}, "
+                                + "machineCode: {}, hitType: {}",
+                        sku.getMaterialCode(), sku.getProductStatus(), candidate.getLhMachineCode(),
+                        substitutionType.getDescription());
+                continue;
+            }
+            if (executeSubstitution(context, sku, candidate, firstPlanDate,
+                    previewChangeStartTime, substitutionType)) {
+                successMachineCount++;
             }
         }
 
-        // 处理置换结果
-        if (successCount > 0) {
-            // 检查特殊材料SKU是否真正排上机台
-            if (isSpecialMaterialSkuScheduled(
-                    context, unscheduled.getMaterialCode(), unscheduled.getProductStatus())) {
-                // 置换成功后从未排结果中移除该特殊材料SKU
-                removeUnscheduledResult(context, unscheduled);
-                // 置换不足时记录未排原因
-                if (successCount < requiredMachineCount) {
-                    String reason = String.format("特殊材料SKU置换不足：按加机台规则需要 %d 台，实际仅成功置换 %d 台",
-                            requiredMachineCount, successCount);
-                    addSubstitutionUnscheduledResult(context, sku, reason);
-                }
-                return true;
-            } else {
-                // 置换后仍未能排上机台
-                updateUnscheduledReason(context, unscheduled, UNSCHEDULED_REASON_STILL_UNSCHEDULED);
-                return false;
-            }
-        } else {
-            // 全部置换失败，记录未排原因
-            String reason = resolveSubstitutionFailureReason(context, sku);
-            updateUnscheduledReason(context, unscheduled, reason);
+        int finalRemainingQty = targetScheduleQtyResolver.resolveProductionRemainingQty(context, sku);
+        if (successMachineCount <= 0) {
+            updateUnscheduledReason(unscheduled,
+                    attemptedMachineCodeSet.isEmpty()
+                            ? UNSCHEDULED_REASON_NO_CANDIDATE : UNSCHEDULED_REASON_STILL_UNSCHEDULED);
             return false;
         }
-    }
 
-    /**
-     * 查找并选择最佳候选被置换机台。
-     *
-     * <p>候选机台筛选条件：</p>
-     * <ul>
-     *   <li>来自当前已排硫化排程结果列表；</li>
-     *   <li>被置换SKU不能是特殊材料SKU（避免特殊材料之间互相置换）；</li>
-     *   <li>机台硬匹配特殊材料SKU（英寸范围、模具集合、特殊材料支持）；</li>
-     *   <li>优先非续作SKU机台，再续作SKU机台。</li>
-     * </ul>
-     *
-     * <p>4级优先级选择：3天喷砂清洗 -> 2天月计划降模 -> 30天精度计划 -> 胎胚库存低。</p>
-     *
-     * @param context 排程上下文
-     * @param sku 特殊材料SKU
-     * @return 最佳候选机台的排程结果，无候选返回null
-     */
-    private LhScheduleResult selectBestCandidateMachine(LhScheduleContext context, SkuScheduleDTO sku) {
-        // 收集候选机台，按续作/非续作分组
-        List<LhScheduleResult> nonContinuousCandidates = new ArrayList<LhScheduleResult>();
-        List<LhScheduleResult> continuousCandidates = new ArrayList<LhScheduleResult>();
-
-        for (LhScheduleResult result : context.getScheduleResultList()) {
-            // 结构保留机台在统一释放时间前不得被特殊材料置换链撤销或改排。
-            if (context.isStructureMinMachineRetained(result.getLhMachineCode())) {
-                continue;
-            }
-            // 排除特殊材料SKU的机台
-            if (isSpecialMaterial(context, result.getMaterialCode(), result.getStructureName())) {
-                continue;
-            }
-            // 硬匹配检查
-            MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
-            if (!LhMachineHardMatchUtil.isMachineHardMatched(context, sku, machine)) {
-                continue;
-            }
-            // 模具可用性预检（dry-run）：检查特殊材料SKU在该机台上的模具是否可用，不可用则跳过
-            if (!isMouldAvailable(context, sku, result.getLhMachineCode())) {
-                continue;
-            }
-            // 按续作/非续作分组
-            if (ScheduleTypeEnum.CONTINUOUS.getCode().equals(result.getScheduleType())) {
-                continuousCandidates.add(result);
-            } else {
-                nonContinuousCandidates.add(result);
-            }
+        removeUnscheduledResult(context, unscheduled.getMaterialCode(), unscheduled.getProductStatus());
+        if (finalRemainingQty > 0) {
+            String reason = String.format(
+                    "特殊材料SKU置换不足：按加机台规则需要 %d 台，实际成功置换 %d 台",
+                    requiredMachineCount, successMachineCount);
+            addOrMergeSpecialMaterialUnscheduledResult(context, sku, finalRemainingQty, reason);
         }
-
-        // 优先从非续作候选中选择，找不到再从续作候选中选择
-        LhScheduleResult candidate = selectByPriority(context, nonContinuousCandidates);
-        if (Objects.nonNull(candidate)) {
-            return candidate;
-        }
-        return selectByPriority(context, continuousCandidates);
-    }
-
-    /**
-     * 模具可用性预检（dry-run）。
-     *
-     * <p>通过 MouldResourceContext.tryAllocate 检查特殊材料SKU在目标机台上的模具是否可用，
-     * 预检后立即调用 release 回滚预分配，不影响后续正式分配。</p>
-     *
-     * @param context 排程上下文
-     * @param sku 特殊材料SKU
-     * @param machineCode 目标机台编码
-     * @return true-模具可用，false-模具不可用
-     */
-    private boolean isMouldAvailable(LhScheduleContext context, SkuScheduleDTO sku, String machineCode) {
-        MouldResourceContext mouldResourceContext = context.getMouldResourceContext();
-        if (Objects.isNull(mouldResourceContext)) {
-            return true;
-        }
-        // dry-run：尝试分配模具
-        MouldResourceAllocationResult allocateResult = mouldResourceContext.tryAllocate(
-                sku.getMaterialCode(), machineCode);
-        if (!allocateResult.isAllowed()) {
-            log.info("模具预检不可用, materialCode: {}, machineCode: {}, 原因: {}",
-                    sku.getMaterialCode(), machineCode, allocateResult.getSkipReason());
-            return false;
-        }
-        // 立即释放预分配，保持状态不变
-        mouldResourceContext.release(sku.getMaterialCode(), allocateResult);
+        log.info("特殊材料置换SKU处理完成, materialCode: {}, productStatus: {}, "
+                        + "成功机台数: {}/{}, 最终剩余量: {}",
+                sku.getMaterialCode(), sku.getProductStatus(), successMachineCount,
+                requiredMachineCount, finalRemainingQty);
         return true;
     }
 
     /**
-     * 按4级优先级从候选列表中选择最佳被置换机台。
-     *
-     * <p>优先级（逐层匹配，命中上层则不再比较下层）：</p>
-     * <ol>
-     *   <li>3天内喷砂清洗计划，喷砂时间越近越优先；</li>
-     *   <li>2天内月计划降模需求，降模时间越近越优先；</li>
-     *   <li>30天内精度保养计划，精度计划时间越近越优先；</li>
-     *   <li>胎胚库存低，库存越低越优先。</li>
-     * </ol>
+     * 查找排程窗口内首个有正向月计划日计划量的日期。
      *
      * @param context 排程上下文
-     * @param candidates 候选机台排程结果列表
-     * @return 最佳候选，无候选返回null
+     * @param sku 特殊材料 SKU
+     * @return 首个有量日期；窗口内无量返回null
      */
-    private LhScheduleResult selectByPriority(LhScheduleContext context, List<LhScheduleResult> candidates) {
-        if (CollectionUtils.isEmpty(candidates)) {
+    private LocalDate resolveFirstPositivePlanDate(LhScheduleContext context, SkuScheduleDTO sku) {
+        LocalDate windowStartDate = toLocalDate(context.getScheduleDate());
+        LocalDate windowEndDate = resolveWindowEndDate(context);
+        if (Objects.isNull(windowStartDate) || Objects.isNull(windowEndDate)) {
             return null;
         }
-
-        // 第1级：3天内喷砂清洗计划
-        LhScheduleResult sandBlastCandidate = selectSandBlastCandidate(context, candidates);
-        if (Objects.nonNull(sandBlastCandidate)) {
-            return sandBlastCandidate;
-        }
-
-        // 第2级：2天内月计划降模需求
-        LhScheduleResult monthPlanReduceCandidate = selectMonthPlanReduceCandidate(context, candidates);
-        if (Objects.nonNull(monthPlanReduceCandidate)) {
-            return monthPlanReduceCandidate;
-        }
-
-        // 第3级：30天内精度计划
-        LhScheduleResult precisionPlanCandidate = selectPrecisionPlanCandidate(context, candidates);
-        if (Objects.nonNull(precisionPlanCandidate)) {
-            return precisionPlanCandidate;
-        }
-
-        // 第4级：胎胚库存低
-        return selectLowEmbryoStockCandidate(context, candidates);
-    }
-
-    /**
-     * 选择3天内有喷砂清洗计划的候选机台，喷砂时间越近越优先。
-     *
-     * @param context 排程上下文
-     * @param candidates 候选机台列表
-     * @return 最佳候选，无命中返回null
-     */
-    private LhScheduleResult selectSandBlastCandidate(LhScheduleContext context,
-                                                       List<LhScheduleResult> candidates) {
-        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
-        LocalDate deadline = scheduleDate.plusDays(SAND_BLAST_WITHIN_DAYS);
-
-        LhScheduleResult bestCandidate = null;
-        Date nearestCleanTime = null;
-        for (LhScheduleResult candidate : candidates) {
-            // 查找该机台3天内的喷砂清洗计划
-            Date cleanTime = findSandBlastCleanTime(context, candidate.getLhMachineCode(), scheduleDate, deadline);
-            if (Objects.isNull(cleanTime)) {
-                continue;
+        LocalDate cursorDate = windowStartDate;
+        while (!cursorDate.isAfter(windowEndDate)) {
+            int dayPlanQty = MonthPlanDateResolver.resolveDayQty(
+                    context, sku.getMaterialCode(), sku.getProductStatus(), cursorDate);
+            if (dayPlanQty > 0) {
+                return cursorDate;
             }
-            // 喷砂清洗计划时间越近越优先
-            if (Objects.isNull(nearestCleanTime) || cleanTime.before(nearestCleanTime)) {
-                nearestCleanTime = cleanTime;
-                bestCandidate = candidate;
-            }
-        }
-        return bestCandidate;
-    }
-
-    /**
-     * 查找机台在指定日期范围内的喷砂清洗计划时间。
-     *
-     * @param context 排程上下文
-     * @param machineCode 机台编码
-     * @param startDate 开始日期
-     * @param endDate 结束日期
-     * @return 喷砂清洗时间，无命中返回null
-     */
-    private Date findSandBlastCleanTime(LhScheduleContext context, String machineCode,
-                                        LocalDate startDate, LocalDate endDate) {
-        if (CollectionUtils.isEmpty(context.getCleaningPlanList())) {
-            return null;
-        }
-        for (LhMouldCleanPlan plan : context.getCleaningPlanList()) {
-            // 只匹配喷砂清洗（cleanType=02）
-            if (!CleaningTypeEnum.SAND_BLAST.getCode().equals(plan.getCleanType())) {
-                continue;
-            }
-            if (!StringUtils.equals(machineCode, plan.getLhCode())) {
-                continue;
-            }
-            if (Objects.isNull(plan.getCleanTime())) {
-                continue;
-            }
-            LocalDate cleanDate = toLocalDate(plan.getCleanTime());
-            // 清洗时间在排程日期起3天内
-            if (!cleanDate.isBefore(startDate) && !cleanDate.isAfter(endDate)) {
-                return plan.getCleanTime();
-            }
+            cursorDate = cursorDate.plusDays(1);
         }
         return null;
     }
 
     /**
-     * 选择2天内有月计划降模需求的候选机台，降模时间越近越优先。
-     *
-     * <p>月计划降模判断：该机台SKU的多机台数量超过月计划日计划节奏所需机台数，
-     * 且在未来2天内月计划日计划量可由更少机台覆盖时，该机台可作为降模候选。</p>
+     * 解析排程窗口最后一个业务日。
      *
      * @param context 排程上下文
-     * @param candidates 候选机台列表
-     * @return 最佳候选，无命中返回null
+     * @return 窗口结束日期
      */
-    private LhScheduleResult selectMonthPlanReduceCandidate(LhScheduleContext context,
-                                                             List<LhScheduleResult> candidates) {
-        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
-
-        LhScheduleResult bestCandidate = null;
-        int nearestReduceDay = Integer.MAX_VALUE;
-        for (LhScheduleResult candidate : candidates) {
-            // 判断该机台SKU在未来2天内是否有月计划降模需求
-            int reduceDay = resolveMonthPlanReduceDay(context, candidate, scheduleDate);
-            if (reduceDay < 0 || reduceDay > MONTH_PLAN_REDUCE_WITHIN_DAYS) {
+    private LocalDate resolveWindowEndDate(LhScheduleContext context) {
+        LocalDate windowEndDate = null;
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())) {
                 continue;
             }
-            // 降模时间越近越优先
-            if (reduceDay < nearestReduceDay) {
-                nearestReduceDay = reduceDay;
-                bestCandidate = candidate;
+            LocalDate workDate = toLocalDate(shift.getWorkDate());
+            if (Objects.isNull(windowEndDate) || workDate.isAfter(windowEndDate)) {
+                windowEndDate = workDate;
             }
         }
-        return bestCandidate;
+        if (Objects.nonNull(windowEndDate)) {
+            return windowEndDate;
+        }
+        /*
+         * 正常排程上下文以班次窗口为准；单元预演或初始化早期班次尚未装载时，
+         * 继续使用已解析的窗口结束时间，禁止退化为只扫描 T 日。
+         */
+        return Objects.nonNull(context.getWindowEndDate())
+                ? toLocalDate(context.getWindowEndDate())
+                : toLocalDate(context.getScheduleDate());
     }
 
     /**
-     * 解析机台SKU的月计划降模需求日。
-     *
-     * <p>判断逻辑：统计该SKU当前已排机台数，对比月计划日计划量所需机台数，
-     * 若当前机台数大于所需机台数，则存在降模需求，返回最近降模日（0=当天，1=次日，2=后天）。</p>
+     * 收集允许置换的续作在机结果。
      *
      * @param context 排程上下文
-     * @param result 候选机台排程结果
-     * @param scheduleDate 排程日期
-     * @return 最近降模日（0-based），无降模需求返回-1
+     * @param sku 特殊材料 SKU
+     * @param targetDate 特殊材料首个有量日期
+     * @param excludedMachineCodeSet 已尝试机台集合
+     * @return 通过基础预检的续作候选
      */
-    private int resolveMonthPlanReduceDay(LhScheduleContext context, LhScheduleResult result,
-                                          LocalDate scheduleDate) {
-        String materialCode = result.getMaterialCode();
-        if (StringUtils.isEmpty(materialCode)) {
+    private List<LhScheduleResult> collectContinuationCandidates(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LocalDate targetDate,
+            Set<String> excludedMachineCodeSet) {
+        List<LhScheduleResult> candidateList = new ArrayList<LhScheduleResult>(16);
+        Set<String> collectedMachineCodeSet = new LinkedHashSet<String>(16);
+        for (LhScheduleResult result : context.getSpecialMaterialContinuationResultSnapshot()) {
+            if (!isCurrentContinuationCandidate(
+                    context, sku, result, targetDate, excludedMachineCodeSet)) {
+                continue;
+            }
+            if (collectedMachineCodeSet.add(result.getLhMachineCode())) {
+                candidateList.add(result);
+            }
+        }
+        return candidateList;
+    }
+
+    /**
+     * 校验冻结的续作结果当前是否仍可作为置换候选。
+     *
+     * @param context 排程上下文
+     * @param specialSku 特殊材料 SKU
+     * @param result 冻结的续作结果
+     * @param targetDate 特殊材料首个有量日期
+     * @param excludedMachineCodeSet 已尝试机台
+     * @return true-可进入候选；false-必须跳过
+     */
+    private boolean isCurrentContinuationCandidate(
+            LhScheduleContext context,
+            SkuScheduleDTO specialSku,
+            LhScheduleResult result,
+            LocalDate targetDate,
+            Set<String> excludedMachineCodeSet) {
+        if (Objects.isNull(result)
+                || !context.getScheduleResultList().contains(result)
+                || !ScheduleTypeEnum.CONTINUOUS.getCode().equals(result.getScheduleType())
+                || StringUtils.isEmpty(result.getLhMachineCode())
+                || excludedMachineCodeSet.contains(result.getLhMachineCode())
+                || context.isStructureMinMachineRetained(result.getLhMachineCode())
+                || isSpecialMaterial(context, result.getMaterialCode(), result.getStructureName())
+                || !hasPositivePlanQtyOnDate(context, result, targetDate)
+                || hasNonContinuationResultOnOrAfterTargetDate(context, result.getLhMachineCode(), targetDate)) {
+            return false;
+        }
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
+        return Objects.nonNull(machine)
+                && LhMachineHardMatchUtil.isMachineHardMatched(context, specialSku, machine)
+                && isMouldAvailable(context, specialSku, result.getLhMachineCode());
+    }
+
+    /**
+     * 判断结果在指定业务日是否仍有正计划量。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param targetDate 业务日期
+     * @return true-该日仍在生产；false-该日无量
+     */
+    private boolean hasPositivePlanQtyOnDate(
+            LhScheduleContext context,
+            LhScheduleResult result,
+            LocalDate targetDate) {
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())
+                    || Objects.isNull(shift.getWorkDate())
+                    || !targetDate.equals(toLocalDate(shift.getWorkDate()))) {
+                continue;
+            }
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+            if (Objects.nonNull(planQty) && planQty > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断目标机台从特殊材料目标日起是否已经承接换活字块或新增结果。
+     *
+     * <p>只要存在冻结续作结果之外的正计划量，就跳过整台机台，避免置换影响已经完成的
+     * S4.4 换活字块或 S4.5 新增排产。</p>
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param targetDate 特殊材料首个有量日期
+     * @return true-存在不得影响的后续结果；false-只有原续作结果
+     */
+    private boolean hasNonContinuationResultOnOrAfterTargetDate(
+            LhScheduleContext context,
+            String machineCode,
+            LocalDate targetDate) {
+        for (LhScheduleResult result : context.getScheduleResultList()) {
+            if (!StringUtils.equals(machineCode, result.getLhMachineCode())
+                    || context.getSpecialMaterialContinuationResultSnapshot().contains(result)) {
+                continue;
+            }
+            for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+                if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())
+                        || Objects.isNull(shift.getWorkDate())
+                        || toLocalDate(shift.getWorkDate()).isBefore(targetDate)) {
+                    continue;
+                }
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+                if (Objects.nonNull(planQty) && planQty > 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 无副作用预检特殊材料模具资源。
+     *
+     * @param context 排程上下文
+     * @param sku 特殊材料 SKU
+     * @param machineCode 候选机台
+     * @return true-模具可用；false-模具不足或状态不可用
+     */
+    private boolean isMouldAvailable(LhScheduleContext context,
+                                     SkuScheduleDTO sku,
+                                     String machineCode) {
+        MouldResourceContext mouldResourceContext = context.getMouldResourceContext();
+        if (Objects.isNull(mouldResourceContext)) {
+            return true;
+        }
+        MouldResourceAllocationResult allocationResult =
+                mouldResourceContext.previewAllocate(sku.getMaterialCode(), machineCode);
+        if (allocationResult.isAllowed()) {
+            return true;
+        }
+        log.info("特殊材料置换模具预检失败, materialCode: {}, productStatus: {}, machineCode: {}, reason: {}",
+                sku.getMaterialCode(), sku.getProductStatus(), machineCode,
+                allocationResult.getSkipReason());
+        return false;
+    }
+
+    /**
+     * 按四层优先级选择下一台候选机台。
+     *
+     * @param context 排程上下文
+     * @param sku 特殊材料 SKU
+     * @param targetDate 特殊材料首个有量日期
+     * @param attemptedMachineCodeSet 已尝试机台
+     * @return 最佳候选；没有候选返回null
+     */
+    private LhScheduleResult selectBestCandidateMachine(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LocalDate targetDate,
+            Set<String> attemptedMachineCodeSet) {
+        List<LhScheduleResult> candidates =
+                collectContinuationCandidates(context, sku, targetDate, attemptedMachineCodeSet);
+        if (CollectionUtils.isEmpty(candidates)) {
+            return null;
+        }
+        LhScheduleResult candidate = selectSandBlastCandidate(context, candidates, targetDate);
+        if (Objects.nonNull(candidate)) {
+            return candidate;
+        }
+        candidate = selectMonthPlanReduceCandidate(context, candidates, targetDate);
+        if (Objects.nonNull(candidate)) {
+            return candidate;
+        }
+        candidate = selectMaintenanceCandidate(context, candidates, targetDate);
+        if (Objects.nonNull(candidate)) {
+            return candidate;
+        }
+        return candidates.stream()
+                .min(Comparator
+                        .comparing(LhScheduleResult::getEmbryoStock,
+                                Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(LhScheduleResult::getLhMachineCode,
+                                Comparator.nullsLast(String::compareTo)))
+                .orElse(null);
+    }
+
+    /**
+     * 选择目标日起三天内最早命中喷砂计划的机台。
+     *
+     * @param context 排程上下文
+     * @param candidates 候选结果
+     * @param targetDate 特殊材料首个有量日期
+     * @return 喷砂层最佳候选
+     */
+    private LhScheduleResult selectSandBlastCandidate(
+            LhScheduleContext context,
+            List<LhScheduleResult> candidates,
+            LocalDate targetDate) {
+        Map<LhScheduleResult, Date> hitTimeMap =
+                new IdentityHashMap<LhScheduleResult, Date>(candidates.size());
+        LocalDate deadline = resolveInclusiveDeadline(
+                targetDate, SAND_BLAST_WITHIN_DAYS);
+        for (LhScheduleResult candidate : candidates) {
+            Date hitTime = findSandBlastTime(
+                    context, candidate.getLhMachineCode(), targetDate, deadline);
+            if (Objects.nonNull(hitTime)) {
+                hitTimeMap.put(candidate, hitTime);
+            }
+        }
+        return hitTimeMap.keySet().stream()
+                .min(Comparator.<LhScheduleResult, Date>comparing(hitTimeMap::get)
+                        .thenComparing(LhScheduleResult::getLhMachineCode,
+                                Comparator.nullsLast(String::compareTo)))
+                .orElse(null);
+    }
+
+    /**
+     * 从当前设备停机计划中查找喷砂计划时间。
+     *
+     * @param context 排程上下文
+     * @param machineCode 运行态机台编码
+     * @param startDate 开始日期
+     * @param endDate 结束日期
+     * @return 最近喷砂开始时间；未命中返回null
+     */
+    private Date findSandBlastTime(
+            LhScheduleContext context,
+            String machineCode,
+            LocalDate startDate,
+            LocalDate endDate) {
+        String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode);
+        Date nearestTime = null;
+        for (MdmDevicePlanShut plan : context.getDevicePlanShutList()) {
+            if (Objects.isNull(plan)
+                    || !MachineStopTypeEnum.SANDBLASTING_CLEANING.getCode()
+                    .equals(plan.getMachineStopType())
+                    || Objects.isNull(plan.getBeginDate())
+                    || !StringUtils.equals(physicalMachineCode,
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(plan.getMachineCode()))) {
+                continue;
+            }
+            LocalDate planDate = toLocalDate(plan.getBeginDate());
+            if (planDate.isBefore(startDate) || planDate.isAfter(endDate)) {
+                continue;
+            }
+            if (Objects.isNull(nearestTime) || plan.getBeginDate().before(nearestTime)) {
+                nearestTime = plan.getBeginDate();
+            }
+        }
+        return nearestTime;
+    }
+
+    /**
+     * 选择目标日起两天内最早满足月计划降模的机台。
+     *
+     * @param context 排程上下文
+     * @param candidates 候选结果
+     * @param targetDate 特殊材料首个有量日期
+     * @return 月计划降模层最佳候选
+     */
+    private LhScheduleResult selectMonthPlanReduceCandidate(
+            LhScheduleContext context,
+            List<LhScheduleResult> candidates,
+            LocalDate targetDate) {
+        Map<LhScheduleResult, Integer> reduceDayMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(candidates.size());
+        for (LhScheduleResult candidate : candidates) {
+            int reduceDay = resolveMonthPlanReduceDay(context, candidate, targetDate);
+            if (reduceDay >= 0 && reduceDay < MONTH_PLAN_REDUCE_WITHIN_DAYS) {
+                reduceDayMap.put(candidate, reduceDay);
+            }
+        }
+        return reduceDayMap.keySet().stream()
+                .min(Comparator.<LhScheduleResult, Integer>comparing(reduceDayMap::get)
+                        .thenComparing(LhScheduleResult::getLhMachineCode,
+                                Comparator.nullsLast(String::compareTo)))
+                .orElse(null);
+    }
+
+    /**
+     * 解析候选续作 SKU 最近月计划降模日期偏移。
+     *
+     * @param context 排程上下文
+     * @param result 候选续作结果
+     * @param targetDate 特殊材料首个有量日期
+     * @return 0-目标日，1-次日，2-后日，-1-不满足降模
+     */
+    private int resolveMonthPlanReduceDay(
+            LhScheduleContext context,
+            LhScheduleResult result,
+            LocalDate targetDate) {
+        Set<String> activeMachineCodeSet = new LinkedHashSet<String>(4);
+        for (LhScheduleResult scheduledResult
+                : context.getSpecialMaterialContinuationResultSnapshot()) {
+            if (context.getScheduleResultList().contains(scheduledResult)
+                    && isSameSku(result.getMaterialCode(), result.getProductStatus(), scheduledResult)
+                    && hasPositivePlanQtyOnDate(context, scheduledResult, targetDate)) {
+                activeMachineCodeSet.add(scheduledResult.getLhMachineCode());
+            }
+        }
+        if (activeMachineCodeSet.size() <= 1) {
             return -1;
         }
-
-        // 统计该SKU当前已排机台数
-        long currentMachineCount = context.getScheduleResultList().stream()
-                .filter(r -> StringUtils.equals(materialCode, r.getMaterialCode()))
-                .map(LhScheduleResult::getLhMachineCode)
-                .distinct()
-                .count();
-        if (currentMachineCount <= 1) {
-            // 只有1台机台不降模
-            return -1;
-        }
-
-        // 逐日判断未来2天内月计划日计划量是否可由更少机台覆盖
-        int dailyCapacity = Objects.nonNull(result.getStandardCapacity()) ? result.getStandardCapacity() : 0;
+        int dailyCapacity = Objects.isNull(result.getStandardCapacity())
+                ? 0 : result.getStandardCapacity();
         if (dailyCapacity <= 0) {
             return -1;
         }
         for (int dayOffset = 0; dayOffset <= MONTH_PLAN_REDUCE_WITHIN_DAYS; dayOffset++) {
-            LocalDate bizDate = scheduleDate.plusDays(dayOffset);
+            LocalDate businessDate = targetDate.plusDays(dayOffset);
             int dayPlanQty = MonthPlanDateResolver.resolveDayQty(
-                    context, materialCode, result.getProductStatus(), bizDate);
-            if (dayPlanQty <= 0) {
-                // 无日计划量的日期可降模
-                return dayOffset;
-            }
-            // 所需机台数 = ceil(日计划量 / 日标准产能)
-            int requiredMachineCount = (dayPlanQty + dailyCapacity - 1) / dailyCapacity;
-            if (requiredMachineCount < currentMachineCount) {
+                    context, result.getMaterialCode(), result.getProductStatus(), businessDate);
+            int requiredMachineCount = dayPlanQty <= 0
+                    ? 0 : (dayPlanQty + dailyCapacity - 1) / dailyCapacity;
+            if (requiredMachineCount < activeMachineCodeSet.size()) {
                 return dayOffset;
             }
         }
@@ -605,887 +679,1305 @@ public class SpecialMaterialMachineSubstitutionService {
     }
 
     /**
-     * 选择30天内有精度保养计划的候选机台，精度计划时间越近越优先。
+     * 选择目标日起三十天内最早命中精度/保养计划的机台。
+     *
+     * <p>只读取 {@code maintenancePlanMap}，不读取设备停机计划，因此05计划性维修不会进入本层。</p>
      *
      * @param context 排程上下文
-     * @param candidates 候选机台列表
-     * @return 最佳候选，无命中返回null
+     * @param candidates 候选结果
+     * @param targetDate 特殊材料首个有量日期
+     * @return 精度/保养层最佳候选
      */
-    private LhScheduleResult selectPrecisionPlanCandidate(LhScheduleContext context,
-                                                           List<LhScheduleResult> candidates) {
-        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
-        LocalDate deadline = scheduleDate.plusDays(PRECISION_PLAN_WITHIN_DAYS);
-
-        LhScheduleResult bestCandidate = null;
-        LocalDate nearestPlanDate = null;
+    private LhScheduleResult selectMaintenanceCandidate(
+            LhScheduleContext context,
+            List<LhScheduleResult> candidates,
+            LocalDate targetDate) {
+        Map<LhScheduleResult, LocalDate> planDateMap =
+                new IdentityHashMap<LhScheduleResult, LocalDate>(candidates.size());
+        LocalDate deadline = resolveInclusiveDeadline(
+                targetDate, MAINTENANCE_PLAN_WITHIN_DAYS);
         for (LhScheduleResult candidate : candidates) {
-            LhPrecisionPlan plan = context.getMaintenancePlanMap().get(candidate.getLhMachineCode());
+            LhPrecisionPlan plan = resolveMaintenancePlan(
+                    context, candidate.getLhMachineCode());
             if (Objects.isNull(plan) || Objects.isNull(plan.getPlanDate())) {
                 continue;
             }
             LocalDate planDate = toLocalDate(plan.getPlanDate());
-            // 精度计划在排程日期起30天内
-            if (planDate.isBefore(scheduleDate) || planDate.isAfter(deadline)) {
-                continue;
-            }
-            // 精度计划时间越近越优先
-            if (Objects.isNull(nearestPlanDate) || planDate.isBefore(nearestPlanDate)) {
-                nearestPlanDate = planDate;
-                bestCandidate = candidate;
+            if (!planDate.isBefore(targetDate) && !planDate.isAfter(deadline)) {
+                planDateMap.put(candidate, planDate);
             }
         }
-        return bestCandidate;
-    }
-
-    /**
-     * 选择胎胚库存最低的候选机台。
-     *
-     * <p>排序：胎胚库存低 -> SKU剩余可排量少 -> 机台编码兜底排序。</p>
-     *
-     * @param context 排程上下文
-     * @param candidates 候选机台列表
-     * @return 最佳候选，无候选返回null
-     */
-    private LhScheduleResult selectLowEmbryoStockCandidate(LhScheduleContext context,
-                                                            List<LhScheduleResult> candidates) {
-        if (CollectionUtils.isEmpty(candidates)) {
-            return null;
-        }
-        return candidates.stream()
-                .min(Comparator
-                        // 胎胚库存低的优先
-                        .comparing(this::resolveResultEmbryoStock,
-                                Comparator.nullsLast(Comparator.naturalOrder()))
-                        // SKU剩余可排量少的优先
-                        .thenComparing(this::resolveResultRemainingQty,
-                                Comparator.nullsLast(Comparator.naturalOrder()))
-                        // 机台编码兜底排序
+        return planDateMap.keySet().stream()
+                .min(Comparator.<LhScheduleResult, LocalDate>comparing(planDateMap::get)
                         .thenComparing(LhScheduleResult::getLhMachineCode,
                                 Comparator.nullsLast(String::compareTo)))
                 .orElse(null);
     }
 
     /**
-     * 获取排程结果对应胎胚库存。
-     *
-     * @param result 排程结果
-     * @return 胎胚库存，未知返回null
-     */
-    private Integer resolveResultEmbryoStock(LhScheduleResult result) {
-        return result.getEmbryoStock();
-    }
-
-    /**
-     * 获取排程结果对应SKU剩余可排量。
-     *
-     * @param result 排程结果
-     * @return 剩余可排量，未知返回null
-     */
-    private Integer resolveResultRemainingQty(LhScheduleResult result) {
-        return result.getMouldSurplusQty();
-    }
-
-    /**
-     * 解析被置换机台的置换类型。
+     * 按运行态机台和物理机台解析精度/保养计划。
      *
      * @param context 排程上下文
-     * @param result 被置换机台排程结果
-     * @return 置换类型枚举
+     * @param machineCode 运行态机台编码
+     * @return 精度/保养计划
      */
-    private SubstitutionTypeEnum resolveSubstitutionType(LhScheduleContext context, LhScheduleResult result) {
-        LocalDate scheduleDate = toLocalDate(context.getScheduleDate());
+    private LhPrecisionPlan resolveMaintenancePlan(
+            LhScheduleContext context,
+            String machineCode) {
+        LhPrecisionPlan plan = context.getMaintenancePlanMap().get(machineCode);
+        if (Objects.nonNull(plan)) {
+            return plan;
+        }
+        return context.getMaintenancePlanMap().get(
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode));
+    }
 
-        // 第1级：3天内喷砂清洗
-        Date cleanTime = findSandBlastCleanTime(context, result.getLhMachineCode(),
-                scheduleDate, scheduleDate.plusDays(SAND_BLAST_WITHIN_DAYS));
-        if (Objects.nonNull(cleanTime)) {
+    /**
+     * 解析候选命中的最高置换类型。
+     *
+     * @param context 排程上下文
+     * @param result 候选续作结果
+     * @param targetDate 特殊材料首个有量日期
+     * @return 置换类型
+     */
+    private SubstitutionTypeEnum resolveSubstitutionType(
+            LhScheduleContext context,
+            LhScheduleResult result,
+            LocalDate targetDate) {
+        if (Objects.nonNull(findSandBlastTime(
+                context, result.getLhMachineCode(), targetDate,
+                resolveInclusiveDeadline(targetDate, SAND_BLAST_WITHIN_DAYS)))) {
             return SubstitutionTypeEnum.SAND_BLAST_SUBSTITUTION;
         }
-
-        // 第2级：2天内月计划降模
-        int reduceDay = resolveMonthPlanReduceDay(context, result, scheduleDate);
-        if (reduceDay >= 0 && reduceDay <= MONTH_PLAN_REDUCE_WITHIN_DAYS) {
+        int reduceDay = resolveMonthPlanReduceDay(context, result, targetDate);
+        if (reduceDay >= 0 && reduceDay < MONTH_PLAN_REDUCE_WITHIN_DAYS) {
             return SubstitutionTypeEnum.MONTH_PLAN_REDUCE_SUBSTITUTION;
         }
-
-        // 第3级：30天内精度计划
-        LhPrecisionPlan plan = context.getMaintenancePlanMap().get(result.getLhMachineCode());
+        LhPrecisionPlan plan = resolveMaintenancePlan(context, result.getLhMachineCode());
         if (Objects.nonNull(plan) && Objects.nonNull(plan.getPlanDate())) {
             LocalDate planDate = toLocalDate(plan.getPlanDate());
-            if (!planDate.isBefore(scheduleDate)
-                    && !planDate.isAfter(scheduleDate.plusDays(PRECISION_PLAN_WITHIN_DAYS))) {
+            if (!planDate.isBefore(targetDate)
+                    && !planDate.isAfter(resolveInclusiveDeadline(
+                    targetDate, MAINTENANCE_PLAN_WITHIN_DAYS))) {
                 return SubstitutionTypeEnum.PRECISION_PLAN_SUBSTITUTION;
             }
         }
-
-        // 第4级：胎胚库存低
         return SubstitutionTypeEnum.LOW_EMBRYO_STOCK_SUBSTITUTION;
     }
 
     /**
-     * 执行单台置换：被置换SKU下机 -> 特殊材料SKU上机。
+     * 计算“从目标日起 N 天内”的包含式截止日。
      *
-     * <p>流程：</p>
-     * <ol>
-     *   <li>移除被置换SKU在该机台上的排程结果，回滚机台状态、模具资源、换模计数和首检计数；</li>
-     *   <li>将被置换SKU记录为未排（原因：被特殊材料SKU置换下机）；</li>
-     *   <li>将特殊材料SKU加回新增待排列表；</li>
-     *   <li>重新调用新增排产策略，让特殊材料SKU按现有规则上机。</li>
-     * </ol>
+     * <p>目标日计作第1天，因此3天内为 T～T+2，2天内为 T～T+1。</p>
      *
-     * @param context 排程上下文
-     * @param sku 特殊材料SKU
-     * @param targetResult 被置换机台排程结果
-     * @return true-置换成功，false-置换失败
+     * @param targetDate 目标日期
+     * @param inclusiveDayCount 包含目标日的天数
+     * @return 包含式截止日期
      */
-    private boolean executeSubstitution(LhScheduleContext context, SkuScheduleDTO sku,
-                                        LhScheduleResult targetResult) {
-        String machineCode = targetResult.getLhMachineCode();
-
-        // 记录置换前特殊材料SKU的排程结果数，用于判断本次置换是否真正新增了结果
-        int beforeResultCount = countSkuResults(
-                context, sku.getMaterialCode(), sku.getProductStatus());
-
-        // 0. 置换前快照：保存被置换机台的排程结果、来源SKU映射、机台分配列表和机台状态，用于置换失败时恢复
-        List<LhScheduleResult> snapshotResults = new ArrayList<LhScheduleResult>();
-        Map<LhScheduleResult, SkuScheduleDTO> snapshotSourceSkuMap = new LinkedHashMap<LhScheduleResult, SkuScheduleDTO>();
-        List<LhScheduleResult> snapshotMachineAssignment = new ArrayList<LhScheduleResult>();
-        MachineScheduleDTO snapshotMachine = null;
-        for (LhScheduleResult machineResult : context.getScheduleResultList()) {
-            if (StringUtils.equals(machineCode, machineResult.getLhMachineCode())) {
-                snapshotResults.add(machineResult);
-                SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(machineResult);
-                if (Objects.nonNull(sourceSku)) {
-                    snapshotSourceSkuMap.put(machineResult, sourceSku);
-                }
-            }
-        }
-        List<LhScheduleResult> existingAssignment = context.getMachineAssignmentMap().get(machineCode);
-        if (Objects.nonNull(existingAssignment)) {
-            snapshotMachineAssignment = new ArrayList<LhScheduleResult>(existingAssignment);
-        }
-        MachineScheduleDTO currentMachine = context.getMachineScheduleMap().get(machineCode);
-        if (Objects.nonNull(currentMachine)) {
-            snapshotMachine = new MachineScheduleDTO();
-            snapshotMachine.setMachineCode(currentMachine.getMachineCode());
-            snapshotMachine.setMachineName(currentMachine.getMachineName());
-            snapshotMachine.setCurrentMaterialCode(currentMachine.getCurrentMaterialCode());
-            snapshotMachine.setCurrentMaterialDesc(currentMachine.getCurrentMaterialDesc());
-            snapshotMachine.setPreviousMaterialCode(currentMachine.getPreviousMaterialCode());
-            snapshotMachine.setPreviousMaterialDesc(currentMachine.getPreviousMaterialDesc());
-            snapshotMachine.setPreviousSpecCode(currentMachine.getPreviousSpecCode());
-            snapshotMachine.setPreviousProSize(currentMachine.getPreviousProSize());
-            snapshotMachine.setEstimatedEndTime(currentMachine.getEstimatedEndTime());
-        }
-
-        // 1. 收集被置换机台上所有结果的物料编码，用于下机后逐个记录未排原因
-        Set<String> replacedSkuKeySet = new LinkedHashSet<String>(4);
-        for (LhScheduleResult machineResult : snapshotResults) {
-            if (StringUtils.isNotEmpty(machineResult.getMaterialCode())) {
-                replacedSkuKeySet.add(MonthPlanDateResolver.buildMaterialStatusKey(
-                        machineResult.getMaterialCode(), machineResult.getProductStatus()));
-            }
-        }
-
-        // 2. 移除被置换SKU在该机台上的排程结果，回滚状态
-        removeReplacedSkuFromMachine(context, machineCode);
-
-        // 3. 逐个被置换SKU记录未排原因
-        for (String replacedSkuKey : replacedSkuKeySet) {
-            SkuScheduleDTO replacedSku = context.getAllSkuScheduleDtoMap().get(replacedSkuKey);
-            if (Objects.nonNull(replacedSku)) {
-                String reason = UNSCHEDULED_REASON_REPLACED + "，机台 " + machineCode;
-                addSubstitutionUnscheduledResult(context, replacedSku, reason);
-            }
-        }
-
-        // 4. 将特殊材料SKU加回新增待排列表
-        if (!context.getNewSpecSkuList().contains(sku)) {
-            context.getNewSpecSkuList().add(sku);
-        }
-
-        // 5. 重新调用新增排产策略，让特殊材料SKU按现有规则上机
-        reScheduleSpecialMaterialSku(context);
-
-        // 6. 通过对比置换前后的结果数判断是否真正新增了排产结果
-        int afterResultCount = countSkuResults(
-                context, sku.getMaterialCode(), sku.getProductStatus());
-        boolean scheduled = afterResultCount > beforeResultCount;
-
-        // 7. 从待排列表中移除特殊材料SKU
-        context.getNewSpecSkuList().remove(sku);
-
-        // 8. 置换失败时恢复被置换SKU的排程结果，避免净损失
-        if (!scheduled) {
-            restoreReplacedSkuResults(context, machineCode, snapshotResults, snapshotSourceSkuMap,
-                    snapshotMachineAssignment, snapshotMachine);
-        }
-
-        return scheduled;
+    private LocalDate resolveInclusiveDeadline(
+            LocalDate targetDate,
+            int inclusiveDayCount) {
+        return targetDate.plusDays(Math.max(0, inclusiveDayCount - 1L));
     }
 
     /**
-     * 置换失败时恢复被置换SKU的排程结果和相关状态。
+     * 无副作用预演候选机台的实际换模落点。
      *
-     * <p>恢复范围：</p>
-     * <ul>
-     *   <li>将快照中的排程结果重新加回 scheduleResultList、scheduleResultSourceSkuMap、machineAssignmentMap；</li>
-     *   <li>从快照恢复机台状态（当前物料、前物料等）；</li>
-     *   <li>重新分配模具资源、重新登记已排机台、重新扣减排产剩余量；</li>
-     *   <li>删除被置换SKU的未排记录。</li>
-     * </ul>
+     * @param context 排程上下文
+     * @param sku 特殊材料 SKU
+     * @param candidate 候选续作结果
+     * @param targetDate 特殊材料首个有量日期
+     * @return 预演换模开始时间；候选不可行返回null
+     */
+    private Date previewSubstitution(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LhScheduleResult candidate,
+            LocalDate targetDate) {
+        Date earliestSwitchTime = resolveEarliestShiftStartTime(context, targetDate);
+        if (Objects.isNull(earliestSwitchTime)) {
+            return null;
+        }
+        IMouldChangeBalanceStrategy mouldChangeStrategy =
+                strategyFactory.getMouldChangeBalanceStrategy();
+        Map<String, int[]> simulatedCountMap =
+                copyMouldChangeCountMap(context.getDailyMouldChangeCountMap());
+        MachineScheduleDTO candidateMachine =
+                context.getMachineScheduleMap().get(candidate.getLhMachineCode());
+        int switchDurationHours = resolvePreviewSwitchDurationHours(
+                context, candidateMachine, sku);
+        Date previewChangeStartTime = mouldChangeStrategy.previewEndingStaggerMouldChange(
+                context, candidate.getLhMachineCode(), earliestSwitchTime,
+                switchDurationHours, sku, simulatedCountMap);
+        if (Objects.isNull(previewChangeStartTime)
+                || previewChangeStartTime.before(earliestSwitchTime)
+                || !isWholeChangeExecutionTimeAllowed(
+                context, previewChangeStartTime, switchDurationHours)
+                || !hasPositiveSpecialMaterialCapacityAfterChange(
+                context, sku, candidate.getLhMachineCode(), previewChangeStartTime,
+                switchDurationHours)) {
+            return null;
+        }
+        log.info("特殊材料置换预演成功, materialCode: {}, productStatus: {}, machineCode: {}, "
+                        + "目标日期: {}, 实际预演换模开始: {}, 换模时长小时: {}",
+                sku.getMaterialCode(), sku.getProductStatus(), candidate.getLhMachineCode(),
+                targetDate, LhScheduleTimeUtil.formatDateTime(previewChangeStartTime),
+                switchDurationHours);
+        return previewChangeStartTime;
+    }
+
+    /**
+     * 按现有换活字块关系选择候选预演时长。
+     *
+     * <p>同胎胚、同模具等条件满足时使用换活字块时长，否则使用正规换模时长。
+     * 判断入口只读取运行态，不登记换模次数，也不写入排程结果。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 候选续作机台
+     * @param sku 特殊材料 SKU
+     * @return 本次候选应使用的切换时长，单位小时
+     */
+    private int resolvePreviewSwitchDurationHours(
+            LhScheduleContext context,
+            MachineScheduleDTO machine,
+            SkuScheduleDTO sku) {
+        boolean typeBlockApplicable = Objects.nonNull(machine)
+                && typeBlockProductionStrategy.isSpecialMaterialSubstitutionTypeBlockApplicable(
+                context, machine, sku);
+        return typeBlockApplicable
+                ? LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context)
+                : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+    }
+
+    /**
+     * 校验整个换模或换活字块执行区间均未进入20:00后的禁换模时段。
+     *
+     * <p>现有时间工具负责判断开始时点，本方法额外校验执行结束边界，避免19:00开始、
+     * 21:00结束这类“开始合法但执行过程跨入20:00以后”的置换。</p>
+     *
+     * @param context 排程上下文
+     * @param changeStartTime 实际或预演切换开始时间
+     * @param switchDurationHours 切换时长，单位小时
+     * @return true-整个执行区间合法；false-必须顺延或更换候选
+     */
+    private boolean isWholeChangeExecutionTimeAllowed(
+            LhScheduleContext context,
+            Date changeStartTime,
+            int switchDurationHours) {
+        if (Objects.isNull(changeStartTime)
+                || LhScheduleTimeUtil.isNoMouldChangeTime(context, changeStartTime)) {
+            return false;
+        }
+        LocalDateTime startDateTime = changeStartTime.toInstant()
+                .atZone(ZoneId.systemDefault()).toLocalDateTime();
+        LocalDateTime endDateTime = startDateTime.plusHours(Math.max(0, switchDurationHours));
+        LocalDateTime noChangeBoundary = startDateTime.toLocalDate()
+                .atTime(LhScheduleTimeUtil.getNoMouldChangeStartHour(context), 0);
+        return !endDateTime.isAfter(noChangeBoundary);
+    }
+
+    /**
+     * 解析指定业务日最早班次开始时间。
+     *
+     * @param context 排程上下文
+     * @param targetDate 业务日期
+     * @return 最早班次开始时间
+     */
+    private Date resolveEarliestShiftStartTime(
+            LhScheduleContext context,
+            LocalDate targetDate) {
+        Date earliestTime = null;
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())
+                    || Objects.isNull(shift.getShiftStartDateTime())
+                    || !targetDate.equals(toLocalDate(shift.getWorkDate()))) {
+                continue;
+            }
+            if (Objects.isNull(earliestTime) || shift.getShiftStartDateTime().before(earliestTime)) {
+                earliestTime = shift.getShiftStartDateTime();
+            }
+        }
+        return earliestTime;
+    }
+
+    /**
+     * 校验换模完成后窗口内是否至少能产生一个模次的有效计划量。
+     *
+     * @param context 排程上下文
+     * @param sku 特殊材料 SKU
+     * @param machineCode 候选机台
+     * @param changeStartTime 换模开始时间
+     * @param switchDurationHours 换模时长
+     * @return true-至少存在正产能；false-无法产生有效计划量
+     */
+    private boolean hasPositiveSpecialMaterialCapacityAfterChange(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            String machineCode,
+            Date changeStartTime,
+            int switchDurationHours) {
+        if (sku.getLhTimeSeconds() <= 0) {
+            return false;
+        }
+        Date productionReadyTime = new Date(changeStartTime.getTime()
+                + switchDurationHours * 60L * 60L * 1000L);
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
+        ICapacityCalculateStrategy capacityStrategy = strategyFactory.getCapacityCalculateStrategy();
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftEndDateTime())
+                    || !shift.getShiftEndDateTime().after(productionReadyTime)) {
+                continue;
+            }
+            Date effectiveStartTime = Objects.nonNull(shift.getShiftStartDateTime())
+                    && shift.getShiftStartDateTime().after(productionReadyTime)
+                    ? shift.getShiftStartDateTime() : productionReadyTime;
+            int firstShiftQty = capacityStrategy.calculateFirstShiftQty(
+                    effectiveStartTime, shift.getShiftEndDateTime(),
+                    sku.getLhTimeSeconds(), machineMouldQty);
+            if (firstShiftQty > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 执行单台候选的局部截断和指定机台排产。
+     *
+     * @param context 排程上下文
+     * @param specialSku 特殊材料 SKU
+     * @param candidate 候选续作结果
+     * @param firstPlanDate 特殊材料首个有量日期
+     * @param previewChangeStartTime 预演换模开始时间
+     * @param substitutionType 置换命中类型
+     * @return true-置换成功；false-已完整回滚
+     */
+    private boolean executeSubstitution(
+            LhScheduleContext context,
+            SkuScheduleDTO specialSku,
+            LhScheduleResult candidate,
+            LocalDate firstPlanDate,
+            Date previewChangeStartTime,
+            SubstitutionTypeEnum substitutionType) {
+        String machineCode = candidate.getLhMachineCode();
+        SpecialMaterialSubstitutionAttemptSnapshot attemptSnapshot =
+                SpecialMaterialSubstitutionAttemptSnapshot.capture(context, specialSku);
+        List<LhScheduleResult> continuationResults =
+                resolveContinuationResultsOnMachine(context, machineCode);
+        Map<LhScheduleResult, LhScheduleResult> originalResultStateMap =
+                copyResultStateMap(continuationResults);
+        Map<LhScheduleResult, SkuScheduleDTO> originalSourceSkuMap =
+                resolveSourceSkuMap(context, continuationResults);
+        Map<Integer, Integer> previewRemovedQtyByShift = new LinkedHashMap<Integer, Integer>(8);
+
+        try {
+            // 先按预演落点临时截断续作尾量并释放对应班次产能，供指定机台新增主链做真实校验。
+            truncateContinuationResults(context, continuationResults, originalSourceSkuMap,
+                    previewChangeStartTime, previewRemovedQtyByShift, null, true);
+            MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+            if (Objects.isNull(machine)) {
+                attemptSnapshot.restore(context, specialSku);
+                return false;
+            }
+            machine.setEstimatedEndTime(previewChangeStartTime);
+            machine.setNextMaterialCode(specialSku.getMaterialCode());
+
+            /*
+             * 调用现有新增排产主链时写入临时指定机台和最早换模时点。
+             * NewSpecProductionStrategy 会再次执行定点、单控、模具、首检、停机和实际产能校验，
+             * 但不会回落其他机台。
+             */
+            LhScheduleResult specialResult = scheduleSpecialMaterialOnSpecifiedMachine(
+                    context, specialSku, machineCode, previewChangeStartTime);
+            if (Objects.isNull(specialResult)
+                    || !isActualChangeTimeValid(context, specialResult, firstPlanDate)) {
+                attemptSnapshot.restore(context, specialSku);
+                log.info("特殊材料置换正式排产失败，候选状态已完整恢复, materialCode: {}, "
+                                + "productStatus: {}, machineCode: {}",
+                        specialSku.getMaterialCode(), specialSku.getProductStatus(), machineCode);
+                return false;
+            }
+
+            Date actualChangeStartTime = specialResult.getMouldChangeStartTime();
+            /*
+             * 正式主链可能因同胎胚错峰、首检或停机把换模继续后移。此时必须恢复原续作结果原貌，
+             * 再按最终实际换模时间重算保留量，不能沿用较早的预演截断点。
+             */
+            restoreOriginalContinuationResultStates(
+                    context, originalResultStateMap, originalSourceSkuMap);
+            Map<Integer, Integer> finalRemovedQtyByShift = new LinkedHashMap<Integer, Integer>(8);
+            Map<SkuScheduleDTO, Map<LocalDate, Integer>> removedQtyBySkuDate =
+                    new IdentityHashMap<SkuScheduleDTO, Map<LocalDate, Integer>>(4);
+            Map<SkuScheduleDTO, Integer> removedQtyBySku =
+                    truncateContinuationResults(context, continuationResults, originalSourceSkuMap,
+                            actualChangeStartTime, finalRemovedQtyByShift,
+                            removedQtyBySkuDate, false);
+            adjustReleasedMachineCapacityDelta(
+                    context, machineCode, previewRemovedQtyByShift, finalRemovedQtyByShift);
+            synchronizeContinuationScheduledMachineMaps(
+                    context, originalResultStateMap.values(), continuationResults);
+            restoreTruncatedSkuQtyAndWriteUnscheduled(
+                    context, machineCode, removedQtyBySku, removedQtyBySkuDate);
+
+            recordSubstitutionInfo(context, candidate, specialResult,
+                    substitutionType, actualChangeStartTime);
+            log.info("特殊材料置换成功, materialCode: {}, productStatus: {}, machineCode: {}, "
+                            + "被置换SKU: {}, 命中类型: {}, 实际下机/换模开始: {}, 特殊材料收尾时间: {}",
+                    specialSku.getMaterialCode(), specialSku.getProductStatus(), machineCode,
+                    candidate.getMaterialCode(), substitutionType.getDescription(),
+                    LhScheduleTimeUtil.formatDateTime(actualChangeStartTime),
+                    LhScheduleTimeUtil.formatDateTime(specialResult.getSpecEndTime()));
+            return true;
+        } catch (Exception ex) {
+            attemptSnapshot.restore(context, specialSku);
+            log.error("特殊材料置换候选执行异常，已恢复候选前全部运行态, materialCode: {}, "
+                            + "productStatus: {}, machineCode: {}",
+                    specialSku.getMaterialCode(), specialSku.getProductStatus(), machineCode, ex);
+            return false;
+        } finally {
+            context.clearSpecialMaterialSpecifiedMachineDirective();
+        }
+    }
+
+    /**
+     * 查找指定机台上的冻结续作结果。
      *
      * @param context 排程上下文
      * @param machineCode 机台编码
-     * @param snapshotResults 快照中的排程结果列表
-     * @param snapshotSourceSkuMap 快照中的结果到SKU映射
-     * @param snapshotMachineAssignment 快照中的机台分配列表
-     * @param snapshotMachine 快照中的机台状态
+     * @return 仍存在于当前结果列表的冻结续作结果
      */
-    private void restoreReplacedSkuResults(LhScheduleContext context, String machineCode,
-                                           List<LhScheduleResult> snapshotResults,
-                                           Map<LhScheduleResult, SkuScheduleDTO> snapshotSourceSkuMap,
-                                           List<LhScheduleResult> snapshotMachineAssignment,
-                                           MachineScheduleDTO snapshotMachine) {
-        if (CollectionUtils.isEmpty(snapshotResults)) {
-            return;
-        }
-        log.info("置换失败，开始恢复被置换SKU结果, 机台: {}, 恢复结果数: {}",
-                machineCode, snapshotResults.size());
-
-        // 1. 重新加回排程结果到 scheduleResultList
-        for (LhScheduleResult result : snapshotResults) {
-            if (!context.getScheduleResultList().contains(result)) {
-                context.getScheduleResultList().add(result);
+    private List<LhScheduleResult> resolveContinuationResultsOnMachine(
+            LhScheduleContext context,
+            String machineCode) {
+        List<LhScheduleResult> resultList = new ArrayList<LhScheduleResult>(2);
+        for (LhScheduleResult result : context.getSpecialMaterialContinuationResultSnapshot()) {
+            if (context.getScheduleResultList().contains(result)
+                    && StringUtils.equals(machineCode, result.getLhMachineCode())) {
+                resultList.add(result);
             }
         }
+        return resultList;
+    }
 
-        // 2. 重新加回结果到SKU映射
-        context.getScheduleResultSourceSkuMap().putAll(snapshotSourceSkuMap);
-
-        // 3. 重新加回机台分配映射
-        if (!CollectionUtils.isEmpty(snapshotMachineAssignment)) {
-            context.getMachineAssignmentMap().put(machineCode, new ArrayList<LhScheduleResult>(snapshotMachineAssignment));
+    /**
+     * 深拷贝续作结果字段，供正式换模时间后移时重新计算截断量。
+     *
+     * @param resultList 续作结果
+     * @return 对象身份到字段快照的映射
+     */
+    private Map<LhScheduleResult, LhScheduleResult> copyResultStateMap(
+            List<LhScheduleResult> resultList) {
+        Map<LhScheduleResult, LhScheduleResult> stateMap =
+                new IdentityHashMap<LhScheduleResult, LhScheduleResult>(
+                        Math.max(4, resultList.size() * 2));
+        for (LhScheduleResult result : resultList) {
+            LhScheduleResult copy = new LhScheduleResult();
+            BeanUtil.copyProperties(result, copy);
+            stateMap.put(result, copy);
         }
+        return stateMap;
+    }
 
-        // 4. 从快照恢复机台状态
-        MachineScheduleDTO currentMachine = context.getMachineScheduleMap().get(machineCode);
-        if (Objects.nonNull(currentMachine) && Objects.nonNull(snapshotMachine)) {
-            currentMachine.setCurrentMaterialCode(snapshotMachine.getCurrentMaterialCode());
-            currentMachine.setCurrentMaterialDesc(snapshotMachine.getCurrentMaterialDesc());
-            currentMachine.setPreviousMaterialCode(snapshotMachine.getPreviousMaterialCode());
-            currentMachine.setPreviousMaterialDesc(snapshotMachine.getPreviousMaterialDesc());
-            currentMachine.setPreviousSpecCode(snapshotMachine.getPreviousSpecCode());
-            currentMachine.setPreviousProSize(snapshotMachine.getPreviousProSize());
-            currentMachine.setEstimatedEndTime(snapshotMachine.getEstimatedEndTime());
-        }
-
-        // 5. 重新分配模具资源和重新登记已排机台
-        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
-        IMouldChangeBalanceStrategy mouldChangeStrategy = strategyFactory.getMouldChangeBalanceStrategy();
-        IFirstInspectionBalanceStrategy inspectionStrategy = strategyFactory.getFirstInspectionBalanceStrategy();
-        for (LhScheduleResult result : snapshotResults) {
-            // 重新分配模具资源
-            SkuScheduleDTO sourceSku = snapshotSourceSkuMap.get(result);
+    /**
+     * 解析续作结果对应的来源 SKU。
+     *
+     * @param context 排程上下文
+     * @param resultList 续作结果
+     * @return 结果对象身份到来源 SKU 的映射
+     */
+    private Map<LhScheduleResult, SkuScheduleDTO> resolveSourceSkuMap(
+            LhScheduleContext context,
+            List<LhScheduleResult> resultList) {
+        Map<LhScheduleResult, SkuScheduleDTO> sourceSkuMap =
+                new IdentityHashMap<LhScheduleResult, SkuScheduleDTO>(
+                        Math.max(4, resultList.size() * 2));
+        for (LhScheduleResult result : resultList) {
+            SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
+            if (Objects.isNull(sourceSku)) {
+                sourceSku = resolveSkuScheduleDto(
+                        context, result.getMaterialCode(), result.getProductStatus());
+            }
             if (Objects.nonNull(sourceSku)) {
-                MouldResourceContext mouldResourceContext = context.getMouldResourceContext();
-                if (Objects.nonNull(mouldResourceContext) && StringUtils.isNotEmpty(sourceSku.getMaterialCode())) {
-                    mouldResourceContext.tryAllocate(sourceSku.getMaterialCode(), machineCode);
-                }
-                // 重新扣减排产剩余量
-                int scheduledQty = ShiftFieldUtil.resolveScheduledQty(result);
-                if (scheduledQty > 0) {
-                    targetScheduleQtyResolver.deductProductionRemainingQty(
-                            context, sourceSku, scheduledQty, "置换失败恢复", machineCode);
-                }
-            }
-            // 重新登记已排机台
-            if (Objects.nonNull(shifts) && !shifts.isEmpty()) {
-                recordScheduledMachineForRestoredResult(context, result, shifts);
-            }
-            // 重新增加换模计数和首检计数
-            if ("1".equals(result.getIsChangeMould()) && Objects.nonNull(result.getMouldChangeStartTime())) {
-                mouldChangeStrategy.allocateMouldChange(context, machineCode, result.getMouldChangeStartTime());
-                inspectionStrategy.allocateInspection(context, machineCode, result.getMouldChangeStartTime());
+                sourceSkuMap.put(result, sourceSku);
             }
         }
-
-        // 6. 删除被置换SKU的未排记录
-        removeReplacedUnscheduledResults(context, machineCode);
-
-        log.info("置换失败恢复完成, 机台: {}, 恢复结果数: {}", machineCode, snapshotResults.size());
+        return sourceSkuMap;
     }
 
     /**
-     * 为恢复的排程结果重新登记已排机台。
+     * 截断续作结果在实际下机时点之后的计划量。
      *
      * @param context 排程上下文
-     * @param result 排程结果
-     * @param shifts 排程窗口班次
+     * @param resultList 目标机台续作结果
+     * @param sourceSkuMap 结果来源 SKU
+     * @param offlineTime 实际下机时间
+     * @param removedQtyByShift 各班次被截断数量输出
+     * @param removedQtyBySkuDate 被截断 SKU 按业务日数量；预演阶段可为空
+     * @param releaseMachineCapacity 是否把截断量释放回机台运行态
+     * @return 各来源 SKU 被截断总量
      */
-    private void recordScheduledMachineForRestoredResult(LhScheduleContext context, LhScheduleResult result,
-                                                         List<LhShiftConfigVO> shifts) {
-        if (Objects.isNull(result) || CollectionUtils.isEmpty(shifts)
-                || StringUtils.isEmpty(result.getLhMachineCode())) {
-            return;
+    private Map<SkuScheduleDTO, Integer> truncateContinuationResults(
+            LhScheduleContext context,
+            List<LhScheduleResult> resultList,
+            Map<LhScheduleResult, SkuScheduleDTO> sourceSkuMap,
+            Date offlineTime,
+            Map<Integer, Integer> removedQtyByShift,
+            Map<SkuScheduleDTO, Map<LocalDate, Integer>> removedQtyBySkuDate,
+            boolean releaseMachineCapacity) {
+        Map<SkuScheduleDTO, Integer> removedQtyBySku =
+                new IdentityHashMap<SkuScheduleDTO, Integer>(4);
+        for (LhScheduleResult result : resultList) {
+            SkuScheduleDTO sourceSku = sourceSkuMap.get(result);
+            if (Objects.isNull(sourceSku)) {
+                throw new IllegalStateException("被置换续作结果缺少来源SKU: " + result.getMaterialCode());
+            }
+            int resultRemovedQty = 0;
+            for (int shiftIndex = 1;
+                 shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+                 shiftIndex++) {
+                int originalQty = Math.max(0, Objects.isNull(
+                        ShiftFieldUtil.getShiftPlanQty(result, shiftIndex))
+                        ? 0 : ShiftFieldUtil.getShiftPlanQty(result, shiftIndex));
+                if (originalQty <= 0) {
+                    continue;
+                }
+                int retainedQty = resolveRetainedShiftQty(
+                        result, sourceSku, shiftIndex, originalQty, offlineTime);
+                int removedQty = Math.max(0, originalQty - retainedQty);
+                if (removedQty <= 0) {
+                    continue;
+                }
+                Date originalStartTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+                Date retainedEndTime = resolveRetainedShiftEndTime(
+                        sourceSku, result, originalStartTime, retainedQty);
+                ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, retainedQty,
+                        retainedQty > 0 ? originalStartTime : null,
+                        retainedQty > 0 ? retainedEndTime : null);
+                resultRemovedQty += removedQty;
+                removedQtyByShift.merge(shiftIndex, removedQty, Integer::sum);
+                if (Objects.nonNull(removedQtyBySkuDate)) {
+                    LocalDate productionDate =
+                            resolveShiftBusinessDate(context, shiftIndex);
+                    if (Objects.nonNull(productionDate)) {
+                        removedQtyBySkuDate
+                                .computeIfAbsent(sourceSku,
+                                        key -> new LinkedHashMap<LocalDate, Integer>(4))
+                                .merge(productionDate, removedQty, Integer::sum);
+                    }
+                }
+                if (releaseMachineCapacity) {
+                    releaseMachineShiftCapacity(
+                            context, result.getLhMachineCode(), shiftIndex, removedQty);
+                }
+            }
+            refreshTruncatedContinuationResult(result, resultRemovedQty);
+            if (resultRemovedQty > 0) {
+                removedQtyBySku.merge(sourceSku, resultRemovedQty, Integer::sum);
+            }
         }
-        Set<LocalDate> recordedDateSet = new HashSet<LocalDate>(3);
-        for (LhShiftConfigVO shift : shifts) {
-            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
-                continue;
-            }
-            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
-            if (Objects.isNull(planQty) || planQty <= 0) {
-                continue;
-            }
-            if (Objects.nonNull(shift.getWorkDate())) {
-                recordedDateSet.add(toLocalDate(shift.getWorkDate()));
+        return removedQtyBySku;
+    }
+
+    /**
+     * 解析排程窗口班次所属业务日。
+     *
+     * @param context 排程上下文
+     * @param shiftIndex 班次索引
+     * @return 班次业务日；未命中返回null
+     */
+    private LocalDate resolveShiftBusinessDate(LhScheduleContext context, int shiftIndex) {
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.nonNull(shift) && Objects.nonNull(shift.getShiftIndex())
+                    && shift.getShiftIndex() == shiftIndex
+                    && Objects.nonNull(shift.getWorkDate())) {
+                return toLocalDate(shift.getWorkDate());
             }
         }
-        for (LocalDate businessDate : recordedDateSet) {
-            context.recordScheduledMachine(businessDate, result.getStructureName(),
-                    result.getMaterialCode(), result.getProductStatus(), result.getLhMachineCode());
+        return null;
+    }
+
+    /**
+     * 计算一个班次在下机时点前可保留的计划量。
+     *
+     * @param result 续作结果
+     * @param sourceSku 来源 SKU
+     * @param shiftIndex 班次索引
+     * @param originalQty 原班次计划量
+     * @param offlineTime 实际下机时间
+     * @return 可保留计划量
+     */
+    private int resolveRetainedShiftQty(
+            LhScheduleResult result,
+            SkuScheduleDTO sourceSku,
+            int shiftIndex,
+            int originalQty,
+            Date offlineTime) {
+        Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+        Date shiftEndTime = ShiftFieldUtil.getShiftEndTime(result, shiftIndex);
+        if (Objects.isNull(shiftStartTime) || Objects.isNull(shiftEndTime)) {
+            throw new IllegalStateException("被置换续作班次缺少起止时间: "
+                    + result.getLhMachineCode() + "#" + shiftIndex);
+        }
+        if (!shiftEndTime.after(offlineTime)) {
+            return originalQty;
+        }
+        if (!shiftStartTime.before(offlineTime)) {
+            return 0;
+        }
+        int lhTimeSeconds = sourceSku.getLhTimeSeconds();
+        int mouldQty = resolveResultMouldQty(result, sourceSku);
+        if (lhTimeSeconds <= 0 || mouldQty <= 0) {
+            throw new IllegalStateException("被置换续作SKU缺少硫化时间或模数: "
+                    + sourceSku.getMaterialCode());
+        }
+        long availableSeconds = Math.max(0L,
+                (offlineTime.getTime() - shiftStartTime.getTime()) / 1000L);
+        long completeCureCount = availableSeconds / lhTimeSeconds;
+        long retainedQty = completeCureCount * mouldQty;
+        return (int) Math.min(originalQty, Math.min(Integer.MAX_VALUE, retainedQty));
+    }
+
+    /**
+     * 计算截断后班次实际结束时间。
+     *
+     * @param sourceSku 来源 SKU
+     * @param result 续作结果
+     * @param shiftStartTime 班次开始时间
+     * @param retainedQty 保留计划量
+     * @return 保留量对应的实际结束时间
+     */
+    private Date resolveRetainedShiftEndTime(
+            SkuScheduleDTO sourceSku,
+            LhScheduleResult result,
+            Date shiftStartTime,
+            int retainedQty) {
+        if (retainedQty <= 0 || Objects.isNull(shiftStartTime)) {
+            return null;
+        }
+        int mouldQty = resolveResultMouldQty(result, sourceSku);
+        int cureCount = (retainedQty + mouldQty - 1) / mouldQty;
+        long durationMillis = (long) cureCount * sourceSku.getLhTimeSeconds() * 1000L;
+        return new Date(shiftStartTime.getTime() + durationMillis);
+    }
+
+    /**
+     * 解析续作结果实际模数。
+     *
+     * @param result 续作结果
+     * @param sourceSku 来源 SKU
+     * @return 正模数
+     */
+    private int resolveResultMouldQty(LhScheduleResult result, SkuScheduleDTO sourceSku) {
+        int mouldQty = Objects.isNull(result.getMouldQty()) ? 0 : result.getMouldQty();
+        return mouldQty > 0 ? mouldQty
+                : ShiftCapacityResolverUtil.resolveMachineMouldQty(sourceSku.getMouldQty());
+    }
+
+    /**
+     * 刷新局部截断后的续作结果汇总字段和收尾时间。
+     *
+     * @param result 续作结果
+     * @param removedQty 被截断数量
+     */
+    private void refreshTruncatedContinuationResult(
+            LhScheduleResult result,
+            int removedQty) {
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setTotalDailyPlanQty(result.getDailyPlanQty());
+        ShiftFieldUtil.clearUnplannedShiftCureFormulaFields(result);
+        int lastShiftIndex = ShiftFieldUtil.applyLastPlannedShiftEndMark(result, true);
+        Date lastEndTime = lastShiftIndex > 0
+                ? ShiftFieldUtil.getShiftEndTime(result, lastShiftIndex) : null;
+        result.setSpecEndTime(lastEndTime);
+        if (Objects.nonNull(result.getTdaySpecEndTime())
+                && (Objects.isNull(lastEndTime) || result.getTdaySpecEndTime().after(lastEndTime))) {
+            result.setTdaySpecEndTime(lastEndTime);
+        }
+        if (removedQty > 0) {
+            int originalSurplusQty = Objects.isNull(result.getMouldSurplusQty())
+                    ? 0 : result.getMouldSurplusQty();
+            result.setMouldSurplusQty(originalSurplusQty + removedQty);
         }
     }
 
     /**
-     * 删除指定机台上被置换SKU的未排记录。
+     * 将临时截断量释放回候选机台班次剩余产能。
      *
      * @param context 排程上下文
      * @param machineCode 机台编码
+     * @param shiftIndex 班次索引
+     * @param releasedQty 释放数量
      */
-    private void removeReplacedUnscheduledResults(LhScheduleContext context, String machineCode) {
-        String reasonPrefix = UNSCHEDULED_REASON_REPLACED + "，机台 " + machineCode;
-        context.getUnscheduledResultList().removeIf(u -> StringUtils.isNotEmpty(u.getUnscheduledReason())
-                && u.getUnscheduledReason().startsWith(UNSCHEDULED_REASON_REPLACED)
-                && u.getUnscheduledReason().contains(machineCode));
+    private void releaseMachineShiftCapacity(
+            LhScheduleContext context,
+            String machineCode,
+            int shiftIndex,
+            int releasedQty) {
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        int[] machineCapacity = Objects.isNull(machine)
+                ? null : machine.getShiftRemainingCapacity();
+        int[] contextCapacity = context.getMachineShiftCapacityMap().get(machineCode);
+        if (Objects.nonNull(machineCapacity) && shiftIndex < machineCapacity.length) {
+            machineCapacity[shiftIndex] += releasedQty;
+        }
+        if (Objects.nonNull(contextCapacity) && contextCapacity != machineCapacity
+                && shiftIndex < contextCapacity.length) {
+            contextCapacity[shiftIndex] += releasedQty;
+        }
     }
 
     /**
-     * 统计指定物料编码在当前排程结果列表中的结果数。
+     * 恢复续作原结果字段，准备按正式换模时间重新截断。
      *
      * @param context 排程上下文
-     * @param materialCode 物料编码
-     * @param productStatus 产品状态
-     * @return 结果数
+     * @param originalStateMap 原结果字段快照
+     * @param sourceSkuMap 结果来源 SKU
      */
-    private int countSkuResults(LhScheduleContext context,
-                                String materialCode,
-                                String productStatus) {
-        int count = 0;
+    private void restoreOriginalContinuationResultStates(
+            LhScheduleContext context,
+            Map<LhScheduleResult, LhScheduleResult> originalStateMap,
+            Map<LhScheduleResult, SkuScheduleDTO> sourceSkuMap) {
+        for (Map.Entry<LhScheduleResult, LhScheduleResult> entry : originalStateMap.entrySet()) {
+            BeanUtil.copyProperties(entry.getValue(), entry.getKey());
+            if (!context.getScheduleResultList().contains(entry.getKey())) {
+                context.getScheduleResultList().add(entry.getKey());
+            }
+            SkuScheduleDTO sourceSku = sourceSkuMap.get(entry.getKey());
+            if (Objects.nonNull(sourceSku)) {
+                context.getScheduleResultSourceSkuMap().put(entry.getKey(), sourceSku);
+            }
+            List<LhScheduleResult> assignmentList = context.getMachineAssignmentMap()
+                    .computeIfAbsent(entry.getKey().getLhMachineCode(),
+                            key -> new ArrayList<LhScheduleResult>(2));
+            if (!assignmentList.contains(entry.getKey())) {
+                assignmentList.add(0, entry.getKey());
+            }
+        }
+    }
+
+    /**
+     * 按“正式截断量-预演截断量”修正机台剩余产能。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param previewRemovedQtyByShift 预演截断量
+     * @param finalRemovedQtyByShift 正式截断量
+     */
+    private void adjustReleasedMachineCapacityDelta(
+            LhScheduleContext context,
+            String machineCode,
+            Map<Integer, Integer> previewRemovedQtyByShift,
+            Map<Integer, Integer> finalRemovedQtyByShift) {
+        for (int shiftIndex = 1;
+             shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             shiftIndex++) {
+            int previewQty = previewRemovedQtyByShift.getOrDefault(shiftIndex, 0);
+            int finalQty = finalRemovedQtyByShift.getOrDefault(shiftIndex, 0);
+            int deltaQty = finalQty - previewQty;
+            if (deltaQty == 0) {
+                continue;
+            }
+            adjustMachineShiftCapacity(context, machineCode, shiftIndex, deltaQty);
+        }
+    }
+
+    /**
+     * 调整机台指定班次剩余产能，负数表示正式下机时间后移后收回预释放产能。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     * @param shiftIndex 班次索引
+     * @param deltaQty 产能变化量
+     */
+    private void adjustMachineShiftCapacity(
+            LhScheduleContext context,
+            String machineCode,
+            int shiftIndex,
+            int deltaQty) {
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+        int[] machineCapacity = Objects.isNull(machine)
+                ? null : machine.getShiftRemainingCapacity();
+        int[] contextCapacity = context.getMachineShiftCapacityMap().get(machineCode);
+        if (Objects.nonNull(machineCapacity) && shiftIndex < machineCapacity.length) {
+            machineCapacity[shiftIndex] = Math.max(0, machineCapacity[shiftIndex] + deltaQty);
+        }
+        if (Objects.nonNull(contextCapacity) && contextCapacity != machineCapacity
+                && shiftIndex < contextCapacity.length) {
+            contextCapacity[shiftIndex] = Math.max(0, contextCapacity[shiftIndex] + deltaQty);
+        }
+    }
+
+    /**
+     * 复用新增主链把特殊材料排到唯一指定机台。
+     *
+     * @param context 排程上下文
+     * @param sku 特殊材料 SKU
+     * @param machineCode 指定续作机台
+     * @param earliestSwitchTime 预演确认的最早换模时间
+     * @return 指定机台上的特殊材料结果；失败返回null
+     */
+    private LhScheduleResult scheduleSpecialMaterialOnSpecifiedMachine(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            String machineCode,
+            Date earliestSwitchTime) {
+        List<SkuScheduleDTO> originalPendingSkuList =
+                new ArrayList<SkuScheduleDTO>(context.getNewSpecSkuList());
+        List<SkuScheduleDTO> isolatedSkuList = new ArrayList<SkuScheduleDTO>(1);
+        isolatedSkuList.add(sku);
+        context.setNewSpecSkuList(isolatedSkuList);
+        context.setSpecialMaterialSpecifiedMachineCode(machineCode);
+        context.setSpecialMaterialSpecifiedSkuKey(
+                MonthPlanDateResolver.buildMaterialStatusKey(
+                        sku.getMaterialCode(), sku.getProductStatus()));
+        context.setSpecialMaterialEarliestSwitchTime(earliestSwitchTime);
+        try {
+            MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
+            /*
+             * 置换后的实际交替类型必须先走现有换活字块判断。同胎胚、同模具等条件满足时，
+             * 由换活字块主链完成切换、首检、产能和账本更新；明确不适用时才进入正规换模主链。
+             */
+            SpecifiedMachineScheduleResult typeBlockResult =
+                    typeBlockProductionStrategy.tryScheduleSpecialMaterialSubstitution(
+                            context, machine, sku, earliestSwitchTime);
+            if (typeBlockResult.isApplicable()) {
+                log.info("特殊材料置换按换活字块主链执行, materialCode: {}, productStatus: {}, "
+                                + "machineCode: {}, success: {}, reason: {}",
+                        sku.getMaterialCode(), sku.getProductStatus(), machineCode,
+                        typeBlockResult.isSuccess(), typeBlockResult.getReason());
+                return typeBlockResult.isSuccess()
+                        ? typeBlockResult.getScheduleResult() : null;
+            }
+
+            IProductionStrategy strategy = strategyFactory.getProductionStrategy(
+                    ScheduleTypeEnum.NEW_SPEC.getCode());
+            IMachineMatchStrategy machineMatchStrategy = strategyFactory.getMachineMatchStrategy();
+            IMouldChangeBalanceStrategy mouldChangeStrategy =
+                    strategyFactory.getMouldChangeBalanceStrategy();
+            IFirstInspectionBalanceStrategy inspectionStrategy =
+                    strategyFactory.getFirstInspectionBalanceStrategy();
+            ICapacityCalculateStrategy capacityStrategy =
+                    strategyFactory.getCapacityCalculateStrategy();
+            // 单个特殊材料 SKU 直接进入现有新增主链，避免重新排序影响其他已完成新增结果。
+            strategy.scheduleNewSpecs(context, machineMatchStrategy,
+                    mouldChangeStrategy, inspectionStrategy, capacityStrategy);
+            strategy.allocateShiftPlanQty(context);
+            /*
+             * scheduleNewSpecs 内已经完成班次分配、余量和胎胚账本扣减。这里禁止再次执行
+             * 面向全量新增结果的 adjustEmbryoStock，避免置换阶段回裁或重写 S4.5 已完成结果。
+             */
+            return findScheduledSpecialMaterialResult(
+                    context, sku.getMaterialCode(), sku.getProductStatus(), machineCode);
+        } finally {
+            context.setNewSpecSkuList(originalPendingSkuList);
+            context.clearSpecialMaterialSpecifiedMachineDirective();
+        }
+    }
+
+    /**
+     * 查找特殊材料在指定机台生成的正计划量结果。
+     *
+     * @param context 排程上下文
+     * @param materialCode 特殊材料编码
+     * @param productStatus 产品状态
+     * @param machineCode 指定机台
+     * @return 特殊材料结果
+     */
+    private LhScheduleResult findScheduledSpecialMaterialResult(
+            LhScheduleContext context,
+            String materialCode,
+            String productStatus,
+            String machineCode) {
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (StringUtils.equals(materialCode, result.getMaterialCode())
                     && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
-                    StringUtils.trimToEmpty(result.getProductStatus()))) {
-                count++;
+                    StringUtils.trimToEmpty(result.getProductStatus()))
+                    && StringUtils.equals(machineCode, result.getLhMachineCode())
+                    && ShiftFieldUtil.resolveScheduledQty(result) > 0) {
+                return result;
             }
         }
-        return count;
+        return null;
     }
 
     /**
-     * 移除被置换SKU在指定机台上的全部排程结果，并回滚相关状态。
-     *
-     * <p>回滚范围：</p>
-     * <ul>
-     *   <li>scheduleResultList：移除该机台所有结果；</li>
-     *   <li>scheduleResultSourceSkuMap：移除对应entry；</li>
-     *   <li>machineAssignmentMap：移除该机台entry；</li>
-     *   <li>machineScheduleMap：从initialMachineScheduleMap恢复初始快照；</li>
-     *   <li>dailyMouldChangeCountMap：按换模时间递减早/中班计数；</li>
-     *   <li>dailyFirstInspectionCountMap：按首检时间递减计数；</li>
-     *   <li>mouldResourceContext：释放被置换结果占用的模具号。</li>
-     * </ul>
+     * 校验正式换模时间未早于月计划准入且未落入禁换模时段。
      *
      * @param context 排程上下文
-     * @param machineCode 被置换机台编码
+     * @param specialResult 特殊材料结果
+     * @param firstPlanDate 首个有量日期
+     * @return true-时间合法；false-必须回滚
      */
-    private void removeReplacedSkuFromMachine(LhScheduleContext context, String machineCode) {
-        // 收集该机台的所有排程结果
-        List<LhScheduleResult> machineResults = context.getScheduleResultList().stream()
-                .filter(r -> StringUtils.equals(machineCode, r.getLhMachineCode()))
-                .collect(Collectors.toList());
-        if (CollectionUtils.isEmpty(machineResults)) {
-            return;
-        }
-
-        // 获取换模均衡策略和首检均衡策略用于回滚计数
-        IMouldChangeBalanceStrategy mouldChangeStrategy = strategyFactory.getMouldChangeBalanceStrategy();
-        IFirstInspectionBalanceStrategy inspectionStrategy = strategyFactory.getFirstInspectionBalanceStrategy();
-
-        // 逐个结果回滚状态
-        for (LhScheduleResult result : machineResults) {
-            // 回滚换模计数：按换模开始时间递减对应日期早/中班计数
-            if ("1".equals(result.getIsChangeMould()) && Objects.nonNull(result.getMouldChangeStartTime())) {
-                mouldChangeStrategy.rollbackMouldChange(context, result.getMouldChangeStartTime());
-            }
-            // 回滚首检计数：按换模开始时间递减对应日期早/中班首检计数
-            if ("1".equals(result.getIsChangeMould()) && Objects.nonNull(result.getMouldChangeStartTime())) {
-                inspectionStrategy.rollbackInspection(context, result.getMouldChangeStartTime());
-            }
-            // 释放模具资源
-            releaseMouldResources(context, result);
-            // 移除结果到SKU的映射
-            context.getScheduleResultSourceSkuMap().remove(result);
-        }
-
-        // 从排程结果列表中移除该机台的所有结果
-        context.getScheduleResultList().removeAll(machineResults);
-
-        // 移除机台分配映射
-        context.getMachineAssignmentMap().remove(machineCode);
-
-        // 回滚已排机台统计Map（skuScheduledMachineCodeMap 和 structureScheduledMachineCodeMap）
-        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
-        for (LhScheduleResult result : machineResults) {
-            removeScheduledMachineFromMaps(context, result, shifts);
-        }
-
-        // 回滚被置换SKU的排产剩余量和胎胚库存账本
-        for (LhScheduleResult result : machineResults) {
-            restoreReplacedSkuProductionLedger(context, result);
-        }
-
-        // 恢复机台状态到初始快照
-        restoreMachineState(context, machineCode);
-
-        log.info("被置换SKU下机完成, 机台: {}, 移除结果数: {}, 被置换物料: {}",
-                machineCode, machineResults.size(),
-                machineResults.isEmpty() ? "" : machineResults.get(0).getMaterialCode());
+    private boolean isActualChangeTimeValid(
+            LhScheduleContext context,
+            LhScheduleResult specialResult,
+            LocalDate firstPlanDate) {
+        Date actualChangeStartTime = specialResult.getMouldChangeStartTime();
+        Date earliestTargetTime = resolveEarliestShiftStartTime(context, firstPlanDate);
+        int switchDurationHours = StringUtils.equals(
+                ScheduleTypeEnum.TYPE_BLOCK.getCode(), specialResult.getScheduleType())
+                || StringUtils.equals("1", specialResult.getIsTypeBlock())
+                ? LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context)
+                : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+        return Objects.nonNull(actualChangeStartTime)
+                && Objects.nonNull(earliestTargetTime)
+                && !actualChangeStartTime.before(earliestTargetTime)
+                && isWholeChangeExecutionTimeAllowed(
+                context, actualChangeStartTime, switchDurationHours);
     }
 
     /**
-     * 释放被置换结果占用的模具资源。
+     * 同步局部截断前后的结构/SKU已排机台统计。
      *
      * @param context 排程上下文
-     * @param result 被移除的排程结果
+     * @param originalResultList 截断前续作结果字段快照
+     * @param retainedResultList 截断后续作结果
      */
-    private void releaseMouldResources(LhScheduleContext context, LhScheduleResult result) {
-        MouldResourceContext mouldResourceContext = context.getMouldResourceContext();
-        if (Objects.isNull(mouldResourceContext) || StringUtils.isEmpty(result.getMouldCode())) {
-            return;
+    private void synchronizeContinuationScheduledMachineMaps(
+            LhScheduleContext context,
+            Iterable<LhScheduleResult> originalResultList,
+            List<LhScheduleResult> retainedResultList) {
+        /*
+         * 必须使用字段快照移除截断前全部业务日登记。如果直接使用已经截断的原对象，
+         * 只能移除保留日期，后段被截断日期仍会残留“已排机台”，导致后续加机台数判断失真。
+         */
+        for (LhScheduleResult originalResult : originalResultList) {
+            removeScheduledMachineRegistration(context, originalResult);
         }
-        // 模具号可能是逗号分隔的多个模具号，需全部释放
-        String[] mouldCodeArray = result.getMouldCode().split(",");
-        List<String> mouldCodeList = new ArrayList<String>(mouldCodeArray.length);
-        for (String code : mouldCodeArray) {
-            String trimmedCode = code.trim();
-            if (StringUtils.isNotEmpty(trimmedCode)) {
-                mouldCodeList.add(trimmedCode);
+        for (LhScheduleResult retainedResult : retainedResultList) {
+            if (ShiftFieldUtil.resolveScheduledQty(retainedResult) <= 0) {
+                removeZeroQtyContinuationResult(context, retainedResult);
+                continue;
+            }
+            for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+                if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())
+                        || Objects.isNull(shift.getWorkDate())) {
+                    continue;
+                }
+                Integer planQty = ShiftFieldUtil.getShiftPlanQty(
+                        retainedResult, shift.getShiftIndex());
+                if (Objects.nonNull(planQty) && planQty > 0) {
+                    context.recordScheduledMachine(
+                            toLocalDate(shift.getWorkDate()),
+                            retainedResult.getStructureName(),
+                            retainedResult.getMaterialCode(),
+                            retainedResult.getProductStatus(),
+                            retainedResult.getLhMachineCode());
+                }
             }
         }
-        if (CollectionUtils.isEmpty(mouldCodeList)) {
-            return;
-        }
-        // 构建释放用的分配结果，释放后机台绑定模具会被清除
-        MouldResourceAllocationResult releaseResult = new MouldResourceAllocationResult();
-        releaseResult.setAllowed(true);
-        releaseResult.setMachineCode(result.getLhMachineCode());
-        releaseResult.setAllocatedMouldCodeList(mouldCodeList);
-        mouldResourceContext.release(result.getMaterialCode(), releaseResult);
     }
 
     /**
-     * 从已排机台统计Map中移除指定结果的机台登记。
-     *
-     * <p>遍历排程窗口班次，对有计划量的业务日，
-     * 从 skuScheduledMachineCodeMap 和 structureScheduledMachineCodeMap 中移除该机台编码。</p>
+     * 移除结果原有业务日机台登记。
      *
      * @param context 排程上下文
-     * @param result 被移除的排程结果
-     * @param shifts 排程窗口班次列表
+     * @param result 截断前结果
      */
-    private void removeScheduledMachineFromMaps(LhScheduleContext context, LhScheduleResult result,
-                                                List<LhShiftConfigVO> shifts) {
-        if (Objects.isNull(context) || Objects.isNull(result) || CollectionUtils.isEmpty(shifts)
-                || StringUtils.isEmpty(result.getLhMachineCode())) {
-            return;
-        }
-        // 遍历班次，找出有计划量的业务日
-        Set<LocalDate> recordedDateSet = new HashSet<LocalDate>(3);
-        for (LhShiftConfigVO shift : shifts) {
-            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
+    private void removeScheduledMachineRegistration(
+            LhScheduleContext context,
+            LhScheduleResult result) {
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())
+                    || Objects.isNull(shift.getWorkDate())) {
                 continue;
             }
             Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
             if (Objects.isNull(planQty) || planQty <= 0) {
                 continue;
             }
-            if (Objects.nonNull(shift.getWorkDate())) {
-                recordedDateSet.add(toLocalDate(shift.getWorkDate()));
-            }
-        }
-        // 从各业务日的机台集合中移除该机台
-        for (LocalDate businessDate : recordedDateSet) {
+            LocalDate businessDate = toLocalDate(shift.getWorkDate());
             String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
                     result.getMaterialCode(), result.getProductStatus());
-            removeMachineFromScheduledMap(context.getSkuScheduledMachineCodeMap(),
+            removeMachineCode(context.getSkuScheduledMachineCodeMap(),
                     businessDate, skuKey, result.getLhMachineCode());
-            removeMachineFromScheduledMap(context.getStructureScheduledMachineCodeMap(),
+            removeMachineCode(context.getStructureScheduledMachineCodeMap(),
                     businessDate, result.getStructureName(), result.getLhMachineCode());
         }
     }
 
     /**
-     * 从指定维度的已排机台Map中移除机台编码。
+     * 从指定业务日维度移除机台编码。
      *
-     * @param targetMap 目标Map（skuScheduledMachineCodeMap 或 structureScheduledMachineCodeMap）
+     * @param targetMap 已排机台统计
      * @param businessDate 业务日
-     * @param key 物料编码或结构名称
+     * @param key SKU复合键或结构名称
      * @param machineCode 机台编码
      */
-    private void removeMachineFromScheduledMap(Map<LocalDate, Map<String, Set<String>>> targetMap,
-                                               LocalDate businessDate, String key, String machineCode) {
-        if (Objects.isNull(targetMap) || Objects.isNull(businessDate) || StringUtils.isEmpty(key)) {
+    private void removeMachineCode(
+            Map<LocalDate, Map<String, Set<String>>> targetMap,
+            LocalDate businessDate,
+            String key,
+            String machineCode) {
+        if (Objects.isNull(businessDate) || StringUtils.isEmpty(key)
+                || CollectionUtils.isEmpty(targetMap)) {
             return;
         }
-        Map<String, Set<String>> keyMap = targetMap.get(businessDate);
-        if (Objects.isNull(keyMap)) {
+        Map<String, Set<String>> valueMap = targetMap.get(businessDate);
+        if (CollectionUtils.isEmpty(valueMap)) {
             return;
         }
-        Set<String> machineCodeSet = keyMap.get(key);
-        if (Objects.isNull(machineCodeSet)) {
+        Set<String> machineCodeSet = valueMap.get(key);
+        if (CollectionUtils.isEmpty(machineCodeSet)) {
             return;
         }
         machineCodeSet.remove(machineCode);
         if (machineCodeSet.isEmpty()) {
-            keyMap.remove(key);
+            valueMap.remove(key);
         }
-        if (keyMap.isEmpty()) {
+        if (valueMap.isEmpty()) {
             targetMap.remove(businessDate);
         }
     }
 
     /**
-     * 恢复被置换SKU的排产剩余量和胎胚库存账本。
-     *
-     * <p>复用 TargetScheduleQtyResolver.restoreProductionRemainingQty 一次性回滚
-     * skuProductionRemainingQtyMap 和 embryoStockConsumeLedgerMap。</p>
+     * 删除已被完全截断的续作结果。
      *
      * @param context 排程上下文
-     * @param result 被移除的排程结果
+     * @param result 零计划量续作结果
      */
-    private void restoreReplacedSkuProductionLedger(LhScheduleContext context, LhScheduleResult result) {
-        if (Objects.isNull(result) || StringUtils.isEmpty(result.getMaterialCode())) {
-            return;
-        }
-        SkuScheduleDTO replacedSku = resolveSkuScheduleDto(
-                context, result.getMaterialCode(), result.getProductStatus());
-        if (Objects.isNull(replacedSku)) {
-            return;
-        }
-        // 获取结果的实际排产量（8班次计划量之和）
-        int scheduledQty = ShiftFieldUtil.resolveScheduledQty(result);
-        if (scheduledQty <= 0) {
-            return;
-        }
-        // 复用现有方法恢复排产剩余量和胎胚库存账本
-        targetScheduleQtyResolver.restoreProductionRemainingQty(
-                context, replacedSku, scheduledQty, "特殊材料置换下机回滚",
-                result.getLhMachineCode());
-    }
-
-    /**
-     * 恢复机台状态到初始快照。
-     *
-     * @param context 排程上下文
-     * @param machineCode 机台编码
-     */
-    private void restoreMachineState(LhScheduleContext context, String machineCode) {
-        MachineScheduleDTO initialSnapshot = context.getInitialMachineScheduleMap().get(machineCode);
-        MachineScheduleDTO currentMachine = context.getMachineScheduleMap().get(machineCode);
-        if (Objects.isNull(currentMachine)) {
-            return;
-        }
-        if (Objects.nonNull(initialSnapshot)) {
-            // 从初始快照恢复机台状态
-            currentMachine.setCurrentMaterialCode(initialSnapshot.getCurrentMaterialCode());
-            currentMachine.setCurrentMaterialDesc(initialSnapshot.getCurrentMaterialDesc());
-            currentMachine.setPreviousMaterialCode(initialSnapshot.getPreviousMaterialCode());
-            currentMachine.setPreviousMaterialDesc(initialSnapshot.getPreviousMaterialDesc());
-            currentMachine.setPreviousSpecCode(initialSnapshot.getPreviousSpecCode());
-            currentMachine.setPreviousProSize(initialSnapshot.getPreviousProSize());
-            currentMachine.setEstimatedEndTime(initialSnapshot.getEstimatedEndTime());
-        } else {
-            // 无初始快照时清空当前物料状态
-            currentMachine.setCurrentMaterialCode(null);
-            currentMachine.setCurrentMaterialDesc(null);
-            currentMachine.setPreviousMaterialCode(null);
-            currentMachine.setPreviousMaterialDesc(null);
-            currentMachine.setEstimatedEndTime(null);
-        }
-    }
-
-    /**
-     * 重新调用新增排产策略，让特殊材料SKU按现有规则上机。
-     *
-     * <p>复用 S4.5 的排产策略链：SKU排序 -> 机台匹配 -> 换模均衡 -> 首检均衡 -> 产能计算。
-     * 此时被置换机台已释放，特殊材料SKU应能匹配到该机台。</p>
-     *
-     * @param context 排程上下文
-     */
-    private void reScheduleSpecialMaterialSku(LhScheduleContext context) {
-        IProductionStrategy strategy = strategyFactory.getProductionStrategy(
-                ScheduleTypeEnum.NEW_SPEC.getCode());
-        ISkuPriorityStrategy priorityStrategy = strategyFactory.getSkuPriorityStrategy();
-        IMachineMatchStrategy machineMatchStrategy = strategyFactory.getMachineMatchStrategy();
-        IMouldChangeBalanceStrategy mouldChangeStrategy = strategyFactory.getMouldChangeBalanceStrategy();
-        IFirstInspectionBalanceStrategy inspectionStrategy = strategyFactory.getFirstInspectionBalanceStrategy();
-        ICapacityCalculateStrategy capacityStrategy = strategyFactory.getCapacityCalculateStrategy();
-
-        // SKU优先级排序
-        priorityStrategy.sortByPriority(context);
-        // 执行新增排产（此时待排列表中只有特殊材料SKU）
-        strategy.scheduleNewSpecs(context, machineMatchStrategy,
-                mouldChangeStrategy, inspectionStrategy, capacityStrategy);
-        // 班次计划量分配
-        strategy.allocateShiftPlanQty(context);
-        // 胎胚库存调整
-        strategy.adjustEmbryoStock(context);
-    }
-
-    /**
-     * 计算特殊材料SKU需置换机台数。
-     *
-     * <p>按现有加机台规则简化计算：需置换机台数 = max(1, ceil(目标量 / (日标准产能 * 窗口工作日数)))。</p>
-     *
-     * @param context 排程上下文
-     * @param sku 特殊材料SKU
-     * @return 需置换机台数
-     */
-    private int calculateRequiredMachineCount(LhScheduleContext context, SkuScheduleDTO sku) {
-        int targetQty = sku.resolveTargetScheduleQty();
-        if (targetQty <= 0) {
-            return 0;
-        }
-        int dailyCapacity = sku.getDailyCapacity();
-        if (dailyCapacity <= 0) {
-            return 1;
-        }
-        // 计算窗口工作日数
-        int windowWorkDays = resolveWindowWorkDayCount(context);
-        if (windowWorkDays <= 0) {
-            windowWorkDays = 1;
-        }
-        // 需置换机台数 = ceil(目标量 / (日标准产能 * 窗口工作日数))
-        int totalWindowCapacity = dailyCapacity * windowWorkDays;
-        int requiredCount = (targetQty + totalWindowCapacity - 1) / totalWindowCapacity;
-        return Math.max(1, requiredCount);
-    }
-
-    /**
-     * 计算排程窗口内的工作日数。
-     *
-     * @param context 排程上下文
-     * @return 工作日数
-     */
-    private int resolveWindowWorkDayCount(LhScheduleContext context) {
-        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.getScheduleShifts(context, context.getScheduleDate());
-        if (CollectionUtils.isEmpty(shifts)) {
-            return 1;
-        }
-        // 按工作日期去重统计
-        Set<LocalDate> workDateSet = new HashSet<LocalDate>(8);
-        for (LhShiftConfigVO shift : shifts) {
-            if (Objects.nonNull(shift.getWorkDate())) {
-                workDateSet.add(toLocalDate(shift.getWorkDate()));
+    private void removeZeroQtyContinuationResult(
+            LhScheduleContext context,
+            LhScheduleResult result) {
+        context.getScheduleResultList().remove(result);
+        context.getScheduleResultSourceSkuMap().remove(result);
+        List<LhScheduleResult> assignmentList =
+                context.getMachineAssignmentMap().get(result.getLhMachineCode());
+        if (Objects.nonNull(assignmentList)) {
+            assignmentList.remove(result);
+            if (assignmentList.isEmpty()) {
+                context.getMachineAssignmentMap().remove(result.getLhMachineCode());
             }
         }
-        return Math.max(1, workDateSet.size());
     }
 
     /**
-     * 判断特殊材料SKU是否已在排程结果中排上机台。
+     * 恢复被截断续作数量并写入精确未排结果。
+     *
+     * @param context 排程上下文
+     * @param machineCode 被置换机台
+     * @param removedQtyBySku 各续作 SKU 被截断数量
+     * @param removedQtyBySkuDate 各续作 SKU 按业务日被截断数量
+     */
+    private void restoreTruncatedSkuQtyAndWriteUnscheduled(
+            LhScheduleContext context,
+            String machineCode,
+            Map<SkuScheduleDTO, Integer> removedQtyBySku,
+            Map<SkuScheduleDTO, Map<LocalDate, Integer>> removedQtyBySkuDate) {
+        for (Map.Entry<SkuScheduleDTO, Integer> entry : removedQtyBySku.entrySet()) {
+            SkuScheduleDTO replacedSku = entry.getKey();
+            int removedQty = Math.max(0, entry.getValue());
+            if (removedQty <= 0) {
+                continue;
+            }
+            targetScheduleQtyResolver.restoreProductionRemainingQty(
+                    context, replacedSku, removedQty,
+                    "特殊材料置换局部截断恢复", machineCode);
+            restoreTruncatedDailyQuota(
+                    context, replacedSku, removedQtyBySkuDate.get(replacedSku));
+            addTruncatedSkuUnscheduledResult(
+                    context, replacedSku, machineCode, removedQty);
+        }
+    }
+
+    /**
+     * 将被截断续作量恢复到 dayN 日计划节奏账本。
+     *
+     * <p>续作原排产按“生产日及之前欠量优先、再借用未来日计划”的顺序消费账本。
+     * 尾量截断按生产日期倒序恢复，并在每个生产日内从较晚计划日向前回退，
+     * 同步减少实际量、未来借用量和满班补齐超排量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 被提前下机的续作 SKU
+     * @param removedQtyByDate 按实际生产业务日汇总的截断数量
+     */
+    private void restoreTruncatedDailyQuota(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            Map<LocalDate, Integer> removedQtyByDate) {
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = sku.getDailyPlanQuotaMap();
+        if (CollectionUtils.isEmpty(quotaMap) || CollectionUtils.isEmpty(removedQtyByDate)) {
+            return;
+        }
+        List<Map.Entry<LocalDate, Integer>> removedDateEntryList =
+                new ArrayList<Map.Entry<LocalDate, Integer>>(removedQtyByDate.entrySet());
+        removedDateEntryList.sort(Map.Entry.<LocalDate, Integer>comparingByKey().reversed());
+        for (Map.Entry<LocalDate, Integer> removedDateEntry : removedDateEntryList) {
+            LocalDate productionDate = removedDateEntry.getKey();
+            int pendingRestoreQty = Math.max(0, removedDateEntry.getValue());
+            if (pendingRestoreQty <= 0) {
+                continue;
+            }
+            List<Map.Entry<LocalDate, SkuDailyPlanQuotaDTO>> quotaEntryList =
+                    new ArrayList<Map.Entry<LocalDate, SkuDailyPlanQuotaDTO>>(quotaMap.entrySet());
+            Collections.reverse(quotaEntryList);
+            int restoredQuotaQty = 0;
+            int restoredFutureBorrowQty = 0;
+            for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> quotaEntry : quotaEntryList) {
+                if (restoredQuotaQty >= pendingRestoreQty
+                        || Objects.isNull(quotaEntry.getValue())) {
+                    break;
+                }
+                SkuDailyPlanQuotaDTO quota = quotaEntry.getValue();
+                int restoredQty = Math.min(
+                        Math.max(0, quota.getScheduledQty()),
+                        pendingRestoreQty - restoredQuotaQty);
+                if (restoredQty <= 0) {
+                    continue;
+                }
+                quota.setScheduledQty(quota.getScheduledQty() - restoredQty);
+                quota.setRemainingQty(quota.getRemainingQty() + restoredQty);
+                restoredQuotaQty += restoredQty;
+                if (quotaEntry.getKey().isAfter(productionDate)) {
+                    restoredFutureBorrowQty += restoredQty;
+                }
+            }
+            SkuDailyPlanQuotaDTO productionQuota = quotaMap.get(productionDate);
+            if (Objects.nonNull(productionQuota)) {
+                productionQuota.setActualQty(Math.max(
+                        0, productionQuota.getActualQty() - restoredQuotaQty));
+                productionQuota.setFutureBorrowQty(Math.max(
+                        0, productionQuota.getFutureBorrowQty() - restoredFutureBorrowQty));
+            }
+            int restoredShiftFillOverQty =
+                    Math.max(0, pendingRestoreQty - restoredQuotaQty);
+            restoreShiftFillOverQty(
+                    context, sku, productionQuota, restoredShiftFillOverQty);
+        }
+        SkuDailyPlanQuotaUtil.refreshRollingFields(quotaMap);
+    }
+
+    /**
+     * 回退被截断班次中未消费 dayN 额度的满班补齐超排量。
+     *
+     * @param context 排程上下文
+     * @param sku 被提前下机的续作 SKU
+     * @param productionQuota 实际生产日账本
+     * @param restoredShiftFillOverQty 需要回退的超排数量
+     */
+    private void restoreShiftFillOverQty(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            SkuDailyPlanQuotaDTO productionQuota,
+            int restoredShiftFillOverQty) {
+        if (restoredShiftFillOverQty <= 0) {
+            return;
+        }
+        if (Objects.nonNull(productionQuota)) {
+            productionQuota.setShiftFillOverQty(Math.max(
+                    0, productionQuota.getShiftFillOverQty() - restoredShiftFillOverQty));
+        }
+        sku.setShiftFillOverQty(Math.max(
+                0, sku.getShiftFillOverQty() - restoredShiftFillOverQty));
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                sku.getMaterialCode(), sku.getProductStatus());
+        int accumulatedQty = context.getSkuShiftFillOverQtyMap().getOrDefault(skuKey, 0);
+        context.getSkuShiftFillOverQtyMap().put(
+                skuKey, Math.max(0, accumulatedQty - restoredShiftFillOverQty));
+    }
+
+    /**
+     * 写入被截断续作 SKU 的精确未排数量。
+     *
+     * @param context 排程上下文
+     * @param sku 被截断续作 SKU
+     * @param machineCode 被置换机台
+     * @param removedQty 被截断数量
+     */
+    private void addTruncatedSkuUnscheduledResult(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            String machineCode,
+            int removedQty) {
+        String reason = UNSCHEDULED_REASON_REPLACED + "，机台 " + machineCode;
+        for (LhUnscheduledResult result : context.getUnscheduledResultList()) {
+            if (isSameSku(sku.getMaterialCode(), sku.getProductStatus(), result)
+                    && StringUtils.equals(reason, result.getUnscheduledReason())) {
+                int originalQty = Objects.isNull(result.getUnscheduledQty())
+                        ? 0 : result.getUnscheduledQty();
+                result.setUnscheduledQty(originalQty + removedQty);
+                return;
+            }
+        }
+        LhUnscheduledResult result = buildUnscheduledResult(context, sku, removedQty, reason);
+        context.getUnscheduledResultList().add(result);
+    }
+
+    /**
+     * 记录成功置换的精确结果，供S4.6生成交替计划备注。
+     *
+     * @param context 排程上下文
+     * @param replacedResult 被截断续作结果
+     * @param specialResult 特殊材料结果
+     * @param substitutionType 置换类型
+     * @param actualChangeStartTime 实际换模开始时间
+     */
+    private void recordSubstitutionInfo(
+            LhScheduleContext context,
+            LhScheduleResult replacedResult,
+            LhScheduleResult specialResult,
+            SubstitutionTypeEnum substitutionType,
+            Date actualChangeStartTime) {
+        specialResult.setIsChangeMould("1");
+        SpecialMaterialSubstitutionRecord record = new SpecialMaterialSubstitutionRecord();
+        record.setMachineCode(specialResult.getLhMachineCode());
+        record.setReplacedMaterialCode(replacedResult.getMaterialCode());
+        record.setSpecialMaterialCode(specialResult.getMaterialCode());
+        record.setSpecialProductStatus(specialResult.getProductStatus());
+        record.setSubstitutionType(substitutionType.name());
+        record.setRemark(substitutionType.buildRemark(specialResult.getLhMachineCode()));
+        record.setActualOfflineTime(actualChangeStartTime);
+        record.setActualChangeStartTime(actualChangeStartTime);
+        int switchDurationHours = StringUtils.equals(
+                ScheduleTypeEnum.TYPE_BLOCK.getCode(), specialResult.getScheduleType())
+                || StringUtils.equals("1", specialResult.getIsTypeBlock())
+                ? LhScheduleTimeUtil.getTypeBlockChangeTotalHours(context)
+                : LhScheduleTimeUtil.getMouldChangeTotalHours(context);
+        record.setActualChangeEndTime(new Date(actualChangeStartTime.getTime()
+                + switchDurationHours * 60L * 60L * 1000L));
+        context.getSpecialMaterialSubstitutionRecordList().add(record);
+    }
+
+    /**
+     * 复制真实换模计数供无副作用预演使用。
+     *
+     * @param sourceMap 真实每日换模计数
+     * @return 深拷贝模拟计数
+     */
+    private Map<String, int[]> copyMouldChangeCountMap(Map<String, int[]> sourceMap) {
+        Map<String, int[]> targetMap =
+                new LinkedHashMap<String, int[]>(Math.max(8, sourceMap.size() * 2));
+        for (Map.Entry<String, int[]> entry : sourceMap.entrySet()) {
+            targetMap.put(entry.getKey(), Objects.isNull(entry.getValue())
+                    ? new int[]{0, 0} : entry.getValue().clone());
+        }
+        return targetMap;
+    }
+
+    /**
+     * 按物料和产品状态移除特殊材料原未排结果。
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
      * @param productStatus 产品状态
-     * @return true-已排上机台，false-未排上
      */
-    private boolean isSpecialMaterialSkuScheduled(LhScheduleContext context,
-                                                  String materialCode,
-                                                  String productStatus) {
-        return context.getScheduleResultList().stream()
-                .anyMatch(r -> StringUtils.equals(materialCode, r.getMaterialCode())
-                        && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
-                        StringUtils.trimToEmpty(r.getProductStatus())));
+    private void removeUnscheduledResult(
+            LhScheduleContext context,
+            String materialCode,
+            String productStatus) {
+        context.getUnscheduledResultList().removeIf(result ->
+                isSameSku(materialCode, productStatus, result));
     }
 
     /**
-     * 判断物料是否已排上指定机台。
+     * 写入特殊材料置换后仍剩余的未排数量。
      *
      * @param context 排程上下文
-     * @param materialCode 物料编码
-     * @param machineCode 机台编码
-     * @return true-已排上指定机台，false-未排上
+     * @param sku 特殊材料 SKU
+     * @param remainingQty 剩余待排量
+     * @param reason 未排原因
      */
-    private boolean isMaterialScheduledOnMachine(LhScheduleContext context, String materialCode,
-                                                  String machineCode) {
-        return context.getScheduleResultList().stream()
-                .anyMatch(r -> StringUtils.equals(materialCode, r.getMaterialCode())
-                        && StringUtils.equals(machineCode, r.getLhMachineCode()));
-    }
-
-    /**
-     * 记录置换信息到上下文，供S4.6生成模具交替计划时使用。
-     *
-     * <p>置换信息以机台编码为key存储，S4.6生成模具交替计划时可据此补充备注。</p>
-     *
-     * @param context 排程上下文
-     * @param materialCode 特殊材料SKU物料编码
-     * @param substitutionType 置换类型
-     * @param replacedMachineCode 被置换机台编码
-     * @param replacedMaterialCode 被置换SKU物料编码
-     */
-    private void recordSubstitutionInfo(LhScheduleContext context, String materialCode,
-                                        SubstitutionTypeEnum substitutionType,
-                                        String replacedMachineCode, String replacedMaterialCode) {
-        if (Objects.isNull(substitutionType) || StringUtils.isEmpty(replacedMachineCode)) {
-            return;
-        }
-        // 构建模具交替计划备注
-        String remark = substitutionType.buildRemark(replacedMachineCode, replacedMaterialCode);
-        // 在排程结果中找到特殊材料SKU在该机台上的结果，设置换模标识确保生成交替计划
-        for (LhScheduleResult result : context.getScheduleResultList()) {
-            if (StringUtils.equals(materialCode, result.getMaterialCode())
-                    && StringUtils.equals(replacedMachineCode, result.getLhMachineCode())) {
-                // 确保换模标识为1，S4.6会据此生成模具交替计划
-                result.setIsChangeMould("1");
-                break;
+    private void addOrMergeSpecialMaterialUnscheduledResult(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            int remainingQty,
+            String reason) {
+        for (LhUnscheduledResult result : context.getUnscheduledResultList()) {
+            if (isSameSku(sku.getMaterialCode(), sku.getProductStatus(), result)) {
+                result.setUnscheduledQty(remainingQty);
+                result.setUnscheduledReason(reason);
+                return;
             }
         }
-        // 记录置换备注到上下文，供S4.6生成交替计划时追加备注
-        Map<String, String> substitutionRemarkMap = context.getSubstitutionRemarkMap();
-        if (Objects.isNull(substitutionRemarkMap)) {
-            substitutionRemarkMap = new LinkedHashMap<String, String>(8);
-            context.setSubstitutionRemarkMap(substitutionRemarkMap);
-        }
-        substitutionRemarkMap.put(replacedMachineCode, remark);
-        log.info("特殊材料置换备注已记录, 机台: {}, 备注: {}", replacedMachineCode, remark);
+        context.getUnscheduledResultList().add(
+                buildUnscheduledResult(context, sku, remainingQty, reason));
     }
 
     /**
-     * 解析置换失败原因。
+     * 构建置换相关未排结果。
      *
      * @param context 排程上下文
-     * @param sku 特殊材料SKU
-     * @return 失败原因
+     * @param sku SKU
+     * @param unscheduledQty 未排数量
+     * @param reason 未排原因
+     * @return 未排结果
      */
-    private String resolveSubstitutionFailureReason(LhScheduleContext context, SkuScheduleDTO sku) {
-        // 检查是否有候选机台
-        boolean hasCandidate = context.getScheduleResultList().stream()
-                .anyMatch(r -> !isSpecialMaterial(context, r.getMaterialCode(), r.getStructureName())
-                        && LhMachineHardMatchUtil.isMachineHardMatched(context, sku,
-                                context.getMachineScheduleMap().get(r.getLhMachineCode())));
-        if (!hasCandidate) {
-            return UNSCHEDULED_REASON_NO_CANDIDATE;
-        }
-        // 有候选但置换失败，按约束类型判断
-        // 简化判断：统一返回约束不满足
-        return UNSCHEDULED_REASON_STILL_UNSCHEDULED;
+    private LhUnscheduledResult buildUnscheduledResult(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            int unscheduledQty,
+            String reason) {
+        LhUnscheduledResult result = new LhUnscheduledResult();
+        result.setFactoryCode(context.getFactoryCode());
+        result.setBatchNo(context.getBatchNo());
+        result.setMaterialCode(sku.getMaterialCode());
+        result.setProductStatus(sku.getProductStatus());
+        result.setMaterialDesc(sku.getMaterialDesc());
+        result.setStructureName(sku.getStructureName());
+        result.setSpecCode(sku.getSpecCode());
+        result.setMainMaterialDesc(sku.getMainMaterialDesc());
+        result.setEmbryoCode(sku.getEmbryoCode());
+        result.setMouldQty(sku.getMouldQty());
+        result.setScheduleDate(context.getScheduleTargetDate());
+        result.setUnscheduledQty(unscheduledQty);
+        result.setUnscheduledReason(reason);
+        result.setMonthPlanVersion(sku.getMonthPlanVersion());
+        result.setProductionVersion(sku.getProductionVersion());
+        return result;
     }
 
     /**
-     * 从未排结果中移除指定业务SKU的全部记录。
-     * <p>特殊物料重新调用新增策略时可能生成新的未排记录；置换成功后必须按
-     * “物料+产品状态”统一清理，避免同一状态同时存在已排结果和未排结果。</p>
+     * 更新已有特殊材料未排原因。
      *
-     * @param context 排程上下文
-     * @param unscheduled 待移除的未排结果
-     */
-    private void removeUnscheduledResult(LhScheduleContext context, LhUnscheduledResult unscheduled) {
-        context.getUnscheduledResultList().removeIf(result -> StringUtils.equals(
-                unscheduled.getMaterialCode(), result.getMaterialCode())
-                && StringUtils.equals(StringUtils.trimToEmpty(unscheduled.getProductStatus()),
-                StringUtils.trimToEmpty(result.getProductStatus())));
-    }
-
-    /**
-     * 更新未排结果的未排原因。
-     *
-     * @param context 排程上下文
      * @param unscheduled 未排结果
      * @param reason 未排原因
      */
-    private void updateUnscheduledReason(LhScheduleContext context, LhUnscheduledResult unscheduled,
-                                          String reason) {
+    private void updateUnscheduledReason(
+            LhUnscheduledResult unscheduled,
+            String reason) {
         unscheduled.setUnscheduledReason(reason);
     }
 
     /**
-     * 添加置换相关的未排结果。
-     *
-     * @param context 排程上下文
-     * @param sku SKU排程信息
-     * @param reason 未排原因
-     */
-    private void addSubstitutionUnscheduledResult(LhScheduleContext context, SkuScheduleDTO sku,
-                                                   String reason) {
-        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
-        unscheduled.setFactoryCode(context.getFactoryCode());
-        unscheduled.setBatchNo(context.getBatchNo());
-        unscheduled.setMaterialCode(sku.getMaterialCode());
-        unscheduled.setProductStatus(sku.getProductStatus());
-        unscheduled.setMaterialDesc(sku.getMaterialDesc());
-        unscheduled.setStructureName(sku.getStructureName());
-        unscheduled.setSpecCode(sku.getSpecCode());
-        unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
-        unscheduled.setEmbryoCode(sku.getEmbryoCode());
-        unscheduled.setScheduleDate(context.getScheduleTargetDate());
-        unscheduled.setUnscheduledQty(sku.resolveTargetScheduleQty());
-        unscheduled.setUnscheduledReason(reason);
-        unscheduled.setMonthPlanVersion(sku.getMonthPlanVersion());
-        unscheduled.setProductionVersion(sku.getProductionVersion());
-        context.getUnscheduledResultList().add(unscheduled);
-    }
-
-    /**
-     * 从上下文中查找指定物料编码的SKU排程信息。
+     * 查找物料和产品状态对应的 SKU 运行态。
      *
      * @param context 排程上下文
      * @param materialCode 物料编码
-     * @return SKU排程信息，未找到返回null
+     * @param productStatus 产品状态
+     * @return SKU运行态；未找到返回null
      */
-    private SkuScheduleDTO resolveSkuScheduleDto(LhScheduleContext context,
-                                                 String materialCode,
-                                                 String productStatus) {
+    private SkuScheduleDTO resolveSkuScheduleDto(
+            LhScheduleContext context,
+            String materialCode,
+            String productStatus) {
         if (StringUtils.isEmpty(materialCode)) {
             return null;
         }
-        // 优先从全量SKU索引Map查找（S4.3填充，永不清空，包含被阻塞的SKU）
         String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(materialCode, productStatus);
         SkuScheduleDTO indexedSku = context.getAllSkuScheduleDtoMap().get(skuKey);
         if (Objects.nonNull(indexedSku)) {
             return indexedSku;
         }
-        // 优先从新增待排列表查找
         for (SkuScheduleDTO sku : context.getNewSpecSkuList()) {
             if (isSameSku(materialCode, productStatus, sku)) {
                 return sku;
             }
         }
-        // 从续作列表查找
         for (SkuScheduleDTO sku : context.getContinuousSkuList()) {
             if (isSameSku(materialCode, productStatus, sku)) {
                 return sku;
             }
         }
-        // 从排程结果来源SKU映射中查找
         for (SkuScheduleDTO sku : context.getScheduleResultSourceSkuMap().values()) {
             if (isSameSku(materialCode, productStatus, sku)) {
                 return sku;
             }
         }
-        // 从结构分组兑底查询来源查找（S4.5处理后SKU已从待排列表移除，但仍保留在结构分组中）
-        if (!CollectionUtils.isEmpty(context.getStructureSkuMap())) {
-            for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
-                if (CollectionUtils.isEmpty(skuList)) {
-                    continue;
-                }
-                for (SkuScheduleDTO sku : skuList) {
-                    if (isSameSku(materialCode, productStatus, sku)) {
-                        return sku;
-                    }
+        for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
+            for (SkuScheduleDTO sku : skuList) {
+                if (isSameSku(materialCode, productStatus, sku)) {
+                    return sku;
                 }
             }
         }
@@ -1493,14 +1985,53 @@ public class SpecialMaterialMachineSubstitutionService {
     }
 
     /**
-     * 判断SKU是否与指定物料状态一致。
+     * 判断排程结果是否与指定业务 SKU 一致。
      *
      * @param materialCode 物料编码
      * @param productStatus 产品状态
-     * @param sku 待比较SKU
+     * @param result 排程结果
      * @return true-物料和产品状态均一致
      */
-    private boolean isSameSku(String materialCode, String productStatus, SkuScheduleDTO sku) {
+    private boolean isSameSku(
+            String materialCode,
+            String productStatus,
+            LhScheduleResult result) {
+        return Objects.nonNull(result)
+                && StringUtils.equals(materialCode, result.getMaterialCode())
+                && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
+                StringUtils.trimToEmpty(result.getProductStatus()));
+    }
+
+    /**
+     * 判断未排结果是否与指定业务 SKU 一致。
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param result 未排结果
+     * @return true-物料和产品状态均一致
+     */
+    private boolean isSameSku(
+            String materialCode,
+            String productStatus,
+            LhUnscheduledResult result) {
+        return Objects.nonNull(result)
+                && StringUtils.equals(materialCode, result.getMaterialCode())
+                && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
+                StringUtils.trimToEmpty(result.getProductStatus()));
+    }
+
+    /**
+     * 判断 SKU DTO 是否与指定业务 SKU 一致。
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param sku SKU DTO
+     * @return true-物料和产品状态均一致
+     */
+    private boolean isSameSku(
+            String materialCode,
+            String productStatus,
+            SkuScheduleDTO sku) {
         return Objects.nonNull(sku)
                 && StringUtils.equals(materialCode, sku.getMaterialCode())
                 && StringUtils.equals(StringUtils.trimToEmpty(productStatus),
@@ -1508,15 +2039,13 @@ public class SpecialMaterialMachineSubstitutionService {
     }
 
     /**
-     * 将Date转换为LocalDate。
+     * 将 Date 转换为系统时区 LocalDate。
      *
      * @param date 日期
-     * @return LocalDate
+     * @return LocalDate；date为空返回null
      */
     private LocalDate toLocalDate(Date date) {
-        if (Objects.isNull(date)) {
-            return null;
-        }
-        return date.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+        return Objects.isNull(date) ? null
+                : date.toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
     }
 }

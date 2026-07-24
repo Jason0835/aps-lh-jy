@@ -27,6 +27,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.observer.ScheduleEvent;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
+import com.zlt.aps.lh.engine.strategy.support.SpecialMaterialSubstitutionRecord;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
@@ -1256,13 +1257,16 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
             // 判断交替类型：普通换模、换活字块、干冰清洗、喷砂清洗在这里统一落数据字典值。
             plan.setChangeMouldType(changeMouldType);
+            /*
+             * 特殊材料置换备注必须在当前结果转换为交替计划时精确匹配。
+             * 不能等全部计划生成后再按机台批量追加，否则同一机台的其他换模计划也会被误标。
+             */
+            appendSubstitutionRemark(
+                    context, plan, result, plannedMouldChangeStartTime);
             plans.add(plan);
 
             updateRollingState(state, result);
         }
-
-        // 追加特殊材料硫化机置换备注到模具交替计划
-        appendSubstitutionRemark(context, plans);
 
         planOrder = appendCleaningMouldChangePlans(context, plans, planOrder, changeResults);
         logOutOfWindowMouldChangePlans(context, plans);
@@ -1290,30 +1294,45 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 追加特殊材料硫化机置换备注到模具交替计划。
+     * 精确追加特殊材料硫化机置换备注。
      *
-     * <p>特殊材料SKU置换上机后，在上下文中记录了置换备注（置换类型+被置换机台编码+被置换SKU）。
-     * 此处按机台编码匹配模具交替计划，将置换备注追加到对应计划的备注字段。</p>
+     * <p>按机台、接管 SKU、产品状态和最终实际换模开始时间四个维度匹配置换记录。
+     * 只有当前排程结果对应的交替计划可以追加备注，同机台其他换模计划保持不变。</p>
      *
      * @param context 排程上下文
-     * @param plans 模具交替计划列表
+     * @param plan 当前结果生成的模具交替计划
+     * @param result 当前换模排程结果
+     * @param plannedMouldChangeStartTime 最终实际换模开始时间
      */
-    private void appendSubstitutionRemark(LhScheduleContext context, List<LhMouldChangePlan> plans) {
-        if (CollectionUtils.isEmpty(plans) || context.getSubstitutionRemarkMap() == null
-                || context.getSubstitutionRemarkMap().isEmpty()) {
+    private void appendSubstitutionRemark(
+            LhScheduleContext context,
+            LhMouldChangePlan plan,
+            LhScheduleResult result,
+            Date plannedMouldChangeStartTime) {
+        if (Objects.isNull(plan) || Objects.isNull(result)
+                || CollectionUtils.isEmpty(context.getSpecialMaterialSubstitutionRecordList())) {
             return;
         }
-        for (LhMouldChangePlan plan : plans) {
-            String substitutionRemark = context.getSubstitutionRemarkMap().get(plan.getLhMachineCode());
-            if (StringUtils.isNotEmpty(substitutionRemark)) {
-                String existingRemark = plan.getRemark();
-                if (StringUtils.isNotEmpty(existingRemark)) {
-                    plan.setRemark(existingRemark + "；" + substitutionRemark);
-                } else {
-                    plan.setRemark(substitutionRemark);
-                }
-                log.info("模具交替计划追加置换备注, 机台: {}, 备注: {}", plan.getLhMachineCode(), plan.getRemark());
+        for (SpecialMaterialSubstitutionRecord record
+                : context.getSpecialMaterialSubstitutionRecordList()) {
+            if (!StringUtils.equals(result.getLhMachineCode(), record.getMachineCode())
+                    || !StringUtils.equals(result.getMaterialCode(), record.getSpecialMaterialCode())
+                    || !StringUtils.equals(normalizeProductStatus(result.getProductStatus()),
+                    normalizeProductStatus(record.getSpecialProductStatus()))
+                    || !Objects.equals(plannedMouldChangeStartTime,
+                    record.getActualChangeStartTime())) {
+                continue;
             }
+            String existingRemark = plan.getRemark();
+            plan.setRemark(StringUtils.isNotEmpty(existingRemark)
+                    ? existingRemark + "；" + record.getRemark() : record.getRemark());
+            log.info("模具交替计划精确追加特殊材料置换备注, 机台: {}, 接管SKU: {}, "
+                            + "产品状态: {}, 实际换模开始: {}, 备注: {}",
+                    plan.getLhMachineCode(), result.getMaterialCode(),
+                    normalizeProductStatus(result.getProductStatus()),
+                    LhScheduleTimeUtil.formatDateTime(plannedMouldChangeStartTime),
+                    plan.getRemark());
+            return;
         }
     }
 
