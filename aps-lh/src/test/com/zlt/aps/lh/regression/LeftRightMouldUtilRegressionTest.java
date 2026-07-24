@@ -26,8 +26,21 @@ class LeftRightMouldUtilRegressionTest {
     }
 
     @Test
-    void resolveLeftRightMould_shouldKeepCurrentValueWhenAlreadyPresent() {
-        assertEquals("LR", LeftRightMouldUtil.resolveLeftRightMould("LR", "K1501L"));
+    void resolveLeftRightMould_shouldOverrideCurrentValueBySuffixForSingleMouldMachine() {
+        // 单模机台编码以 L 结尾，已有值 LR 必须被机台后缀 L 覆盖
+        assertEquals("L", LeftRightMouldUtil.resolveLeftRightMould("LR", "K1501L"));
+    }
+
+    @Test
+    void resolveLeftRightMould_shouldOverrideCopiedOppositeSideForSingleMouldMachine() {
+        // 单控整机配对侧从主侧复制到 L，右模机台必须按后缀矫正为 R
+        assertEquals("R", LeftRightMouldUtil.resolveLeftRightMould("L", "K1501R"));
+    }
+
+    @Test
+    void resolveLeftRightMould_shouldKeepCurrentValueForDualMouldMachine() {
+        // 双模机台（编码不以 L/R 结尾）保留已有值 R
+        assertEquals("R", LeftRightMouldUtil.resolveLeftRightMould("R", "K1501"));
     }
 
     @Test

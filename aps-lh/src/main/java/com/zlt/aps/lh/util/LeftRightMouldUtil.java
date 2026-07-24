@@ -3,8 +3,6 @@ package com.zlt.aps.lh.util;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import org.apache.commons.lang3.StringUtils;
 
-import java.util.Locale;
-
 /**
  * 左右模字段计算工具。
  *
@@ -17,25 +15,23 @@ public final class LeftRightMouldUtil {
 
     /**
      * 解析左右模标识。
-     * <p>规则：已有值优先；机台编码后缀 L/R 分别映射 L/R；其他默认 LR。</p>
+     * <p>规则：单模机台（编码以 L/R 结尾）按机台后缀取 L/R，优先于已有值；
+     * 双模机台（编码不以 L/R 结尾）保留已有值，无值时默认 LR。</p>
      *
      * @param currentValue 当前左右模值
      * @param machineCode  机台编码
      * @return 左右模标识（L/R/LR）
      */
     public static String resolveLeftRightMould(String currentValue, String machineCode) {
+        // 单模机台左右模由机台后缀唯一确定，必须优先于已有值，
+        // 防止单控整机配对侧复制主侧结果时把对侧的 L/R 带过来。
+        String splitSide = LhSingleControlMachineUtil.resolveSplitSide(machineCode);
+        if (StringUtils.isNotEmpty(splitSide)) {
+            return splitSide;
+        }
+        // 双模机台：保留已有值（历史单边示方等场景），无值时默认 LR。
         if (StringUtils.isNotEmpty(currentValue)) {
             return currentValue;
-        }
-        if (StringUtils.isEmpty(machineCode)) {
-            return LhScheduleConstant.LEFT_RIGHT_MOULD;
-        }
-        String normalizedMachineCode = machineCode.trim().toUpperCase(Locale.ROOT);
-        if (normalizedMachineCode.endsWith(LhScheduleConstant.LEFT_MOULD)) {
-            return LhScheduleConstant.LEFT_MOULD;
-        }
-        if (normalizedMachineCode.endsWith(LhScheduleConstant.RIGHT_MOULD)) {
-            return LhScheduleConstant.RIGHT_MOULD;
         }
         return LhScheduleConstant.LEFT_RIGHT_MOULD;
     }
