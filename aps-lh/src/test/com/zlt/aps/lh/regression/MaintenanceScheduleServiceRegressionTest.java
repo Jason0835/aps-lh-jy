@@ -13,8 +13,10 @@ import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.util.Calendar;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,7 +30,7 @@ class MaintenanceScheduleServiceRegressionTest {
     private final LhMaintenanceScheduleService service = new LhMaintenanceScheduleService();
 
     @Test
-    void tryAttachMaintenanceAfterFirstEnding_shouldCreateFixedMorningWindowWhenDueSoon() {
+    void tryAttachMaintenanceAfterFirstEnding_shouldDelayWhenEndingAfterSix() {
         LhScheduleContext context = buildContext(date(2026, 4, 20));
         context.getMaintenancePlanMap().put("K1001", buildPrecisionPlan("K1001", date(2026, 5, 10), 20));
         MachineScheduleDTO machine = buildMachine("K1001");
@@ -39,18 +41,18 @@ class MaintenanceScheduleServiceRegressionTest {
         assertTrue(scheduled, "到期 30 天内且首次收尾后应安排保养");
         assertEquals(1, machine.getMaintenanceWindowList().size());
         MachineMaintenanceWindowDTO window = machine.getMaintenanceWindowList().get(0);
-        assertEquals(dateTime(2026, 4, 20, 8, 0), window.getMaintenanceStartTime());
-        assertEquals(dateTime(2026, 4, 20, 15, 0), window.getMaintenanceEndTime());
-        assertEquals(dateTime(2026, 4, 20, 17, 30), window.getProductionResumeTime());
-        assertEquals(1, context.getDailyMaintenanceCountMap().get("2026-04-20").intValue());
+        assertEquals(dateTime(2026, 4, 21, 8, 0), window.getMaintenanceStartTime());
+        assertEquals(dateTime(2026, 4, 21, 15, 0), window.getMaintenanceEndTime());
+        assertEquals(dateTime(2026, 4, 21, 17, 30), window.getProductionResumeTime());
+        assertEquals(1, context.getDailyMaintenanceCountMap().get("2026-04-21").intValue());
         assertTrue(context.getScheduleLogList().stream()
                         .anyMatch(item -> "精准计划最终安排".equals(item.getTitle())
-                                && item.getLogDetail().contains("最早开产=2026-04-20 17:30:00")),
+                                && item.getLogDetail().contains("最早开产=2026-04-21 17:30:00")),
                 "最终保养开始、结束和最早开产必须写入排程过程日志");
     }
 
     @Test
-    void tryAttachMaintenanceAfterFirstEnding_shouldDelayToNextDayWhenEndingAfterEight() {
+    void tryAttachMaintenanceAfterFirstEnding_shouldDelayToNextDayWhenEndingAfterSix() {
         LhScheduleContext context = buildContext(date(2026, 4, 20));
         context.getMaintenancePlanMap().put("K1001", buildPrecisionPlan("K1001", date(2026, 5, 10), 20));
         MachineScheduleDTO machine = buildMachine("K1001");
@@ -61,7 +63,7 @@ class MaintenanceScheduleServiceRegressionTest {
         assertTrue(scheduled);
         assertEquals(dateTime(2026, 4, 21, 8, 0),
                 machine.getMaintenanceWindowList().get(0).getMaintenanceStartTime(),
-                "08:00后收尾不得回排当天保养，必须从下一自然日08:00开始寻找");
+                "06:00后收尾不得回排当天精度，必须从下一自然日08:00开始寻找");
     }
 
     @Test
@@ -80,7 +82,7 @@ class MaintenanceScheduleServiceRegressionTest {
     }
 
     @Test
-    void tryAttachMaintenanceAfterFirstEnding_shouldDelayMonthEndAndCrossYear() {
+    void tryAttachMaintenanceAfterFirstEnding_shouldNotDelayPastPlanDateAtYearEnd() {
         LhScheduleContext context = buildContext(date(2026, 12, 31));
         context.getMaintenancePlanMap().put("K1001", buildPrecisionPlan("K1001", date(2026, 12, 31), 0));
         MachineScheduleDTO machine = buildMachine("K1001");
@@ -88,10 +90,8 @@ class MaintenanceScheduleServiceRegressionTest {
         boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
                 context, machine, dateTime(2026, 12, 31, 7, 59));
 
-        assertTrue(scheduled);
-        assertEquals(dateTime(2027, 1, 1, 8, 0),
-                machine.getMaintenanceWindowList().get(0).getMaintenanceStartTime(),
-                "12月31日盘点日应顺延并正确跨年");
+        assertFalse(scheduled, "计划日命中盘点且没有更早合规日期时，不得跨年延后执行");
+        assertTrue(machine.getMaintenanceWindowList().isEmpty());
     }
 
     @Test
@@ -131,7 +131,7 @@ class MaintenanceScheduleServiceRegressionTest {
         MachineScheduleDTO allowedMachine = buildMachine("K1001");
 
         service.tryAttachMaintenanceAfterFirstEnding(
-                allowedContext, allowedMachine, dateTime(2026, 5, 3, 7, 0));
+                allowedContext, allowedMachine, dateTime(2026, 5, 3, 6, 0));
 
         assertEquals(dateTime(2026, 5, 3, 8, 0),
                 allowedMachine.getMaintenanceWindowList().get(0).getMaintenanceStartTime(),
@@ -154,7 +154,7 @@ class MaintenanceScheduleServiceRegressionTest {
         assertTrue(scheduled, "长期在机且到期前检查应安排强制下机保养");
         MachineMaintenanceWindowDTO window = machine.getMaintenanceWindowList().get(0);
         assertTrue(window.isForceDown(), "长期在机触发的保养窗口应标记强制下机");
-        assertEquals("长期在机强制下机", window.getTriggerReason());
+        assertEquals("精度计划到期强制下机", window.getTriggerReason());
     }
 
     @Test
@@ -215,6 +215,50 @@ class MaintenanceScheduleServiceRegressionTest {
         assertTrue(machine.getMaintenanceWindowList().isEmpty());
     }
 
+    /**
+     * 计划日期早于T日代表已经错过允许提前执行的窗口，即使daysToDue进入强制范围也不得延后触发。
+     */
+    @Test
+    void tryAttachMaintenanceAfterFirstEnding_shouldSkipPlanDateBeforeTDay() {
+        LhScheduleContext context = buildContext(date(2026, 7, 24));
+        LhPrecisionPlan plan = buildPrecisionPlan(
+                "K1902", date(2026, 2, 4), -170);
+        context.getMaintenancePlanMap().put("K1902", plan);
+        MachineScheduleDTO machine = buildMachine("K1902");
+
+        boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
+                context, machine, dateTime(2026, 7, 24, 23, 0));
+
+        assertFalse(scheduled, "PLAN_DATE早于T日的历史精度计划不得延后执行");
+        assertTrue(machine.getMaintenanceWindowList().isEmpty());
+        assertTrue(context.getScheduleLogList().stream()
+                        .anyMatch(item -> item.getLogDetail().contains("禁止延后执行")),
+                "跳过历史计划的日期原因必须写入过程日志");
+    }
+
+    /**
+     * 日期硬约束使候选日超过计划日期时必须取消安排，不能顺延到计划日之后。
+     */
+    @Test
+    void prepareMaintenancePlanWindows_shouldNotScheduleAfterPlanDate() {
+        LhScheduleContext context = buildContext(date(2026, 7, 24));
+        context.getDailyMaintenanceCountMap().put("2026-07-24", 1);
+        LhPrecisionPlan plan = buildPrecisionPlan(
+                "K1902", date(2026, 7, 24), 0);
+        context.setOrderedMaintenancePlanList(Collections.singletonList(plan));
+        context.getMaintenancePlanMap().put("K1902", plan);
+        MachineScheduleDTO machine = buildMachine("K1902");
+        context.getMachineScheduleMap().put("K1902", machine);
+
+        service.prepareMaintenancePlanWindows(context);
+
+        assertTrue(machine.getMaintenanceWindowList().isEmpty(),
+                "计划日额度已满时不得把精度顺延到计划日之后");
+        assertTrue(context.getScheduleLogList().stream()
+                        .anyMatch(item -> item.getLogDetail().contains("禁止延后执行")),
+                "无计划日前合规日期时必须记录取消安排原因");
+    }
+
     @Test
     void tryAttachMaintenanceAfterFirstEnding_shouldCreateWindowWhenMachineHasNoRecentOnlineRecord() {
         LhScheduleContext context = buildContext(date(2026, 5, 3));
@@ -257,7 +301,7 @@ class MaintenanceScheduleServiceRegressionTest {
         context.getMachineScheduleMap().put("K1501R", rightMachine);
 
         boolean scheduled = service.tryAttachMaintenanceAfterFirstEnding(
-                context, leftMachine, dateTime(2026, 4, 20, 8, 0));
+                context, leftMachine, dateTime(2026, 4, 20, 6, 0));
 
         assertTrue(scheduled);
         assertEquals(1, leftMachine.getMaintenanceWindowList().size());
@@ -278,7 +322,7 @@ class MaintenanceScheduleServiceRegressionTest {
         MachineScheduleDTO machine = buildMachine("K1001");
 
         service.tryAttachMaintenanceAfterFirstEnding(
-                context, machine, dateTime(2026, 4, 20, 7, 0));
+                context, machine, dateTime(2026, 4, 20, 6, 0));
 
         MachineMaintenanceWindowDTO window = machine.getMaintenanceWindowList().get(0);
         assertEquals(dateTime(2026, 4, 20, 8, 0), window.getMaintenanceStartTime());
@@ -400,19 +444,19 @@ class MaintenanceScheduleServiceRegressionTest {
         assertFalse(service.shouldApplyMaintenanceOverlapSwitchRule(
                 context, machine, dateTime(2026, 4, 19, 22, 0)),
                 "未来保养不得提前启用维保重叠专用切换时长");
-        assertTrue(service.shouldApplyMaintenanceOverlapSwitchRule(
+        assertFalse(service.shouldApplyMaintenanceOverlapSwitchRule(
                 context, machine, dateTime(2026, 4, 20, 8, 0)),
-                "保养开始边界应启用维保重叠规则");
+                "最新规则禁止任何换模或换活字块与精度计划并行");
         assertFalse(service.shouldApplyMaintenanceOverlapSwitchRule(
                 context, machine, dateTime(2026, 4, 20, 15, 0)),
                 "保养结束边界不再属于保养物理重叠区间");
     }
 
     /**
-     * 正规换模与精度计划重叠时必须从精度计划开始点并行，恢复时间取两个任务的最大结束时间。
+     * 正规换模与精度窗口冲突时必须整体顺延到胶囊预热结束，不再并行执行。
      */
     @Test
-    void resolveParallelMouldChangeReadyTime_shouldTakeMaximumEndTime() {
+    void delaySwitchStartByMaintenance_shouldDelayWholeSwitchAfterPrecisionPreheat() {
         LhScheduleContext context = buildContext(date(2026, 4, 20));
         MachineScheduleDTO machine = buildMachine("K1001");
         MachineMaintenanceWindowDTO window = new MachineMaintenanceWindowDTO();
@@ -422,25 +466,151 @@ class MaintenanceScheduleServiceRegressionTest {
         window.setProductionResumeTime(dateTime(2026, 4, 20, 17, 30));
         machine.getMaintenanceWindowList().add(window);
 
-        Date nightCandidateParallelStartTime = service.resolveParallelMouldChangeStartTime(
-                context, machine, dateTime(2026, 4, 20, 0, 0), 8);
-        Date parallelStartTime = service.resolveParallelMouldChangeStartTime(
-                context, machine, dateTime(2026, 4, 20, 6, 0), 8);
-        Date normalMouldChangeEndTime = LhScheduleTimeUtil.addHours(parallelStartTime, 8);
-        Date maintenanceLongerReadyTime = service.resolveParallelMouldChangeReadyTime(
-                context, machine, parallelStartTime, normalMouldChangeEndTime);
-        Date longMouldChangeEndTime = LhScheduleTimeUtil.addHours(parallelStartTime, 10);
-        Date mouldChangeLongerReadyTime = service.resolveParallelMouldChangeReadyTime(
-                context, machine, parallelStartTime, longMouldChangeEndTime);
+        Date delayedStartTime = service.delaySwitchStartByMaintenance(
+                machine, dateTime(2026, 4, 20, 6, 0), 8);
 
-        assertEquals(dateTime(2026, 4, 20, 8, 0), nightCandidateParallelStartTime,
-                "晚班候选必须先对齐到允许换模的早班，再与精度计划并行");
-        assertEquals(dateTime(2026, 4, 20, 8, 0), parallelStartTime,
-                "前序SKU在08:00前结束时，正规换模应与精度计划同时开始");
-        assertEquals(dateTime(2026, 4, 20, 17, 30), maintenanceLongerReadyTime,
-                "默认8小时换模短于7小时保养加2.5小时预热，必须17:30恢复生产");
-        assertEquals(dateTime(2026, 4, 20, 18, 0), mouldChangeLongerReadyTime,
-                "换模时长更长时必须取换模结束时间");
+        assertEquals(dateTime(2026, 4, 20, 17, 30), delayedStartTime,
+                "06:00开始的8小时换模会跨越精度窗口，必须整体顺延到预热结束");
+    }
+
+    @Test
+    void resolvePrecisionCandidateRejectReason_shouldAcceptOnlyWholePendingQtyBeforeSix() {
+        LhScheduleContext context = buildContext(date(2026, 4, 20));
+        context.getLhParamsMap().put(LhScheduleParamConstant.PRECISION_PRE_INSERT_MAX_QTY, "50");
+        MachineScheduleDTO machine = buildMachine("K1001");
+        MachineMaintenanceWindowDTO window = new MachineMaintenanceWindowDTO();
+        window.setPlanDate(date(2026, 4, 21));
+        window.setDaysToDue(10);
+        window.setPreInsertAllowed(true);
+        window.setProductionCutoffTime(dateTime(2026, 4, 21, 6, 0));
+        window.setProductionResumeTime(dateTime(2026, 4, 21, 17, 30));
+        machine.getMaintenanceWindowList().add(window);
+        com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO sku =
+                new com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO();
+        sku.setMaterialCode("MAT-50");
+
+        assertEquals("", service.resolvePrecisionCandidateRejectReason(
+                context, machine, sku, 50, 50,
+                dateTime(2026, 4, 20, 22, 0),
+                dateTime(2026, 4, 21, 0, 0),
+                dateTime(2026, 4, 21, 6, 0)),
+                "最终收尾恰好等于06:00且完整排完50条时应接受");
+        assertTrue(service.resolvePrecisionCandidateRejectReason(
+                context, machine, sku, 50, 49,
+                dateTime(2026, 4, 20, 22, 0),
+                dateTime(2026, 4, 21, 0, 0),
+                dateTime(2026, 4, 21, 5, 59)).contains("禁止截断SKU"),
+                "不得只截取部分待排量填充空闲时间");
+        assertTrue(service.resolvePrecisionCandidateRejectReason(
+                context, machine, sku, 50, 50,
+                dateTime(2026, 4, 20, 22, 0),
+                dateTime(2026, 4, 21, 0, 0),
+                dateTime(2026, 4, 21, 6, 1)).contains("晚于"),
+                "晚于06:00一分钟必须排除");
+        context.getLhParamsMap().put(LhScheduleParamConstant.PRECISION_PRE_INSERT_MAX_QTY, "0");
+        assertTrue(service.resolvePrecisionCandidateRejectReason(
+                context, machine, sku, 51, 51,
+                dateTime(2026, 4, 20, 22, 0),
+                dateTime(2026, 4, 21, 0, 0),
+                dateTime(2026, 4, 21, 5, 59)).contains("50"),
+                "阈值配置为0时必须回到默认50，不能静默降为1或取消限制");
+    }
+
+    /**
+     * 精度窗口被每日台数等硬约束顺延到当前滚动窗口之外时，不得提前锁死本轮正常生产。
+     */
+    @Test
+    void resolvePrecisionCandidateRejectReason_shouldIgnoreWindowOutsideCurrentScheduleRange() {
+        LhScheduleContext context = buildContext(date(2026, 4, 20));
+        context.setWindowEndDate(date(2026, 4, 22));
+        MachineScheduleDTO machine = buildMachine("K1001");
+        MachineMaintenanceWindowDTO window = new MachineMaintenanceWindowDTO();
+        window.setPlanDate(date(2026, 5, 10));
+        window.setDaysToDue(20);
+        window.setPreInsertAllowed(false);
+        window.setProductionCutoffTime(dateTime(2026, 5, 10, 6, 0));
+        window.setProductionResumeTime(dateTime(2026, 5, 10, 17, 30));
+        machine.getMaintenanceWindowList().add(window);
+        com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO sku =
+                new com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO();
+        sku.setMaterialCode("MAT-NORMAL");
+
+        assertEquals("", service.resolvePrecisionCandidateRejectReason(
+                context, machine, sku, 200, 24,
+                dateTime(2026, 4, 20, 6, 0),
+                dateTime(2026, 4, 20, 14, 0),
+                dateTime(2026, 4, 20, 22, 0)),
+                "当前滚动窗口之外的未来精度计划不得把正常新增SKU误判为精度前插排");
+    }
+
+    @Test
+    void prepareMaintenancePlanWindows_shouldPrioritizeUrgentThenMachineCode() {
+        LhScheduleContext context = buildContext(date(2026, 4, 20));
+        LhPrecisionPlan ordinaryPlan = buildPrecisionPlan(
+                "K2002", date(2026, 4, 30), 10);
+        ordinaryPlan.setPlanDate(date(2026, 4, 20));
+        LhPrecisionPlan urgentLargeCodePlan = buildPrecisionPlan(
+                "K2001", date(2026, 4, 22), 2);
+        urgentLargeCodePlan.setPlanDate(date(2026, 4, 20));
+        LhPrecisionPlan urgentSmallCodePlan = buildPrecisionPlan(
+                "K1001", date(2026, 4, 22), 2);
+        urgentSmallCodePlan.setPlanDate(date(2026, 4, 20));
+        context.setOrderedMaintenancePlanList(Arrays.asList(
+                ordinaryPlan, urgentLargeCodePlan, urgentSmallCodePlan));
+        MachineScheduleDTO ordinaryMachine = buildMachine("K2002");
+        MachineScheduleDTO urgentLargeCodeMachine = buildMachine("K2001");
+        MachineScheduleDTO urgentSmallCodeMachine = buildMachine("K1001");
+        context.getMachineScheduleMap().put("K2002", ordinaryMachine);
+        context.getMachineScheduleMap().put("K2001", urgentLargeCodeMachine);
+        context.getMachineScheduleMap().put("K1001", urgentSmallCodeMachine);
+
+        service.prepareMaintenancePlanWindows(context);
+
+        assertEquals("K1001", context.getOrderedMaintenancePlanList().get(0).getMachineCode(),
+                "同到期天数、同计划日期必须按物理机台编码升序");
+        assertEquals("K2001", context.getOrderedMaintenancePlanList().get(1).getMachineCode());
+        assertEquals("K2002", context.getOrderedMaintenancePlanList().get(2).getMachineCode(),
+                "普通30天内计划必须排在3天强制计划之后");
+        assertEquals(dateTime(2026, 4, 20, 8, 0),
+                urgentSmallCodeMachine.getMaintenanceWindowList().get(0).getMaintenanceStartTime());
+        assertTrue(urgentLargeCodeMachine.getMaintenanceWindowList().isEmpty(),
+                "同日额度被更高排序机台占用后，第二台不得延后到计划日期之后");
+    }
+
+    /**
+     * 普通精度计划在前SKU收尾时间未知时必须暂缓，不能误占最早执行日。
+     */
+    @Test
+    void prepareMaintenancePlanWindows_shouldDeferOrdinaryPlanWhenEndingTimeUnknown() {
+        LhScheduleContext context = buildContext(date(2026, 4, 20));
+        LhPrecisionPlan plan = buildPrecisionPlan(
+                "K1001", date(2026, 5, 10), 20);
+        context.setOrderedMaintenancePlanList(Collections.singletonList(plan));
+        context.getMaintenancePlanMap().put("K1001", plan);
+        MachineScheduleDTO machine = buildMachine("K1001");
+        machine.setCurrentMaterialCode("MAT-RUNNING");
+        machine.setEstimatedEndTime(null);
+        context.getMachineScheduleMap().put(machine.getMachineCode(), machine);
+
+        service.prepareMaintenancePlanWindows(context);
+
+        assertTrue(machine.getMaintenanceWindowList().isEmpty(),
+                "4～30天普通计划无法确认前SKU收尾时不得提前挂载精度窗口");
+        assertTrue(context.getScheduleLogList().stream()
+                        .anyMatch(item -> item.getLogDetail().contains("收尾时间未知")),
+                "暂缓原因必须进入过程日志，便于后续滚动排程审计");
+
+        boolean attachedAfterEnding = service.tryAttachMaintenanceAfterFirstEnding(
+                context, machine, dateTime(2026, 4, 20, 8, 0));
+
+        assertTrue(attachedAfterEnding,
+                "续作主链取得真实收尾时间后必须补做精度决策，不能整批永久跳过");
+        assertEquals(dateTime(2026, 4, 21, 8, 0),
+                machine.getMaintenanceWindowList().get(0).getMaintenanceStartTime());
+        assertTrue(machine.getMaintenanceWindowList().get(0).isPreInsertAllowed(),
+                "06:00后自然收尾并顺延到次日时，应开放收尾至次日06:00的小余量插排窗口");
+        assertTrue(context.getMaintenanceDeferredPhysicalMachineCodeSet().isEmpty(),
+                "补决策成功后必须清除暂缓标记，防止重复挂窗");
     }
 
     private static LhScheduleContext buildContext(Date scheduleDate) {
@@ -473,6 +643,9 @@ class MaintenanceScheduleServiceRegressionTest {
         plan.setMachineCode(machineCode);
         plan.setYear(BigDecimal.valueOf(2026));
         plan.setDueDate(dueDate);
+        // 回归用例默认让计划日期与传入到期日期一致；专门验证DUE_DATE缺失的用例仍提供未来PLAN_DATE，
+        // 以便单独验证daysToDue口径，不与本次新增的PLAN_DATE >= T准入条件混淆。
+        plan.setPlanDate(Objects.nonNull(dueDate) ? dueDate : date(2026, 12, 31));
         plan.setDaysToDue(daysToDue);
         plan.setCompletionStatus("0");
         return plan;

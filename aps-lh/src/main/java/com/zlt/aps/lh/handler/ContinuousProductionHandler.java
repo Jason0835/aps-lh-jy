@@ -4,6 +4,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
+import com.zlt.aps.lh.service.impl.LhMaintenanceScheduleService;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
@@ -39,6 +40,8 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
     private ITypeBlockProductionStrategy typeBlockProductionStrategy;
     @Resource
     private StructureMinMachineRetentionService structureMinMachineRetentionService;
+    @Resource
+    private LhMaintenanceScheduleService maintenanceScheduleService;
 
     @Override
     protected void doHandle(LhScheduleContext context) {
@@ -50,6 +53,12 @@ public class ContinuousProductionHandler extends AbsScheduleStepHandler {
         priorityStrategy.sortByPriority(context);
         log.debug("续作排产优先级排序完成, 续作SKU: {}, 新增SKU: {}",
                 context.getContinuousSkuList().size(), context.getNewSpecSkuList().size());
+
+        /*
+         * S4.4开始前按到期天数、计划日期和物理机台编码统一预留精度窗口。
+         * 必须先于逐SKU续作排产执行，避免普通SKU遍历顺序抢占3天内精度计划的每日名额。
+         */
+        maintenanceScheduleService.prepareMaintenancePlanWindows(context);
 
         IProductionStrategy strategy = strategyFactory.getProductionStrategy(
                 ScheduleTypeEnum.CONTINUOUS.getCode());

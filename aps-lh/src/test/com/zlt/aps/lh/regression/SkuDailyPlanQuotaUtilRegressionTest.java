@@ -92,6 +92,36 @@ class SkuDailyPlanQuotaUtilRegressionTest {
         assertEquals(20, quotaMap.get(day3).getFinalLossQty());
     }
 
+    /**
+     * 跨日回滚必须撤销当前生产日最后借用的未来额度，不能从无关日期任意退量。
+     */
+    @Test
+    void restoreRollingQuota_shouldReverseExactProductionDayConsumption() {
+        LocalDate day1 = LocalDate.of(2026, 5, 3);
+        LocalDate day2 = LocalDate.of(2026, 5, 4);
+        LocalDate day3 = LocalDate.of(2026, 5, 5);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>(4);
+        quotaMap.put(day1, quota("3302001724", day1, 20));
+        quotaMap.put(day2, quota("3302001724", day2, 20));
+        quotaMap.put(day3, quota("3302001724", day3, 20));
+        SkuDailyPlanQuotaUtil.consumeRollingQuota(quotaMap, day1, 35, day2);
+        SkuDailyPlanQuotaUtil.consumeRollingQuota(quotaMap, day3, 15, day3);
+
+        int restoredQty = SkuDailyPlanQuotaUtil.restoreRollingQuota(
+                quotaMap, day1, 15, day2);
+
+        assertEquals(15, restoredQty);
+        assertEquals(20, quotaMap.get(day1).getScheduledQty(),
+                "day1自身已先消费的额度必须保留");
+        assertEquals(5, quotaMap.get(day2).getScheduledQty(),
+                "day3后续生产已补用的5条历史额度必须保留，仅撤销day1借用的15条");
+        assertEquals(10, quotaMap.get(day3).getScheduledQty(),
+                "其他生产日实际采用的day3额度不得被本次回滚改动");
+        assertEquals(20, quotaMap.get(day1).getActualQty(),
+                "实际产量只从触发回滚的生产日扣减");
+        assertEquals(15, quotaMap.get(day3).getActualQty());
+    }
+
     @Test
     void buildShiftedEarlyProductionQuotaMap_shouldMoveNextDayPlansWithoutMutatingSource() {
         LocalDate day1 = LocalDate.of(2026, 6, 14);

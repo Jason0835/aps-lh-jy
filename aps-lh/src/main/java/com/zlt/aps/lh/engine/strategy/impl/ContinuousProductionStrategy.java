@@ -282,6 +282,24 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     startTime, effectiveShifts, machineMouldQty, isEnding)
                     : buildScheduleResult(context, machine, sku, startTime, null, effectiveShifts, machineMouldQty, isEnding);
             if (result != null) {
+                /*
+                 * 3天内精度计划已经在S4.4入口预留执行窗口。续作结果生成后立即以执行日06:00
+                 * 为硬截止截断，截断量同步恢复生产余量、dayN账本和机台产能，禁止只设置forceDown标志。
+                 */
+                int precisionForceRemovedQty = applyPrecisionForceDownIfNecessary(
+                        context, machine, sku, result, shifts);
+                if (Objects.nonNull(result.getDailyPlanQty()) && result.getDailyPlanQty() <= 0) {
+                    // 滚动继承结果可能已经存在于结果集和机台分配索引中；强制截断为零后必须
+                    // 同步删除，禁止留下“零量但仍占机”的脏结果。新建结果尚未入集，重复删除无副作用。
+                    context.getScheduleResultList().remove(result);
+                    context.getScheduleResultSourceSkuMap().remove(result);
+                    removeResultsFromMachineAssignments(
+                            context, Collections.singletonList(result));
+                    log.info("续作SKU因精度计划到期强制下机后无可保留计划量, materialCode: {}, "
+                                    + "machineCode: {}, removedQty: {}",
+                            sku.getMaterialCode(), machineCode, precisionForceRemovedQty);
+                    continue;
+                }
                 result.setScheduleType("01");
                 result.setIsChangeMould("0");
                 result.setIsTypeBlock("0");
@@ -7563,19 +7581,8 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         Date machineReadyTime = getCapacityCalculateStrategy().calculateStartTime(
                 context, machine.getMachineCode(), endingTime);
         int switchDurationHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
-        boolean trialConstructionStage = StringUtils.equals(
-                ConstructionStageEnum.TRIAL.getCode(), specifySku.getConstructionStage());
-        boolean maintenanceOverlapSwitch = !trialConstructionStage
-                && getMaintenanceScheduleService().shouldParallelMouldChangeWithMaintenance(
-                context, machine, endingTime, switchDurationHours);
-        boolean trialMaintenanceOverlap = trialConstructionStage
-                && getMaintenanceScheduleService().isNormalSwitchOverlapMaintenance(
-                context, machine, endingTime, switchDurationHours);
-        // 试制SKU实际落地前会清除重叠精度窗口，预判时使用原机台结束时间模拟早班换模，且不修改运行态。
-        Date switchReadyTime = maintenanceOverlapSwitch
-                ? getMaintenanceScheduleService().resolveParallelMouldChangeStartTime(
-                context, machine, endingTime, switchDurationHours)
-                : trialMaintenanceOverlap ? endingTime : machineReadyTime;
+        // 精度计划与换模禁止并行，试制和正规SKU统一从精度及预热结束后的真实机台就绪时间开始。
+        Date switchReadyTime = machineReadyTime;
         switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(context, switchReadyTime);
         // 定点物料预演继续携带真实切换时长、SKU和动作类型，保留换模均衡、试制及次数限制语义；
         // 默认实现内部仅对05维修放开并行，其他停机仍按原规则顺延。
@@ -7594,13 +7601,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
         Date inspectionTime = null;
         try {
             Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
-            maintenanceOverlapSwitch = !trialConstructionStage
-                    && getMaintenanceScheduleService().hasMouldChangeMaintenanceOverlap(
-                    context, machine, mouldChangeStartTime, mouldChangeCompleteTime);
-            Date maintenanceReadyTime = maintenanceOverlapSwitch
-                    ? getMaintenanceScheduleService().resolveParallelMouldChangeReadyTime(
-                    context, machine, mouldChangeStartTime, mouldChangeCompleteTime)
-                    : mouldChangeCompleteTime;
+            Date maintenanceReadyTime = mouldChangeCompleteTime;
             boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
                     context, context.getDevicePlanShutList(), machine.getMachineCode(), endingTime,
                     mouldChangeStartTime, mouldChangeCompleteTime);
@@ -7620,9 +7621,7 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 return false;
             }
             Date productionStartTime = plannedRepairAffectingSwitch
-                    ? firstInspectionBaseTime : maintenanceOverlapSwitch
-                    ? firstInspectionBaseTime
-                    : inspectionTime;
+                    ? firstInspectionBaseTime : inspectionTime;
             int machineMouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(machine);
             int runtimeShiftCapacity = ShiftCapacityResolverUtil.resolveRuntimeShiftCapacity(
                     context, machine, specifySku.getShiftCapacity());
@@ -10963,6 +10962,214 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 iterator.remove();
             }
         }
+    }
+
+    /**
+     * 对3天内精度计划执行真实强制下机。
+     *
+     * <p>按执行日06:00截断物理机台当前续作结果。跨越截止时间的班次使用现有停机、清洗和
+     * 实际硫化节拍计算可保留量；截止后的班次全部清零。被移除数量同步恢复SKU生产余量、
+     * dayN账本及机台剩余产能，并写入明确未排原因。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 当前机台
+     * @param sku 当前续作SKU
+     * @param result 待截断结果
+     * @param shifts 排程窗口班次
+     * @return 被截断总量
+     */
+    private int applyPrecisionForceDownIfNecessary(LhScheduleContext context,
+                                                   MachineScheduleDTO machine,
+                                                   SkuScheduleDTO sku,
+                                                   LhScheduleResult result,
+                                                   List<LhShiftConfigVO> shifts) {
+        Date cutoffTime = getMaintenanceScheduleService().resolveForceDownCutoffTime(machine);
+        if (Objects.isNull(cutoffTime) || Objects.isNull(result)) {
+            return 0;
+        }
+        int removedTotalQty = 0;
+        Map<LocalDate, Integer> removedQtyByDate = new LinkedHashMap<LocalDate, Integer>(4);
+        for (int shiftIndex = 1;
+             shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             shiftIndex++) {
+            Integer originalQtyValue = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            int originalQty = Objects.isNull(originalQtyValue) ? 0 : Math.max(0, originalQtyValue);
+            if (originalQty <= 0) {
+                continue;
+            }
+            Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+            Date shiftEndTime = ShiftFieldUtil.getShiftEndTime(result, shiftIndex);
+            if (Objects.isNull(shiftStartTime) || Objects.isNull(shiftEndTime)
+                    || !shiftEndTime.after(cutoffTime)) {
+                continue;
+            }
+            int retainedQty = 0;
+            if (shiftStartTime.before(cutoffTime)) {
+                long shiftDurationSeconds = Math.max(1L,
+                        (shiftEndTime.getTime() - shiftStartTime.getTime()) / 1000L);
+                retainedQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
+                        context.getDevicePlanShutList(), machine.getCleaningWindowList(),
+                        Collections.<MachineMaintenanceWindowDTO>emptyList(),
+                        machine.getMachineCode(), shiftStartTime, cutoffTime,
+                        Math.max(originalQty, sku.getShiftCapacity()), sku.getLhTimeSeconds(),
+                        ShiftCapacityResolverUtil.resolveMachineMouldQty(result.getMouldQty()),
+                        shiftDurationSeconds, 0, 0, 0);
+                retainedQty = Math.min(originalQty, Math.max(0, retainedQty));
+            }
+            int removedQty = originalQty - retainedQty;
+            if (removedQty <= 0) {
+                continue;
+            }
+            Date retainedEndTime = retainedQty > 0
+                    ? ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
+                    context.getDevicePlanShutList(), machine.getCleaningWindowList(),
+                    Collections.<MachineMaintenanceWindowDTO>emptyList(),
+                    machine.getMachineCode(), shiftStartTime, cutoffTime,
+                    retainedQty, originalQty)
+                    : null;
+            ShiftFieldUtil.setShiftPlanQty(result, shiftIndex, retainedQty,
+                    retainedQty > 0 ? shiftStartTime : null, retainedEndTime);
+            removedTotalQty += removedQty;
+            LocalDate productionDate = resolveShiftBusinessDate(shifts, shiftIndex);
+            if (Objects.nonNull(productionDate)) {
+                removedQtyByDate.merge(productionDate, removedQty, Integer::sum);
+            }
+            releasePrecisionForceDownCapacity(context, machine, shiftIndex, removedQty);
+        }
+        if (removedTotalQty <= 0) {
+            return 0;
+        }
+        ShiftFieldUtil.syncDailyPlanQty(result);
+        result.setTotalDailyPlanQty(result.getDailyPlanQty());
+        ShiftFieldUtil.clearUnplannedShiftCureFormulaFields(result);
+        int lastShiftIndex = ShiftFieldUtil.applyLastPlannedShiftEndMark(result, false);
+        Date lastEndTime = lastShiftIndex > 0
+                ? ShiftFieldUtil.getShiftEndTime(result, lastShiftIndex) : null;
+        result.setSpecEndTime(lastEndTime);
+        result.setTdaySpecEndTime(lastEndTime);
+        result.setIsEnd("0");
+        result.setMouldSurplusQty((Objects.isNull(result.getMouldSurplusQty())
+                ? 0 : result.getMouldSurplusQty()) + removedTotalQty);
+        context.getEndingFillAllowedOverQtyMap().remove(result);
+        context.getSharedEmbryoEndingStaggerAllowedOverQtyMap().remove(result);
+        getTargetScheduleQtyResolver().restoreProductionRemainingQty(
+                context, sku, removedTotalQty,
+                LhMaintenanceScheduleService.TRIGGER_REASON_FORCE_DOWN, machine.getMachineCode());
+        restorePrecisionForceDownDailyQuota(context, sku, removedQtyByDate);
+        addPrecisionForceDownUnscheduledResult(
+                context, sku, machine.getMachineCode(), removedTotalQty);
+        machine.setEnding(true);
+        machine.setEstimatedEndTime(cutoffTime);
+        log.warn("精度计划到期触发强制下机, 机台: {}, SKU: {}, 截止时间: {}, 截断量: {}, "
+                        + "保留量: {}, 未排原因: {}",
+                machine.getMachineCode(), sku.getMaterialCode(),
+                LhScheduleTimeUtil.formatDateTime(cutoffTime), removedTotalQty,
+                Objects.isNull(result.getDailyPlanQty()) ? 0 : result.getDailyPlanQty(),
+                LhMaintenanceScheduleService.TRIGGER_REASON_FORCE_DOWN);
+        return removedTotalQty;
+    }
+
+    /**
+     * 解析班次所属业务日期。
+     *
+     * @param shifts 排程班次
+     * @param shiftIndex 班次索引
+     * @return 业务日期
+     */
+    private LocalDate resolveShiftBusinessDate(List<LhShiftConfigVO> shifts, int shiftIndex) {
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.nonNull(shift) && Objects.nonNull(shift.getShiftIndex())
+                    && shift.getShiftIndex() == shiftIndex && Objects.nonNull(shift.getWorkDate())) {
+                return shift.getWorkDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDate();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 释放强制下机截断后的机台班次产能。
+     */
+    private void releasePrecisionForceDownCapacity(LhScheduleContext context,
+                                                   MachineScheduleDTO machine,
+                                                   int shiftIndex,
+                                                   int removedQty) {
+        int[] machineCapacity = machine.getShiftRemainingCapacity();
+        int[] contextCapacity = context.getMachineShiftCapacityMap().get(machine.getMachineCode());
+        if (Objects.nonNull(machineCapacity) && shiftIndex < machineCapacity.length) {
+            machineCapacity[shiftIndex] += removedQty;
+        }
+        if (Objects.nonNull(contextCapacity) && contextCapacity != machineCapacity
+                && shiftIndex < contextCapacity.length) {
+            contextCapacity[shiftIndex] += removedQty;
+        }
+    }
+
+    /**
+     * 按被截断班次业务日倒序恢复dayN账本。
+     *
+     * <p>每个生产日均复用统一滚动账本的逆向恢复方法，先撤销该生产日最后借用的未来额度，
+     * 再撤销历史欠产额度；禁止再从整个账本尾部任意退量，避免跨日强制下机把dayN恢复错位。</p>
+     */
+    private void restorePrecisionForceDownDailyQuota(LhScheduleContext context,
+                                                     SkuScheduleDTO sku,
+                                                     Map<LocalDate, Integer> removedQtyByDate) {
+        if (CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())
+                || CollectionUtils.isEmpty(removedQtyByDate)) {
+            return;
+        }
+        List<Map.Entry<LocalDate, Integer>> removedEntries =
+                new ArrayList<Map.Entry<LocalDate, Integer>>(removedQtyByDate.entrySet());
+        removedEntries.sort(Map.Entry.<LocalDate, Integer>comparingByKey().reversed());
+        for (Map.Entry<LocalDate, Integer> removedEntry : removedEntries) {
+            int pendingRestoreQty = Math.max(0, removedEntry.getValue());
+            int restoredQty = SkuDailyPlanQuotaUtil.restoreRollingQuota(
+                    sku.getDailyPlanQuotaMap(), removedEntry.getKey(), pendingRestoreQty, null);
+            if (restoredQty != pendingRestoreQty) {
+                log.warn("精度强制下机dayN账本恢复量不一致, materialCode: {}, productionDate: {}, "
+                                + "expectedRestoreQty: {}, actualRestoreQty: {}",
+                        sku.getMaterialCode(), removedEntry.getKey(), pendingRestoreQty, restoredQty);
+            }
+        }
+    }
+
+    /**
+     * 写入或合并精度计划强制下机未排记录。
+     */
+    private void addPrecisionForceDownUnscheduledResult(LhScheduleContext context,
+                                                        SkuScheduleDTO sku,
+                                                        String machineCode,
+                                                        int removedQty) {
+        String reason = LhMaintenanceScheduleService.TRIGGER_REASON_FORCE_DOWN
+                + "，机台 " + machineCode;
+        for (LhUnscheduledResult existing : context.getUnscheduledResultList()) {
+            if (StringUtils.equals(sku.getMaterialCode(), existing.getMaterialCode())
+                    && StringUtils.equals(sku.getProductStatus(), existing.getProductStatus())
+                    && StringUtils.equals(reason, existing.getUnscheduledReason())) {
+                existing.setUnscheduledQty((Objects.isNull(existing.getUnscheduledQty())
+                        ? 0 : existing.getUnscheduledQty()) + removedQty);
+                return;
+            }
+        }
+        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+        unscheduled.setFactoryCode(context.getFactoryCode());
+        unscheduled.setBatchNo(context.getBatchNo());
+        unscheduled.setScheduleDate(context.getScheduleTargetDate());
+        unscheduled.setMonthPlanVersion(sku.getMonthPlanVersion());
+        unscheduled.setProductionVersion(sku.getProductionVersion());
+        unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setProductStatus(sku.getProductStatus());
+        unscheduled.setMaterialDesc(sku.getMaterialDesc());
+        unscheduled.setStructureName(sku.getStructureName());
+        unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
+        unscheduled.setSpecCode(sku.getSpecCode());
+        unscheduled.setSpecDesc(sku.getSpecDesc());
+        unscheduled.setEmbryoCode(sku.getEmbryoCode());
+        unscheduled.setMouldQty(sku.getMouldQty());
+        unscheduled.setUnscheduledQty(removedQty);
+        unscheduled.setUnscheduledReason(reason);
+        unscheduled.setDataSource(AUTO_DATA_SOURCE);
+        unscheduled.setIsDelete(0);
+        context.getUnscheduledResultList().add(unscheduled);
     }
 
     private Date resolveActualCompletionTime(LhScheduleContext context, LhScheduleResult result) {

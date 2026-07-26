@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
@@ -1164,6 +1165,80 @@ class DefaultMachineMatchStrategyRegressionTest {
         assertEquals(1, candidates.size(), "新增选机必须先锁定最早收尾后20分钟窗口，窗口外机台不再参与本轮排序");
         assertEquals("M-EARLY", candidates.get(0).getMachineCode(),
                 "窗口外机台即使规格和英寸更匹配，也不能越过最早收尾窗口内的机台");
+    }
+
+    @Test
+    void matchMachines_shouldUsePrecisionResumeTimeBeforeChoosingEarliestEndingShift() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+
+        MachineScheduleDTO precisionBlockedMachine = machine(
+                "A-PRECISION-BLOCKED", shifts.get(0).getShiftStartDateTime(),
+                "SPEC-A", "22.5", "MAT-PRECISION");
+        precisionBlockedMachine.setHasMaintenancePlan(true);
+        MachineMaintenanceWindowDTO precisionWindow = new MachineMaintenanceWindowDTO();
+        precisionWindow.setMachineCode(precisionBlockedMachine.getMachineCode());
+        precisionWindow.setMaintenanceStartTime(
+                LhScheduleTimeUtil.addHours(shifts.get(6).getShiftStartDateTime(), 2));
+        precisionWindow.setMaintenanceEndTime(
+                LhScheduleTimeUtil.addHours(precisionWindow.getMaintenanceStartTime(), 7));
+        precisionWindow.setProductionResumeTime(
+                LhScheduleTimeUtil.addMinutes(precisionWindow.getMaintenanceEndTime(), 150));
+        precisionWindow.setPreInsertAllowed(false);
+        precisionBlockedMachine.setMaintenanceWindowList(Collections.singletonList(precisionWindow));
+
+        MachineScheduleDTO availableMachine = machine(
+                "B-AVAILABLE", shifts.get(6).getShiftStartDateTime(),
+                "SPEC-A", "22.5", "MAT-AVAILABLE");
+        context.getMachineScheduleMap().put(
+                precisionBlockedMachine.getMachineCode(), precisionBlockedMachine);
+        context.getMachineScheduleMap().put(availableMachine.getMachineCode(), availableMachine);
+
+        List<MachineScheduleDTO> candidates =
+                strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(),
+                "精度及预热已将早收尾机台推迟到后续班次时，不得由该机台过滤当前真实可排候选");
+        assertEquals("B-AVAILABLE", candidates.get(0).getMachineCode(),
+                "候选分层必须使用精度调整后的真实就绪时间");
+    }
+
+    @Test
+    void matchMachines_shouldKeepOriginalReferenceTimeForOpenPrecisionPreInsertWindow() {
+        DefaultMachineMatchStrategy strategy = new DefaultMachineMatchStrategy();
+        LhScheduleContext context = buildContext();
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+
+        MachineScheduleDTO preInsertMachine = machine(
+                "A-PRE-INSERT", shifts.get(0).getShiftStartDateTime(),
+                "SPEC-A", "22.5", "MAT-PRE-INSERT");
+        preInsertMachine.setHasMaintenancePlan(true);
+        MachineMaintenanceWindowDTO precisionWindow = new MachineMaintenanceWindowDTO();
+        precisionWindow.setMachineCode(preInsertMachine.getMachineCode());
+        precisionWindow.setMaintenanceStartTime(
+                LhScheduleTimeUtil.addHours(shifts.get(6).getShiftStartDateTime(), 2));
+        precisionWindow.setMaintenanceEndTime(
+                LhScheduleTimeUtil.addHours(precisionWindow.getMaintenanceStartTime(), 7));
+        precisionWindow.setProductionResumeTime(
+                LhScheduleTimeUtil.addMinutes(precisionWindow.getMaintenanceEndTime(), 150));
+        precisionWindow.setProductionCutoffTime(shifts.get(6).getShiftStartDateTime());
+        precisionWindow.setPreInsertAllowed(true);
+        precisionWindow.setPreInsertScheduled(false);
+        preInsertMachine.setMaintenanceWindowList(Collections.singletonList(precisionWindow));
+
+        MachineScheduleDTO laterMachine = machine(
+                "B-LATER", shifts.get(6).getShiftStartDateTime(),
+                "SPEC-A", "22.5", "MAT-LATER");
+        context.getMachineScheduleMap().put(preInsertMachine.getMachineCode(), preInsertMachine);
+        context.getMachineScheduleMap().put(laterMachine.getMachineCode(), laterMachine);
+
+        List<MachineScheduleDTO> candidates =
+                strategy.matchMachines(context, sku("MAT-1", "SPEC-A", "22.5"));
+
+        assertEquals(1, candidates.size(),
+                "尚未使用的精度前插排窗口必须保留原收尾时间，继续进入06:00前完整候选测算");
+        assertEquals("A-PRE-INSERT", candidates.get(0).getMachineCode());
     }
 
     @Test

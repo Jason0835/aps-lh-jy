@@ -213,6 +213,10 @@ public final class LhScheduleConstant {
 
     /** 维保重叠切换耗时（小时） */
     public static final int MAINTENANCE_OVERLAP_SWITCH_HOURS = 4;
+    /** 精度计划执行日前允许插排的SKU最大完整待排量 */
+    public static final int PRECISION_PRE_INSERT_MAX_QTY = 50;
+    /** 精度计划执行日前生产任务必须完成的固定小时 */
+    public static final int PRECISION_PRODUCTION_CUTOFF_HOUR = 6;
 
     // ======================== 停机超时阈值 ========================
 

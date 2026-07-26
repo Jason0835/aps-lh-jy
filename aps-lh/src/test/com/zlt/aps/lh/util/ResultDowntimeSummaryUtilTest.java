@@ -214,7 +214,7 @@ class ResultDowntimeSummaryUtilTest {
     }
 
     /**
-     * 正规换模与精度计划及胶囊预热完整占用区间重叠时，只写组合原因。
+     * 历史结果即使存在换模与精度重叠，精度所在班次也必须统一写精度计划。
      */
     @Test
     void bindMaintenanceSummary_shouldAppendCombinedReasonWhenMouldChangeOverlapsPrecisionPlan() {
@@ -230,8 +230,8 @@ class ResultDowntimeSummaryUtilTest {
                 result, Collections.singletonList(maintenanceWindow), buildScheduleWindowShifts(), 8);
 
         assertTrue(bound);
-        assertEquals("换模+精度计划", ShiftFieldUtil.getShiftAnalysis(result, 2),
-                "换模08:00～16:00与精度计划08:00～17:30重叠时只允许写组合原因");
+        assertEquals("精度计划", ShiftFieldUtil.getShiftAnalysis(result, 2),
+                "新规则废止换模与精度并行，班次原因必须统一为精度计划");
     }
 
     /**

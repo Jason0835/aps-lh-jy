@@ -3,7 +3,10 @@ package com.zlt.aps.lh.service.impl;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
+import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhPrecisionPlan;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -12,14 +15,20 @@ import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
 import com.zlt.aps.mdm.api.domain.entity.MdmWorkCalendar;
+import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
 import java.util.Calendar;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -34,8 +43,8 @@ public class LhMaintenanceScheduleService {
 
     /** 普通收尾触发原因 */
     private static final String TRIGGER_REASON_AFTER_ENDING = "首个规格收尾后保养";
-    /** 长期在机触发原因 */
-    private static final String TRIGGER_REASON_FORCE_DOWN = "长期在机强制下机";
+    /** 3天内精度计划强制下机触发原因 */
+    public static final String TRIGGER_REASON_FORCE_DOWN = "精度计划到期强制下机";
     /** 长期在机天数阈值 */
     private static final int LONG_ONLINE_DAYS = 30;
     /** 启用配置值 */
@@ -46,6 +55,401 @@ public class LhMaintenanceScheduleService {
     private static final String MAINTENANCE_PROCESS_LOG_TITLE = "精准计划保养判断";
     /** 精度保养最终安排日志标题 */
     private static final String MAINTENANCE_FINAL_LOG_TITLE = "精准计划最终安排";
+
+    /**
+     * 在续作排产前按业务优先级统一预留精度计划窗口。
+     *
+     * <p>计划日期不早于排程T日是进入本轮调度的首要前提，确保精度只能提前、不能延后；
+     * 满足日期前提后直接读取数据源 DAYS_TO_DUE 作为预警和强制判断口径。普通4～30天计划不会
+     * 截断当前在机SKU；若当前已知收尾晚于最早候选日06:00，则寻找计划日前自然收尾后的最近
+     * 合规执行日，并只在两者之间开放小余量插排。3天内计划优先占用计划日前最早合规日。</p>
+     *
+     * @param context 排程上下文
+     */
+    public void prepareMaintenancePlanWindows(LhScheduleContext context) {
+        if (Objects.isNull(context) || CollectionUtils.isEmpty(context.getOrderedMaintenancePlanList())
+                || CollectionUtils.isEmpty(context.getMachineScheduleMap())
+                || Objects.isNull(context.getScheduleDate())) {
+            return;
+        }
+        context.setMaintenancePreDecisionCompleted(true);
+        int forceDays = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_FORCE_CHECK_DAYS,
+                LhScheduleConstant.MAINTENANCE_FORCE_CHECK_DAYS);
+        List<LhPrecisionPlan> orderedPlans =
+                new ArrayList<LhPrecisionPlan>(context.getOrderedMaintenancePlanList());
+        // 中心服务再次执行稳定排序，避免调用方绕过初始化服务或测试手工构造上下文时，
+        // 精度优先级退化为数据查询顺序。daysToDue直接取数据源字段，不按日期重新推导。
+        orderedPlans.sort(Comparator
+                .comparing(LhPrecisionPlan::getDaysToDue,
+                        Comparator.nullsLast(Integer::compareTo))
+                .thenComparing(LhPrecisionPlan::getPlanDate,
+                        Comparator.nullsLast(Date::compareTo))
+                .thenComparing(plan -> LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                        plan.getMachineCode()), Comparator.nullsLast(String::compareTo)));
+        context.setOrderedMaintenancePlanList(orderedPlans);
+        Set<String> handledPhysicalMachineSet = new HashSet<String>(
+                Math.max(4, orderedPlans.size() * 2));
+        StringBuilder orderLog = new StringBuilder(192);
+        int order = 0;
+        for (LhPrecisionPlan plan : orderedPlans) {
+            if (!isPlanUncompleted(plan) || Objects.isNull(plan.getDaysToDue())
+                    || StringUtils.isEmpty(plan.getMachineCode())) {
+                continue;
+            }
+            // 中心入口再次校验计划日期，避免测试构造、历史调用或未来新增入口绕过基础数据查询条件。
+            if (!isPlanDateEligible(context, plan)) {
+                appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE,
+                        plan.getMachineCode(), plan, null,
+                        "计划日期早于排程T日或计划日期为空",
+                        "不进入本轮精度调度，禁止延后执行");
+                log.info("精度计划日期不满足本轮触发前提，跳过, 机台: {}, 计划日期: {}, T日: {}, "
+                                + "距到期天数: {}",
+                        plan.getMachineCode(), LhScheduleTimeUtil.formatDate(plan.getPlanDate()),
+                        LhScheduleTimeUtil.formatDate(context.getScheduleDate()), plan.getDaysToDue());
+                continue;
+            }
+            String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                    plan.getMachineCode());
+            if (!handledPhysicalMachineSet.add(physicalMachineCode)) {
+                appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE,
+                        plan.getMachineCode(), plan, null,
+                        "同一物理机台已有更高优先级精度计划", "本批跳过重复计划");
+                continue;
+            }
+            MachineScheduleDTO machine = resolveRuntimeMachine(context, plan.getMachineCode());
+            if (Objects.isNull(machine) || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+                continue;
+            }
+            order++;
+            if (orderLog.length() > 0) {
+                orderLog.append(" -> ");
+            }
+            orderLog.append(order).append(':').append(physicalMachineCode)
+                    .append('(').append(plan.getDaysToDue()).append("天)");
+
+            Date firstCandidateDate = resolveAvailableMaintenanceDate(context,
+                    LhScheduleTimeUtil.clearTime(context.getScheduleDate()), machine.getMachineCode(), plan);
+            Date knownEndingTime = resolvePhysicalKnownEndingTime(context, machine);
+            Date firstCutoffTime = buildProductionCutoffTime(firstCandidateDate);
+            boolean forceDown = plan.getDaysToDue() <= forceDays
+                    && (Objects.isNull(knownEndingTime) || knownEndingTime.after(firstCutoffTime));
+            boolean preInsertAllowed = false;
+            Date finalPlanDate = firstCandidateDate;
+
+            /*
+             * 普通4～30天计划不允许在前SKU收尾时间未知时直接占用最早执行日。
+             * 中心预决策一旦挂窗，后续续作链会按该窗口限制生产；若此处把“未知”误判成
+             * “可以在06:00前收尾”，既可能提前阻断正常续作，也无法按规则寻找自然收尾后的
+             * 最近合规日。因此普通计划本轮明确暂缓，等待后续滚动取得可靠收尾时间；
+             * 3天内计划仍按硬性要求挂窗并由强制下机链处理。
+             */
+            if (plan.getDaysToDue() > forceDays && Objects.isNull(knownEndingTime)) {
+                context.getMaintenanceDeferredPhysicalMachineCodeSet().add(physicalMachineCode);
+                appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE,
+                        machine.getMachineCode(), plan, null,
+                        "普通精度计划前SKU预计收尾时间未知，无法完成06:00截止判断",
+                        "本轮暂缓挂窗，等待后续滚动重新决策");
+                log.warn("普通精度计划前SKU收尾时间未知，本轮暂缓挂窗, 机台: {}, "
+                                + "计划日期: {}, 距到期天数: {}, 强制阈值天数: {}",
+                        machine.getMachineCode(), LhScheduleTimeUtil.formatDate(plan.getPlanDate()),
+                        plan.getDaysToDue(), forceDays);
+                continue;
+            }
+
+            if (!forceDown && Objects.nonNull(knownEndingTime) && knownEndingTime.after(firstCutoffTime)) {
+                // 最新业务口径以PLAN_DATE作为允许执行的最后日期，DUE_DATE不参与延后边界判断。
+                Date dueDate = LhScheduleTimeUtil.clearTime(plan.getPlanDate());
+                Date cursorDate = LhScheduleTimeUtil.addDays(firstCandidateDate, 1);
+                Date availableDate = resolveAvailableMaintenanceDate(
+                        context, cursorDate, machine.getMachineCode(), plan);
+                while (Objects.nonNull(dueDate) && !availableDate.after(dueDate)
+                        && knownEndingTime.after(buildProductionCutoffTime(availableDate))) {
+                    cursorDate = LhScheduleTimeUtil.addDays(availableDate, 1);
+                    availableDate = resolveAvailableMaintenanceDate(
+                            context, cursorDate, machine.getMachineCode(), plan);
+                }
+                if (Objects.nonNull(dueDate) && availableDate.after(dueDate)) {
+                    appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE,
+                            machine.getMachineCode(), plan, knownEndingTime,
+                            "普通精度计划在到期日前无自然收尾窗口", "等待后续滚动进入3天强制范围");
+                    continue;
+                }
+                finalPlanDate = availableDate;
+                preInsertAllowed = knownEndingTime.before(buildProductionCutoffTime(finalPlanDate));
+            }
+
+            if (!isExecutionDateWithinPlanDate(plan, finalPlanDate)) {
+                log.warn("精度计划在计划日前无合规执行日，本轮取消安排, 机台: {}, 计划日期: {}, "
+                                + "距到期天数: {}, 候选执行日期: {}",
+                        machine.getMachineCode(), LhScheduleTimeUtil.formatDate(plan.getPlanDate()),
+                        plan.getDaysToDue(), LhScheduleTimeUtil.formatDate(finalPlanDate));
+                appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE,
+                        machine.getMachineCode(), plan, finalPlanDate,
+                        "计划日前日期均被每日台数、周日、盘点日、节假日或停机任务占用",
+                        "取消安排，禁止延后执行");
+                continue;
+            }
+            attachMaintenanceWindow(context, machine, plan, finalPlanDate,
+                    forceDown, preInsertAllowed,
+                    forceDown ? TRIGGER_REASON_FORCE_DOWN : TRIGGER_REASON_AFTER_ENDING);
+        }
+        log.info("精度计划处理排序完成, 工厂: {}, 目标日: {}, 计划数: {}, 排序结果: {}",
+                context.getFactoryCode(), LhScheduleTimeUtil.formatDate(context.getScheduleDate()),
+                order, orderLog);
+    }
+
+    /**
+     * 校验换活字块、新增排产或特殊材料候选是否允许占用精度计划前窗口。
+     *
+     * <p>只有明确标记为可插排的4～30天计划才允许在执行日06:00前新增SKU，并且必须一次排完
+     * SKU完整待排量。3天强制计划、前SKU本可在06:00前自然收尾的计划以及已接受过插排的窗口，
+     * 均禁止再次填充。候选从预热完成后开始时属于正常后续生产，不受本方法的50条限制。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 候选机台
+     * @param sku 候选SKU
+     * @param pendingQty 候选进入本机台前的完整真实待排量
+     * @param plannedQty 本次结果最终计划量
+     * @param preparationStartTime 换模或换活字块开始时间；无准备任务时传开产时间
+     * @param productionStartTime 实际开产时间
+     * @param completionTime 最后一个正量班次的实际完成时间
+     * @return 空字符串表示允许；非空为具体排除原因
+     */
+    public String resolvePrecisionCandidateRejectReason(LhScheduleContext context,
+                                                        MachineScheduleDTO machine,
+                                                        SkuScheduleDTO sku,
+                                                        int pendingQty,
+                                                        int plannedQty,
+                                                        Date preparationStartTime,
+                                                        Date productionStartTime,
+                                                        Date completionTime) {
+        MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+        if (Objects.isNull(window) || Objects.isNull(window.getProductionCutoffTime())
+                || Objects.isNull(window.getProductionResumeTime())) {
+            return StringUtils.EMPTY;
+        }
+        Date taskStartTime = Objects.nonNull(preparationStartTime)
+                ? preparationStartTime : productionStartTime;
+        if (Objects.isNull(taskStartTime)) {
+            return "候选缺少换型或开产开始时间";
+        }
+        /*
+         * 中心预决策会一次性为30天内全部精度计划分配执行日；当每日台数限制使某些窗口被顺延到
+         * 当前滚动排程窗口之外时，该未来窗口不能提前锁死本轮正常生产。只有精度生产截止已经进入
+         * 当前排程窗口，才把本次新增/换活字块结果视为“精度前插排”并执行完整余量及06:00过滤。
+         */
+        if (Objects.nonNull(context.getWindowEndDate())
+                && !window.getProductionCutoffTime().before(
+                LhScheduleTimeUtil.addDays(
+                        LhScheduleTimeUtil.clearTime(context.getWindowEndDate()), 1))) {
+            return StringUtils.EMPTY;
+        }
+        // 预热完成后开始属于精度后的正常生产，不受前置插排阈值约束。
+        if (!taskStartTime.before(window.getProductionResumeTime())) {
+            return StringUtils.EMPTY;
+        }
+        String rejectReason = StringUtils.EMPTY;
+        int maxQty = resolvePrecisionPreInsertMaxQty(context);
+        if (!window.isPreInsertAllowed()) {
+            rejectReason = window.isForceDown()
+                    ? "3天内强制精度计划禁止插排SKU"
+                    : "前SKU可在06:00前自然收尾，按规则保留为空等";
+        } else if (window.isPreInsertScheduled()) {
+            rejectReason = "同一物理机台精度前窗口已安排插排SKU";
+        } else if (pendingQty <= 0) {
+            rejectReason = "SKU无真实待排量";
+        } else if (pendingQty > maxQty) {
+            rejectReason = "完整待排量超过精度前插排上限" + maxQty;
+        } else if (plannedQty != pendingQty) {
+            rejectReason = plannedQty > pendingQty
+                    ? "结果计划量超过真实待排量，禁止精度前超排"
+                    : "结果未完整排完待排量，禁止截断SKU";
+        } else if (Objects.isNull(productionStartTime) || Objects.isNull(completionTime)) {
+            rejectReason = "无法计算候选完整时间轴";
+        } else if (taskStartTime.after(window.getProductionCutoffTime())
+                || completionTime.after(window.getProductionCutoffTime())) {
+            rejectReason = "换型、首检或生产完成时间晚于精度执行日06:00";
+        }
+        log.info("精度前插排候选判断, 机台: {}, 计划日期: {}, 距到期天数: {}, SKU: {}, "
+                        + "待排量: {}, 计划量: {}, 准备开始: {}, 预计开产: {}, 预计收尾: {}, "
+                        + "生产截止: {}, 结论: {}, 原因: {}",
+                machine.getMachineCode(), LhScheduleTimeUtil.formatDate(window.getPlanDate()),
+                window.getDaysToDue(), Objects.nonNull(sku) ? sku.getMaterialCode() : "-",
+                pendingQty, plannedQty, LhScheduleTimeUtil.formatDateTime(taskStartTime),
+                LhScheduleTimeUtil.formatDateTime(productionStartTime),
+                LhScheduleTimeUtil.formatDateTime(completionTime),
+                LhScheduleTimeUtil.formatDateTime(window.getProductionCutoffTime()),
+                StringUtils.isEmpty(rejectReason) ? "接受" : "排除",
+                StringUtils.isEmpty(rejectReason) ? "完整时间轴可在06:00前完成" : rejectReason);
+        return rejectReason;
+    }
+
+    /**
+     * 解析精度前插排最大完整待排量。
+     *
+     * @param context 排程上下文
+     * @return 正整数阈值；缺失、非数字或非正数时返回默认50
+     */
+    private int resolvePrecisionPreInsertMaxQty(LhScheduleContext context) {
+        if (Objects.nonNull(context) && Objects.nonNull(context.getScheduleConfig())) {
+            return context.getScheduleConfig().getPrecisionPreInsertMaxQty();
+        }
+        int configuredValue = getParamInt(
+                context, LhScheduleParamConstant.PRECISION_PRE_INSERT_MAX_QTY,
+                LhScheduleConstant.PRECISION_PRE_INSERT_MAX_QTY);
+        if (configuredValue > 0) {
+            return configuredValue;
+        }
+        log.warn("精度前插排最大计划量配置非正数，使用默认值, paramCode: {}, value: {}, defaultValue: {}",
+                LhScheduleParamConstant.PRECISION_PRE_INSERT_MAX_QTY, configuredValue,
+                LhScheduleConstant.PRECISION_PRE_INSERT_MAX_QTY);
+        return LhScheduleConstant.PRECISION_PRE_INSERT_MAX_QTY;
+    }
+
+    /**
+     * 在候选结果正式提交后登记精度前窗口已被使用，并同步物理机台L/R两侧。
+     *
+     * @param context 排程上下文
+     * @param machine 已接受插排的机台
+     * @param result 已正式提交的插排结果
+     */
+    public void markPrecisionPreInsertScheduled(LhScheduleContext context,
+                                                MachineScheduleDTO machine,
+                                                LhScheduleResult result) {
+        markPrecisionPreInsertScheduled(machine);
+        markPrecisionPreInsertScheduled(LhSingleControlMachineUtil.resolvePairMachine(
+                context, machine.getMachineCode()));
+        if (Objects.nonNull(result)) {
+            context.getPrecisionPreInsertResultSet().add(result);
+        }
+    }
+
+    /**
+     * 判断候选任务是否真实落在精度计划生产截止日前，应在提交后登记为精度前插排。
+     *
+     * @param machine 候选机台
+     * @param taskStartTime 换型或开产开始时间
+     * @return true-属于精度前插排；false-无精度窗口或属于预热后的正常生产
+     */
+    public boolean shouldMarkPrecisionPreInsert(MachineScheduleDTO machine, Date taskStartTime) {
+        MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+        return Objects.nonNull(window) && window.isPreInsertAllowed()
+                && Objects.nonNull(taskStartTime)
+                && taskStartTime.before(window.getProductionCutoffTime());
+    }
+
+    /**
+     * 判断机台是否存在尚未使用的精度前插排窗口。
+     *
+     * @param machine 机台
+     * @return true-允许继续按现有顺序遍历小余量候选
+     */
+    public boolean hasOpenPrecisionPreInsertWindow(MachineScheduleDTO machine) {
+        MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+        return Objects.nonNull(window) && window.isPreInsertAllowed()
+                && !window.isPreInsertScheduled();
+    }
+
+    /**
+     * 获取3天内精度计划的强制下机截止时间。
+     *
+     * @param machine 机台
+     * @return 执行日06:00；非强制计划返回null
+     */
+    public Date resolveForceDownCutoffTime(MachineScheduleDTO machine) {
+        MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+        return Objects.nonNull(window) && window.isForceDown()
+                ? window.getProductionCutoffTime() : null;
+    }
+
+    private void markPrecisionPreInsertScheduled(MachineScheduleDTO machine) {
+        MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+        if (Objects.nonNull(window) && window.isPreInsertAllowed()) {
+            window.setPreInsertScheduled(true);
+        }
+    }
+
+    /**
+     * 判断结果是否属于精度执行日前已接受的插排结果。
+     *
+     * @param machine 机台
+     * @param result 结果
+     * @return true-结果在精度截止日前完成且窗口已标记为插排
+     */
+    public boolean isPrecisionPreInsertResult(MachineScheduleDTO machine, LhScheduleResult result) {
+        MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+        return Objects.nonNull(window) && window.isPreInsertScheduled()
+                && Objects.nonNull(result) && Objects.nonNull(result.getSpecEndTime())
+                && !result.getSpecEndTime().after(window.getProductionCutoffTime());
+    }
+
+    private MachineMaintenanceWindowDTO resolveFirstMaintenanceWindow(MachineScheduleDTO machine) {
+        return Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())
+                ? null : machine.getMaintenanceWindowList().get(0);
+    }
+
+    /**
+     * 解析精准计划对应的运行态机台。
+     *
+     * @param context 排程上下文
+     * @param planMachineCode 计划机台编码
+     * @return 运行态机台；物理机拆分为L/R时优先返回左侧
+     */
+    private MachineScheduleDTO resolveRuntimeMachine(LhScheduleContext context, String planMachineCode) {
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(planMachineCode);
+        if (Objects.nonNull(machine)) {
+            return machine;
+        }
+        String leftMachineCode = LhSingleControlMachineUtil.resolveLeftMachineCode(planMachineCode);
+        machine = context.getMachineScheduleMap().get(leftMachineCode);
+        if (Objects.nonNull(machine)) {
+            return machine;
+        }
+        return context.getMachineScheduleMap().get(
+                LhSingleControlMachineUtil.resolveRightMachineCode(planMachineCode));
+    }
+
+    /**
+     * 读取物理机台两侧当前已知的最晚收尾时间。
+     *
+     * @param context 排程上下文
+     * @param machine 任一侧运行态机台
+     * @return 最晚收尾时间；在机侧缺少预计收尾时间时返回null
+     */
+    private Date resolvePhysicalKnownEndingTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        Date endingTime = resolveKnownEndingTime(context, machine);
+        if (StringUtils.isNotEmpty(machine.getCurrentMaterialCode()) && Objects.isNull(endingTime)) {
+            return null;
+        }
+        MachineScheduleDTO pairMachine = LhSingleControlMachineUtil.resolvePairMachine(
+                context, machine.getMachineCode());
+        Date pairEndingTime = resolveKnownEndingTime(context, pairMachine);
+        if (Objects.nonNull(pairMachine) && StringUtils.isNotEmpty(pairMachine.getCurrentMaterialCode())
+                && Objects.isNull(pairEndingTime)) {
+            return null;
+        }
+        return later(endingTime, pairEndingTime);
+    }
+
+    /**
+     * 读取单侧机台已知收尾时间；空闲机台以当前排程日零点表示已经就绪。
+     *
+     * @param context 排程上下文
+     * @param machine 运行态机台
+     * @return 已知收尾时间
+     */
+    private Date resolveKnownEndingTime(LhScheduleContext context, MachineScheduleDTO machine) {
+        if (Objects.isNull(machine)) {
+            return null;
+        }
+        // 空闲机台没有预计收尾时间并不代表时间未知，应视为排程日开始时已经就绪。
+        // 该区分可避免3天内精准计划把空闲机台误判为“必须强制下机”。
+        if (StringUtils.isEmpty(machine.getCurrentMaterialCode())
+                && Objects.isNull(machine.getEstimatedEndTime())) {
+            return context.getScheduleDate();
+        }
+        return machine.getEstimatedEndTime();
+    }
 
     /**
      * 首个规格收尾后尝试挂载保养窗口。
@@ -60,6 +464,18 @@ public class LhMaintenanceScheduleService {
                                                         Date endingTime) {
         if (!isBasicValid(context, machine) || Objects.isNull(endingTime)
                 || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
+            return false;
+        }
+        String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                machine.getMachineCode());
+        /*
+         * S4.4入口已经完成中心预决策时，只有“前SKU收尾时间未知”的普通计划允许在
+         * 续作结果形成后补决策一次。其他计划必须服从中心排序与已分配日期，禁止旧入口
+         * 再挂载第二个窗口或绕过到期日前结论。
+         */
+        boolean deferredByUnknownEnding = context.getMaintenanceDeferredPhysicalMachineCodeSet()
+                .contains(physicalMachineCode);
+        if (context.isMaintenancePreDecisionCompleted() && !deferredByUnknownEnding) {
             return false;
         }
         String lookupMachineCode = machine.getMachineCode();
@@ -81,14 +497,22 @@ public class LhMaintenanceScheduleService {
         appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE, lookupMachineCode, plan,
                 physicalEndingTime,
                 "机台第一个SKU物理机台最晚收尾=" + PriorityTraceLogHelper.formatDateTime(physicalEndingTime)
-                        + "，固定保养开始=08:00",
-                physicalEndingTime.after(buildMaintenanceStartTime(
-                        context, LhScheduleTimeUtil.clearTime(physicalEndingTime)))
-                        ? "08:00后收尾，从下一自然日开始顺延" : "当天08:00可作为候选");
+                        + "，生产截止=06:00，精度固定开始=08:00",
+                physicalEndingTime.after(buildProductionCutoffTime(
+                        LhScheduleTimeUtil.clearTime(physicalEndingTime)))
+                        ? "06:00后收尾，从下一自然日开始顺延" : "当天08:00可作为候选");
         Date candidateDate = resolveNormalCandidateDate(context, physicalEndingTime);
         Date planDate = resolveAvailableMaintenanceDate(context, candidateDate, lookupMachineCode, plan);
-        return attachMaintenanceWindow(context, machine, plan, planDate,
-                false, TRIGGER_REASON_AFTER_ENDING);
+        boolean preInsertAllowed = deferredByUnknownEnding
+                && physicalEndingTime.after(buildProductionCutoffTime(
+                LhScheduleTimeUtil.clearTime(physicalEndingTime)))
+                && physicalEndingTime.before(buildProductionCutoffTime(planDate));
+        boolean attached = attachMaintenanceWindow(context, machine, plan, planDate,
+                false, preInsertAllowed, TRIGGER_REASON_AFTER_ENDING);
+        if (attached) {
+            context.getMaintenanceDeferredPhysicalMachineCodeSet().remove(physicalMachineCode);
+        }
+        return attached;
     }
 
     /**
@@ -105,10 +529,16 @@ public class LhMaintenanceScheduleService {
         if (!isBasicValid(context, machine) || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
             return false;
         }
+        if (context.isMaintenancePreDecisionCompleted()) {
+            return false;
+        }
         String lookupMachineCode = machine.getMachineCode();
         LhPrecisionPlan plan = resolveMaintenancePlan(context, lookupMachineCode);
         Integer daysToDue = resolveDaysToDue(plan);
         if (Objects.isNull(plan) || Objects.isNull(daysToDue) || Objects.isNull(context.getScheduleDate())) {
+            return false;
+        }
+        if (!isPlanDateEligible(context, plan)) {
             return false;
         }
         int onlineDays = resolvePhysicalOnlineDays(context, machine);
@@ -142,7 +572,7 @@ public class LhMaintenanceScheduleService {
             return false;
         }
         return attachMaintenanceWindow(context, machine, plan, candidateDate,
-                true, TRIGGER_REASON_FORCE_DOWN);
+                true, false, TRIGGER_REASON_FORCE_DOWN);
     }
 
     /**
@@ -157,9 +587,13 @@ public class LhMaintenanceScheduleService {
         if (!isBasicValid(context, machine) || !CollectionUtils.isEmpty(machine.getMaintenanceWindowList())) {
             return false;
         }
+        if (context.isMaintenancePreDecisionCompleted()) {
+            return false;
+        }
         LhPrecisionPlan plan = resolveMaintenancePlan(context, machine.getMachineCode());
         Integer daysToDue = resolveDaysToDue(plan);
-        if (!isPlanUncompleted(plan) || Objects.isNull(daysToDue)) {
+        if (!isPlanUncompleted(plan) || Objects.isNull(daysToDue)
+                || !isPlanDateEligible(context, plan)) {
             return false;
         }
         int forceCheckDays = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_FORCE_CHECK_DAYS,
@@ -189,10 +623,12 @@ public class LhMaintenanceScheduleService {
             Date candidateEndTime = LhScheduleTimeUtil.addHours(adjustedStartTime, switchDurationHours);
             Date latestOverlapEndTime = null;
             for (MachineMaintenanceWindowDTO window : machine.getMaintenanceWindowList()) {
-                if (!isWindowOverlap(window, adjustedStartTime, candidateEndTime)) {
+                Date occupationEndTime = Objects.nonNull(window.getProductionResumeTime())
+                        ? window.getProductionResumeTime() : window.getMaintenanceEndTime();
+                if (!isWindowOverlap(window, adjustedStartTime, candidateEndTime, occupationEndTime)) {
                     continue;
                 }
-                latestOverlapEndTime = later(latestOverlapEndTime, window.getMaintenanceEndTime());
+                latestOverlapEndTime = later(latestOverlapEndTime, occupationEndTime);
             }
             if (Objects.isNull(latestOverlapEndTime) || !latestOverlapEndTime.after(adjustedStartTime)) {
                 return adjustedStartTime;
@@ -398,10 +834,9 @@ public class LhMaintenanceScheduleService {
     public boolean shouldApplyMaintenanceOverlapSwitchRule(LhScheduleContext context,
                                                            MachineScheduleDTO machine,
                                                            Date referenceTime) {
-        Date maintenanceEndTime = resolveMaintenanceEndTime(context, machine, referenceTime);
-        return Objects.nonNull(referenceTime)
-                && Objects.nonNull(maintenanceEndTime)
-                && referenceTime.before(maintenanceEndTime);
+        // 最新规则明确禁止换模、换活字块与精度计划并行。所有调用方继续复用原入口，
+        // 但统一返回false，随后走正常切换时长并由delaySwitchStartByMaintenance顺延至预热结束。
+        return false;
     }
 
     /**
@@ -492,36 +927,55 @@ public class LhMaintenanceScheduleService {
                                             LhPrecisionPlan plan,
                                             Date planDate,
                                             boolean forceDown,
+                                            boolean preInsertAllowed,
                                             String triggerReason) {
+        // 最终挂窗前再次守住“只能提前、不能延后”边界。日期硬约束若导致候选日晚于计划日期，
+        // 本轮不得挂载精度窗口，也不得通过强制下机把历史计划延后到当前或未来日期执行。
+        if (!isExecutionDateWithinPlanDate(plan, planDate)) {
+            appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE,
+                    machine.getMachineCode(), plan, planDate,
+                    "候选执行日期晚于精度计划日期",
+                    "取消挂窗，禁止延后执行");
+            log.warn("精度候选执行日期晚于计划日期，本轮取消安排, 机台: {}, 计划日期: {}, "
+                            + "候选执行日期: {}, 距到期天数: {}",
+                    machine.getMachineCode(), LhScheduleTimeUtil.formatDate(plan.getPlanDate()),
+                    LhScheduleTimeUtil.formatDate(planDate), plan.getDaysToDue());
+            return false;
+        }
         int durationHours = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS,
                 LhScheduleConstant.MAINTENANCE_DURATION_HOURS);
         Date startTime = buildMaintenanceStartTime(context, planDate);
         Date endTime = LhScheduleTimeUtil.addHours(startTime, durationHours);
         Date productionResumeTime = LhScheduleTimeUtil.addMinutes(
                 endTime, LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
+        Date productionCutoffTime = buildProductionCutoffTime(planDate);
 
         // 单控 L/R 属于同一物理机台：任一侧触发时两侧同步挂载相同占用窗口，
         // 但每一侧窗口保留各自精准计划主键，排程完成后分别回填 SCHEDULE_DATE。
         attachMaintenanceWindowToMachine(context, machine, plan, planDate, startTime, endTime,
-                productionResumeTime, forceDown, triggerReason);
+                productionResumeTime, productionCutoffTime, forceDown, preInsertAllowed, triggerReason);
         MachineScheduleDTO pairMachine = LhSingleControlMachineUtil.resolvePairMachine(context, machine.getMachineCode());
         if (Objects.nonNull(pairMachine)) {
             LhPrecisionPlan pairPlan = context.getMaintenancePlanMap().get(pairMachine.getMachineCode());
             attachMaintenanceWindowToMachine(context, pairMachine, pairPlan, planDate, startTime, endTime,
-                    productionResumeTime, forceDown, triggerReason);
+                    productionResumeTime, productionCutoffTime, forceDown, preInsertAllowed, triggerReason);
         }
         increaseDailyMaintenanceCount(context, planDate, machine.getMachineCode());
         log.info("硫化机保养窗口已安排, 机台: {}, 配对侧: {}, 保养类型: {}, 计划到期: {}, 距到期天数: {}, "
-                        + "保养开始: {}, 保养结束: {}, 预热完成及最早开产: {}, 强制下机: {}, 原因: {}",
+                        + "生产截止: {}, 保养开始: {}, 保养结束: {}, 预热完成及最早开产: {}, "
+                        + "允许精度前插排: {}, 强制下机: {}, 原因: {}",
                 machine.getMachineCode(), Objects.nonNull(pairMachine) ? pairMachine.getMachineCode() : "-",
                 plan.getPrecisionType(), LhScheduleTimeUtil.formatDate(resolvePlanDueDate(context, plan)),
-                resolveDaysToDue(plan), LhScheduleTimeUtil.formatDateTime(startTime),
+                resolveDaysToDue(plan), LhScheduleTimeUtil.formatDateTime(productionCutoffTime),
+                LhScheduleTimeUtil.formatDateTime(startTime),
                 LhScheduleTimeUtil.formatDateTime(endTime), LhScheduleTimeUtil.formatDateTime(productionResumeTime),
-                forceDown, triggerReason);
+                preInsertAllowed, forceDown, triggerReason);
         appendMaintenanceProcessLog(context, MAINTENANCE_FINAL_LOG_TITLE, machine.getMachineCode(), plan,
                 startTime,
                 "保养结束=" + PriorityTraceLogHelper.formatDateTime(endTime)
                         + "，预热完成及最早开产=" + PriorityTraceLogHelper.formatDateTime(productionResumeTime)
+                        + "，生产截止=" + PriorityTraceLogHelper.formatDateTime(productionCutoffTime)
+                        + "，允许插排=" + preInsertAllowed
                         + "，物理机台=" + LhSingleControlMachineUtil.resolvePhysicalMachineCode(machine.getMachineCode()),
                         (forceDown ? "强制下机" : "自然收尾后保养") + "，原因=" + triggerReason);
         return true;
@@ -539,7 +993,9 @@ public class LhMaintenanceScheduleService {
      * @param startTime 保养开始时间
      * @param endTime 保养结束时间
      * @param productionResumeTime 预热完成及最早开产时间
+     * @param productionCutoffTime 精度执行日前生产和准备任务截止时间
      * @param forceDown 是否强制下机
+     * @param preInsertAllowed 是否允许在截止时间前插排完整小余量SKU
      * @param triggerReason 触发原因
      */
     private void attachMaintenanceWindowToMachine(LhScheduleContext context,
@@ -549,7 +1005,9 @@ public class LhMaintenanceScheduleService {
                                                    Date startTime,
                                                    Date endTime,
                                                    Date productionResumeTime,
+                                                   Date productionCutoffTime,
                                                    boolean forceDown,
+                                                   boolean preInsertAllowed,
                                                    String triggerReason) {
         if (Objects.isNull(targetMachine) || !CollectionUtils.isEmpty(targetMachine.getMaintenanceWindowList())) {
             return;
@@ -565,6 +1023,8 @@ public class LhMaintenanceScheduleService {
         window.setMaintenanceStartTime(startTime);
         window.setMaintenanceEndTime(endTime);
         window.setProductionResumeTime(productionResumeTime);
+        window.setProductionCutoffTime(productionCutoffTime);
+        window.setPreInsertAllowed(preInsertAllowed);
         window.setForceDown(forceDown);
         window.setTriggerReason(triggerReason);
         targetMachine.getMaintenanceWindowList().add(window);
@@ -650,12 +1110,25 @@ public class LhMaintenanceScheduleService {
                                                  String machineCode,
                                                  LhPrecisionPlan plan) {
         Date cursorDate = LhScheduleTimeUtil.clearTime(candidateDate);
+        Date searchStartDate = cursorDate;
+        int skippedDays = 0;
+        String firstUnavailableReason = StringUtils.EMPTY;
+        String lastUnavailableReason = StringUtils.EMPTY;
         while (true) {
-            String unavailableReason = resolveDateUnavailableReason(context, cursorDate);
+            String unavailableReason = resolveDateUnavailableReason(context, cursorDate, machineCode);
             if (StringUtils.isEmpty(unavailableReason)) {
                 String dateKey = LhScheduleTimeUtil.formatDate(cursorDate);
-                StringBuilder ruleBuilder = new StringBuilder(128);
-                ruleBuilder.append("当天保养物理机台数=")
+                StringBuilder ruleBuilder = new StringBuilder(192);
+                ruleBuilder.append("搜索起点=")
+                        .append(LhScheduleTimeUtil.formatDate(searchStartDate))
+                        .append("，顺延天数=").append(skippedDays)
+                        .append("，首个排除原因=")
+                        .append(StringUtils.isEmpty(firstUnavailableReason)
+                                ? "无" : firstUnavailableReason)
+                        .append("，最后排除原因=")
+                        .append(StringUtils.isEmpty(lastUnavailableReason)
+                                ? "无" : lastUnavailableReason)
+                        .append("，最终当天保养物理机台数=")
                         .append(resolveDailyMaintenanceCount(context, dateKey))
                         .append("/").append(DAILY_MAINTENANCE_LIMIT)
                         .append("，周日命中=").append(isSunday(cursorDate))
@@ -664,18 +1137,26 @@ public class LhMaintenanceScheduleService {
                         .append(isHolidayOrHolidayBeforeDay(context, cursorDate));
                 appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE, machineCode, plan,
                         cursorDate, ruleBuilder.toString(), "日期可用");
+                log.info("精度计划执行日期搜索完成, 机台: {}, 搜索起点: {}, 最终日期: {}, "
+                                + "顺延天数: {}, 首个排除原因: {}, 最后排除原因: {}",
+                        machineCode, LhScheduleTimeUtil.formatDate(searchStartDate),
+                        LhScheduleTimeUtil.formatDate(cursorDate), skippedDays,
+                        StringUtils.isEmpty(firstUnavailableReason) ? "无" : firstUnavailableReason,
+                        StringUtils.isEmpty(lastUnavailableReason) ? "无" : lastUnavailableReason);
                 return cursorDate;
             }
-            log.info("保养日期不满足约束，顺延一天, 日期: {}, 原因: {}",
-                    LhScheduleTimeUtil.formatDate(cursorDate),
-                    unavailableReason);
-            appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE, machineCode, plan,
-                    cursorDate, unavailableReason, "顺延一天");
+            if (StringUtils.isEmpty(firstUnavailableReason)) {
+                firstUnavailableReason = unavailableReason;
+            }
+            lastUnavailableReason = unavailableReason;
+            skippedDays++;
             cursorDate = LhScheduleTimeUtil.addDays(cursorDate, 1);
         }
     }
 
-    private String resolveDateUnavailableReason(LhScheduleContext context, Date targetDate) {
+    private String resolveDateUnavailableReason(LhScheduleContext context,
+                                                Date targetDate,
+                                                String machineCode) {
         String dateKey = LhScheduleTimeUtil.formatDate(targetDate);
         int usedCount = resolveDailyMaintenanceCount(context, dateKey);
         if (usedCount >= DAILY_MAINTENANCE_LIMIT) {
@@ -690,12 +1171,92 @@ public class LhMaintenanceScheduleService {
         if (isHolidayOrHolidayBeforeDay(context, targetDate)) {
             return "节假日前限制天数内不安排保养";
         }
+        String timelineConflictReason = resolveFixedTimelineConflictReason(
+                context, targetDate, machineCode);
+        if (StringUtils.isNotEmpty(timelineConflictReason)) {
+            return timelineConflictReason;
+        }
         return null;
+    }
+
+    /**
+     * 判断精度计划及胶囊预热占用是否与机台既有停机、维修或清洗窗口重叠。
+     *
+     * @param context 排程上下文
+     * @param targetDate 精度候选执行日期
+     * @param machineCode 任一侧运行态机台编码
+     * @return 冲突原因；无冲突返回空字符串
+     */
+    private String resolveFixedTimelineConflictReason(LhScheduleContext context,
+                                                      Date targetDate,
+                                                      String machineCode) {
+        Date maintenanceStartTime = buildMaintenanceStartTime(context, targetDate);
+        Date maintenanceEndTime = LhScheduleTimeUtil.addHours(maintenanceStartTime,
+                getParamInt(context, LhScheduleParamConstant.MAINTENANCE_DURATION_HOURS,
+                        LhScheduleConstant.MAINTENANCE_DURATION_HOURS));
+        Date occupationEndTime = LhScheduleTimeUtil.addMinutes(maintenanceEndTime,
+                LhScheduleTimeUtil.getCapsulePreheatMinutes(context));
+        String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(machineCode);
+        if (!CollectionUtils.isEmpty(context.getDevicePlanShutList())) {
+            for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
+                if (Objects.isNull(planShut) || Objects.isNull(planShut.getBeginDate())
+                        || Objects.isNull(planShut.getEndDate())
+                        || !StringUtils.equals(physicalMachineCode,
+                        LhSingleControlMachineUtil.resolvePhysicalMachineCode(planShut.getMachineCode()))) {
+                    continue;
+                }
+                if (isTimeRangeOverlap(maintenanceStartTime, occupationEndTime,
+                        planShut.getBeginDate(), planShut.getEndDate())) {
+                    return "精度及预热窗口与设备停机/维修计划重叠";
+                }
+            }
+        }
+        for (MachineScheduleDTO runtimeMachine : context.getMachineScheduleMap().values()) {
+            if (Objects.isNull(runtimeMachine)
+                    || !StringUtils.equals(physicalMachineCode,
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(runtimeMachine.getMachineCode()))
+                    || CollectionUtils.isEmpty(runtimeMachine.getCleaningWindowList())) {
+                continue;
+            }
+            for (MachineCleaningWindowDTO cleaningWindow : runtimeMachine.getCleaningWindowList()) {
+                if (Objects.nonNull(cleaningWindow)
+                        && isTimeRangeOverlap(maintenanceStartTime, occupationEndTime,
+                        cleaningWindow.getCleanStartTime(), cleaningWindow.getReadyTime())) {
+                    return "精度及预热窗口与机台清洗计划重叠";
+                }
+            }
+        }
+        return StringUtils.EMPTY;
+    }
+
+    /**
+     * 判断两个左闭右开时间区间是否重叠。
+     *
+     * @param firstStart 第一区间开始
+     * @param firstEnd 第一区间结束
+     * @param secondStart 第二区间开始
+     * @param secondEnd 第二区间结束
+     * @return true-存在实际重叠；false-无重叠或时间无效
+     */
+    private boolean isTimeRangeOverlap(Date firstStart,
+                                       Date firstEnd,
+                                       Date secondStart,
+                                       Date secondEnd) {
+        return Objects.nonNull(firstStart) && Objects.nonNull(firstEnd)
+                && Objects.nonNull(secondStart) && Objects.nonNull(secondEnd)
+                && firstStart.before(firstEnd) && secondStart.before(secondEnd)
+                && firstStart.before(secondEnd) && secondStart.before(firstEnd);
     }
 
     private boolean isPlanDueSoon(LhScheduleContext context, LhPrecisionPlan plan) {
         Integer daysToDue = resolveDaysToDue(plan);
         if (Objects.isNull(plan) || Objects.isNull(daysToDue) || Objects.isNull(context.getScheduleDate())) {
+            return false;
+        }
+        if (!isPlanDateEligible(context, plan)) {
+            appendMaintenanceProcessLog(context, MAINTENANCE_PROCESS_LOG_TITLE, plan.getMachineCode(), plan,
+                    null, "计划日期早于排程T日或计划日期为空",
+                    "不进入本轮精度调度，禁止延后执行");
             return false;
         }
         int warningDays = getParamInt(context, LhScheduleParamConstant.MAINTENANCE_WARNING_DAYS,
@@ -705,6 +1266,44 @@ public class LhMaintenanceScheduleService {
                 null, "预警阈值=" + warningDays + "，是否进入预警范围=" + dueSoon,
                 dueSoon ? "进入30天预警范围" : "未进入预警范围");
         return dueSoon;
+    }
+
+    /**
+     * 判断精度计划日期是否具备本轮触发资格。
+     *
+     * <p>精度计划允许从T日起提前到计划日前执行，但计划日期一旦早于T日即视为已经错过本轮可执行窗口，
+     * 不得把历史未完成计划延后到本轮执行。DAYS_TO_DUE仍只负责30天预警和3天强制分级，不能替代
+     * PLAN_DATE >= T这一日期准入条件。</p>
+     *
+     * @param context 排程上下文
+     * @param plan 精度计划
+     * @return true-计划日期不早于T日；false-计划日期为空或早于T日
+     */
+    private boolean isPlanDateEligible(LhScheduleContext context, LhPrecisionPlan plan) {
+        if (Objects.isNull(context) || Objects.isNull(context.getScheduleDate())
+                || Objects.isNull(plan) || Objects.isNull(plan.getPlanDate())) {
+            return false;
+        }
+        Date scheduleDate = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
+        Date precisionPlanDate = LhScheduleTimeUtil.clearTime(plan.getPlanDate());
+        return !precisionPlanDate.before(scheduleDate);
+    }
+
+    /**
+     * 判断最终精度执行日是否未超过计划日期。
+     *
+     * @param plan 精度计划
+     * @param executionDate 候选执行日
+     * @return true-候选日不晚于计划日；false-日期缺失或候选日晚于计划日
+     */
+    private boolean isExecutionDateWithinPlanDate(LhPrecisionPlan plan, Date executionDate) {
+        if (Objects.isNull(plan) || Objects.isNull(plan.getPlanDate())
+                || Objects.isNull(executionDate)) {
+            return false;
+        }
+        Date precisionPlanDate = LhScheduleTimeUtil.clearTime(plan.getPlanDate());
+        Date candidateDate = LhScheduleTimeUtil.clearTime(executionDate);
+        return !candidateDate.after(precisionPlanDate);
     }
 
     /**
@@ -769,8 +1368,8 @@ public class LhMaintenanceScheduleService {
     }
 
     /**
-     * 根据首个规格真实收尾时间解析正常保养候选日。
-     * <p>保养固定在 08:00 开始：收尾不晚于固定开始时间时可使用当天；晚于固定开始时间时，
+     * 根据首个规格真实收尾时间解析正常精度候选日。
+     * <p>前规格必须在精度执行日06:00前完整收尾：收尾不晚于06:00时可使用当天；晚于06:00时，
      * 必须从下一自然日开始寻找可用日期，禁止把保养提前到前规格仍在生产的时段。</p>
      *
      * @param context 排程上下文
@@ -779,8 +1378,8 @@ public class LhMaintenanceScheduleService {
      */
     private Date resolveNormalCandidateDate(LhScheduleContext context, Date endingTime) {
         Date endingDate = LhScheduleTimeUtil.clearTime(endingTime);
-        Date fixedStartTime = buildMaintenanceStartTime(context, endingDate);
-        return endingTime.after(fixedStartTime)
+        Date productionCutoffTime = buildProductionCutoffTime(endingDate);
+        return endingTime.after(productionCutoffTime)
                 ? LhScheduleTimeUtil.addDays(endingDate, 1) : endingDate;
     }
 
@@ -801,6 +1400,17 @@ public class LhMaintenanceScheduleService {
             startHour = LhScheduleConstant.MAINTENANCE_START_HOUR;
         }
         return LhScheduleTimeUtil.buildTime(planDate, startHour, 0, 0);
+    }
+
+    /**
+     * 构建精度执行日前生产与准备任务的固定截止时间。
+     *
+     * @param planDate 精度最终执行日期
+     * @return 执行日当天06:00
+     */
+    private Date buildProductionCutoffTime(Date planDate) {
+        return LhScheduleTimeUtil.buildTime(planDate,
+                LhScheduleConstant.PRECISION_PRODUCTION_CUTOFF_HOUR, 0, 0);
     }
 
     /**

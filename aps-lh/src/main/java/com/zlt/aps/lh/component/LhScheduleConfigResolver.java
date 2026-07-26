@@ -181,6 +181,9 @@ public class LhScheduleConfigResolver {
         putCapsuleReplacementParams(resolvedParamMap, lhParamsMap);
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS,
                 LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS);
+        putPositiveIntValue(resolvedParamMap, lhParamsMap,
+                LhScheduleParamConstant.PRECISION_PRE_INSERT_MAX_QTY,
+                LhScheduleConstant.PRECISION_PRE_INSERT_MAX_QTY);
 
         // 排程窗口与设备约束参数
         putIntValue(resolvedParamMap, lhParamsMap, LhScheduleParamConstant.SCHEDULE_DAYS, LhScheduleConstant.SCHEDULE_DAYS, 1);
@@ -303,6 +306,37 @@ public class LhScheduleConfigResolver {
         }
         if (minValue != null && resolvedValue < minValue) {
             resolvedValue = minValue;
+        }
+        resolvedParamMap.put(paramCode, String.valueOf(resolvedValue));
+    }
+
+    /**
+     * 解析必须大于零的整数参数，非法值统一回到业务默认值。
+     *
+     * @param resolvedParamMap 解析后参数
+     * @param lhParamsMap 原始参数
+     * @param paramCode 参数编码
+     * @param defaultValue 业务默认值
+     */
+    private void putPositiveIntValue(Map<String, String> resolvedParamMap,
+                                     Map<String, String> lhParamsMap,
+                                     String paramCode,
+                                     int defaultValue) {
+        String value = lhParamsMap.get(paramCode);
+        int resolvedValue = defaultValue;
+        if (StringUtils.isNotEmpty(value)) {
+            try {
+                int parsedValue = Integer.parseInt(value.trim());
+                if (parsedValue > 0) {
+                    resolvedValue = parsedValue;
+                } else {
+                    log.warn("硫化正整数参数配置越界，使用默认值, paramCode={}, value={}, defaultValue={}",
+                            paramCode, value, defaultValue);
+                }
+            } catch (NumberFormatException e) {
+                log.warn("硫化正整数参数解析失败，使用默认值, paramCode={}, value={}, defaultValue={}",
+                        paramCode, value, defaultValue);
+            }
         }
         resolvedParamMap.put(paramCode, String.valueOf(resolvedValue));
     }

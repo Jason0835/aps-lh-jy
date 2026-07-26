@@ -252,14 +252,15 @@ public final class ResultDowntimeSummaryUtil {
      * @param result 最终排程结果
      * @param maintenanceWindowList 精度计划窗口
      * @param mouldChangeHours 现有正规换模时长
-     * @return 重叠时返回“换模+精度计划”，否则返回“精度计划”
+     * @return 固定返回“精度计划”
      */
     public static String resolveMaintenanceAnalysis(
             LhScheduleResult result,
             List<MachineMaintenanceWindowDTO> maintenanceWindowList,
             int mouldChangeHours) {
-        return isMouldChangeMaintenanceOverlap(result, maintenanceWindowList, mouldChangeHours)
-                ? MOULD_CHANGE_PRECISION_PLAN_ANALYSIS : PRECISION_PLAN_ANALYSIS;
+        // 新规则禁止换模、换活字块与精度窗口并行，因此精度所在班次的原因必须保持单一口径。
+        // 即使读取历史脏数据时检测到重叠，也不能继续输出已经废止的“换模+精度计划”语义。
+        return PRECISION_PLAN_ANALYSIS;
     }
 
     /**

@@ -46,6 +46,7 @@ import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.service.ILhBaseDataService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
+import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.SkuDecrementChecker;
@@ -82,6 +83,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -2384,8 +2386,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     /**
      * 加载硫化精度保养计划，按机台编号建立Map。
-     * <p>年度完整性审计读取全年原始计划；运行态只加载计划日期大于等于T日、
-     * 完成状态为未完成且实际执行日期为空的计划，避免历史或已执行计划重复占用机台。
+     * <p>年度完整性审计读取全年原始计划；运行态只加载计划日期不早于排程T日、DAYS_TO_DUE进入
+     * 预警范围、完成状态为未完成且实际执行日期为空的计划。精度允许在计划日前提前执行，但禁止把
+     * 计划日期已经早于T日的历史计划延后到当前窗口执行。
      * 已安排但设备侧未执行的计划不再按排程日期排除，允许在滚动排程中基于最新数据重新评估。</p>
      *
      * @param context     排程上下文
@@ -2395,6 +2398,8 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         int scheduleYear = resolveScheduleYear(context);
         // 精度计划T日与排程引擎窗口起点保持一致，统一使用context.scheduleDate。
         Date scheduleDate = LhScheduleTimeUtil.clearTime(context.getScheduleDate());
+        int warningDays = context.getParamIntValue(LhScheduleParamConstant.MAINTENANCE_WARNING_DAYS,
+                LhScheduleConstant.MAINTENANCE_WARNING_DAYS);
 
         // 年度完整性审计必须保留全年原始计划口径，不能因运行态过滤把已安排计划误报为年度缺失。
         List<LhPrecisionPlan> annualMaintenancePlanList = lhPrecisionPlanMapper.selectList(
@@ -2403,14 +2408,17 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                         .eq(LhPrecisionPlan::getYear, BigDecimal.valueOf(scheduleYear))
                         .eq(LhPrecisionPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
 
-        // 运行态只加载T日起设备侧未完成的精准计划；完成判据统一为完成状态与实际执行日期，
-        // 已安排但未执行的计划不再按排程日期排除，允许滚动排程基于最新数据重新评估保养日期。
+        // PLAN_DATE >= T是精度计划进入本轮排程的首要前提，确保精度只能提前、不能延后；
+        // 在满足该前提的计划中，再直接使用DAYS_TO_DUE判断30天预警和3天强制范围。
         List<LhPrecisionPlan> maintenancePlanList = lhPrecisionPlanMapper.selectList(
                 new LambdaQueryWrapper<LhPrecisionPlan>()
                         .eq(LhPrecisionPlan::getFactoryCode, factoryCode)
                         .eq(LhPrecisionPlan::getYear, BigDecimal.valueOf(scheduleYear))
                         .eq(LhPrecisionPlan::getIsDelete, DeleteFlagEnum.NORMAL.getCode())
+                        .isNotNull(LhPrecisionPlan::getPlanDate)
                         .ge(LhPrecisionPlan::getPlanDate, scheduleDate)
+                        .isNotNull(LhPrecisionPlan::getDaysToDue)
+                        .le(LhPrecisionPlan::getDaysToDue, warningDays)
                         .eq(LhPrecisionPlan::getCompletionStatus, "0")
                         .isNull(LhPrecisionPlan::getActualDate));
         Map<String, LhPrecisionPlan> maintenancePlanMap = new HashMap<>(32);
@@ -2423,19 +2431,34 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             }
         }
         if (!CollectionUtils.isEmpty(maintenancePlanList)) {
+            // 先按业务优先级稳定排序，再建立兼容Map，避免数据库返回顺序影响每日精度名额归属。
+            maintenancePlanList.sort(Comparator
+                    .comparing(LhPrecisionPlan::getDaysToDue)
+                    .thenComparing(LhPrecisionPlan::getPlanDate,
+                            Comparator.nullsLast(Date::compareTo))
+                    .thenComparing(plan -> LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                            plan.getMachineCode()), Comparator.nullsLast(String::compareTo)));
             for (LhPrecisionPlan plan : maintenancePlanList) {
                 if (StringUtils.isEmpty(plan.getMachineCode())) {
                     continue;
                 }
-                maintenancePlanMap.put(plan.getMachineCode(), plan);
+                // 同一运行态机台存在异常重复计划时只保留排序最靠前的一条供历史Map调用，
+                // 完整列表仍保留全部记录，年度审计会继续输出重复计划告警。
+                maintenancePlanMap.putIfAbsent(plan.getMachineCode(), plan);
             }
         }
         context.setMaintenancePlanMap(maintenancePlanMap);
+        context.setOrderedMaintenancePlanList(new ArrayList<LhPrecisionPlan>(maintenancePlanList));
         context.setAnnualMaintenancePlanCountMap(annualPlanCountMap);
-        log.debug("硫化精度保养计划加载完成, 年度: {}, T日: {}, 年度计划数: {}, T日起未执行计划数: {}",
+        log.info("硫化精度保养计划加载完成, 年度: {}, T日: {}, 预警天数: {}, 年度计划数: {}, "
+                        + "T日起30天内未执行计划数: {}, 处理顺序: {}",
                 scheduleYear, LhScheduleTimeUtil.formatDate(scheduleDate),
+                warningDays,
                 Objects.isNull(annualMaintenancePlanList) ? 0 : annualMaintenancePlanList.size(),
-                maintenancePlanMap.size());
+                maintenancePlanList.size(),
+                maintenancePlanList.stream()
+                        .map(plan -> plan.getMachineCode() + "(" + plan.getDaysToDue() + "天)")
+                        .collect(Collectors.joining(",")));
     }
 
     /**

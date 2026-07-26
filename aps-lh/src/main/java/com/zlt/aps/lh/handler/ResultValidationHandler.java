@@ -28,12 +28,14 @@ import com.zlt.aps.lh.engine.observer.ScheduleEvent;
 import com.zlt.aps.lh.engine.observer.ScheduleEventPublisher;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
 import com.zlt.aps.lh.engine.strategy.support.SpecialMaterialSubstitutionRecord;
+import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
+import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.MachineCleaningOverlapUtil;
 import com.zlt.aps.lh.util.ResultDowntimeSummaryUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
@@ -41,6 +43,7 @@ import com.zlt.aps.lh.util.LeftRightMouldUtil;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.lh.util.SkuDailyPlanQuotaUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
@@ -53,13 +56,16 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Comparator;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -122,6 +128,11 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 
             // S4.6.1 排程后置校验：保存前校验结果必填字段和关键数量约束。
             postValidation(context);
+
+            // 数量规范化可能改变最终班次收尾时间，因此必须在保存前再次校验06:00截止。
+            // 若不再满足，只撤销带身份标记的精度前插排结果并恢复账本，机台保持空等。
+            rollbackInvalidPrecisionPreInsertResults(context);
+            logPrecisionIdleFallbacks(context);
 
             // 模数规范化完成后按最终实际班次量重建胶囊次数；这里只核对，不得再次扣减计划量。
             capsuleReplacementRuleService.verifyFinalState(context);
@@ -511,6 +522,532 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
         for (LhScheduleResult result : context.getScheduleResultList()) {
             ShiftFieldUtil.clearUnplannedShiftCureFormulaFields(result);
         }
+    }
+
+    /**
+     * 保存前复核精度前插排结果的最终时间轴。
+     *
+     * <p>插排候选首次通过后，后置模数规范化等步骤仍可能改变结果数量和真实收尾时间。
+     * 本方法使用上下文中的对象身份集合只核对正式接受的插排结果；一旦准备开始时间或
+     * 真实收尾时间晚于执行日06:00，立即撤销结果、恢复SKU生产余量和dayN账本，
+     * 不在最终阶段重新搜索候选，机台按业务要求回退为空等。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void rollbackInvalidPrecisionPreInsertResults(LhScheduleContext context) {
+        if (CollectionUtils.isEmpty(context.getPrecisionPreInsertResultSet())) {
+            return;
+        }
+        List<LhScheduleResult> acceptedResults =
+                new ArrayList<LhScheduleResult>(context.getPrecisionPreInsertResultSet());
+        for (LhScheduleResult result : acceptedResults) {
+            if (!context.getScheduleResultList().contains(result)) {
+                context.getPrecisionPreInsertResultSet().remove(result);
+                continue;
+            }
+            MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
+            MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+            if (Objects.isNull(window) || Objects.isNull(window.getProductionCutoffTime())) {
+                rollbackPrecisionPreInsertResult(context, machine, result, "精度窗口或06:00截止时间缺失");
+                continue;
+            }
+            Date preparationStartTime = Objects.nonNull(result.getMouldChangeStartTime())
+                    ? result.getMouldChangeStartTime() : resolveFirstPlannedShiftStartTime(result);
+            Date actualCompletionTime = resolveActualCompletionTime(result);
+            boolean invalid = Objects.isNull(preparationStartTime) || Objects.isNull(actualCompletionTime)
+                    || preparationStartTime.after(window.getProductionCutoffTime())
+                    || actualCompletionTime.after(window.getProductionCutoffTime());
+            if (invalid) {
+                rollbackPrecisionPreInsertResult(context, machine, result,
+                        "最终时间轴晚于精度执行日06:00");
+                continue;
+            }
+            log.info("精度前插排最终复核通过, 机台: {}, SKU: {}, 准备开始: {}, "
+                            + "最终收尾: {}, 生产截止: {}",
+                    result.getLhMachineCode(), result.getMaterialCode(),
+                    LhScheduleTimeUtil.formatDateTime(preparationStartTime),
+                    LhScheduleTimeUtil.formatDateTime(actualCompletionTime),
+                    LhScheduleTimeUtil.formatDateTime(window.getProductionCutoffTime()));
+        }
+    }
+
+    /**
+     * 输出没有接受插排SKU时的最终空等结论。
+     *
+     * <p>该方法只遍历真实运行态窗口，不重建候选列表或排序；L/R 物理机只记录一次，
+     * 便于从日志还原“候选均失败后为什么没有继续填充机台”。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void logPrecisionIdleFallbacks(LhScheduleContext context) {
+        Map<String, Boolean> loggedPhysicalMachineMap = new HashMap<String, Boolean>(16);
+        for (MachineScheduleDTO machine : context.getMachineScheduleMap().values()) {
+            MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+            if (Objects.isNull(window) || !window.isPreInsertAllowed()
+                    || window.isPreInsertScheduled()) {
+                continue;
+            }
+            String physicalMachineCode =
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(machine.getMachineCode());
+            if (loggedPhysicalMachineMap.put(physicalMachineCode, Boolean.TRUE) != null) {
+                continue;
+            }
+            log.info("精度前插排无合适候选，机台回退为空等, 物理机台: {}, 计划日期: {}, "
+                            + "生产截止: {}, 精度开始: {}, 后续最早开产: {}",
+                    physicalMachineCode, LhScheduleTimeUtil.formatDate(window.getPlanDate()),
+                    LhScheduleTimeUtil.formatDateTime(window.getProductionCutoffTime()),
+                    LhScheduleTimeUtil.formatDateTime(window.getMaintenanceStartTime()),
+                    LhScheduleTimeUtil.formatDateTime(window.getProductionResumeTime()));
+        }
+    }
+
+    /**
+     * 撤销一条最终复核失败的精度前插排结果。
+     *
+     * <p>撤销在现有保存事务前完成，按同一次物理机提交成组删除结果，并同步恢复生产余量、
+     * dayN额度、机台班次产能、机台运行态、模具占用视图、换模及首检计数。胶囊账本尚未最终
+     * 生成，删除结果后不会形成胶囊占用；最终阶段不再搜索候选，机台保持精度前空等。</p>
+     *
+     * @param context 排程上下文
+     * @param machine 插排机台
+     * @param result 待撤销结果
+     * @param reason 撤销原因
+     */
+    private void rollbackPrecisionPreInsertResult(LhScheduleContext context,
+                                                  MachineScheduleDTO machine,
+                                                  LhScheduleResult result,
+                                                  String reason) {
+        SkuScheduleDTO sourceSku = context.getScheduleResultSourceSkuMap().get(result);
+        List<LhScheduleResult> rollbackResults =
+                resolvePrecisionPreInsertRollbackGroup(context, result, sourceSku);
+        int rollbackQty = 0;
+        Map<LocalDate, Integer> rollbackQtyByDate =
+                new LinkedHashMap<LocalDate, Integer>(4);
+        Set<String> rollbackMachineCodeSet = new LinkedHashSet<String>(4);
+        rollbackPrecisionPreInsertResources(context, rollbackResults);
+        for (LhScheduleResult rollbackResult : rollbackResults) {
+            rollbackQty += resolveResultPlanQty(rollbackResult);
+            collectPrecisionRollbackQtyByDate(context, rollbackResult, rollbackQtyByDate);
+            releasePrecisionPreInsertCapacity(context, rollbackResult);
+            rollbackMachineCodeSet.add(rollbackResult.getLhMachineCode());
+            context.getScheduleResultList().remove(rollbackResult);
+            context.getScheduleResultSourceSkuMap().remove(rollbackResult);
+            context.getPrecisionPreInsertResultSet().remove(rollbackResult);
+            removeResultFromMachineAssignment(context, rollbackResult);
+        }
+        if (Objects.nonNull(sourceSku) && rollbackQty > 0) {
+            targetScheduleQtyResolver.restoreProductionRemainingQty(
+                    context, sourceSku, rollbackQty, reason, result.getLhMachineCode());
+            restorePrecisionPreInsertDailyQuota(sourceSku, rollbackQtyByDate);
+            addPrecisionPreInsertRollbackUnscheduled(context, sourceSku, rollbackQty, reason);
+        }
+        // 删除结果后按仍然有效的最后结果重建机台运行态，再重建模具占用视图。
+        // 这样最终撤销不会让后续胶囊核对或换模计划生成继续读取已删除插排SKU的状态。
+        for (String machineCode : rollbackMachineCodeSet) {
+            restorePrecisionPreInsertMachineState(context, machineCode);
+        }
+        context.setMouldResourceContext(MouldResourceContext.from(context));
+        resetPrecisionPreInsertWindow(context, machine);
+        log.warn("精度前插排最终复核失败并撤销, 机台: {}, SKU: {}, 撤销结果数: {}, "
+                        + "撤销量: {}, 原因: {}, 处理结果: 机台空等至精度开始",
+                result.getLhMachineCode(), result.getMaterialCode(),
+                rollbackResults.size(), rollbackQty, reason);
+    }
+
+    /**
+     * 解析同一物理机台一次提交的精度前插排结果组。
+     *
+     * <p>单控整机可能同时生成L/R两条结果，两条结果共同消费同一SKU账本。任一侧最终复核失败时
+     * 必须成组撤销，禁止只删除半边结果而留下数量、模具和机台状态不一致。</p>
+     *
+     * @param context 排程上下文
+     * @param anchorResult 触发撤销的结果
+     * @param sourceSku 来源SKU
+     * @return 至少包含触发结果的撤销结果组
+     */
+    private List<LhScheduleResult> resolvePrecisionPreInsertRollbackGroup(
+            LhScheduleContext context,
+            LhScheduleResult anchorResult,
+            SkuScheduleDTO sourceSku) {
+        List<LhScheduleResult> rollbackResults = new ArrayList<LhScheduleResult>(2);
+        String physicalMachineCode = LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                anchorResult.getLhMachineCode());
+        for (LhScheduleResult candidate : context.getPrecisionPreInsertResultSet()) {
+            if (!context.getScheduleResultList().contains(candidate)
+                    || context.getScheduleResultSourceSkuMap().get(candidate) != sourceSku
+                    || !StringUtils.equals(physicalMachineCode,
+                    LhSingleControlMachineUtil.resolvePhysicalMachineCode(candidate.getLhMachineCode()))
+                    || !Objects.equals(anchorResult.getMouldChangeStartTime(),
+                    candidate.getMouldChangeStartTime())) {
+                continue;
+            }
+            rollbackResults.add(candidate);
+        }
+        if (!rollbackResults.contains(anchorResult)) {
+            rollbackResults.add(anchorResult);
+        }
+        return rollbackResults;
+    }
+
+    /**
+     * 精确释放一次精度前插排提交占用的换模及首检计数资源。
+     *
+     * <p>单控L/R结果共用一次换模和首检资源，因此换模计数只回退一次；首检均衡时间和
+     * 首检数量归属班次仅登记在主结果上，按对象身份取回可避免双重释放。</p>
+     *
+     * @param context 排程上下文
+     * @param rollbackResults 同一次提交的撤销结果组
+     */
+    private void rollbackPrecisionPreInsertResources(
+            LhScheduleContext context,
+            List<LhScheduleResult> rollbackResults) {
+        Date mouldChangeStartTime = null;
+        for (LhScheduleResult rollbackResult : rollbackResults) {
+            Date allocatedMouldChangeTime =
+                    context.getPrecisionPreInsertMouldChangeTimeMap().remove(rollbackResult);
+            if (Objects.isNull(mouldChangeStartTime)
+                    && Objects.nonNull(allocatedMouldChangeTime)) {
+                mouldChangeStartTime = allocatedMouldChangeTime;
+            }
+            Date inspectionTime =
+                    context.getPrecisionPreInsertInspectionTimeMap().remove(rollbackResult);
+            if (Objects.nonNull(inspectionTime)) {
+                rollbackDailyShiftCounter(
+                        context, context.getDailyFirstInspectionCountMap(), inspectionTime);
+            }
+            Integer inspectionShiftIndex =
+                    context.getPrecisionPreInsertInspectionShiftIndexMap().remove(rollbackResult);
+            LhShiftConfigVO inspectionShift =
+                    resolveShiftByIndex(context, inspectionShiftIndex);
+            if (Objects.nonNull(inspectionShift)) {
+                FirstInspectionQtyUtil.rollbackFirstInspectionSequence(context, inspectionShift);
+            }
+        }
+        if (Objects.nonNull(mouldChangeStartTime)) {
+            rollbackDailyShiftCounter(
+                    context, context.getDailyMouldChangeCountMap(), mouldChangeStartTime);
+        }
+    }
+
+    /**
+     * 回退早班或中班的一次资源计数；夜班不占用现有均衡上限。
+     *
+     * @param context 排程上下文
+     * @param counterMap 日期维度计数
+     * @param allocatedTime 原分配时间
+     */
+    private void rollbackDailyShiftCounter(LhScheduleContext context,
+                                           Map<String, int[]> counterMap,
+                                           Date allocatedTime) {
+        if (CollectionUtils.isEmpty(counterMap) || Objects.isNull(allocatedTime)) {
+            return;
+        }
+        int[] counters = counterMap.get(DateUtil.format(allocatedTime, "yyyy-MM-dd"));
+        if (Objects.isNull(counters) || counters.length < 2) {
+            return;
+        }
+        if (LhScheduleTimeUtil.isMorningShift(context, allocatedTime) && counters[0] > 0) {
+            counters[0]--;
+            return;
+        }
+        if (LhScheduleTimeUtil.isAfternoonShift(context, allocatedTime) && counters[1] > 0) {
+            counters[1]--;
+        }
+    }
+
+    /**
+     * 按班次索引读取本次排程窗口班次。
+     *
+     * @param context 排程上下文
+     * @param shiftIndex 班次索引
+     * @return 命中的班次；未登记返回null
+     */
+    private LhShiftConfigVO resolveShiftByIndex(LhScheduleContext context,
+                                                Integer shiftIndex) {
+        if (Objects.isNull(shiftIndex)
+                || CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.nonNull(shift) && Objects.equals(shiftIndex, shift.getShiftIndex())) {
+                return shift;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 汇总待撤销结果各班次对应的实际生产业务日数量。
+     *
+     * @param context 排程上下文
+     * @param result 待撤销结果
+     * @param rollbackQtyByDate 业务日撤销量汇总
+     */
+    private void collectPrecisionRollbackQtyByDate(LhScheduleContext context,
+                                                   LhScheduleResult result,
+                                                   Map<LocalDate, Integer> rollbackQtyByDate) {
+        if (CollectionUtils.isEmpty(context.getScheduleWindowShifts())) {
+            return;
+        }
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())
+                    || Objects.isNull(shift.getWorkDate())) {
+                continue;
+            }
+            Integer shiftQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
+            if (Objects.isNull(shiftQty) || shiftQty <= 0) {
+                continue;
+            }
+            LocalDate productionDate = shift.getWorkDate().toInstant()
+                    .atZone(ZoneId.systemDefault()).toLocalDate();
+            rollbackQtyByDate.merge(productionDate, shiftQty, Integer::sum);
+        }
+    }
+
+    /**
+     * 释放最终撤销结果占用的机台班次产能。
+     *
+     * @param context 排程上下文
+     * @param result 待撤销结果
+     */
+    private void releasePrecisionPreInsertCapacity(LhScheduleContext context,
+                                                   LhScheduleResult result) {
+        MachineScheduleDTO resultMachine =
+                context.getMachineScheduleMap().get(result.getLhMachineCode());
+        int[] machineCapacity = Objects.isNull(resultMachine)
+                ? null : resultMachine.getShiftRemainingCapacity();
+        int[] contextCapacity =
+                context.getMachineShiftCapacityMap().get(result.getLhMachineCode());
+        for (int shiftIndex = 1;
+             shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             shiftIndex++) {
+            Integer shiftQtyValue = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            int shiftQty = Objects.isNull(shiftQtyValue) ? 0 : Math.max(0, shiftQtyValue);
+            if (shiftQty <= 0) {
+                continue;
+            }
+            if (Objects.nonNull(machineCapacity) && shiftIndex < machineCapacity.length) {
+                machineCapacity[shiftIndex] += shiftQty;
+            }
+            if (Objects.nonNull(contextCapacity) && contextCapacity != machineCapacity
+                    && shiftIndex < contextCapacity.length) {
+                contextCapacity[shiftIndex] += shiftQty;
+            }
+        }
+    }
+
+    /**
+     * 按撤销后仍有效的最后一条结果恢复机台运行态。
+     *
+     * @param context 排程上下文
+     * @param machineCode 机台编码
+     */
+    private void restorePrecisionPreInsertMachineState(LhScheduleContext context,
+                                                       String machineCode) {
+        MachineScheduleDTO runtimeMachine = context.getMachineScheduleMap().get(machineCode);
+        if (Objects.isNull(runtimeMachine)) {
+            return;
+        }
+        LhScheduleResult latestResult = null;
+        for (LhScheduleResult candidate : context.getScheduleResultList()) {
+            if (!StringUtils.equals(machineCode, candidate.getLhMachineCode())) {
+                continue;
+            }
+            Date candidateCompletionTime = resolveActualCompletionTime(candidate);
+            Date latestCompletionTime = Objects.isNull(latestResult)
+                    ? null : resolveActualCompletionTime(latestResult);
+            if (Objects.isNull(latestResult)
+                    || (Objects.nonNull(candidateCompletionTime)
+                    && (Objects.isNull(latestCompletionTime)
+                    || candidateCompletionTime.after(latestCompletionTime)))) {
+                latestResult = candidate;
+            }
+        }
+        if (Objects.nonNull(latestResult)) {
+            SkuScheduleDTO latestSku = context.getScheduleResultSourceSkuMap().get(latestResult);
+            runtimeMachine.setCurrentMaterialCode(latestResult.getMaterialCode());
+            runtimeMachine.setCurrentMaterialDesc(latestResult.getMaterialDesc());
+            if (Objects.nonNull(latestSku)) {
+                runtimeMachine.setPreviousSpecCode(latestSku.getSpecCode());
+                runtimeMachine.setPreviousProSize(latestSku.getProSize());
+            }
+            runtimeMachine.setEstimatedEndTime(resolveActualCompletionTime(latestResult));
+            runtimeMachine.setEnding(StringUtils.equals("1", latestResult.getIsEnd()));
+            return;
+        }
+        MachineScheduleDTO initialMachine = context.getInitialMachineScheduleMap().get(machineCode);
+        if (Objects.nonNull(initialMachine)) {
+            runtimeMachine.setCurrentMaterialCode(initialMachine.getCurrentMaterialCode());
+            runtimeMachine.setCurrentMaterialDesc(initialMachine.getCurrentMaterialDesc());
+            runtimeMachine.setPreviousMaterialCode(initialMachine.getPreviousMaterialCode());
+            runtimeMachine.setPreviousMaterialDesc(initialMachine.getPreviousMaterialDesc());
+            runtimeMachine.setPreviousSpecCode(initialMachine.getPreviousSpecCode());
+            runtimeMachine.setPreviousProSize(initialMachine.getPreviousProSize());
+            runtimeMachine.setEstimatedEndTime(initialMachine.getEstimatedEndTime());
+            return;
+        }
+        runtimeMachine.setCurrentMaterialCode(runtimeMachine.getPreviousMaterialCode());
+        runtimeMachine.setCurrentMaterialDesc(runtimeMachine.getPreviousMaterialDesc());
+    }
+
+    /**
+     * 从机台分配索引移除被撤销结果。
+     *
+     * @param context 排程上下文
+     * @param result 被撤销结果
+     */
+    private void removeResultFromMachineAssignment(LhScheduleContext context, LhScheduleResult result) {
+        List<LhScheduleResult> assignedResults =
+                context.getMachineAssignmentMap().get(result.getLhMachineCode());
+        if (!CollectionUtils.isEmpty(assignedResults)) {
+            assignedResults.remove(result);
+            if (assignedResults.isEmpty()) {
+                context.getMachineAssignmentMap().remove(result.getLhMachineCode());
+            }
+        }
+    }
+
+    /**
+     * 恢复插排结果已经消费的dayN额度。
+     *
+     * @param sku 来源SKU
+     * @param rollbackQtyByDate 各实际生产业务日撤销量
+     */
+    private void restorePrecisionPreInsertDailyQuota(
+            SkuScheduleDTO sku,
+            Map<LocalDate, Integer> rollbackQtyByDate) {
+        if (CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())
+                || CollectionUtils.isEmpty(rollbackQtyByDate)) {
+            return;
+        }
+        List<Map.Entry<LocalDate, Integer>> rollbackEntries =
+                new ArrayList<Map.Entry<LocalDate, Integer>>(rollbackQtyByDate.entrySet());
+        rollbackEntries.sort(Map.Entry.<LocalDate, Integer>comparingByKey().reversed());
+        for (Map.Entry<LocalDate, Integer> rollbackEntry : rollbackEntries) {
+            int expectedRestoreQty = Math.max(0, rollbackEntry.getValue());
+            int actualRestoreQty = SkuDailyPlanQuotaUtil.restoreRollingQuota(
+                    sku.getDailyPlanQuotaMap(), rollbackEntry.getKey(), expectedRestoreQty, null);
+            if (actualRestoreQty != expectedRestoreQty) {
+                log.warn("精度前插排dayN账本恢复量不一致, materialCode: {}, productionDate: {}, "
+                                + "expectedRestoreQty: {}, actualRestoreQty: {}",
+                        sku.getMaterialCode(), rollbackEntry.getKey(),
+                        expectedRestoreQty, actualRestoreQty);
+            }
+        }
+    }
+
+    /**
+     * 生成最终复核撤销后的未排记录，确保排程结果与待排账本可对账。
+     *
+     * @param context 排程上下文
+     * @param sku 来源SKU
+     * @param rollbackQty 撤销量
+     * @param reason 撤销原因
+     */
+    private void addPrecisionPreInsertRollbackUnscheduled(LhScheduleContext context,
+                                                         SkuScheduleDTO sku,
+                                                         int rollbackQty,
+                                                         String reason) {
+        LhUnscheduledResult unscheduled = new LhUnscheduledResult();
+        unscheduled.setFactoryCode(context.getFactoryCode());
+        unscheduled.setBatchNo(context.getBatchNo());
+        unscheduled.setScheduleDate(context.getScheduleTargetDate());
+        unscheduled.setMonthPlanVersion(sku.getMonthPlanVersion());
+        unscheduled.setProductionVersion(sku.getProductionVersion());
+        unscheduled.setMaterialCode(sku.getMaterialCode());
+        unscheduled.setProductStatus(sku.getProductStatus());
+        unscheduled.setMaterialDesc(sku.getMaterialDesc());
+        unscheduled.setStructureName(sku.getStructureName());
+        unscheduled.setMainMaterialDesc(sku.getMainMaterialDesc());
+        unscheduled.setSpecCode(sku.getSpecCode());
+        unscheduled.setSpecDesc(sku.getSpecDesc());
+        unscheduled.setEmbryoCode(sku.getEmbryoCode());
+        unscheduled.setMouldQty(sku.getMouldQty());
+        unscheduled.setUnscheduledQty(rollbackQty);
+        unscheduled.setUnscheduledReason(reason + "，机台空等至精度开始");
+        unscheduled.setDataSource("0");
+        unscheduled.setIsDelete(0);
+        context.getUnscheduledResultList().add(unscheduled);
+    }
+
+    /**
+     * 清除物理机台的插排占用标志，保留精度窗口本身用于后续摘要绑定。
+     *
+     * @param context 排程上下文
+     * @param machine 任一侧机台
+     */
+    private void resetPrecisionPreInsertWindow(LhScheduleContext context, MachineScheduleDTO machine) {
+        resetPrecisionPreInsertWindow(machine);
+        if (Objects.nonNull(machine)) {
+            resetPrecisionPreInsertWindow(
+                    LhSingleControlMachineUtil.resolvePairMachine(context, machine.getMachineCode()));
+        }
+    }
+
+    /**
+     * 清除单侧机台插排标志。
+     *
+     * @param machine 单侧机台
+     */
+    private void resetPrecisionPreInsertWindow(MachineScheduleDTO machine) {
+        MachineMaintenanceWindowDTO window = resolveFirstMaintenanceWindow(machine);
+        if (Objects.nonNull(window)) {
+            window.setPreInsertScheduled(false);
+        }
+    }
+
+    /**
+     * 获取机台首个精度窗口。
+     *
+     * @param machine 机台
+     * @return 首个精度窗口；无窗口时返回null
+     */
+    private MachineMaintenanceWindowDTO resolveFirstMaintenanceWindow(MachineScheduleDTO machine) {
+        return Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())
+                ? null : machine.getMaintenanceWindowList().get(0);
+    }
+
+    /**
+     * 读取结果首个正量班次的实际开产时间。
+     *
+     * @param result 排程结果
+     * @return 首个正量班次开始时间；无正量班次时返回null
+     */
+    private Date resolveFirstPlannedShiftStartTime(LhScheduleResult result) {
+        for (int shiftIndex = 1;
+             shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             shiftIndex++) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            Date startTime = ShiftFieldUtil.getShiftStartTime(result, shiftIndex);
+            if (Objects.nonNull(planQty) && planQty > 0 && Objects.nonNull(startTime)) {
+                return startTime;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 读取结果最后一个正量班次的最终收尾时间。
+     *
+     * <p>各排产主链已经使用停机、清洗、首检及实际节拍生成班次结束时间，
+     * 保存前直接读取最后一个正量班次可避免重新计算形成第二套时间口径。</p>
+     *
+     * @param result 排程结果
+     * @return 最终收尾时间；无正量班次时返回规格结束时间
+     */
+    private Date resolveActualCompletionTime(LhScheduleResult result) {
+        Date completionTime = null;
+        for (int shiftIndex = 1;
+             shiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             shiftIndex++) {
+            Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shiftIndex);
+            Date endTime = ShiftFieldUtil.getShiftEndTime(result, shiftIndex);
+            if (Objects.nonNull(planQty) && planQty > 0 && Objects.nonNull(endTime)
+                    && (Objects.isNull(completionTime) || endTime.after(completionTime))) {
+                completionTime = endTime;
+            }
+        }
+        return Objects.nonNull(completionTime) ? completionTime : result.getSpecEndTime();
     }
 
     /**

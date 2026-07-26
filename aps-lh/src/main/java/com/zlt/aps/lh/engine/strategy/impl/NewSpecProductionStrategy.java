@@ -2189,40 +2189,18 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     getMaintenanceScheduleService().tryAttachMaintenanceAfterFirstEnding(
                             context, candidateMachine, endingTime);
                 }
-                // 试制SKU换模需在早班完成：维保窗口挂载后，检查正序换模窗口是否与维保窗口物理重叠。
-                // 若重叠则清除维保窗口，使后续 calculateStartTime 不被维保推迟，换模可在早班开始；
-                // 维保将在后续排程迭代中重新安排。
-                // 注意：endingTime可能落在禁止换模时段(晚班20:00-次日06:00)，此时实际换模开始时间
-                // 应为次日早班，需先对齐到早班后再检查重叠，否则会遗漏晚班endingTime对应的早班换模窗口。
-                if (isTrialConstructionStage(sku)) {
-                    int trialNormalSwitchHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
-                    // 试制SKU换模必须在早班开始,若endingTime落在禁止换模时段,对齐到次日早班后再检查重叠
-                    Date trialSwitchStartTime = LhScheduleTimeUtil.isNoMouldChangeTime(context, endingTime)
-                            ? LhScheduleTimeUtil.resolveNextMorningAfterNoMouldChangeWindow(context, endingTime)
-                            : endingTime;
-                    if (getMaintenanceScheduleService().isNormalSwitchOverlapMaintenance(
-                            context, candidateMachine, trialSwitchStartTime, trialNormalSwitchHours)) {
-                        log.info("试制SKU换模窗口与维保窗口物理重叠，清除维保窗口以便早班换模, "
-                                        + "materialCode: {}, machineCode: {}, endingTime: {}, switchStartTime: {}, normalSwitchHours: {}",
-                                sku.getMaterialCode(), machineCode,
-                                LhScheduleTimeUtil.formatDateTime(endingTime),
-                                LhScheduleTimeUtil.formatDateTime(trialSwitchStartTime), trialNormalSwitchHours);
-                        getMaintenanceScheduleService().clearMaintenanceWindows(context, candidateMachine);
-                    }
-                }
+                /*
+                 * 精度窗口属于硬时间轴，试制SKU也不得清除或覆盖。试制早班换模与精度冲突时，
+                 * 后续统一顺延到胶囊预热完成后重新按早班规则寻找合法窗口。
+                 */
                 // 保养窗口挂载会改变候选机台运行态，提前清理窗口产能缓存，避免后续复用旧产能。
                 candidateCache.clearCapacityCache();
                 Date machineReadyTime = capacityCalculate.calculateStartTime(context,
                         machineCode, endingTime);
                 int switchDurationHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
-                boolean maintenanceOverlapSwitch = !isTrialConstructionStage(sku)
-                        && getMaintenanceScheduleService().shouldParallelMouldChangeWithMaintenance(
-                        context, candidateMachine, endingTime, switchDurationHours);
-                // 正规换模命中精度计划时，从精度计划开始点同步执行；试制SKU继续沿用清除窗口的例外规则。
-                Date switchReadyTime = maintenanceOverlapSwitch
-                        ? getMaintenanceScheduleService().resolveParallelMouldChangeStartTime(
-                        context, candidateMachine, endingTime, switchDurationHours)
-                        : machineReadyTime;
+                // 本次规则禁止换模与精度计划并行，统一使用已经避开精度及预热窗口的机台就绪时间。
+                boolean maintenanceOverlapSwitch = false;
+                Date switchReadyTime = machineReadyTime;
                 switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, machineCode, switchReadyTime);
                 // 试制SKU换模需在早班完成，不受开产模式限制；非试制SKU仍受开产模式约束
                 switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
@@ -2322,14 +2300,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                 LhScheduleTimeUtil.formatDateTime(dayContext.getDayEndTime()));
                         continue;
                     }
-                    // 分配器可能调整换模开始时间，必须按实际换模区间重新判断精度计划重叠。
-                    maintenanceOverlapSwitch = !isTrialConstructionStage(sku)
-                            && getMaintenanceScheduleService().hasMouldChangeMaintenanceOverlap(
-                            context, candidateMachine, mouldChangeStartTime, mouldChangeCompleteTime);
-                    Date maintenanceReadyTime = maintenanceOverlapSwitch
-                            ? getMaintenanceScheduleService().resolveParallelMouldChangeReadyTime(
-                            context, candidateMachine, mouldChangeStartTime, mouldChangeCompleteTime)
-                            : mouldChangeCompleteTime;
+                    // 精度窗口与换模禁止重叠；分配器已将冲突换模顺延，首检从真实换模完成点开始。
+                    maintenanceOverlapSwitch = false;
+                    Date maintenanceReadyTime = mouldChangeCompleteTime;
                     boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
                             context, context.getDevicePlanShutList(), machineCode, endingTime,
                             mouldChangeStartTime, mouldChangeCompleteTime);
@@ -2762,6 +2735,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         ? buildWholeSingleControlPairResult(context, result, pairSingleControlMachine, sku,
                                 machineMouldQty, pairMouldResourceAllocationResult)
                         : null;
+                /*
+                 * 精度前插排必须使用进入本候选前的真实生产余量，不能使用满班补齐、模数取整或
+                 * 动态扩机后放大的临时目标量。该值在日计划账本扣减前读取，失败时可完整回滚。
+                 */
+                int precisionPendingQty = getTargetScheduleQtyResolver()
+                        .resolveProductionRemainingQty(context, sku);
                 // 7. 先消费dayN节奏账本，再落地结果与刷新机台状态；非收尾实际排产由SKU实际消费账本控制。
                 // 收尾/试制等严格目标量会被截断；正规/量试非收尾允许记录满班补齐超排。
                 /*
@@ -2806,6 +2785,42 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                             failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
                     continue;
                 }
+                Date precisionCompletionTime = result.getSpecEndTime();
+                if (Objects.nonNull(pairResult) && Objects.nonNull(pairResult.getSpecEndTime())
+                        && (Objects.isNull(precisionCompletionTime)
+                        || pairResult.getSpecEndTime().after(precisionCompletionTime))) {
+                    precisionCompletionTime = pairResult.getSpecEndTime();
+                }
+                String precisionRejectReason = getMaintenanceScheduleService()
+                        .resolvePrecisionCandidateRejectReason(
+                                context, candidateMachine, sku, precisionPendingQty, machineScheduledQty,
+                                mouldChangeStartTime, firstProductionStartTime, precisionCompletionTime);
+                if (StringUtils.isNotEmpty(precisionRejectReason)) {
+                    appendNewSpecCandidateRejectedProcessLog(context, sku, machineCode,
+                            precisionRejectReason,
+                            machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                            firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty, machineScheduledQty);
+                    inspectionBalance.rollbackInspection(context, inspectionTime);
+                    FirstInspectionQtyUtil.rollbackFirstInspectionSequence(
+                            context, firstInspectionAttributionShift);
+                    rollbackMouldChangeAllocation(context, sku, mouldChangeBalance, mouldChangeStartTime);
+                    rollbackMouldResourceAllocation(context, sku, mouldResourceAllocationResult,
+                            pairMouldResourceAllocationResult);
+                    quotaLedgerBaseline.restore(context, sku);
+                    sku.setTargetScheduleQty(baseTargetScheduleQty);
+                    remainingQty = resolveSchedulableRemainingQty(context, sku);
+                    sku.setRemainingScheduleQty(remainingQty);
+                    excludedMachineCodes.add(machineCode);
+                    candidateCache.removeMachine(machineCode);
+                    recordExcludedMachineReason(excludedMachineReasonMap, machineCode,
+                            precisionRejectReason,
+                            machineReadyTime, switchReadyTime, mouldChangeStartTime, mouldChangeCompleteTime,
+                            inspectionTime, firstProductionStartTime, maxQtyToWindowEnd, machinePlanQty,
+                            machineScheduledQty);
+                    failReason = selectHigherPriorityFailReason(
+                            failReason, NewSpecFailReasonEnum.NO_CAPACITY_IN_SCHEDULE_WINDOW);
+                    continue;
+                }
                 // class3/class6 晚班按 workDate 归属后续业务日，不能用自然开产日期写提前生产审计。
                 LocalDate resultBusinessDate = resolveProductionWorkDate(shifts, firstProductionStartTime);
                 if (Objects.isNull(resultBusinessDate)) {
@@ -2816,6 +2831,23 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 appendEarlyProductionRemark(context, result, earlyProductionDecision, resultBusinessDate);
                 context.getScheduleResultList().add(result);
                 context.getScheduleResultSourceSkuMap().put(result, sku);
+                if (getMaintenanceScheduleService().shouldMarkPrecisionPreInsert(
+                        candidateMachine, mouldChangeStartTime)) {
+                    // 结果及账本已经全部通过，正式登记该物理机台的精度前窗口已被占用。
+                    getMaintenanceScheduleService().markPrecisionPreInsertScheduled(
+                            context, candidateMachine, result);
+                    // 新增规格换模已真实消费换模均衡名额，按结果身份保存分配时间；
+                    // 最终时间轴撤销时只回退该次真实占用，不能按结果上的通用切换时间推断。
+                    context.getPrecisionPreInsertMouldChangeTimeMap().put(
+                            result, mouldChangeStartTime);
+                    // 保存正式占用的首检时间和归属班次，最终时间轴复核失败时按原资源精确回退。
+                    context.getPrecisionPreInsertInspectionTimeMap().put(result, inspectionTime);
+                    context.getPrecisionPreInsertInspectionShiftIndexMap().put(
+                            result, firstInspectionAttributionShift.getShiftIndex());
+                    if (Objects.nonNull(pairResult)) {
+                        context.getPrecisionPreInsertResultSet().add(pairResult);
+                    }
+                }
                 if (ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
                         context, context.getDevicePlanShutList(), machineCode, endingTime,
                         mouldChangeStartTime, mouldChangeCompleteTime)) {
@@ -8264,13 +8296,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 ? candidate.getEstimatedEndTime() : resolveDefaultMachineEndTime(context, shifts);
         Date machineReadyTime = capacityCalculate.calculateStartTime(context, candidate.getMachineCode(), endingTime);
         int switchDurationHours = LhScheduleTimeUtil.getMouldChangeTotalHours(context);
-        boolean maintenanceOverlapSwitch = !isTrialConstructionStage(sku)
-                && getMaintenanceScheduleService().shouldParallelMouldChangeWithMaintenance(
-                context, candidate, endingTime, switchDurationHours);
-        Date switchReadyTime = maintenanceOverlapSwitch
-                ? getMaintenanceScheduleService().resolveParallelMouldChangeStartTime(
-                context, candidate, endingTime, switchDurationHours)
-                : machineReadyTime;
+        // 精度计划与换模禁止并行，模拟和正式落地统一使用已避开精度窗口的机台就绪时间。
+        Date switchReadyTime = machineReadyTime;
         switchReadyTime = resolveSpecifyReservedReadyTime(context, sku, candidate.getMachineCode(), switchReadyTime);
         // 试制SKU换模需在早班完成，不受开产模式限制
         switchReadyTime = ShiftProductionControlUtil.resolveEarliestSwitchStartTime(
@@ -8278,13 +8305,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         switchReadyTime = alignNewSpecSwitchReadyTimeToWindowStart(context, shifts, switchReadyTime);
         Date mouldChangeStartTime = switchReadyTime;
         Date mouldChangeCompleteTime = LhScheduleTimeUtil.addHours(mouldChangeStartTime, switchDurationHours);
-        maintenanceOverlapSwitch = !isTrialConstructionStage(sku)
-                && getMaintenanceScheduleService().hasMouldChangeMaintenanceOverlap(
-                context, candidate, mouldChangeStartTime, mouldChangeCompleteTime);
-        Date maintenanceReadyTime = maintenanceOverlapSwitch
-                ? getMaintenanceScheduleService().resolveParallelMouldChangeReadyTime(
-                context, candidate, mouldChangeStartTime, mouldChangeCompleteTime)
-                : mouldChangeCompleteTime;
+        Date maintenanceReadyTime = mouldChangeCompleteTime;
         boolean plannedRepairAffectingSwitch = ShiftCapacityResolverUtil.isPlannedRepairAffectingSwitch(
                 context, context.getDevicePlanShutList(), candidate.getMachineCode(), endingTime,
                 mouldChangeStartTime, mouldChangeCompleteTime);

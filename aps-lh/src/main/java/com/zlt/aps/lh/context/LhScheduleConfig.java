@@ -401,6 +401,19 @@ public class LhScheduleConfig {
                 LhScheduleConstant.MAINTENANCE_OVERLAP_SWITCH_HOURS);
     }
 
+    /**
+     * 获取精度计划执行日前允许插排的SKU最大完整待排量。
+     *
+     * @return 最大完整待排量；配置缺失、非法或非正数时返回默认50条
+     */
+    public int getPrecisionPreInsertMaxQty() {
+        int configuredValue = getParamIntValue(
+                LhScheduleParamConstant.PRECISION_PRE_INSERT_MAX_QTY,
+                LhScheduleConstant.PRECISION_PRE_INSERT_MAX_QTY);
+        return configuredValue > 0
+                ? configuredValue : LhScheduleConstant.PRECISION_PRE_INSERT_MAX_QTY;
+    }
+
     public int getMachineStopTimeoutHours() {
         return getParamIntValue(LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS, LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
     }

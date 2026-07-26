@@ -137,6 +137,8 @@ public final class LhScheduleParamConstant {
     public static final String CAPSULE_PREHEAT_HOURS = "SYS0307009";
     /** 维保重叠切换耗时（小时） */
     public static final String MAINTENANCE_OVERLAP_SWITCH_HOURS = "SYS0307010";
+    /** 精度计划执行日前允许插排的SKU最大完整待排量 */
+    public static final String PRECISION_PRE_INSERT_MAX_QTY = "SYS0307011";
     /** 排程天数 */
     public static final String SCHEDULE_DAYS = "SYS0304004";
     /** 是否按产能满排 */
