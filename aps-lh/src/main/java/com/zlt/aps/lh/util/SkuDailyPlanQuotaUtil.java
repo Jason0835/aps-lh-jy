@@ -123,6 +123,49 @@ public final class SkuDailyPlanQuotaUtil {
     }
 
     /**
+     * 预演指定生产日期本次最多可消费的滚动 dayN 额度，不修改运行态账本。
+     *
+     * <p>单控整机必须按左右两侧成对落地。严格场景下若可消费额度为奇数，调用方需要先将
+     * 预演结果向下取偶数后再正式扣账，不能先扣掉奇数额度再把结果行裁成偶数，否则
+     * dayN 的 {@code scheduledQty}、{@code remainingQty} 与实际 L/R 排产量会出现 1 条偏差。</p>
+     *
+     * @param quotaMap dayN 节奏账本
+     * @param productionDate 实际生产业务日期
+     * @param planQty 本次计划消费数量
+     * @param lookAheadEndDate 允许提前借用的最晚业务日期；null 表示沿用原公共语义
+     * @return 本次最多可消费的滚动 dayN 额度
+     */
+    public static int previewRollingQuotaConsumableQty(Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap,
+                                                        LocalDate productionDate,
+                                                        int planQty,
+                                                        LocalDate lookAheadEndDate) {
+        if (CollectionUtils.isEmpty(quotaMap) || Objects.isNull(productionDate) || planQty <= 0) {
+            return 0;
+        }
+        int remainingPlanQty = planQty;
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            if (Objects.isNull(entry.getKey()) || entry.getKey().isAfter(productionDate)) {
+                continue;
+            }
+            remainingPlanQty -= Math.min(remainingPlanQty, resolveAvailableQuotaQty(entry.getValue()));
+            if (remainingPlanQty <= 0) {
+                return planQty;
+            }
+        }
+        for (Map.Entry<LocalDate, SkuDailyPlanQuotaDTO> entry : quotaMap.entrySet()) {
+            if (Objects.isNull(entry.getKey()) || !entry.getKey().isAfter(productionDate)
+                    || (Objects.nonNull(lookAheadEndDate) && entry.getKey().isAfter(lookAheadEndDate))) {
+                continue;
+            }
+            remainingPlanQty -= Math.min(remainingPlanQty, resolveAvailableQuotaQty(entry.getValue()));
+            if (remainingPlanQty <= 0) {
+                return planQty;
+            }
+        }
+        return planQty - remainingPlanQty;
+    }
+
+    /**
      * 构造提前生产临时日计划额度视图。
      * <p>历史三参调用仍按提前一天处理，因此当前业务日到窗口结束日逐日读取下一天额度；
      * 该方法只克隆运行态账本，不修改原始月计划日计划量和原始额度对象。</p>
@@ -353,5 +396,18 @@ public final class SkuDailyPlanQuotaUtil {
         quota.setRemainingQty(Math.max(0, quota.getRemainingQty() - consumeQty));
         quota.setScheduledQty(quota.getScheduledQty() + consumeQty);
         return consumeQty;
+    }
+
+    /**
+     * 获取单日账本当前仍可被消费的安全数量。
+     *
+     * @param quota 单日 dayN 节奏账本
+     * @return 非负的可消费数量
+     */
+    private static int resolveAvailableQuotaQty(SkuDailyPlanQuotaDTO quota) {
+        if (Objects.isNull(quota)) {
+            return 0;
+        }
+        return Math.max(0, quota.getRemainingQty());
     }
 }

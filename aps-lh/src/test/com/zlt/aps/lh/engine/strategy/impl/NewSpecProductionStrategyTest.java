@@ -3,13 +3,25 @@ package com.zlt.aps.lh.engine.strategy.impl;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhRepairCapsule;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
+import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
+import com.zlt.aps.lh.engine.strategy.support.ActiveMachineBinding;
+import com.zlt.aps.lh.engine.strategy.support.DayDrivenScheduleState;
+import com.zlt.aps.lh.engine.strategy.support.DayScheduleContext;
+import com.zlt.aps.lh.engine.strategy.support.DailyCandidateReason;
+import com.zlt.aps.lh.engine.strategy.support.DailyNewSpecCandidate;
+import com.zlt.aps.lh.engine.strategy.support.DailySchedulePhase;
+import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
+import com.zlt.aps.lh.engine.strategy.support.HistoricalReverseSelectionDirective;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
 import com.zlt.aps.lh.engine.strategy.support.ProductionQuantityPolicy;
@@ -23,6 +35,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDate;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -40,6 +53,56 @@ import java.util.Set;
  * @author APS
  */
 public class NewSpecProductionStrategyTest {
+
+    /**
+     * 用例说明：历史反选只锁定优先机台，日计划账本缺失或当前dayN为0时不得授予排产资格。
+     */
+    @Test
+    public void shouldRequireCurrentDayPlanForHistoricalLockedCandidate() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 25, 0, 0, 0));
+        List<LhShiftConfigVO> shifts =
+                LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate());
+        LocalDate scheduleDate = resolveWorkDate(shifts.get(0));
+        DayScheduleContext dayContext = new DayScheduleContext(
+                scheduleDate, shifts.subList(0, 3), true, false);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002369");
+        sku.setProductStatus("S");
+        sku.setPendingQty(100);
+        sku.setSurplusQty(100);
+        sku.setTargetScheduleQty(100);
+        HistoricalReverseSelectionDirective directive = new HistoricalReverseSelectionDirective();
+        directive.setMaterialCode(sku.getMaterialCode());
+        directive.setProductStatus(sku.getProductStatus());
+        directive.setMachineCode("K2001");
+        directive.setEffectiveMachineCode("K2001");
+        directive.setActualChangeType(MouldChangeTypeEnum.REGULAR.getCode());
+        context.getHistoricalReverseSelectionDirectiveList().add(directive);
+        DayDrivenScheduleState state =
+                new DayDrivenScheduleState(Collections.singletonList(sku));
+
+        DailyNewSpecCandidate zeroPlanCandidate = ReflectionTestUtils.invokeMethod(
+                strategy, "buildDailyCandidate", context, dayContext, state,
+                DailySchedulePhase.TODAY_PLAN_AND_LOCKED, sku);
+
+        Assertions.assertNull(zeroPlanCandidate,
+                "历史反选不得绕过当天日计划准入");
+
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(2);
+        quotaMap.put(scheduleDate, buildQuota(60, 60));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        DailyNewSpecCandidate plannedCandidate = ReflectionTestUtils.invokeMethod(
+                strategy, "buildDailyCandidate", context, dayContext, state,
+                DailySchedulePhase.TODAY_PLAN_AND_LOCKED, sku);
+
+        Assertions.assertNotNull(plannedCandidate);
+        Assertions.assertTrue(plannedCandidate.hasReason(DailyCandidateReason.TODAY_PLAN));
+        Assertions.assertTrue(plannedCandidate.hasReason(
+                DailyCandidateReason.ALTERNATE_PLAN_REVERSE_SELECT));
+    }
 
     /**
      * 用例说明：存在单机可收完剩余量的候选机台时，应优先选择该机台。
@@ -570,10 +633,11 @@ public class NewSpecProductionStrategyTest {
                 LhScheduleContext.class,
                 SkuScheduleDTO.class,
                 LhScheduleResult.class,
-                List.class);
+                List.class,
+                boolean.class);
         method.setAccessible(true);
 
-        Integer scheduledQty = (Integer) method.invoke(strategy, context, sku, result, shifts);
+        Integer scheduledQty = (Integer) method.invoke(strategy, context, sku, result, shifts, false);
 
         Assertions.assertEquals(48, scheduledQty.intValue());
         Assertions.assertEquals(48, ShiftFieldUtil.getShiftPlanQty(result, shifts.get(0).getShiftIndex()).intValue());
@@ -621,14 +685,191 @@ public class NewSpecProductionStrategyTest {
                 LhScheduleContext.class,
                 SkuScheduleDTO.class,
                 LhScheduleResult.class,
-                List.class);
+                List.class,
+                boolean.class);
         method.setAccessible(true);
 
-        Integer scheduledQty = (Integer) method.invoke(strategy, context, sku, result, shifts);
+        Integer scheduledQty = (Integer) method.invoke(strategy, context, sku, result, shifts, false);
 
         Assertions.assertEquals(46, scheduledQty.intValue());
         Assertions.assertEquals(46, ShiftFieldUtil.getShiftPlanQty(result, shifts.get(2).getShiftIndex()).intValue());
         Assertions.assertEquals(0, sku.getShiftFillOverQty());
+    }
+
+    /**
+     * 用例说明：收尾SKU跨日续排时，只有实时剩余量不超过当前业务日物理组产能，
+     * 当前增量才属于最终严格收尾块；中间业务日不得读取结果行isEnd直接裁断班次。
+     */
+    @Test
+    public void shouldOnlyMarkCarryOverFinalStrictBlockWhenRemainingFitsDayCapacity() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001593");
+        LhScheduleResult result = new LhScheduleResult();
+        result.setIsEnd("1");
+        ActiveMachineBinding endingBinding = new ActiveMachineBinding(
+                "3302001593/S", sku, "K1809", null,
+                result, null, true);
+
+        Boolean middleDayBlock = ReflectionTestUtils.invokeMethod(
+                strategy, "isFinalStrictCarryOverBlock",
+                endingBinding, 50, 48);
+        Boolean finalDayBlock = ReflectionTestUtils.invokeMethod(
+                strategy, "isFinalStrictCarryOverBlock",
+                endingBinding, 48, 48);
+
+        Assertions.assertFalse(Boolean.TRUE.equals(middleDayBlock),
+                "剩余量仍大于当日产能时必须连续满产，不能按dayN尾量裁断");
+        Assertions.assertTrue(Boolean.TRUE.equals(finalDayBlock),
+                "剩余量可在当日收完时才进入最终严格收口");
+    }
+
+    /**
+     * 用例说明：收尾目标量被前置补满规则抬高时，最终严格余量必须扣除本批次已经落地的
+     * 新增结果，不能继续读取被抬高后的目标账本。
+     */
+    @Test
+    public void shouldResolveStrictSurplusRemainingQtyFromActualScheduledResult() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002343");
+        sku.setProductStatus("T");
+        sku.setSurplusQty(60);
+        sku.setTargetScheduleQty(112);
+
+        LhScheduleResult scheduledResult = new LhScheduleResult();
+        scheduledResult.setMaterialCode(sku.getMaterialCode());
+        scheduledResult.setProductStatus(sku.getProductStatus());
+        scheduledResult.setScheduleType("02");
+        scheduledResult.setIsTypeBlock("0");
+        scheduledResult.setClass1PlanQty(40);
+        context.getScheduleResultList().add(scheduledResult);
+
+        Integer remainingQty = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveStrictSurplusRemainingQty", context, sku);
+
+        Assertions.assertEquals(20, remainingQty);
+    }
+
+    /**
+     * 用例说明：首次上机时未识别为收尾的绑定，跨日后只要真实余量已能被当日物理产能收完，
+     * 也必须立即进入严格收尾，不能继续使用首次绑定时固化的非收尾标签。
+     */
+    @Test
+    public void shouldEnterCarryOverStrictEndingByRealtimeCapacityWithoutFrozenEndingFlag() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002343");
+        ActiveMachineBinding nonEndingBinding = new ActiveMachineBinding(
+                "3302002343/T", sku, "K2204", null,
+                new LhScheduleResult(), null, false);
+
+        Boolean finalBlock = ReflectionTestUtils.invokeMethod(
+                strategy, "isFinalStrictCarryOverBlock",
+                nonEndingBinding, 60, 100);
+
+        Assertions.assertTrue(Boolean.TRUE.equals(finalBlock),
+                "实时余量可在当前物理块收完时必须严格收口");
+    }
+
+    /**
+     * 用例说明：单控整机最终收尾块必须按L/R物理组合计产能判断，
+     * 不能只使用主侧单机产能导致提前进入严格裁剪。
+     */
+    @Test
+    public void shouldUseWholeSingleControlCapacityForCarryOverFinalBlock() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001593");
+        LhScheduleResult primaryResult = new LhScheduleResult();
+        LhScheduleResult pairResult = new LhScheduleResult();
+        ActiveMachineBinding endingBinding = new ActiveMachineBinding(
+                "3302001593/S", sku, "K1809L", "K1809R",
+                primaryResult, pairResult, true);
+
+        Boolean finalBlock = ReflectionTestUtils.invokeMethod(
+                strategy, "isFinalStrictCarryOverBlock",
+                endingBinding, 96, 48);
+        Boolean middleBlock = ReflectionTestUtils.invokeMethod(
+                strategy, "isFinalStrictCarryOverBlock",
+                endingBinding, 97, 48);
+
+        Assertions.assertTrue(Boolean.TRUE.equals(finalBlock));
+        Assertions.assertFalse(Boolean.TRUE.equals(middleBlock));
+    }
+
+    /**
+     * 用例说明：单控整机在严格收尾场景下必须左右成对落地。
+     * 当 dayN 仅剩奇数额度时，只能先消费可均分的偶数额度，不能先消费奇数再把 L/R 结果向下取整，
+     * 否则日计划账本会比实际整机排产多扣 1 条。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldKeepSingleControlQuotaConsistentWhenStrictQuotaIsOdd() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectTargetScheduleQtyResolver(strategy, new TargetScheduleQtyResolver());
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 25, 0, 0, 0));
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(
+                context, context.getScheduleDate());
+        LocalDate productionDate = resolveWorkDate(shifts.get(0));
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002999");
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        sku.setStrictTargetQty(true);
+        sku.setPendingQty(20);
+        sku.setSurplusQty(20);
+        sku.setTargetScheduleQty(20);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<>(4);
+        SkuDailyPlanQuotaDTO quota = buildQuota(15, 15);
+        quota.setMaterialCode(sku.getMaterialCode());
+        quota.setProductionDate(productionDate);
+        quotaMap.put(productionDate, quota);
+        sku.setDailyPlanQuotaMap(quotaMap);
+        context.getSkuProductionRemainingQtyMap().put(sku.getMaterialCode(), 20);
+
+        LhScheduleResult primaryResult = buildCarryOverCapsuleResult("K1501L");
+        primaryResult.setMaterialCode(sku.getMaterialCode());
+        primaryResult.setIsEnd("1");
+        LhScheduleResult pairResult = buildCarryOverCapsuleResult("K1501R");
+        pairResult.setMaterialCode(sku.getMaterialCode());
+        pairResult.setIsEnd("1");
+        LhShiftConfigVO firstShift = shifts.get(0);
+        ShiftFieldUtil.setShiftPlanQty(primaryResult, firstShift.getShiftIndex(), 10,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.setShiftPlanQty(pairResult, firstShift.getShiftIndex(), 10,
+                firstShift.getShiftStartDateTime(), firstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(primaryResult);
+        ShiftFieldUtil.syncDailyPlanQty(pairResult);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "applyWholeSingleControlBlockToDailyQuota",
+                LhScheduleContext.class,
+                SkuScheduleDTO.class,
+                LhScheduleResult.class,
+                LhScheduleResult.class,
+                List.class,
+                boolean.class);
+        method.setAccessible(true);
+
+        Integer actualQty = (Integer) method.invoke(
+                strategy, context, sku, primaryResult, pairResult, shifts, false);
+
+        Assertions.assertEquals(14, actualQty.intValue(), "严格单控整机只能落地可均分到L/R两侧的偶数数量");
+        Assertions.assertEquals(7,
+                ShiftFieldUtil.getShiftPlanQty(primaryResult, firstShift.getShiftIndex()).intValue(),
+                "主侧班产必须与整机账本消费数量保持一半关系");
+        Assertions.assertEquals(7,
+                ShiftFieldUtil.getShiftPlanQty(pairResult, firstShift.getShiftIndex()).intValue(),
+                "配对侧班产必须与主侧完全一致");
+        Assertions.assertEquals(14, quota.getScheduledQty(), "dayN账本只能扣减实际整机落地的14条");
+        Assertions.assertEquals(1, quota.getRemainingQty(), "未能成对落地的1条额度必须保留给后续排程");
+        Assertions.assertEquals(14, quota.getActualQty(), "生产日期实际消费额度必须与整机实际排产量一致");
+        Assertions.assertEquals(6, context.getSkuProductionRemainingQtyMap().get(sku.getMaterialCode()).intValue(),
+                "SKU实际消费账本也只能扣除实际落地的14条");
     }
 
     /**
@@ -691,11 +932,154 @@ public class NewSpecProductionStrategyTest {
         Assertions.assertEquals(16, ShiftFieldUtil.getShiftPlanQty(auxResult, 3).intValue());
     }
 
+    /**
+     * 用例说明：跨日续排把临时增量合并回原结果时，必须保留“换胶囊”班次事实。
+     * 否则下一次胶囊运行态重建会认为首次跨限尚未处理，并在后续班次重复固定扣量。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldKeepCapsuleReplacementAnalysisAfterCarryOverDeltaMerge() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 25, 0, 0, 0));
+        context.setScheduleConfig(new LhScheduleConfig(new LinkedHashMap<String, String>(0)));
+        List<LhShiftConfigVO> shifts =
+                LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate());
+        context.setScheduleWindowShifts(shifts);
+
+        LhScheduleResult targetResult = buildCarryOverCapsuleResult("K1101");
+        LhScheduleResult deltaResult = buildCarryOverCapsuleResult("K1101");
+        LhShiftConfigVO thirdShift = shifts.get(2);
+        ShiftFieldUtil.setShiftPlanQty(deltaResult, thirdShift.getShiftIndex(), 14,
+                thirdShift.getShiftStartDateTime(), thirdShift.getShiftEndDateTime());
+        ShiftFieldUtil.setShiftAnalysis(targetResult, thirdShift.getShiftIndex(), "干冰清洗");
+        ShiftFieldUtil.setShiftAnalysis(deltaResult, thirdShift.getShiftIndex(), "干冰清洗,换胶囊");
+
+        invokeMergeDayShiftDelta(strategy, context, targetResult, deltaResult,
+                Collections.singletonList(thirdShift), shifts);
+
+        Assertions.assertEquals("干冰清洗,换胶囊",
+                ShiftFieldUtil.getShiftAnalysis(targetResult, thirdShift.getShiftIndex()));
+
+        /*
+         * 以已合并的原结果重建胶囊运行态，再安排下一班。若合并遗漏“换胶囊”，
+         * 此处会重新触发首次跨限扣量和备注；保留事实后应只按正常产量继续累计。
+         */
+        LhRepairCapsule capsule = new LhRepairCapsule();
+        capsule.setLhCode("K1101");
+        capsule.setReplaceCapsuleCount(440);
+        capsule.setReplaceCapsuleCount2(0);
+        context.getCapsuleUsageMap().put("K1101", capsule);
+        context.getScheduleResultList().add(targetResult);
+        CapsuleReplacementRuleService capsuleRuleService = new CapsuleReplacementRuleService();
+        capsuleRuleService.rebuildRuntimeState(context, null);
+        Assertions.assertTrue(context.getCapsuleThresholdHandledMachineSet().contains("K1101"));
+
+        LhScheduleResult nextShiftResult = buildCarryOverCapsuleResult("K1101");
+        int actualQty = capsuleRuleService.resolveActualPlanQty(
+                context, nextShiftResult, shifts.get(3), 16, "跨日续排回归");
+        Assertions.assertEquals(16, actualQty);
+        Assertions.assertNull(ShiftFieldUtil.getShiftAnalysis(nextShiftResult, shifts.get(3).getShiftIndex()));
+    }
+
+    /**
+     * 用例说明：按日循环已经确定当前业务日时，模具到货等日期敏感校验必须优先使用该业务日，
+     * 不得被未来 dayN 加机日期提前覆盖。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldPreferCurrentBusinessDateWhenResolvingMouldAvailabilityDate() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 25, 0, 0, 0));
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveCurrentScheduleDate", LhScheduleContext.class, LocalDate.class,
+                SkuScheduleDTO.class, LocalDate.class);
+        method.setAccessible(true);
+        Date resolvedDate = (Date) method.invoke(strategy, context,
+                LocalDate.of(2026, 7, 26), new SkuScheduleDTO(), LocalDate.of(2026, 7, 27));
+
+        Assertions.assertEquals(toDate(2026, 7, 26, 0, 0, 0), resolvedDate);
+    }
+
+    /**
+     * 用例说明：按日编排只接受完整的 2/3/3 八班窗口，缺班时必须在资源消费前中断。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldRejectIncompleteDayDrivenShiftLayout() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 25, 0, 0, 0));
+        List<LhShiftConfigVO> shifts = new ArrayList<LhShiftConfigVO>(
+                LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
+        shifts.remove(shifts.size() - 1);
+        LinkedHashMap<LocalDate, List<LhShiftConfigVO>> dayShiftMap =
+                LhScheduleTimeUtil.groupByWorkDate(shifts);
+
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "validateDayDrivenShiftLayout", List.class, LinkedHashMap.class);
+        method.setAccessible(true);
+        InvocationTargetException exception = Assertions.assertThrows(InvocationTargetException.class,
+                () -> method.invoke(strategy, shifts, dayShiftMap));
+
+        Assertions.assertTrue(exception.getCause() instanceof IllegalStateException);
+        Assertions.assertTrue(exception.getCause().getMessage().contains("必须提供8个班次"));
+    }
+
+    /**
+     * 用例说明：前三个日内阶段即使满足未来日计划条件，也不得取得提前生产准入。
+     *
+     * @throws Exception 反射调用异常
+     */
+    @Test
+    public void shouldRejectEarlyProductionBeforeEarlyProductionPhase() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "resolveEarlyProductionDecision", LhScheduleContext.class, SkuScheduleDTO.class,
+                Date.class, List.class, boolean.class, DailySchedulePhase.class);
+        method.setAccessible(true);
+
+        EarlyProductionDecision decision = (EarlyProductionDecision) method.invoke(strategy,
+                new LhScheduleContext(), new SkuScheduleDTO(), toDate(2026, 7, 25, 8, 0, 0),
+                Collections.<LhShiftConfigVO>emptyList(), false, DailySchedulePhase.ADD_MACHINE);
+
+        Assertions.assertFalse(decision.isEarlyProduction());
+    }
+
     private void injectTargetScheduleQtyResolver(NewSpecProductionStrategy strategy,
                                                  TargetScheduleQtyResolver resolver) throws Exception {
         Field field = NewSpecProductionStrategy.class.getDeclaredField("targetScheduleQtyResolver");
         field.setAccessible(true);
         field.set(strategy, resolver);
+    }
+
+    /**
+     * 通过反射调用跨日结果增量合并入口，验证真实合并分支的班次备注处理。
+     *
+     * @param strategy 新增排产策略
+     * @param context 排程上下文
+     * @param targetResult 原跨日结果
+     * @param deltaResult 当前日临时增量结果
+     * @param dayShifts 当前业务日班次
+     * @param allShifts 完整排程窗口班次
+     * @throws Exception 反射调用异常
+     */
+    private void invokeMergeDayShiftDelta(NewSpecProductionStrategy strategy,
+                                          LhScheduleContext context,
+                                          LhScheduleResult targetResult,
+                                          LhScheduleResult deltaResult,
+                                          List<LhShiftConfigVO> dayShifts,
+                                          List<LhShiftConfigVO> allShifts) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "mergeDayShiftDelta", LhScheduleContext.class, LhScheduleResult.class,
+                LhScheduleResult.class, List.class, List.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, targetResult, deltaResult, dayShifts, allShifts);
     }
 
     private MachineScheduleDTO invokeSelectCandidateMachine(NewSpecProductionStrategy strategy,
@@ -711,17 +1095,22 @@ public class NewSpecProductionStrategyTest {
                 LhScheduleContext.class,
                 SkuScheduleDTO.class,
                 NewSpecCandidateCache.class,
+                List.class,
                 Set.class,
                 IMachineMatchStrategy.class,
                 MachineScheduleDTO.class,
-                ProductionQuantityPolicy.class);
+                ProductionQuantityPolicy.class,
+                List.class);
         method.setAccessible(true);
         NewSpecCandidateCache candidateCache = NewSpecCandidateCache.from(candidates,
                 candidate -> Boolean.TRUE.equals(ReflectionTestUtils.invokeMethod(
                         strategy, "isSingleControlMachine", context, candidate.getMachineCode())));
+        List<MachineScheduleDTO> orderedCandidates =
+                new ArrayList<MachineScheduleDTO>(candidates.size());
         return (MachineScheduleDTO) method.invoke(
-                strategy, context, sku, candidateCache, new HashSet<String>(excludedMachineCodes),
-                machineMatch, preferredTrialMachine, quantityPolicy);
+                strategy, context, sku, candidateCache, new ArrayList<MachineScheduleDTO>(candidates),
+                new HashSet<String>(excludedMachineCodes), machineMatch, preferredTrialMachine,
+                quantityPolicy, orderedCandidates);
     }
 
     private MachineScheduleDTO invokeSelectCandidateMachineFromScopedList(NewSpecProductionStrategy strategy,
@@ -848,6 +1237,22 @@ public class NewSpecProductionStrategyTest {
         machine.setMachineCode(machineCode);
         machine.setMaxMoldNum(maxMouldNum);
         return machine;
+    }
+
+    /**
+     * 构建用于跨日换胶囊回归的最小结果行。
+     *
+     * @param machineCode 硫化机台编码
+     * @return 包含班产计算必要字段的排程结果
+     */
+    private LhScheduleResult buildCarryOverCapsuleResult(String machineCode) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setLhMachineCode(machineCode);
+        result.setMaterialCode("3302000001");
+        result.setProductStatus("S");
+        result.setMouldQty(1);
+        result.setLhTime(3600);
+        return result;
     }
 
     private SkuDailyPlanQuotaDTO buildQuota(int remainingQty) {

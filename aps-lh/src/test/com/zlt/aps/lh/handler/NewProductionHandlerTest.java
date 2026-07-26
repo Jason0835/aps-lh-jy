@@ -122,10 +122,10 @@ class NewProductionHandlerTest {
     }
 
     /**
-     * 验证新增业务排序完成后，历史反选仍能把目标SKU恢复到普通新增SKU之前。
+     * 验证新增业务排序完成后，历史反选只登记指定机台指令，不能重排 SKU 队列。
      */
     @Test
-    void handle_shouldKeepHistoricalReverseSkuAheadAfterBusinessPrioritySort() {
+    void handle_shouldKeepBusinessPriorityOrderAfterHistoricalReverseSelection() {
         when(strategyFactory.getProductionStrategy("02")).thenReturn(strategy);
         when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
         when(strategyFactory.getMachineMatchStrategy()).thenReturn(machineMatchStrategy);
@@ -147,17 +147,13 @@ class NewProductionHandlerTest {
                     Arrays.asList(normalHighPrioritySku, historicalReverseSku));
             return null;
         }).when(skuPriorityStrategy).sortByPriority(context);
+        // 真实历史反选策略只登记“机台+后物料”指令，不得改写排序器已经确定的队列。
+        doAnswer(invocation -> null).when(historicalReverseSelectionStrategy).reverseSelect(context);
         doAnswer(invocation -> {
-            context.getNewSpecSkuList().clear();
-            context.getNewSpecSkuList().addAll(
-                    Arrays.asList(historicalReverseSku, normalHighPrioritySku));
-            return null;
-        }).when(historicalReverseSelectionStrategy).reverseSelect(context);
-        doAnswer(invocation -> {
-            assertSame(historicalReverseSku, context.getNewSpecSkuList().get(0),
-                    "历史反选SKU必须在普通新增选机前保持第一顺位");
-            assertSame(normalHighPrioritySku, context.getNewSpecSkuList().get(1),
-                    "普通高优先级SKU不得再次覆盖历史反选执行顺序");
+            assertSame(normalHighPrioritySku, context.getNewSpecSkuList().get(0),
+                    "历史指定机台只能影响选机，不能覆盖 SKU 业务排序第一顺位");
+            assertSame(historicalReverseSku, context.getNewSpecSkuList().get(1),
+                    "历史反选目标 SKU 必须保留排序器给出的原有相对位置");
             return null;
         }).when(strategy).scheduleNewSpecs(
                 any(LhScheduleContext.class), any(IMachineMatchStrategy.class),

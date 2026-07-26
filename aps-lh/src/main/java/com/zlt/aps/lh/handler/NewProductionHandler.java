@@ -75,7 +75,8 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
         /*
          * S4.5.3 前日交替计划机台反选：
          * 必须在新增SKU业务优先级排序完成后、普通新增选机前执行。反选策略会按历史班次4、5的
-         * “机台+后物料”指令重新前置目标SKU，避免业务排序再次覆盖反选顺序并让普通SKU提前占机。
+         * “机台+后物料”关系登记指定机台指令；目标 SKU 轮到时优先尝试该机台，但绝不改写上一步
+         * 已确定的 SKU 业务排序，避免历史计划覆盖当前月计划、产品状态和排序 tie-break 规则。
          */
         historicalReverseSelectionStrategy.reverseSelect(context);
         log.info("前日交替计划机台反选完成, 排程结果数: {}, 待新增SKU: {}, 指令数: {}",
@@ -94,17 +95,16 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
         // S4.5.7 计算开产时间
         ICapacityCalculateStrategy capacityStrategy = strategyFactory.getCapacityCalculateStrategy();
 
-        /** 对每个新增SKU执行以下流程:
-         * 1. 按优先级排序
-         * 2. 按历史交替计划前置反选SKU并登记指定机台
-         * 3. 匹配可用硫化机台
-         * 4. 基础换模时间分配（可选换模均衡：早<=8, 中<=7, 总<=15）
-         * 5. 首检均衡分配(早/中班操作数均衡)
-         * 6. 计算开产时间(考虑保养/维修/清洗重叠)
-         * 7. 分配班次计划量
-         * 8. 胎胚库存校正与零计划收口
-         * 9. 新增排产降模处理
-         * 10. 标记未排产SKU和原因
+        /*
+         * S4.5.8 新增排产按业务日编排：
+         * 1. 保持上方已生成的SKU顺序和历史反选指令，不在日循环内重新排序；
+         * 2. 将class1～class8按workDate拆为T日2班、T+1/T+2各3班；
+         * 3. 每日依次执行“在机延续、当天计划/锁定、加机台、提前生产、日终结转”；
+         * 4. 单个候选仍复用现有选机、换模、首检、目标量、单控和排满内核；
+         * 5. 临时资源失败只登记延期，T+2 的提前生产阶段完成后再统一写最终未排；
+         * 6. 三天全部完成后，才执行下方窗口级胎胚调整和后续特殊材料置换。
+         *
+         * 该调用仍使用IProductionStrategy原接口，数据库字段、Mapper和保存链路均不改变。
          */
         strategy.scheduleNewSpecs(context, machineMatchStrategy,
                 mouldChangeStrategy, inspectionStrategy, capacityStrategy);

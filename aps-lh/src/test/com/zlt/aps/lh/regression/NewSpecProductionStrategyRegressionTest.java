@@ -610,7 +610,7 @@ class NewSpecProductionStrategyRegressionTest {
     }
 
     @Test
-    void applyBlockToDailyQuota_shouldTrimResultQtyWhenWindowQuotaIsExhausted() {
+    void applyBlockToDailyQuota_shouldNotConsumeFutureQuotaWhenEarlyProductionIsDisabled() {
         NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
         LhScheduleContext context = buildContext();
         context.setMachineScheduleMap(new LinkedHashMap<String, MachineScheduleDTO>());
@@ -623,6 +623,13 @@ class NewSpecProductionStrategyRegressionTest {
 
         SkuScheduleDTO sku = buildSku();
         sku.setMaterialCode("MAT-QUOTA");
+        // 该用例验证日计划账本而非实际排产总量，先提供足额目标，避免SKU实际消费账本提前裁剪结果。
+        sku.setPendingQty(16);
+        sku.setSurplusQty(16);
+        sku.setTargetScheduleQty(16);
+        // 试制严格目标量必须按本业务日额度回裁，才能准确验证不允许透支未来 dayN 的行为。
+        sku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        sku.setStrictTargetQty(true);
         sku.setDailyPlanQuotaMap(buildQuotaMap(firstShift, nextDayShift, 6, 4));
 
         LhScheduleResult result = new LhScheduleResult();
@@ -637,11 +644,15 @@ class NewSpecProductionStrategyRegressionTest {
                 nextDayShift.getShiftStartDateTime(), nextDayShift.getShiftEndDateTime());
         ShiftFieldUtil.syncDailyPlanQty(result);
 
-        ReflectionTestUtils.invokeMethod(strategy, "applyBlockToDailyQuota", context, sku, result, shifts);
+        // 非提前生产路径只能扣减本业务日及历史已形成的额度，不得透支未来 dayN 额度。
+        ReflectionTestUtils.invokeMethod(
+                strategy, "applyBlockToDailyQuota", context, sku, result, shifts, false);
 
-        assertEquals(10, result.getDailyPlanQty().intValue(), "窗口总量用尽后，结果行计划量必须同步回裁");
-        assertEquals(Integer.valueOf(8), ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()));
-        assertEquals(Integer.valueOf(2), ShiftFieldUtil.getShiftPlanQty(result, nextDayShift.getShiftIndex()));
+        assertEquals(10, result.getDailyPlanQty().intValue(), "禁止提前生产时，结果行只能保留两个业务日各自可消费的额度");
+        assertEquals(Integer.valueOf(6), ShiftFieldUtil.getShiftPlanQty(result, firstShift.getShiftIndex()),
+                "T日班次不得提前借用T+1日额度补齐");
+        assertEquals(Integer.valueOf(4), ShiftFieldUtil.getShiftPlanQty(result, nextDayShift.getShiftIndex()),
+                "T+1日班次只能消费其自身尚未被占用的额度");
         assertEquals(6, context.getSkuShiftFillOverQtyMap().get("MAT-QUOTA").intValue());
     }
 
@@ -4368,7 +4379,8 @@ class NewSpecProductionStrategyRegressionTest {
 
         List<MachineScheduleDTO> orderedCandidates = new ArrayList<>(3);
         MachineScheduleDTO selectedMachine = ReflectionTestUtils.invokeMethod(strategy,
-                "selectCandidateMachine", context, sku, candidateCache, Collections.emptySet(),
+                "selectCandidateMachine", context, sku, candidateCache, new ArrayList<>(candidates),
+                Collections.emptySet(),
                 orderedMachineMatch(normalMachine, occupiedSingleControlMachine, singleControlMachine), null,
                 ProductionQuantityPolicy.from(sku, false), orderedCandidates);
 
@@ -4382,7 +4394,8 @@ class NewSpecProductionStrategyRegressionTest {
         Set<String> excludedMachineCodes = Collections.singleton(normalMachine.getMachineCode());
         List<MachineScheduleDTO> retryOrderedCandidates = new ArrayList<>(2);
         MachineScheduleDTO retrySelectedMachine = ReflectionTestUtils.invokeMethod(strategy,
-                "selectCandidateMachine", context, sku, candidateCache, excludedMachineCodes,
+                "selectCandidateMachine", context, sku, candidateCache, new ArrayList<>(candidates),
+                excludedMachineCodes,
                 orderedMachineMatch(normalMachine, occupiedSingleControlMachine, singleControlMachine), null,
                 ProductionQuantityPolicy.from(sku, false), retryOrderedCandidates);
 
@@ -5679,8 +5692,11 @@ class NewSpecProductionStrategyRegressionTest {
 
         LhScheduleContext context = buildContext();
         context.getLhParamsMap().put("SYS0303004", "100");
-        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
-                LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1")));
+        Map<String, String> scheduleParamMap = new HashMap<String, String>(4);
+        scheduleParamMap.put(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT, "100");
+        scheduleParamMap.put(LhScheduleParamConstant.ENABLE_PRIORITY_TRACE_LOG, "1");
+        // 配置对象优先于 lhParamsMap 取值，测试需把同班次总量上限同步放入配置快照。
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
         List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
 
         LhScheduleResult existingResult = buildEndingResult(context, buildSku(), "K1001");
@@ -5711,6 +5727,46 @@ class NewSpecProductionStrategyRegressionTest {
         assertEquals(0, resolveShiftQty(currentResult, 1), "当前班次超过总量上限时应跳过，不允许拆分剩余10条");
         assertEquals(16, resolveShiftQty(currentResult, 2), "超限只跳过当前班次，后续班次仍按原规则排产");
         assertEquals(16, resolveShiftQty(currentResult, 3), "未被拆分的剩余量应继续进入后续班次判断");
+    }
+
+    @Test
+    void distributeToShifts_shouldNotReapplyStartLimitForCarryOverSku() throws Exception {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        injectDependencies(strategy, false);
+
+        LhScheduleContext context = buildContext();
+        Map<String, String> scheduleParamMap = new HashMap<String, String>(4);
+        scheduleParamMap.put(LhScheduleParamConstant.CLASS_TOTAL_QTY_UP_LIMIT, "100");
+        context.setScheduleConfig(new LhScheduleConfig(scheduleParamMap));
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        LhShiftConfigVO carryOverFirstShift = shifts.get(2);
+
+        LhScheduleResult existingResult = buildEndingResult(context, buildSku(), "K1001");
+        existingResult.setMaterialCode("3302000001");
+        existingResult.setScheduleType("01");
+        ShiftFieldUtil.setShiftPlanQty(existingResult, carryOverFirstShift.getShiftIndex(), 100,
+                carryOverFirstShift.getShiftStartDateTime(), carryOverFirstShift.getShiftEndDateTime());
+        ShiftFieldUtil.syncDailyPlanQty(existingResult);
+        context.getScheduleResultList().add(existingResult);
+
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002369");
+        sku.setLhTimeSeconds(3600);
+        sku.setMouldQty(1);
+        sku.setShiftCapacity(16);
+        sku.setTargetScheduleQty(16);
+        sku.setSurplusQty(16);
+
+        LhScheduleResult carryOverResult = buildEndingResult(context, sku, "K2001");
+        carryOverResult.setIsEnd("0");
+        invokeDistributeToShifts(
+                strategy, context, carryOverResult,
+                Collections.singletonList(carryOverFirstShift),
+                carryOverFirstShift.getShiftStartDateTime(),
+                16, 3600, 1, 16, sku, false, null, true);
+
+        assertEquals(16, resolveShiftQty(carryOverResult, carryOverFirstShift.getShiftIndex()),
+                "跨日在机SKU已完成首次上机，不得再次套用SYS0303004起排限制形成中间空班");
     }
 
     @Test
@@ -5811,21 +5867,32 @@ class NewSpecProductionStrategyRegressionTest {
         LhScheduleResult scheduledResult = findScheduleResultByMaterialCode(
                 context.getScheduleResultList(), sku.getMaterialCode());
         assertNotNull(scheduledResult, "早班首检额度不足后应保留同一机台并顺延重试");
-        assertEquals(dateTime(2026, 4, 17, 14, 0), scheduledResult.getMouldChangeStartTime(),
-                "早班强制首检超限后，同机台必须从下一有效班次开始换模");
+        assertEquals(dateTime(2026, 4, 17, 22, 0), scheduledResult.getMouldChangeStartTime(),
+                "中班换模完成恰好到日终时，按日窗口守卫必须延期到下一业务日晚班重新尝试");
         assertEquals(0, resolveShiftQty(scheduledResult, 1), "早班达到总量上限后不得写入首检");
-        assertEquals(4, resolveShiftQty(scheduledResult, 2),
-                "中班完成换模后应在换模班次写入首检4条");
-        assertEquals(16, resolveShiftQty(scheduledResult, 3),
-                "首检成功后才能从后续有效班次继续普通生产");
+        assertEquals(0, resolveShiftQty(scheduledResult, 2),
+                "中班换模结束达到当前业务日日终，不得提前写入下一业务日生产");
+        assertEquals(4, resolveShiftQty(scheduledResult, 3),
+                "延期后首检应归属下一业务日的晚班");
+        assertEquals(16, resolveShiftQty(scheduledResult, 4),
+                "首检成功后才能从下一业务日早班继续普通生产");
         assertEquals(1, context.getShiftFirstInspectionCountMap().size(),
                 "只有最终成功落地的首检才能推进首检顺序");
-        assertEquals(0, context.getDailyFirstInspectionCountMap().get("2026-04-17")[0],
-                "失败候选的早班首检资源预演不得留下占用");
-        assertEquals(1, context.getDailyFirstInspectionCountMap().get("2026-04-17")[1],
-                "最终成功候选只应占用一次中班首检资源");
-        assertEquals(1, machinePriorityTraceCount[0],
-                "同机台首检顺延只重算切换时间，不得重复进入选机排序日志");
+        assertFalse(context.getDailyFirstInspectionCountMap().containsKey("2026-04-17"),
+                "T日失败候选的早班首检资源预演不得留下占用");
+        int[] nextBusinessDayInspectionCounts = context.getDailyFirstInspectionCountMap().get("2026-04-18");
+        assertNotNull(nextBusinessDayInspectionCounts,
+                "晚班首检会初始化下一业务日计数账本，供后续早中班继续复用");
+        assertEquals(0, nextBusinessDayInspectionCounts[0],
+                "延期后的首检归属晚班，不得占用下一业务日早班首检名额");
+        assertEquals(0, nextBusinessDayInspectionCounts[1],
+                "延期后的首检归属晚班，不得占用下一业务日中班首检名额");
+        /*
+         * T 日同机台首检顺延只重算切换时间，不得重复输出一次排序；延期到 T+1 后属于新的业务日，
+         * 必须重新按当天资源输出一次有效候选排序。因此总数应为 T 日首次选机 + T+1 首次选机两次。
+         */
+        assertEquals(2, machinePriorityTraceCount[0],
+                "同一业务日同机台首检顺延不得重复进入选机排序日志，跨业务日延期应重新输出当天排序");
         long retryLogCount = context.getScheduleLogList().stream()
                 .filter(log -> StringUtils.contains(log.getTitle(), "【K2201】首检顺延重试"))
                 .count();
@@ -6572,6 +6639,43 @@ class NewSpecProductionStrategyRegressionTest {
         method.invoke(strategy, context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
                 remaining, Collections.emptyList(), Collections.emptyList(), sku, isEnding,
                 mouldChangeCompleteTime, Collections.emptyMap());
+    }
+
+    private void invokeDistributeToShifts(NewSpecProductionStrategy strategy,
+                                          LhScheduleContext context,
+                                          LhScheduleResult result,
+                                          List<LhShiftConfigVO> shifts,
+                                          Date startTime,
+                                          int shiftCapacity,
+                                          int lhTimeSeconds,
+                                          int mouldQty,
+                                          int remaining,
+                                          SkuScheduleDTO sku,
+                                          boolean isEnding,
+                                          Date mouldChangeCompleteTime,
+                                          boolean alreadyStartedOnMachine) throws Exception {
+        Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
+                "distributeToShifts",
+                LhScheduleContext.class,
+                LhScheduleResult.class,
+                List.class,
+                Date.class,
+                int.class,
+                int.class,
+                int.class,
+                int.class,
+                List.class,
+                List.class,
+                SkuScheduleDTO.class,
+                boolean.class,
+                Date.class,
+                Map.class,
+                LhShiftConfigVO.class,
+                boolean.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
+                remaining, Collections.emptyList(), Collections.emptyList(), sku, isEnding,
+                mouldChangeCompleteTime, Collections.emptyMap(), null, alreadyStartedOnMachine);
     }
 
     private LhShiftConfigVO resolveNextWorkDateShift(List<LhShiftConfigVO> shifts, LhShiftConfigVO firstShift) {

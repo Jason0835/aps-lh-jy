@@ -3,7 +3,6 @@ package com.zlt.aps.lh.component;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
-import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.context.EmbryoStockConsumeLedger;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -435,6 +434,8 @@ public class TargetScheduleQtyResolverTest {
         Assertions.assertEquals(100, cappedQty);
         Assertions.assertEquals(Integer.valueOf(80), ShiftFieldUtil.getShiftPlanQty(result, 1));
         Assertions.assertEquals(Integer.valueOf(20), ShiftFieldUtil.getShiftPlanQty(result, 2));
+        Assertions.assertNotNull(ShiftFieldUtil.getShiftEndTime(result, 2),
+                "余量裁剪后必须同步重算班次结束时间");
         Assertions.assertEquals(Integer.valueOf(100), result.getDailyPlanQty());
     }
 
@@ -620,7 +621,8 @@ public class TargetScheduleQtyResolverTest {
     }
 
     /**
-     * 用例说明：S4.5新增链路命中共用胎胚零余量收尾时，应直接写入未排并移出待排队列。
+     * 用例说明：S4.5新增链路命中共用胎胚零余量收尾时，应移出待排队列，
+     * 但不得生成未排量为0的无效记录。
      *
      * @throws Exception 反射调用异常
      */
@@ -641,11 +643,8 @@ public class TargetScheduleQtyResolverTest {
                 new NewSpecProductionStrategy(), context, iterator, zeroSurplusSku, sharedZeroEnding, reasonCountMap);
 
         Assertions.assertTrue(handled);
-        Assertions.assertEquals(1, context.getUnscheduledResultList().size());
-        LhUnscheduledResult unscheduled = context.getUnscheduledResultList().get(0);
-        Assertions.assertEquals("3302002369", unscheduled.getMaterialCode());
-        Assertions.assertEquals(Integer.valueOf(0), unscheduled.getUnscheduledQty());
-        Assertions.assertTrue(unscheduled.getUnscheduledReason().contains("共用胎胚且硫化余量为0"));
+        Assertions.assertTrue(context.getUnscheduledResultList().isEmpty());
+        Assertions.assertTrue(reasonCountMap.isEmpty());
         Assertions.assertEquals(1, context.getNewSpecSkuList().size());
         Assertions.assertEquals("3302002370", context.getNewSpecSkuList().get(0).getMaterialCode());
     }

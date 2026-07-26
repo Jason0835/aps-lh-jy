@@ -53,9 +53,16 @@ public class MouldResourceContext {
                                  Map<String, Integer> machineMouldQtyMap,
                                  Map<String, LinkedHashSet<String>> machineBoundMouldCodeMap,
                                  LinkedHashSet<String> occupiedMouldCodeSet) {
-        this.skuAvailableMouldCodeMap = skuAvailableMouldCodeMap;
-        this.skuUnavailableMouldCodeMap = skuUnavailableMouldCodeMap;
-        this.skuUnavailableModelInfoMap = skuUnavailableModelInfoMap;
+        /*
+         * 三个可用性视图会随日驱动编排的 currentScheduleDate 刷新，因此必须复制为可变 Map。
+         * 机台已绑定模具和全局占用集合则保持同一运行态，刷新日期时绝不能重新构建它们。
+         */
+        this.skuAvailableMouldCodeMap =
+                new LinkedHashMap<String, List<String>>(skuAvailableMouldCodeMap);
+        this.skuUnavailableMouldCodeMap =
+                new LinkedHashMap<String, List<String>>(skuUnavailableMouldCodeMap);
+        this.skuUnavailableModelInfoMap =
+                new LinkedHashMap<String, Boolean>(skuUnavailableModelInfoMap);
         this.machineMouldQtyMap = machineMouldQtyMap;
         this.machineBoundMouldCodeMap = machineBoundMouldCodeMap;
         this.occupiedMouldCodeSet = occupiedMouldCodeSet;
@@ -78,6 +85,39 @@ public class MouldResourceContext {
         LinkedHashSet<String> occupiedMouldCodeSet = buildOccupiedMouldCodeSet(machineBoundMouldCodeMap);
         return new MouldResourceContext(skuAvailableMouldCodeMap, skuUnavailableMouldCodeMap,
                 skuUnavailableModelInfoMap, machineMouldQtyMap, machineBoundMouldCodeMap, occupiedMouldCodeSet);
+    }
+
+    /**
+     * 按当前业务日刷新模具到货可用性。
+     *
+     * <p>无台账模具是否可用依赖 {@link LhScheduleContext#getCurrentScheduleDate()} 与到货日期比较。
+     * 日驱动排产从 T 推进到 T+1、T+2 时，已到货模具必须进入候选集合；但刷新只能更新静态
+     * 可用性视图，不能重建 {@code occupiedMouldCodeSet} 或 {@code machineBoundMouldCodeMap}，否则
+     * 已经成功上机的模具会被错误释放并允许重复分配。</p>
+     *
+     * @param context 排程上下文，当前业务日必须已写入 currentScheduleDate
+     */
+    public synchronized void refreshAvailability(LhScheduleContext context) {
+        if (Objects.isNull(context)) {
+            return;
+        }
+        Map<String, Integer> mouldSharedSkuCountMap = buildMouldSharedSkuCountMap(context);
+        Map<String, List<String>> refreshedAvailableMap =
+                buildSkuAvailableMouldCodeMap(context, mouldSharedSkuCountMap);
+        Map<String, List<String>> refreshedUnavailableMap =
+                buildSkuUnavailableMouldCodeMap(context);
+        Map<String, Boolean> refreshedUnavailableModelInfoMap =
+                buildSkuUnavailableModelInfoMap(context);
+        skuAvailableMouldCodeMap.clear();
+        skuAvailableMouldCodeMap.putAll(refreshedAvailableMap);
+        skuUnavailableMouldCodeMap.clear();
+        skuUnavailableMouldCodeMap.putAll(refreshedUnavailableMap);
+        skuUnavailableModelInfoMap.clear();
+        skuUnavailableModelInfoMap.putAll(refreshedUnavailableModelInfoMap);
+        log.debug("模具资源可用性按业务日刷新, scheduleDate: {}, availableSkuCount: {}, "
+                        + "occupiedMouldQty: {}, boundMachineCount: {}",
+                context.getCurrentScheduleDate(), skuAvailableMouldCodeMap.size(),
+                occupiedMouldCodeSet.size(), machineBoundMouldCodeMap.size());
     }
 
     /**
@@ -268,9 +308,9 @@ public class MouldResourceContext {
                 if (Objects.nonNull(modelInfo) && MouldStatusUtil.isEnabled(modelInfo.getMouldStatus())) {
                     mouldCodeSet.add(mouldCode);
                 }
-                // 若模具台账没有，但模具到货计划存在且模具可用日期<=当前排程日期，模具视为可用
+                // 无台账模具仅在到货日期不晚于当前业务日时可分配，避免未来到货模具提前占用。
                 if (modelInfo == null && rel.getBoardingDate() != null && context.getCurrentScheduleDate() != null &&
-                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0){
+                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0) {
                     mouldCodeSet.add(mouldCode);
                 }
             }
@@ -296,9 +336,9 @@ public class MouldResourceContext {
                     continue;
                 }
                 MdmModelInfo modelInfo = CollectionUtils.isEmpty(modelInfoMap) ? null : modelInfoMap.get(mouldCode);
-                // 若模具台账没有，但模具到货计划存在且模具可用日期 > 当前排程日期，模具视为可用
+                // 无台账模具到货后不属于基础资料缺失，不能继续计入不可用模具明细。
                 if (Objects.isNull(modelInfo) && rel.getBoardingDate() != null && context.getCurrentScheduleDate() != null &&
-                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0){
+                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0) {
                     continue;
                 }
                 if (Objects.isNull(modelInfo) || !MouldStatusUtil.isEnabled(modelInfo.getMouldStatus())) {
@@ -325,9 +365,9 @@ public class MouldResourceContext {
                     continue;
                 }
                 MdmModelInfo modelInfo = CollectionUtils.isEmpty(modelInfoMap) ? null : modelInfoMap.get(mouldCode);
-                // 若模具台账没有，但模具到货计划存在且模具可用日期 > 当前排程日期，模具视为可用
+                // 无台账模具到货后不应触发“模具基础资料不可用”的硬性失败原因。
                 if (Objects.isNull(modelInfo) && rel.getBoardingDate() != null && context.getCurrentScheduleDate() != null &&
-                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0){
+                        rel.getBoardingDate().compareTo(context.getCurrentScheduleDate()) <= 0) {
                     continue;
                 }
                 if (Objects.isNull(modelInfo) || !MouldStatusUtil.isEnabled(modelInfo.getMouldStatus())) {

@@ -9,8 +9,11 @@ import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -193,6 +196,34 @@ public class MouldResourceContextTest {
         Assertions.assertFalse(occupiedPreview.isAllowed(), "正式分配后仍在机的模具必须继续互斥");
     }
 
+    /**
+     * 用例说明：无台账到货模具在 T 日不可用，推进到 T+1 后必须刷新可用性视图，
+     * 同时不能重建已占用模具运行态。
+     */
+    @Test
+    public void shouldRefreshBoardingMouldAvailabilityWhenBusinessDayAdvances() {
+        MdmSkuMouldRel boardingMould = buildRel("SKU-BOARDING", "M901");
+        boardingMould.setBoardingDate(toDate(LocalDate.of(2026, 7, 26)));
+        LhScheduleContext context = buildContext(
+                Collections.singletonList(boardingMould),
+                Collections.<MdmModelInfo>emptyList(),
+                Collections.singletonList(buildMachine("K1105", 1)));
+        context.setCurrentScheduleDate(toDate(LocalDate.of(2026, 7, 25)));
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+
+        MouldResourceAllocationResult beforeBoarding =
+                resourceContext.previewAllocate("SKU-BOARDING", "K1105");
+
+        context.setCurrentScheduleDate(toDate(LocalDate.of(2026, 7, 26)));
+        resourceContext.refreshAvailability(context);
+        MouldResourceAllocationResult afterBoarding =
+                resourceContext.previewAllocate("SKU-BOARDING", "K1105");
+
+        Assertions.assertFalse(beforeBoarding.isAllowed(), "到货日前不得预占无台账模具");
+        Assertions.assertTrue(afterBoarding.isAllowed(), "到货业务日必须刷新为可用模具");
+        Assertions.assertEquals(Collections.singletonList("M901"), afterBoarding.getAllocatedMouldCodeList());
+    }
+
     private LhScheduleContext buildContext(List<MdmSkuMouldRel> relList,
                                            List<MdmModelInfo> modelList,
                                            List<MachineScheduleDTO> machineList) {
@@ -221,6 +252,16 @@ public class MouldResourceContextTest {
         rel.setMaterialCode(materialCode);
         rel.setMouldCode(mouldCode);
         return rel;
+    }
+
+    /**
+     * 按系统默认时区构造业务日零点。
+     *
+     * @param localDate 业务日期
+     * @return 对应零点时间
+     */
+    private Date toDate(LocalDate localDate) {
+        return Date.from(localDate.atStartOfDay(ZoneId.systemDefault()).toInstant());
     }
 
     private MdmModelInfo buildModel(String mouldCode, Integer status) {

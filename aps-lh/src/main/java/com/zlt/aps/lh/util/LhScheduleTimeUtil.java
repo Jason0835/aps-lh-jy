@@ -19,6 +19,7 @@ import org.springframework.util.CollectionUtils;
 
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -430,6 +431,35 @@ public final class LhScheduleTimeUtil {
             return new ArrayList<>(context.getScheduleWindowShifts());
         }
         return buildDefaultScheduleShifts(context, scheduleDate);
+    }
+
+    /**
+     * 按班次业务日对排程窗口进行稳定分组。
+     *
+     * <p>分组严格使用 {@link LhShiftConfigVO#getWorkDate()}，不能用班次自然开始日期代替。
+     * T+1、T+2 的晚班从前一自然日 22:00 开始，但业务归属仍分别是 T+1、T+2；
+     * 使用业务日分组后才能得到“T 日早/中，后续日晚/早/中”的正确日编排切片。</p>
+     *
+     * @param shifts 已按 class1～classN 排序的排程窗口班次
+     * @return 按业务日期保持原班次顺序的分组；空输入返回空 Map
+     */
+    public static LinkedHashMap<LocalDate, List<LhShiftConfigVO>> groupByWorkDate(
+            List<LhShiftConfigVO> shifts) {
+        LinkedHashMap<LocalDate, List<LhShiftConfigVO>> dayShiftMap =
+                new LinkedHashMap<LocalDate, List<LhShiftConfigVO>>();
+        if (CollectionUtils.isEmpty(shifts)) {
+            return dayShiftMap;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())) {
+                continue;
+            }
+            LocalDate workDate = shift.getWorkDate().toInstant()
+                    .atZone(DEFAULT_ZONE).toLocalDate();
+            dayShiftMap.computeIfAbsent(
+                    workDate, key -> new ArrayList<LhShiftConfigVO>(3)).add(shift);
+        }
+        return dayShiftMap;
     }
 
     /**

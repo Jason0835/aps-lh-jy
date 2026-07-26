@@ -27,7 +27,6 @@ import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
-import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -43,7 +42,8 @@ import java.util.Set;
  *   <li>只读取前一业务目标日班次4、5的换模/换活字块计划；</li>
  *   <li>固定历史机台和后物料关系，班次映射仅用于识别和首次尝试，不继承历史具体时间和历史交替类型；</li>
  *   <li>当前状态实际满足换活字块时立即委托S4.4既有换活字块主链；</li>
- *   <li>其余指令登记给S4.5既有新增换模主链，在普通候选排序前优先尝试指定机台；</li>
+     *   <li>其余指令登记给S4.5既有新增换模主链，在目标 SKU 自身轮到时优先尝试指定机台；</li>
+     *   <li>历史指定机台只影响选机顺序，绝不改写 S4.5 已完成的 SKU 业务排序；</li>
  *   <li>任何失败都不覆盖前序结果、不提前写未排，SKU继续按普通新增规则竞争。</li>
  * </ul>
  */
@@ -92,12 +92,13 @@ public class HistoricalMouldChangeReverseSelectionStrategy
             return;
         }
 
-        Map<String, SkuScheduleDTO> selectedSkuMap =
-                new LinkedHashMap<String, SkuScheduleDTO>(directives.size());
         for (HistoricalReverseSelectionDirective directive : directives) {
-            processDirective(context, directive, selectedSkuMap);
+            processDirective(context, directive);
         }
-        reorderPendingSkuByDirective(context, directives, selectedSkuMap);
+        /*
+         * Handler 已完成 SKU 优先级排序。历史交替关系仅登记为“SKU 轮到时优先尝试哪台机台”的
+         * 选机指令，不能把目标 SKU 移到队首，否则会覆盖 SKU 排序器的业务优先级。
+         */
         int successCount = 0;
         int alreadySatisfiedCount = 0;
         int pendingRegularCount = 0;
@@ -266,11 +267,9 @@ public class HistoricalMouldChangeReverseSelectionStrategy
      *
      * @param context 排程上下文
      * @param directive 反选指令
-     * @param selectedSkuMap 指令与当前SKU映射
      */
     private void processDirective(LhScheduleContext context,
-                                  HistoricalReverseSelectionDirective directive,
-                                  Map<String, SkuScheduleDTO> selectedSkuMap) {
+                                  HistoricalReverseSelectionDirective directive) {
         LhScheduleResult satisfiedResult = findSatisfiedResult(context, directive);
         if (Objects.nonNull(satisfiedResult)) {
             directive.setAttempted(true);
@@ -297,7 +296,6 @@ public class HistoricalMouldChangeReverseSelectionStrategy
         String productStatus = normalizeProductStatus(sku.getProductStatus());
         directive.setProductStatus(productStatus);
         directive.setSkuSortRank(sku.getSortRank());
-        selectedSkuMap.put(buildDirectiveKey(directive), sku);
 
         MachineScheduleDTO historicalMachine =
                 context.getMachineScheduleMap().get(directive.getMachineCode());
@@ -458,43 +456,6 @@ public class HistoricalMouldChangeReverseSelectionStrategy
             }
         }
         return null;
-    }
-
-    /**
-     * 按历史指令顺序把待处理SKU提前，普通SKU之间原有排序保持不变。
-     *
-     * @param context 排程上下文
-     * @param directives 反选指令
-     * @param selectedSkuMap 指令与SKU映射
-     */
-    private void reorderPendingSkuByDirective(
-            LhScheduleContext context,
-            List<HistoricalReverseSelectionDirective> directives,
-            Map<String, SkuScheduleDTO> selectedSkuMap) {
-        List<SkuScheduleDTO> original = context.getNewSpecSkuList();
-        if (CollectionUtils.isEmpty(original)) {
-            return;
-        }
-        List<SkuScheduleDTO> reordered = new ArrayList<SkuScheduleDTO>(original.size());
-        Set<SkuScheduleDTO> added = java.util.Collections.newSetFromMap(
-                new IdentityHashMap<SkuScheduleDTO, Boolean>());
-        for (HistoricalReverseSelectionDirective directive : directives) {
-            if (directive.isAttempted()) {
-                continue;
-            }
-            SkuScheduleDTO sku = selectedSkuMap.get(buildDirectiveKey(directive));
-            if (Objects.nonNull(sku) && added.add(sku)) {
-                reordered.add(sku);
-            }
-        }
-        for (SkuScheduleDTO sku : original) {
-            if (added.add(sku)) {
-                reordered.add(sku);
-            }
-        }
-        original.clear();
-        original.addAll(reordered);
-        context.rebuildStructureSkuMapFromPending(original);
     }
 
     /**

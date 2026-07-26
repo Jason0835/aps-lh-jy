@@ -147,3 +147,14 @@ resolveSharedEmbryoBalancedTime 方法：
 | shouldKeepSharedEmbryoInAfternoonWhenAfternoonReachesReference | 共用胎胚+中班已达参考值7 不强制挪动 |
 | shouldKeepSingleEmbryoChangeoverOnCurrentShiftWhenDailyLimitAvailable | 单胎胚+早班8次 不挪班 |
 | shouldBlockChangeoverWhenTargetDayDailyLimitReached | T+2换模总次数超限 进入未排（预存问题） |
+
+### 按业务日新增排产的衔接要求
+
+S4.5 新增排产按业务日循环时，每次换模或换活字块只能提交当前 `workDate` 的资源。均衡策略返回的换模完成时间达到或超过当前业务日日终时，调用方必须回滚本次换模次数和模具预占，并将任务延期到下一业务日；不得在当前日提前占用下一日机台时间。
+
+#### Scenario: 当前日换模超窗后回滚
+
+- **WHEN** 换模均衡或晚班禁止换模规则将完成时间顺延到下一业务日
+- **THEN** 当前日换模次数必须回滚
+- **AND** 当前日不得生成下一日班次结果
+- **AND** T 或 T+1 必须延期重试，T+2 仍失败时才进入最终未排

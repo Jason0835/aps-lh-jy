@@ -3,6 +3,7 @@ package com.zlt.aps.lh.component;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineCleaningWindowDTO;
+import com.zlt.aps.lh.api.domain.dto.MachineMaintenanceWindowDTO;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
@@ -778,10 +779,18 @@ public class TargetScheduleQtyResolver {
             int currentShiftQty = resolveRetainedShiftQty(
                     context, sku, Math.min(planQty, remainingRetainQty), mouldQty);
             Date shiftStartTime = ShiftFieldUtil.getShiftStartTime(result, shift.getShiftIndex());
+            Date originalShiftEndTime = ShiftFieldUtil.getShiftEndTime(result, shift.getShiftIndex());
             if (currentShiftQty <= 0) {
                 ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
             } else {
-                ShiftFieldUtil.setShiftPlanQty(result, shift.getShiftIndex(), currentShiftQty, shiftStartTime, null);
+                Date retainedShiftEndTime = currentShiftQty == planQty
+                        ? originalShiftEndTime
+                        : resolveRetainedShiftEndTime(
+                                context, result, shift, shiftStartTime, originalShiftEndTime,
+                                currentShiftQty, planQty);
+                ShiftFieldUtil.setShiftPlanQty(
+                        result, shift.getShiftIndex(), currentShiftQty,
+                        shiftStartTime, retainedShiftEndTime);
             }
             remainingRetainQty -= currentShiftQty;
             actualRetainedQty += currentShiftQty;
@@ -792,6 +801,47 @@ public class TargetScheduleQtyResolver {
                 scene, sku.getMaterialCode(), result.getLhMachineCode(), resultQty, remainingQty,
                 allowedOverQty, actualRetainedQty);
         return actualRetainedQty;
+    }
+
+    /**
+     * 结果按实际余量裁剪后，重新计算当前班次的真实结束时间。
+     *
+     * @param context 排程上下文
+     * @param result 排程结果
+     * @param shift 当前班次
+     * @param shiftStartTime 当前班次实际开始时间
+     * @param originalShiftEndTime 裁剪前实际结束时间
+     * @param retainedQty 裁剪后保留量
+     * @param originalQty 裁剪前计划量
+     * @return 裁剪后班次实际结束时间
+     */
+    private Date resolveRetainedShiftEndTime(LhScheduleContext context,
+                                             LhScheduleResult result,
+                                             LhShiftConfigVO shift,
+                                             Date shiftStartTime,
+                                             Date originalShiftEndTime,
+                                             int retainedQty,
+                                             int originalQty) {
+        if (Objects.isNull(context) || Objects.isNull(result) || Objects.isNull(shift)
+                || Objects.isNull(shiftStartTime) || retainedQty <= 0 || originalQty <= 0) {
+            return originalShiftEndTime;
+        }
+        MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
+        List<MachineCleaningWindowDTO> cleaningWindowList =
+                Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getCleaningWindowList())
+                        ? new ArrayList<MachineCleaningWindowDTO>(0) : machine.getCleaningWindowList();
+        List<MachineMaintenanceWindowDTO> maintenanceWindowList =
+                Objects.isNull(machine) || CollectionUtils.isEmpty(machine.getMaintenanceWindowList())
+                        ? new ArrayList<MachineMaintenanceWindowDTO>(0)
+                        : ShiftCapacityResolverUtil.resolveCapacityMaintenanceWindowList(
+                                context, context.getDevicePlanShutList(), result.getLhMachineCode(),
+                                machine.getMaintenanceWindowList());
+        Date calculationEndTime = Objects.nonNull(originalShiftEndTime)
+                ? originalShiftEndTime : shift.getShiftEndDateTime();
+        return ShiftCapacityResolverUtil.resolveShiftPlanEndTime(
+                context.getDevicePlanShutList(), cleaningWindowList, maintenanceWindowList,
+                result.getLhMachineCode(), shiftStartTime, calculationEndTime,
+                retainedQty, originalQty);
     }
 
     /**

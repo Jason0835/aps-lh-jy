@@ -75,43 +75,30 @@ class HistoricalReverseSelectionNewSpecSupportTest {
     }
 
     /**
-     * 其他历史指定机台尚未尝试时，当前SKU必须延后普通回落。
+     * 校验其他 SKU 的历史指定机台只作为其自身的候选机台指令，
+     * 不得改变当前 SKU 已由前置排序确定的排产先后顺序。
      */
     @Test
-    void normalFallback_shouldWaitUntilOtherHistoricalDirectivesAreAttempted() {
+    @SuppressWarnings("unchecked")
+    void normalCandidates_shouldNotBeBlockedByOtherSkuHistoricalDirective() {
         LhScheduleContext context = baseContext();
         SkuScheduleDTO currentSku = new SkuScheduleDTO();
         currentSku.setMaterialCode("MAT-CURRENT");
         currentSku.setProductStatus("S");
-        SkuScheduleDTO nextSku = new SkuScheduleDTO();
-        nextSku.setMaterialCode("MAT-NEXT");
-        nextSku.setProductStatus("S");
-        HistoricalReverseSelectionDirective currentDirective =
-                directive("MAT-CURRENT", "S", "K1001", 1);
-        currentDirective.setAttempted(true);
-        HistoricalReverseSelectionDirective otherPendingDirective =
-                directive("MAT-NEXT", "S", "K1002", 1);
-        context.getHistoricalReverseSelectionDirectiveList().addAll(
-                Arrays.asList(currentDirective, otherPendingDirective));
-        context.getNewSpecSkuList().addAll(Arrays.asList(currentSku, nextSku));
+        context.getHistoricalReverseSelectionDirectiveList().add(
+                directive("MAT-NEXT", "S", "K1002", 1));
 
-        Boolean shouldWait = ReflectionTestUtils.invokeMethod(strategy,
-                "hasPendingHistoricalReverseDirectiveForOtherSku", context, currentSku);
-        assertTrue(Boolean.TRUE.equals(shouldWait),
-                "其他目标SKU仍在待排队列且指令未尝试时，当前SKU不得立即普通回落");
+        MachineScheduleDTO normalFirst = machine("K1001");
+        MachineScheduleDTO normalSecond = machine("K1003");
+        IMachineMatchStrategy machineMatch = mock(IMachineMatchStrategy.class);
+        List<MachineScheduleDTO> candidates = (List<MachineScheduleDTO>) ReflectionTestUtils.invokeMethod(
+                strategy, "prioritizeHistoricalReverseSpecifiedMachines",
+                context, currentSku, Arrays.asList(normalFirst, normalSecond), machineMatch);
 
-        otherPendingDirective.setAttempted(true);
-        Boolean releasedAfterAttempt = ReflectionTestUtils.invokeMethod(strategy,
-                "hasPendingHistoricalReverseDirectiveForOtherSku", context, currentSku);
-        assertFalse(Boolean.TRUE.equals(releasedAfterAttempt),
-                "全部历史指令完成尝试后，当前SKU必须恢复普通回落资格");
-
-        otherPendingDirective.setAttempted(false);
-        context.getNewSpecSkuList().remove(nextSku);
-        Boolean releasedAfterTargetRemoved = ReflectionTestUtils.invokeMethod(strategy,
-                "hasPendingHistoricalReverseDirectiveForOtherSku", context, currentSku);
-        assertFalse(Boolean.TRUE.equals(releasedAfterTargetRemoved),
-                "历史目标SKU已被前置规则移出待排队列时，不得因残留指令永久阻塞普通回落");
+        assertEquals("K1001", candidates.get(0).getMachineCode(),
+                "其他 SKU 的历史指令不得抢占当前 SKU 的普通候选顺序");
+        assertEquals("K1003", candidates.get(1).getMachineCode(),
+                "当前 SKU 应保持前置 SKU 排序确定的候选顺序并立即参与选机");
     }
 
     /**
@@ -136,37 +123,6 @@ class HistoricalReverseSelectionNewSpecSupportTest {
         assertFalse(directive.isSuccess(), "无窗口产能不得标记反选成功");
         assertEquals("历史指定机台在当前排程窗口无剩余产能",
                 directive.getResultReason());
-    }
-
-    /**
-     * 完整轮次没有任何历史指令状态推进时，必须一次结算残留指令，避免无限轮询和日志膨胀。
-     */
-    @Test
-    void stalledHistoricalRound_shouldFinalizeOnlyCurrentQueueDirectives() {
-        LhScheduleContext context = baseContext();
-        SkuScheduleDTO pendingSku = new SkuScheduleDTO();
-        pendingSku.setMaterialCode("MAT-PENDING");
-        pendingSku.setProductStatus("S");
-        context.getNewSpecSkuList().add(pendingSku);
-        HistoricalReverseSelectionDirective pendingDirective =
-                directive("MAT-PENDING", "S", "K1003", 1);
-        HistoricalReverseSelectionDirective removedSkuDirective =
-                directive("MAT-REMOVED", "S", "K1004", 1);
-        context.getHistoricalReverseSelectionDirectiveList().addAll(
-                Arrays.asList(pendingDirective, removedSkuDirective));
-
-        Integer pendingCount = ReflectionTestUtils.invokeMethod(
-                strategy, "countPendingHistoricalReverseDirectivesInCurrentQueue", context);
-        Integer finalizedCount = ReflectionTestUtils.invokeMethod(
-                strategy, "finalizeStalledHistoricalReverseDirectives", context);
-
-        assertEquals(Integer.valueOf(1), pendingCount);
-        assertEquals(Integer.valueOf(1), finalizedCount);
-        assertTrue(pendingDirective.isAttempted(), "当前待排队列中的残留指令必须结算");
-        assertEquals("历史指定机台完成整轮尝试后仍不可执行，释放普通新增回落",
-                pendingDirective.getResultReason());
-        assertFalse(removedSkuDirective.isAttempted(),
-                "目标SKU已不在待排队列时不得被无进展保护误结算");
     }
 
     /**

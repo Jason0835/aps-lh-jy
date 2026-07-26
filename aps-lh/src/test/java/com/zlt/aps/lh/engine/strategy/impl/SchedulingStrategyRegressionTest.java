@@ -348,6 +348,8 @@ public class SchedulingStrategyRegressionTest {
     public void shouldBlockChangeoverWhenTargetDayDailyLimitReached() {
         DefaultMouldChangeBalanceStrategy strategy = new DefaultMouldChangeBalanceStrategy();
         LhScheduleContext context = buildChangeoverBalanceContext();
+        // 换模均衡器以窗口结束日作为 T+2 判定边界；测试夹具必须显式补齐运行态日期。
+        context.setWindowEndDate(dateTime(2026, 6, 3, 0, 0));
         context.getDailyMouldChangeCountMap().put("2026-06-01", new int[]{8, 7});
         context.getDailyMouldChangeCountMap().put("2026-06-02", new int[]{8, 7});
         context.getDailyMouldChangeCountMap().put("2026-06-03", new int[]{8, 7});
@@ -359,7 +361,7 @@ public class SchedulingStrategyRegressionTest {
 
         Assertions.assertNull(allocatedTime);
         Assertions.assertTrue(context.getMouldChangeLimitBlockedReasonMap().get(sku.getMaterialCode())
-                .contains("T+2 换模/换活字块次数超过每日15次上限"));
+                .contains("窗口结束日 换模/换活字块次数超过每日15次上限"));
     }
 
     /**
@@ -646,10 +648,12 @@ public class SchedulingStrategyRegressionTest {
         Method method = NewSpecProductionStrategy.class.getDeclaredMethod(
                 "refillScheduledResultAfterAddMachineFailure",
                 LhScheduleContext.class, SkuScheduleDTO.class, LhScheduleResult.class,
-                MachineProductionSegment.class, List.class, ProductionQuantityPolicy.class, int.class);
+                MachineProductionSegment.class, List.class, ProductionQuantityPolicy.class, int.class,
+                boolean.class);
         method.setAccessible(true);
+        // 增机失败后的尾部回填属于当前业务日既有机台补量，不得借用未来 dayN 额度。
         int refillQty = (Integer) method.invoke(strategy, context, sku, result, segment, shifts,
-                ProductionQuantityPolicy.from(sku, false), 64);
+                ProductionQuantityPolicy.from(sku, false), 64, false);
 
         Assertions.assertEquals(32, refillQty);
         Assertions.assertEquals(96, ShiftFieldUtil.resolveScheduledQty(result));
@@ -1470,7 +1474,13 @@ public class SchedulingStrategyRegressionTest {
         LocalDate secondDay = resolveShiftWorkDate(shifts, 2);
         LocalDate thirdDay = resolveShiftWorkDate(shifts, 3);
         Assertions.assertTrue(sumPlanQtyByWorkDate(context.getScheduleResultList(), shifts, secondDay) >= 192);
-        Assertions.assertEquals(1, countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, thirdDay));
+        Assertions.assertEquals(2,
+                countPositiveMachineByWorkDateExcludingNight(
+                        context.getScheduleResultList(), shifts, thirdDay),
+                "前一日欠产64必须与第三日计划30合并追补，当前日需要两台机台承接94条");
+        Assertions.assertEquals(2,
+                countPositiveMachineByWorkDate(context.getScheduleResultList(), shifts, thirdDay),
+                "按滚动欠产和当日计划合计需求收敛后只保留两台机台");
     }
 
     /**
@@ -1521,10 +1531,7 @@ public class SchedulingStrategyRegressionTest {
         }
 
         strategy.scheduleReduceMould(context);
-        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "appendContinuousCompensationSkuList", LhScheduleContext.class);
-        method.setAccessible(true);
-        method.invoke(strategy, context);
+        invokeAppendContinuousCompensationSkuList(strategy, context);
 
         LocalDate thirdDay = resolveShiftWorkDate(shifts, 3);
         Assertions.assertEquals(4,
@@ -1558,10 +1565,7 @@ public class SchedulingStrategyRegressionTest {
         context.getScheduleResultSourceSkuMap().put(firstResult, sku);
         context.getScheduleResultSourceSkuMap().put(secondResult, sku);
 
-        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "appendContinuousCompensationSkuList", LhScheduleContext.class);
-        method.setAccessible(true);
-        method.invoke(strategy, context);
+        invokeAppendContinuousCompensationSkuList(strategy, context);
 
         Assertions.assertEquals(1, context.getNewSpecSkuList().size());
         SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
@@ -1576,7 +1580,8 @@ public class SchedulingStrategyRegressionTest {
     }
 
     /**
-     * 续作增机台补偿SKU已进入新增统一排序，选机时不得再锁回原续作机台。
+     * 续作增机台补偿SKU若显式携带优选机台，当前新增选机入口应返回该候选；
+     * 正常补偿构造已清空该字段，实际增机仍由统一候选链选择新机台。
      */
     @Test
     public void shouldNotLockContinuationAddMachineCompensationBackToOriginalMachine() throws Exception {
@@ -1595,7 +1600,8 @@ public class SchedulingStrategyRegressionTest {
         method.setAccessible(true);
         MachineScheduleDTO selectedMachine = (MachineScheduleDTO) method.invoke(strategy, sku, candidates);
 
-        Assertions.assertNull(selectedMachine);
+        Assertions.assertNotNull(selectedMachine);
+        Assertions.assertEquals("K1106", selectedMachine.getMachineCode());
     }
 
     /**
@@ -1730,10 +1736,7 @@ public class SchedulingStrategyRegressionTest {
             context.getScheduleResultSourceSkuMap().put(result, sku);
         }
 
-        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "appendContinuousCompensationSkuList", LhScheduleContext.class);
-        method.setAccessible(true);
-        method.invoke(strategy, context);
+        invokeAppendContinuousCompensationSkuList(strategy, context);
 
         Assertions.assertFalse(context.getNewSpecSkuList().isEmpty());
         SkuScheduleDTO compensationSku = context.getNewSpecSkuList().get(0);
@@ -1768,10 +1771,7 @@ public class SchedulingStrategyRegressionTest {
             context.getScheduleResultSourceSkuMap().put(result, sku);
         }
 
-        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "appendContinuousCompensationSkuList", LhScheduleContext.class);
-        method.setAccessible(true);
-        method.invoke(strategy, context);
+        invokeAppendContinuousCompensationSkuList(strategy, context);
 
         Assertions.assertFalse(context.getNewSpecSkuList().isEmpty());
         SkuScheduleDTO addMachineCandidate = context.getNewSpecSkuList().get(0);
@@ -1779,7 +1779,8 @@ public class SchedulingStrategyRegressionTest {
                 addMachineCandidate.getSourceType());
         Assertions.assertEquals(ScheduleTypeEnum.NEW_SPEC.getCode(), addMachineCandidate.getScheduleType());
         Assertions.assertTrue(addMachineCandidate.isContinuousCompensationSku());
-        Assertions.assertEquals("K1104", addMachineCandidate.getPreferredContinuousMachineCode());
+        Assertions.assertNull(addMachineCandidate.getPreferredContinuousMachineCode(),
+                "续作加机台候选必须清空原续作机台锁定，交由新增统一候选链选择新机台");
         Assertions.assertSame(sku.getDailyPlanQuotaMap(), addMachineCandidate.getDailyPlanQuotaMap());
     }
 
@@ -2000,10 +2001,7 @@ public class SchedulingStrategyRegressionTest {
         context.getScheduleResultSourceSkuMap().put(result, sku);
         context.getContinuousSkuList().add(sku);
 
-        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
-                "appendContinuousCompensationSkuList", LhScheduleContext.class);
-        method.setAccessible(true);
-        method.invoke(strategy, context);
+        invokeAppendContinuousCompensationSkuList(strategy, context);
 
         Assertions.assertTrue(context.getNewSpecSkuList().isEmpty());
     }
@@ -3770,6 +3768,19 @@ public class SchedulingStrategyRegressionTest {
         Assertions.assertEquals(12, resolveShiftPlanQty(result, 2));
         Assertions.assertEquals(1, context.getShiftFirstInspectionCountMap().get("2026-06-01#1").intValue());
         Assertions.assertFalse(context.getShiftFirstInspectionCountMap().containsKey("2026-06-01#2"));
+    }
+
+    /**
+     * 调用续作补偿统一入口。第二个参数是同物料多状态切换锁机集合，
+     * 普通续作回归场景传空集合，不恢复已废弃的单参数并行入口。
+     */
+    private void invokeAppendContinuousCompensationSkuList(
+            ContinuousProductionStrategy strategy,
+            LhScheduleContext context) throws Exception {
+        Method method = ContinuousProductionStrategy.class.getDeclaredMethod(
+                "appendContinuousCompensationSkuList", LhScheduleContext.class, Set.class);
+        method.setAccessible(true);
+        method.invoke(strategy, context, java.util.Collections.<String>emptySet());
     }
 
     private LhScheduleResult invokeBuildNewSpecScheduleResult(NewSpecProductionStrategy strategy,

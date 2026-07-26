@@ -53,3 +53,23 @@
 - **AND** 原续作机台仍在候选集中
 - **WHEN** 系统执行机台匹配
 - **THEN** 系统继续按既有规则优先锁回原续作机台
+
+### Requirement: 按日候选池不得重新排序
+
+S4.5 进入按业务日编排后，系统 MUST 仅按每日资格过滤已排序的 `newSpecSkuList`，不得因候选原因、延期日期、在机状态、提前生产或加机台阶段重新计算排序权重。
+
+#### Scenario: 每日候选保持稳定相对顺序
+
+- **GIVEN** Handler 已为新增 SKU 写入 `scheduleOrder`、`sortRank` 和 `sortDesc`
+- **WHEN** 系统分别构建 T、T+1、T+2 候选池
+- **THEN** 同一阶段内候选 SKU 的相对顺序必须与 Handler 输出一致
+- **AND** 候选原因只能用于准入，不得参与排序
+
+#### Scenario: 历史指定机台不得改变其他SKU执行次序
+
+- **GIVEN** SKU `A` 在 Handler 排序中高于 SKU `B`
+- **AND** 只有 SKU `B` 关联历史“机台+后物料”指定机台指令
+- **WHEN** 系统执行同一业务日的当天计划及锁定阶段
+- **THEN** SKU `A` MUST 仍先按其原有候选机台执行
+- **AND** SKU `B` 仅在轮到自身时优先尝试历史指定机台
+- **AND** 系统 MUST NOT 通过延后 SKU `A` 的普通回落或跳过队列，实质改变 Handler 排序结果

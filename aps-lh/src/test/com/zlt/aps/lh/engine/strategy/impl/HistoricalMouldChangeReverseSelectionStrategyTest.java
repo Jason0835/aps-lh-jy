@@ -56,7 +56,7 @@ class HistoricalMouldChangeReverseSelectionStrategyTest {
     private HistoricalMouldChangeReverseSelectionStrategy strategy;
 
     @Test
-    void reverseSelect_shouldMapShiftSortDeduplicateAndPromoteSku() {
+    void reverseSelect_shouldMapShiftSortDeduplicateAndKeepSkuBusinessOrder() {
         LhScheduleContext context = baseContext();
         SkuScheduleDTO normalSku = sku("MAT-NORMAL", "S", 1);
         SkuScheduleDTO shiftFiveSku = sku("MAT-5", "S", 2);
@@ -91,9 +91,10 @@ class HistoricalMouldChangeReverseSelectionStrategyTest {
         assertEquals(5, directives.get(1).getHistoricalShiftIndex());
         assertEquals(2, directives.get(1).getMappedShiftIndex());
         assertEquals("MAT-5", directives.get(1).getMaterialCode());
-        assertSame(shiftFourSku, context.getNewSpecSkuList().get(0));
+        // 历史机台关系只登记为选机指令，不能覆盖已完成的新增 SKU 业务排序。
+        assertSame(normalSku, context.getNewSpecSkuList().get(0));
         assertSame(shiftFiveSku, context.getNewSpecSkuList().get(1));
-        assertSame(normalSku, context.getNewSpecSkuList().get(2));
+        assertSame(shiftFourSku, context.getNewSpecSkuList().get(2));
     }
 
     @Test
@@ -194,7 +195,9 @@ class HistoricalMouldChangeReverseSelectionStrategyTest {
         HistoricalReverseSelectionDirective directive =
                 context.getHistoricalReverseSelectionDirectiveList().get(0);
         assertEquals("X", directive.getProductStatus());
-        assertSame(lowerPriorityWithQty, context.getNewSpecSkuList().get(0));
+        // 选中 X 状态仅影响该指令的机台尝试对象，不改变 S4.5 原有 SKU 队列顺序。
+        assertSame(higherPriorityWithoutQty, context.getNewSpecSkuList().get(0));
+        assertSame(lowerPriorityWithQty, context.getNewSpecSkuList().get(1));
         assertFalse(directive.isAttempted());
     }
 
