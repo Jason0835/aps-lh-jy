@@ -26,6 +26,7 @@ import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
@@ -136,6 +137,10 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
     private ICapacityCalculateStrategy capacityCalculateStrategy;
     @Resource
     private IMachineMatchStrategy machineMatchStrategy;
+    /** 历史反选和特殊材料指定机台共用的结构停产保机约束。 */
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService =
+            new StructureMinMachineRetentionService();
     /** 胶囊次数累计与换胶囊班次扣减统一入口 */
     @Resource
     private CapsuleReplacementRuleService capsuleReplacementRuleService = new CapsuleReplacementRuleService();
@@ -367,7 +372,20 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
                     "历史班次无法映射到本批次有效班次");
         }
-        Date machineEndTime = machine.getEstimatedEndTime();
+        /*
+         * 历史指定机台绕过普通候选排序，因此必须在该入口单独执行相同的结构保机可用性判断。
+         * 同结构直接放行；不同结构若整个历史映射班次都未越过统一释放时间，则当前指令不可执行。
+         */
+        if (structureMinMachineRetentionService.isDifferentStructureRetentionBlocked(
+                context, sku, machine.getMachineCode(),
+                mappedShift.getShiftEndDateTime())) {
+            return SpecifiedMachineScheduleResult.failed(
+                    MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
+                    "历史指定机台在映射班次内仍被不同结构停产保机占用");
+        }
+        Date machineEndTime =
+                structureMinMachineRetentionService.resolveRetentionAwareOccupationEndTime(
+                        context, sku, machine.getMachineCode(), machine.getEstimatedEndTime());
         if (Objects.isNull(machineEndTime)) {
             return SpecifiedMachineScheduleResult.failed(
                     MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
@@ -430,6 +448,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
                     "换活字块主链返回成功但未找到对应排程结果");
         }
+        // 指定机台同结构接管成功后立即清理旧保机占位，避免后续历史指令重复看到同班次占用。
+        structureMinMachineRetentionService.synchronizeRetainedState(context);
         return SpecifiedMachineScheduleResult.success(
                 result, MouldChangeTypeEnum.TYPE_BLOCK.getCode());
     }
@@ -483,7 +503,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             return SpecifiedMachineScheduleResult.notApplicable(
                     "当前机台物料与特殊材料SKU不满足换活字块条件");
         }
-        Date machineEndTime = machine.getEstimatedEndTime();
+        Date machineEndTime =
+                structureMinMachineRetentionService.resolveRetentionAwareOccupationEndTime(
+                        context, sku, machine.getMachineCode(), machine.getEstimatedEndTime());
         if (Objects.isNull(machineEndTime)) {
             return SpecifiedMachineScheduleResult.failed(
                     MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
@@ -533,6 +555,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                     MouldChangeTypeEnum.TYPE_BLOCK.getCode(),
                     "换活字块主链返回成功但未找到特殊材料置换结果");
         }
+        // 特殊材料指定机台成功后同步同结构接管及剩余保机占位，保持结果和机台运行态一致。
+        structureMinMachineRetentionService.synchronizeRetainedState(context);
         return SpecifiedMachineScheduleResult.success(
                 result, MouldChangeTypeEnum.TYPE_BLOCK.getCode());
     }

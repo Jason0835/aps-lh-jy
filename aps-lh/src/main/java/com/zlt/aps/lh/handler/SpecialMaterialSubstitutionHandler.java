@@ -1,6 +1,7 @@
 package com.zlt.aps.lh.handler;
 
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.service.impl.SpecialMaterialMachineSubstitutionService;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -31,6 +32,8 @@ public class SpecialMaterialSubstitutionHandler extends AbsScheduleStepHandler {
 
     @Resource
     private SpecialMaterialMachineSubstitutionService substitutionService;
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService;
 
     /**
      * 执行特殊材料硫化机置换。
@@ -55,6 +58,8 @@ public class SpecialMaterialSubstitutionHandler extends AbsScheduleStepHandler {
 
         // 执行候选级预演与原子提交；服务内部保证失败候选不会污染既有续作和新增排产结果。
         substitutionService.substitute(context);
+        // 特殊材料同结构接管成功后，统一清理旧保机占位并把剩余保机区间转移到新结果。
+        structureMinMachineRetentionService.synchronizeRetainedState(context);
 
         log.info("特殊材料硫化机置换处理完成, 排程结果数: {}, 未排产数: {}",
                 context.getScheduleResultList().size(), context.getUnscheduledResultList().size());

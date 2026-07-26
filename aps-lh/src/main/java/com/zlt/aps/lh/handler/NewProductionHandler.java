@@ -118,8 +118,9 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
                 context.getUnscheduledResultList().size());
         strategy.scheduleReduceMould(context);
         /*
-         * 最终只做已命中结构的幂等状态校正，不再按阶段聚合数量进行第二次决策；用于统一后续新增
-         * 结果标识，并防止普通机台状态同步覆盖实时下机入口已经顺延的保机结束时间。
+         * S4.5结束后只同步阶段级判断已经命中的结构状态，不重新计算是否触发保机。
+         * 同结构SKU若已接管保机机台，此处负责清理旧结果中的纯保机占位、转移剩余保机区间，
+         * 并把命中标识同步到本阶段新增的同结构结果。
          */
         structureMinMachineRetentionService.synchronizeRetainedState(context);
         log.info("新增规格排产处理完成, 排程结果数: {}, 未排产数: {}",

@@ -15,6 +15,7 @@ import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
 import com.zlt.aps.lh.api.enums.SubstitutionTypeEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.factory.ScheduleStrategyFactory;
 import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
@@ -99,6 +100,10 @@ public class SpecialMaterialMachineSubstitutionService {
 
     @Resource
     private TargetScheduleQtyResolver targetScheduleQtyResolver;
+    /** 特殊材料候选复用结构停产保机的同结构放行、不同结构拦截口径。 */
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService =
+            new StructureMinMachineRetentionService();
 
     /** 换活字块指定机台入口，置换时复用现有同胎胚、同模具判断和切换主链 */
     @Resource
@@ -404,16 +409,50 @@ public class SpecialMaterialMachineSubstitutionService {
                 || !ScheduleTypeEnum.CONTINUOUS.getCode().equals(result.getScheduleType())
                 || StringUtils.isEmpty(result.getLhMachineCode())
                 || excludedMachineCodeSet.contains(result.getLhMachineCode())
-                || context.isStructureMinMachineRetained(result.getLhMachineCode())
                 || isSpecialMaterial(context, result.getMaterialCode(), result.getStructureName())
                 || !hasPositivePlanQtyOnDate(context, result, targetDate)
                 || hasNonContinuationResultOnOrAfterTargetDate(context, result.getLhMachineCode(), targetDate)) {
+            return false;
+        }
+        /*
+         * 特殊材料原有候选条件全部保持不变，只替换原来的“保机机台一律排除”：
+         * 同结构允许继续预演和指定机台接管，不同结构在目标业务日结束前仍处于保机期时排除。
+         */
+        if (structureMinMachineRetentionService.isDifferentStructureRetentionBlocked(
+                context, specialSku, result.getLhMachineCode(),
+                resolveBusinessDayEndTime(context, targetDate))) {
             return false;
         }
         MachineScheduleDTO machine = context.getMachineScheduleMap().get(result.getLhMachineCode());
         return Objects.nonNull(machine)
                 && LhMachineHardMatchUtil.isMachineHardMatched(context, specialSku, machine)
                 && isMouldAvailable(context, specialSku, result.getLhMachineCode());
+    }
+
+    /**
+     * 解析目标业务日最后一个班次的结束时间。
+     *
+     * @param context 排程上下文
+     * @param targetDate 目标业务日
+     * @return 目标日结束时间；班次缺失时返回null并由保机服务按未到期处理
+     */
+    private Date resolveBusinessDayEndTime(LhScheduleContext context,
+                                           LocalDate targetDate) {
+        Date dayEndTime = null;
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getWorkDate())
+                    || Objects.isNull(shift.getShiftEndDateTime())) {
+                continue;
+            }
+            LocalDate shiftDate = shift.getWorkDate().toInstant()
+                    .atZone(ZoneId.systemDefault()).toLocalDate();
+            if (Objects.equals(targetDate, shiftDate)
+                    && (Objects.isNull(dayEndTime)
+                    || shift.getShiftEndDateTime().after(dayEndTime))) {
+                dayEndTime = shift.getShiftEndDateTime();
+            }
+        }
+        return dayEndTime;
     }
 
     /**
@@ -798,12 +837,25 @@ public class SpecialMaterialMachineSubstitutionService {
         if (Objects.isNull(earliestSwitchTime)) {
             return null;
         }
+        MachineScheduleDTO candidateMachine =
+                context.getMachineScheduleMap().get(candidate.getLhMachineCode());
+        Date normalMachineEndTime = Objects.isNull(candidateMachine)
+                ? candidate.getSpecEndTime() : candidateMachine.getEstimatedEndTime();
+        Date retentionAwareEndTime =
+                structureMinMachineRetentionService.resolveRetentionAwareOccupationEndTime(
+                        context, sku, candidate.getLhMachineCode(), normalMachineEndTime);
+        if (Objects.nonNull(retentionAwareEndTime)
+                && retentionAwareEndTime.after(earliestSwitchTime)) {
+            /*
+             * 同结构使用前物料最后实际生产时间，不受保机零量结束时间拖延；
+             * 不同结构则至少等待统一保机结束，随后继续复用原换模预演规则。
+             */
+            earliestSwitchTime = retentionAwareEndTime;
+        }
         IMouldChangeBalanceStrategy mouldChangeStrategy =
                 strategyFactory.getMouldChangeBalanceStrategy();
         Map<String, int[]> simulatedCountMap =
                 copyMouldChangeCountMap(context.getDailyMouldChangeCountMap());
-        MachineScheduleDTO candidateMachine =
-                context.getMachineScheduleMap().get(candidate.getLhMachineCode());
         int switchDurationHours = resolvePreviewSwitchDurationHours(
                 context, candidateMachine, sku);
         Date previewChangeStartTime = mouldChangeStrategy.previewEndingStaggerMouldChange(

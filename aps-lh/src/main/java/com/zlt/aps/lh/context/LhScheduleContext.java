@@ -266,7 +266,8 @@ public class LhScheduleContext {
     /**
      * 结构最低机台规则使用的全量结构SKU快照。
      * <p>该快照在S4.3按现有结构分组一次性冻结，不受后续待排结构视图出队影响；规则不再以
-     * “当前3天内可收尾”为准入条件，S4.4/S4.5每次真实下机前均从该快照解析结构归属。</p>
+     * “当前3天内可收尾”为准入条件。S4.4续作和换活字块全部完成后，结构停产保机统一从该快照
+     * 解析结构归属；S4.5选机继续使用同一快照比较待排SKU与保机前物料的结构。</p>
      */
     private Map<String, List<SkuScheduleDTO>> structureMinMachineSkuSnapshotMap = new LinkedHashMap<>();
     /** 结构最低硫化机台数，key=结构名称，value=周期结构配置或常规结构工厂参数解析值 */
@@ -275,6 +276,22 @@ public class LhScheduleContext {
     private Set<String> structureMinMachineRetainedStructureSet = new LinkedHashSet<>();
     /** 命中规则后的机台统一释放时间，key=运行态机台编码，value=结构最晚有量班次结束时间 */
     private Map<String, Date> structureMinMachineRetentionEndTimeMap = new LinkedHashMap<>();
+    /**
+     * 结构停产保机机台的前物料编码，key=运行态机台编码。
+     * <p>该快照在S4.4阶段级判断命中时写入，新增选机不得通过机台后续可变的当前物料反推结构，
+     * 必须固定使用真正触发保机的前物料进行同结构放行或不同结构拦截。</p>
+     */
+    private Map<String, String> structureMinMachineRetentionPreMaterialMap = new LinkedHashMap<>();
+    /**
+     * 结构停产保机机台的前物料结构，key=运行态机台编码。
+     * <p>同结构SKU允许在保机零量班次换模或换活字块；不同结构SKU只能在统一释放时间后使用机台。</p>
+     */
+    private Map<String, String> structureMinMachineRetentionPreStructureMap = new LinkedHashMap<>();
+    /**
+     * 结构停产保机前物料最后实际生产结束时间，key=运行态机台编码。
+     * <p>同结构接管时以该时间作为最早切换基准，不使用为了保机而顺延后的机台预计结束时间。</p>
+     */
+    private Map<String, Date> structureMinMachineRetentionActualEndTimeMap = new LinkedHashMap<>();
     /** 业务日期 -> 产品结构 -> 计划硫化机台数，来源于月计划统计表 dayN.lhMachines */
     private Map<LocalDate, Map<String, Integer>> structurePlanMachineCountMap =
             new LinkedHashMap<LocalDate, Map<String, Integer>>(4);

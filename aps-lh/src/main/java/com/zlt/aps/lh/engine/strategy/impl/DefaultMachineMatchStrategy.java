@@ -15,6 +15,7 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.LhSpecialMaterialCategoryEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
+import com.zlt.aps.lh.component.StructureMinMachineRetentionService;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
@@ -37,6 +38,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Component;
 import org.springframework.util.CollectionUtils;
 
+import javax.annotation.Resource;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -69,6 +71,11 @@ import java.util.stream.Collectors;
 @Slf4j
 @Component
 public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
+
+    /** 结构停产保机机台可接管时间统一解析入口。 */
+    @Resource
+    private StructureMinMachineRetentionService structureMinMachineRetentionService =
+            new StructureMinMachineRetentionService();
 
     /** 每小时毫秒数 */
     private static final long MILLIS_PER_HOUR = 60L * 60L * 1000L;
@@ -144,7 +151,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
         }
         MachineAvailabilityReason availabilityReason = resolveMachineAvailabilityReason(
                 context, sku, mouldResourceContext, skuInch, matchResult, machine);
-        Date referenceTime = resolveAlignedCandidateReferenceTime(context, machine);
+        Date referenceTime = resolveAlignedCandidateReferenceTime(context, sku, machine);
         return MachineAvailabilityReason.AVAILABLE == availabilityReason
                 && (Objects.isNull(windowEndTime) || Objects.isNull(referenceTime)
                 || referenceTime.before(windowEndTime));
@@ -210,7 +217,7 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 continue;
             }
             // 长时间停机只在存在其他可用机台时才触发换机，避免唯一候选机台被提前误排除。
-            if (hasPlanStopExceededTimeout(context, machine)) {
+            if (hasPlanStopExceededTimeout(context, sku, machine)) {
                 stopTimeoutCandidates.add(machine);
                 continue;
             }
@@ -1213,10 +1220,13 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
      * @param machine 候选机台
      * @return true-超过阈值，false-未超过阈值
      */
-    private boolean hasPlanStopExceededTimeout(LhScheduleContext context, MachineScheduleDTO machine) {
+    private boolean hasPlanStopExceededTimeout(LhScheduleContext context,
+                                               SkuScheduleDTO sku,
+                                               MachineScheduleDTO machine) {
         int timeoutHours = context.getParamIntValue(LhScheduleParamConstant.MACHINE_STOP_TIMEOUT_HOURS,
                 LhScheduleConstant.MACHINE_STOP_TIMEOUT_HOURS);
-        Date candidateReferenceTime = resolveAlignedCandidateReferenceTime(context, machine);
+        Date candidateReferenceTime =
+                resolveAlignedCandidateReferenceTime(context, sku, machine);
         Date candidateWindowEndTime = resolveCandidateWindowEndTime(context, candidateReferenceTime);
         for (MdmDevicePlanShut planShut : context.getDevicePlanShutList()) {
             if (planShut == null || StringUtils.isEmpty(planShut.getMachineCode())
@@ -1356,12 +1366,40 @@ public class DefaultMachineMatchStrategy implements IMachineMatchStrategy {
                 && isSingleControlMachine(context, machine.getMachineCode())
                 && LhSingleControlMachineUtil.isWholeMachineGranularitySku(context, sku)) {
             MachineScheduleDTO pairMachine = LhSingleControlMachineUtil.resolvePairMachine(context, machine.getMachineCode());
-            Date currentSideReferenceTime = resolveAlignedCandidateReferenceTime(context, machine);
-            Date pairSideReferenceTime = resolveAlignedCandidateReferenceTime(context, pairMachine);
+            Date currentSideReferenceTime = resolveRetentionAwareAlignedReferenceTime(
+                    context, sku, machine);
+            Date pairSideReferenceTime = resolveRetentionAwareAlignedReferenceTime(
+                    context, sku, pairMachine);
             // 正规SKU按整机占用单控机台，最早换模起点必须等L/R两边都释放。
             return resolveLaterTime(currentSideReferenceTime, pairSideReferenceTime);
         }
-        return resolveAlignedCandidateReferenceTime(context, machine);
+        return resolveRetentionAwareAlignedReferenceTime(context, sku, machine);
+    }
+
+    /**
+     * 解析结构停产保机约束下的候选参考时间。
+     *
+     * <p>保持现有候选排序器和排序键不变，只替换机台可用时间来源：同结构使用前物料最后实际
+     * 生产时间，不同结构不得早于结构统一释放时间。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前待排SKU
+     * @param machine 候选机台
+     * @return 与排程窗口首班对齐后的参考时间
+     */
+    private Date resolveRetentionAwareAlignedReferenceTime(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            MachineScheduleDTO machine) {
+        if (Objects.isNull(machine)) {
+            return null;
+        }
+        Date normalReferenceTime = resolveCandidateReferenceTime(context, machine);
+        Date retentionAwareReferenceTime =
+                structureMinMachineRetentionService.resolveRetentionAwareOccupationEndTime(
+                        context, sku, machine.getMachineCode(), normalReferenceTime);
+        return alignCandidateReferenceTimeToWindowStart(
+                context, retentionAwareReferenceTime);
     }
 
     /**
