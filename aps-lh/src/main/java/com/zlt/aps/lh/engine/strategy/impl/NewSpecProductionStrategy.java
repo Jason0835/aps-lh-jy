@@ -14289,9 +14289,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         Map<String, LhUnscheduledResult> mergedMap = new LinkedHashMap<>(context.getUnscheduledResultList().size());
         for (LhUnscheduledResult unscheduledResult : context.getUnscheduledResultList()) {
             if (unscheduledResult == null
-                    || StringUtils.isEmpty(unscheduledResult.getMaterialCode())
-                    || Objects.isNull(unscheduledResult.getUnscheduledQty())
-                    || unscheduledResult.getUnscheduledQty() <= 0) {
+                    || StringUtils.isEmpty(unscheduledResult.getMaterialCode())) {
+                continue;
+            }
+            // 日计划准入拦截类未排（窗口内本就无日计划量，未排数量恒为0）代表“有SKU但无排产任务”，
+            // 是明确的未排记录，必须保留落库；其余零量/负量残留视为排产主链已消纳完毕，按原逻辑跳过。
+            if (Objects.isNull(unscheduledResult.getUnscheduledQty())
+                    || (unscheduledResult.getUnscheduledQty() <= 0
+                    && !isDailyPlanAdmissionUnscheduledReason(unscheduledResult.getUnscheduledReason()))) {
                 continue;
             }
             String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
@@ -14310,6 +14315,21 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         }
         context.getUnscheduledResultList().clear();
         context.getUnscheduledResultList().addAll(mergedMap.values());
+    }
+
+    /**
+     * 判断未排原因是否为日计划准入拦截类。
+     * <p>含非续作SKU日计划准入（{@link PendingSkuUnscheduledRule#DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON}）
+     * 与续作试制量试日计划准入（{@link PendingSkuUnscheduledRule#CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON}）。
+     * 该类未排结果未排数量恒为0，代表窗口内无日计划量、本就无排产任务，
+     * 归并去重时不得因数量为0而丢弃，否则SKU不会出现在未排结果表中。</p>
+     *
+     * @param reason 未排原因
+     * @return true-准入拦截类原因；false-其他
+     */
+    private boolean isDailyPlanAdmissionUnscheduledReason(String reason) {
+        return StringUtils.equals(PendingSkuUnscheduledRule.DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON, reason)
+                || StringUtils.equals(PendingSkuUnscheduledRule.CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON, reason);
     }
 
     /**

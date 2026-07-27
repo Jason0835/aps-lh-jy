@@ -52,6 +52,9 @@ public final class PendingSkuUnscheduledRule {
      * 复用提前生产判断器，按硫化参数配置的提前生产天数阈值继续向后查找。完整范围无正计划量时，
      * 再按“后物料”检查前日排程生成的T+1交替计划；任一条件放行仅代表继续进入现有排产流程，
      * 不代表必须生成排程结果。</p>
+     * <p>试制、量试SKU为特殊分支：不叠加提前生产天数阈值，仅按排程窗口首日~窗口末日判断日计划量，
+     * 窗口内有正计划量即放行；窗口内全为0时直接进入未排，且不检查前日T+1交替计划，
+     * 避免历史批次生成的换模承接计划将窗口全零的试制量试SKU逐日滚动续排。</p>
      * <p>日计划严格沿用物料编码和产品状态复合维度；历史交替计划没有产品状态字段，因此承接关系
      * 只按物料编码匹配。前日排程的T+1日对应当前排程窗口首日，仅该日计划可作为本次准入依据。</p>
      * <p>本方法只负责判断和构造未排结果，不修改SKU目标量、排产集合、胎胚库存或日计划账本。</p>
@@ -72,30 +75,42 @@ public final class PendingSkuUnscheduledRule {
             return null;
         }
 
-        // 窗口内原始日计划和窗口后N天任一有量时，保留SKU继续走现有排产主链。
-        if (hasPositiveDailyPlanInAdmissionRange(context, sku, windowEndDate)) {
+        // 试制、量试SKU仅按排程窗口（首日~末日）判断日计划量，不叠加提前生产天数阈值；
+        // 其余SKU沿用完整准入范围（窗口+提前生产天数阈值）。
+        boolean isTrialSku = isTrialOrMassTrialSku(sku);
+        if (isTrialSku) {
+            if (hasPositiveDailyPlanInWindow(sku)) {
+                return null;
+            }
+        } else if (hasPositiveDailyPlanInAdmissionRange(context, sku, windowEndDate)) {
+            // 窗口内原始日计划和窗口后N天任一有量时，保留SKU继续走现有排产主链。
             return null;
         }
 
         // 前日排程T+1日交替计划已明确安排当前物料承接时，保留SKU并继续复用历史反选和普通新增主链。
-        if (hasPreviousT1MouldChangePlan(context, sku.getMaterialCode())) {
+        // 试制、量试SKU窗口全零时直接未排，不检查T+1交替计划，斩断历史换模承接计划的滚动续排链。
+        if (!isTrialSku && hasPreviousT1MouldChangePlan(context, sku.getMaterialCode())) {
             return null;
         }
 
-        int earlyProductionDaysThreshold = EarlyProductionChecker.resolveEarlyProductionDaysThreshold(context);
+        // 试制、量试不适用提前生产天数阈值，判断截止日即窗口末日；其余SKU复用提前生产参数。
+        int earlyProductionDaysThreshold = isTrialSku ? 0
+                : EarlyProductionChecker.resolveEarlyProductionDaysThreshold(context);
         LocalDate admissionEndDate = windowEndDate.plusDays(earlyProductionDaysThreshold);
+        // 试制量试跳过T+1检查，日志如实标注检查方式，避免误读为"检查过且未命中"。
+        String t1CheckDesc = isTrialSku ? "跳过（试制量试）" : "否";
         String detail = String.format("工厂: %s, 批次: %s, 物料: %s, 产品状态: %s, 施工阶段: %s, "
-                        + "排程窗口: %s～%s, 提前生产天数: %d, 准入截止日: %s, T+1交替计划命中: 否, 原因: %s",
+                        + "排程窗口: %s～%s, 提前生产天数: %d, 准入截止日: %s, T+1交替计划命中: %s, 原因: %s",
                 context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(),
                 sku.getConstructionStage(), windowStartDate, windowEndDate, earlyProductionDaysThreshold,
-                admissionEndDate, DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
+                admissionEndDate, t1CheckDesc, DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
         log.info("非续作SKU日计划准入拦截, factoryCode: {}, batchNo: {}, materialCode: {}, "
                         + "productStatus: {}, constructionStage: {}, windowStartDate: {}, windowEndDate: {}, "
-                        + "earlyProductionDaysThreshold: {}, admissionEndDate: {}, previousT1ChangeoverMatched: false, "
+                        + "earlyProductionDaysThreshold: {}, admissionEndDate: {}, previousT1ChangeoverMatched: {}, "
                         + "reason: {}",
                 context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(),
                 sku.getConstructionStage(), windowStartDate, windowEndDate, earlyProductionDaysThreshold,
-                admissionEndDate, DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
+                admissionEndDate, t1CheckDesc, DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
         PriorityTraceLogHelper.appendProcessLog(context, "SKU无计划量不排产", detail);
         LhUnscheduledResult unscheduledResult = buildUnscheduledResult(
                 context, sku, 0, DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON);
@@ -107,14 +122,14 @@ public final class PendingSkuUnscheduledRule {
     }
 
     /**
-     * 评估续作试制、量试SKU是否因完整准入范围无日计划量而直接进入未排。
-     * <p>本规则仅按施工阶段识别试制和量试，判断范围与非续作日计划准入完全一致。
-     * 前日T+1交替计划只是非续作候选的放行条件，不得放行全范围为零的续作试制、量试SKU。</p>
+     * 评估续作试制、量试SKU是否因排程窗口内无日计划量而直接进入未排。
+     * <p>本规则仅按施工阶段识别试制和量试，判断范围严格限制为排程窗口首日~窗口末日，
+     * 不叠加提前生产天数阈值。前日T+1交替计划只是非续作候选的放行条件，不得放行全窗口为零的续作试制、量试SKU。</p>
      * <p>本方法只负责判断和构造未排结果，不修改续作列表、机台或日计划账本。</p>
      *
-     * @param context 排程上下文，提供排程窗口、提前生产参数和跨月月计划数据
+     * @param context 排程上下文，提供排程窗口和跨月月计划数据
      * @param sku 已识别为续作的SKU
-     * @return 命中规则时返回未排结果；非试制量试或范围内有计划时返回null
+     * @return 命中规则时返回未排结果；非试制量试或窗口内有计划时返回null
      */
     public static LhUnscheduledResult evaluateContinuousTrialDailyPlanAdmission(
             LhScheduleContext context, SkuScheduleDTO sku) {
@@ -125,13 +140,15 @@ public final class PendingSkuUnscheduledRule {
         }
         LocalDate windowStartDate = toLocalDate(context.getScheduleDate());
         LocalDate windowEndDate = toLocalDate(context.getWindowEndDate());
+        // 试制、量试续作仅按排程窗口（首日~末日）判断，不向后叠加提前生产天数阈值。
         if (Objects.isNull(windowEndDate)
-                || hasPositiveDailyPlanInAdmissionRange(context, sku, windowEndDate)) {
+                || hasPositiveDailyPlanInWindow(sku)) {
             return null;
         }
 
-        int earlyProductionDaysThreshold = EarlyProductionChecker.resolveEarlyProductionDaysThreshold(context);
-        LocalDate admissionEndDate = windowEndDate.plusDays(earlyProductionDaysThreshold);
+        // 试制、量试不适用提前生产天数阈值，判断截止日即窗口末日。
+        int earlyProductionDaysThreshold = 0;
+        LocalDate admissionEndDate = windowEndDate;
         String detail = String.format("工厂: %s, 批次: %s, 物料: %s, 产品状态: %s, 施工阶段: %s, "
                         + "续作机台: %s, 排程窗口: %s～%s, 提前生产天数: %d, 准入截止日: %s, 原因: %s",
                 context.getFactoryCode(), context.getBatchNo(), sku.getMaterialCode(), sku.getProductStatus(),
@@ -172,6 +189,18 @@ public final class PendingSkuUnscheduledRule {
         // 以窗口最后一天为基准后看N天，复用提前生产参数、跨月取数和产品状态口径。
         return Objects.nonNull(EarlyProductionChecker.resolveFirstFuturePlanDate(
                 context, sku, windowEndDate));
+    }
+
+    /**
+     * 判断排程窗口内（排程首日~窗口末日）是否存在正日计划量。
+     * <p>仅用于试制、量试SKU的准入判断：不向后叠加提前生产天数阈值，严格以排程窗口为判断边界。
+     * 月计划口径与 {@link #hasPositiveDailyPlanInAdmissionRange} 一致，按物料编码和产品状态精确读取。</p>
+     *
+     * @param sku 待判断SKU
+     * @return true-窗口内至少一天有正日计划量；false-窗口内全为0或无SKU
+     */
+    private static boolean hasPositiveDailyPlanInWindow(SkuScheduleDTO sku) {
+        return Objects.nonNull(sku) && sku.getWindowPlanQty() > 0;
     }
 
     /**
