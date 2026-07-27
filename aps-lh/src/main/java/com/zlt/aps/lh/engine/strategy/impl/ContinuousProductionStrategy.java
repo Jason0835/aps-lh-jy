@@ -8218,10 +8218,13 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                     context, result, resolveFirstPlannedShiftStartTime(result));
             List<MachineMaintenanceWindowDTO> maintenanceWindowList = resolveMachineMaintenanceWindowList(
                     context, result.getLhMachineCode());
-            // 最终结果中的残班量不是物理上限，需重算剩余班次真实可排产能后再执行向上修正。
-            Map<Integer, Integer> remainShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
-                    context, result, shifts, resolveFirstPlannedShiftStartTime(result), shiftCapacity,
-                    lhTimeSeconds, mouldQty, cleaningWindowList, maintenanceWindowList, "续作结果收敛");
+            // 未命中结构时无需重算剩余班次真实可排产能，避免停机、清洗、保养等扣减的冗余计算；
+            // 命中结构时残班量不是物理上限，需重算剩余班次真实可排产能后再执行向上修正。
+            Map<Integer, Integer> remainShiftCapacityMap = dailyStandardStructureMatched
+                    ? calculateDailyStandardShiftCapacityMap(
+                            context, result, shifts, resolveFirstPlannedShiftStartTime(result), shiftCapacity,
+                            lhTimeSeconds, mouldQty, cleaningWindowList, maintenanceWindowList, "续作结果收敛")
+                    : Collections.emptyMap();
             // 未命中结构时必须保留后置补满和停产释放链，只跳过日标准量结果收敛，不能提前结束当前结果处理。
             Map<Integer, Integer> adjustedPlanQtyMap = dailyStandardStructureMatched
                     ? ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
