@@ -376,6 +376,9 @@ public final class LhScheduleConstant {
     /** 日标准产量剩余班次默认值，3-中班 */
     public static final int DAILY_STANDARD_CAPACITY_REMAIN_SHIFT_TYPE = 3;
 
+    /** 按日标准量排产结构清单默认值，空值表示所有结构均按原始班产排产 */
+    public static final String DAILY_STANDARD_CAPACITY_STRUCTURE_LIST = "";
+
     /** 当天空闲机台优先开关默认值（0-关闭，1-开启） */
     public static final int ENABLE_TODAY_IDLE_MACHINE_PRIORITY = 1;
 

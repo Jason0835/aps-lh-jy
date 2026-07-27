@@ -229,4 +229,6 @@ public final class LhScheduleParamConstant {
     public static final String ENDING_AUTO_FILL_ENABLED = "SYS0304029";
     /** 在机模具下机时前后计划校验天数 */
     public static final String CONTINUOUS_MOULD_OFFLINE_CHECK_DAYS = "SYS0304030";
+    /** 按日标准量排产结构清单，多个结构名称使用英文逗号分隔 */
+    public static final String DAILY_STANDARD_CAPACITY_STRUCTURE_LIST = "SYS0304031";
 }

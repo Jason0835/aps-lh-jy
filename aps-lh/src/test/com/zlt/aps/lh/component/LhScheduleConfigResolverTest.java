@@ -169,6 +169,21 @@ class LhScheduleConfigResolverTest {
                 lossQtyContext.getScheduleConfig().getCapsuleChangeLossQty());
     }
 
+    @Test
+    void resolveAndAttach_shouldLoadDailyStandardCapacityStructureListIntoSnapshot() {
+        LhScheduleContext context = context();
+
+        resolverWithParam(dailyStandardCapacityStructureParam("结构1, 结构2"))
+                .resolveAndAttach(context);
+
+        Assertions.assertTrue(context.getScheduleConfig()
+                .isDailyStandardCapacityStructureMatched("结构1"));
+        Assertions.assertTrue(context.getScheduleConfig()
+                .isDailyStandardCapacityStructureMatched("结构2"));
+        Assertions.assertFalse(context.getScheduleConfig()
+                .isDailyStandardCapacityStructureMatched("结构3"));
+    }
+
     private LhScheduleConfigResolver resolverWithParam(LhParams param) {
         LhScheduleConfigResolver resolver = new LhScheduleConfigResolver();
         LhParamsMapper mapper = Mockito.mock(LhParamsMapper.class);
@@ -206,6 +221,14 @@ class LhScheduleConfigResolverTest {
         LhParams param = new LhParams();
         param.setFactoryCode("116");
         param.setParamCode(paramCode);
+        param.setParamValue(value);
+        return param;
+    }
+
+    private LhParams dailyStandardCapacityStructureParam(String value) {
+        LhParams param = new LhParams();
+        param.setFactoryCode("116");
+        param.setParamCode(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST);
         param.setParamValue(value);
         return param;
     }

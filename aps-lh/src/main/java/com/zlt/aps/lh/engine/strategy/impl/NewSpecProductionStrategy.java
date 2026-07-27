@@ -2532,6 +2532,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                         context, sku, shifts, firstInspectionAttributionShift, shiftCapacityMap,
                         runtimeShiftCapacity, dynamicTargetQty,
                         ScheduleTypeEnum.NEW_SPEC.getCode(), machineCode);
+                // 按SKU结构统一判断是否执行日标准量补差；未命中时保留前序首检和停机等实际扣减结果。
                 shiftCapacityMap = applyDailyStandardCapacityAdjust(
                         context, sku, machineCode, shifts, shiftCapacityMap, runtimeShiftCapacity);
                 int maxQtyToWindowEnd = sumShiftCapacity(shiftCapacityMap);
@@ -5724,6 +5725,9 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
+        boolean dailyStandardStructureMatched =
+                ShiftCapacityResolverUtil.isDailyStandardCapacityStructureMatched(
+                        context, sku.getStructureName());
         int remainShiftCapacityUpperLimit =
                 ShiftCapacityResolverUtil.resolveDailyStandardRemainShiftCapacityUpperLimit(
                         context, sku.getMaterialCode(), shiftCapacity);
@@ -5741,8 +5745,8 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             if (control == null || !control.isCanSchedule()) {
                 continue;
             }
-            // 日标准量高于“班产×3”时，仅剩余班次使用独立理论上限计算真实可排量。
-            int currentShiftCapacity = !singleControlMachine
+            // 仅参数清单内结构允许剩余班次使用独立理论上限；未命中结构始终从原始班产开始扣减。
+            int currentShiftCapacity = dailyStandardStructureMatched && !singleControlMachine
                     && ShiftCapacityResolverUtil.isDailyStandardRemainShift(shift, remainShiftType)
                     ? remainShiftCapacityUpperLimit : shiftCapacity;
             int actualShiftPlanQty = ShiftCapacityResolverUtil.resolveActualShiftPlanQty(
@@ -5827,6 +5831,13 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                                                                    List<LhShiftConfigVO> shifts,
                                                                    Map<Integer, Integer> shiftCapacityMap,
                                                                    int runtimeShiftCapacity) {
+        boolean dailyStandardStructureMatched =
+                ShiftCapacityResolverUtil.isDailyStandardCapacityStructureMatched(
+                        context, sku.getStructureName());
+        if (!dailyStandardStructureMatched) {
+            // 未命中结构直接保留已完成停机、清洗、首检等扣减的班次产能，不再执行日标准量补差。
+            return shiftCapacityMap;
+        }
         String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
         boolean singleControlMachine = isSingleControlMachine(context, machineCode);
         int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(context, sku.getMaterialCode());
@@ -5838,12 +5849,14 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                 remainShiftCapacityUpperLimit,
                 remainShiftType, singleControlMachine, ScheduleTypeEnum.NEW_SPEC.getCode());
         if (!Objects.equals(shiftCapacityMap, adjustedMap)) {
-            log.info("日标准产量班次计划量修正, 当前流程: 新增排程, materialCode: {}, machineCode: {}, "
-                            + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 剩余班次理论上限: {}, "
+            log.info("日标准产量班次计划量修正, 当前流程: 新增排程, materialCode: {}, structureName: {}, "
+                            + "结构是否命中参数: {}, machineCode: {}, 是否单控机台: {}, "
+                            + "SKU日标准产量: {}, 班产: {}, 剩余班次理论上限: {}, "
                             + "日标准产量剩余班次参数值: {}, "
                             + "修正前班次计划量: {}, 修正后班次计划量: {}",
-                    sku.getMaterialCode(), machineCode, singleControlMachine, dailyStandardQty,
-                    runtimeShiftCapacity, remainShiftCapacityUpperLimit, remainShiftType,
+                    sku.getMaterialCode(), sku.getStructureName(), dailyStandardStructureMatched,
+                    machineCode, singleControlMachine, dailyStandardQty, runtimeShiftCapacity,
+                    remainShiftCapacityUpperLimit, remainShiftType,
                     shiftCapacityMap, adjustedMap);
         }
         return adjustedMap;
@@ -5872,6 +5885,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
             Integer planQty = ShiftFieldUtil.getShiftPlanQty(result, shift.getShiftIndex());
             rawPlanQtyMap.put(shift.getShiftIndex(), Objects.isNull(planQty) ? 0 : Math.max(0, planQty));
         }
+        // 后置补满后仍复用同一结构准入入口，避免模拟、首次分配和最终落库出现不同口径。
         Map<Integer, Integer> adjustedPlanQtyMap = applyDailyStandardCapacityAdjust(
                 context, sku, result.getLhMachineCode(), shifts, rawPlanQtyMap, runtimeShiftCapacity);
         if (Objects.equals(rawPlanQtyMap, adjustedPlanQtyMap)) {
@@ -8347,6 +8361,7 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
         shiftCapacityMap = FirstInspectionQtyUtil.applyFirstInspectionQtyToCapacityMap(
                 context, sku, shifts, firstInspectionAttributionShift, shiftCapacityMap, runtimeShiftCapacity,
                 sku.resolveTargetScheduleQty(), ScheduleTypeEnum.NEW_SPEC.getCode(), candidate.getMachineCode());
+        // 候选模拟必须与真实新增排产复用同一结构门控，否则会因虚高日标准量产能误选机台。
         shiftCapacityMap = applyDailyStandardCapacityAdjust(
                 context, sku, candidate.getMachineCode(), shifts, shiftCapacityMap, runtimeShiftCapacity);
         MachineProductionSegment simulationSegment = buildMachineProductionSegment(

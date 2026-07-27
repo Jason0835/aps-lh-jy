@@ -243,6 +243,7 @@ class ContinuousProductionResultQtyRegressionTest {
     @Test
     void applyDailyStandardPlanQtyToContinuousResults_shouldTrimFinalAfternoonShiftOnly() {
         LhScheduleContext context = newContext();
+        enableDailyStandardCapacityStructure(context, "PCR-日标准");
         MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
         capacity.setMaterialCode("3302002218");
         capacity.setClassCapacity(18);
@@ -251,6 +252,7 @@ class ContinuousProductionResultQtyRegressionTest {
 
         LhScheduleResult result = new LhScheduleResult();
         result.setMaterialCode("3302002218");
+        result.setStructureName("PCR-日标准");
         result.setLhMachineCode("K1915");
         result.setScheduleType("01");
         result.setSingleMouldShiftQty(18);
@@ -277,6 +279,7 @@ class ContinuousProductionResultQtyRegressionTest {
     @Test
     void applyDailyStandardPlanQtyToContinuousResults_shouldRaiseFinalAfternoonShiftToFormulaQty() {
         LhScheduleContext context = newContext();
+        enableDailyStandardCapacityStructure(context, "PCR-日标准");
         MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
         capacity.setMaterialCode("3302002218");
         capacity.setClassCapacity(18);
@@ -285,6 +288,7 @@ class ContinuousProductionResultQtyRegressionTest {
 
         LhScheduleResult result = new LhScheduleResult();
         result.setMaterialCode("3302002218");
+        result.setStructureName("PCR-日标准");
         result.setLhMachineCode("K1514");
         result.setScheduleType("01");
         result.setSingleMouldShiftQty(18);
@@ -313,6 +317,7 @@ class ContinuousProductionResultQtyRegressionTest {
     @Test
     void applyDailyStandardPlanQtyToContinuousResults_shouldFillDailyStandardWhenClassCapacityIsLower() {
         LhScheduleContext context = newContext();
+        enableDailyStandardCapacityStructure(context, "PCR-日标准");
         MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
         capacity.setMaterialCode("3302002177");
         capacity.setClassCapacity(16);
@@ -322,6 +327,7 @@ class ContinuousProductionResultQtyRegressionTest {
 
         LhScheduleResult result = new LhScheduleResult();
         result.setMaterialCode("3302002177");
+        result.setStructureName("PCR-日标准");
         result.setLhMachineCode("K1611");
         result.setScheduleType("01");
         result.setSingleMouldShiftQty(16);
@@ -345,6 +351,44 @@ class ContinuousProductionResultQtyRegressionTest {
         assertEquals(18, result.getClass8PlanQty().intValue(), "T+2中班应补足为18，使完整业务日产量达到50");
         assertEquals(134, ShiftFieldUtil.resolveScheduledQty(result), "窗口8班计划量应由128修正为134");
         assertEquals(16, result.getSingleMouldShiftQty().intValue(), "班产落库字段不得被日标准量修正覆盖");
+    }
+
+    @Test
+    void applyDailyStandardPlanQtyToContinuousResults_shouldKeepClassCapacityWhenStructureNotMatched() {
+        LhScheduleContext context = newContext();
+        enableDailyStandardCapacityStructure(context, "PCR-日标准");
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002177");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(50);
+        capacity.setApsCapacity(54);
+        context.getSkuLhCapacityMap().put("3302002177", capacity);
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302002177");
+        result.setStructureName("PCR-未配置");
+        result.setLhMachineCode("K1611");
+        result.setScheduleType("01");
+        result.setSingleMouldShiftQty(16);
+        result.setMouldQty(2);
+        result.setLhTime(2880);
+        result.setClass1PlanQty(16);
+        result.setClass2PlanQty(16);
+        result.setClass3PlanQty(16);
+        result.setClass4PlanQty(16);
+        result.setClass5PlanQty(16);
+        result.setClass6PlanQty(16);
+        result.setClass7PlanQty(16);
+        result.setClass8PlanQty(16);
+        context.getScheduleResultList().add(result);
+
+        ReflectionTestUtils.invokeMethod(strategy,
+                "applyDailyStandardPlanQtyToContinuousResults", context, context.getScheduleWindowShifts());
+
+        assertEquals(16, result.getClass2PlanQty().intValue(), "未命中结构的T日中班应保持原始班产");
+        assertEquals(16, result.getClass5PlanQty().intValue(), "未命中结构的T+1中班应保持原始班产");
+        assertEquals(16, result.getClass8PlanQty().intValue(), "未命中结构的T+2中班应保持原始班产");
+        assertEquals(128, ShiftFieldUtil.resolveScheduledQty(result), "未命中结构不得使用日标准量补差");
     }
 
     @Test
@@ -1260,6 +1304,17 @@ class ContinuousProductionResultQtyRegressionTest {
         context.setScheduleTargetDate(date(2026, 4, 13));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate()));
         return context;
+    }
+
+    /**
+     * 为测试上下文配置按日标准量排产结构。
+     *
+     * @param context 排程上下文
+     * @param structureName 需要命中的结构名称
+     */
+    private void enableDailyStandardCapacityStructure(LhScheduleContext context, String structureName) {
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST, structureName)));
     }
 
     private List<MachineCleaningWindowDTO> buildDryIceCleaningWindowList() {

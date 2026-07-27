@@ -483,6 +483,22 @@ public final class ShiftCapacityResolverUtil {
     }
 
     /**
+     * 判断SKU结构是否启用日标准量班次计划量规则。
+     * <p>结构清单已由排程配置快照一次性解析，本方法只提供续作、换活字块和新增排产
+     * 共用的空安全准入入口，避免各流程重复读取或拆分硫化参数。</p>
+     *
+     * @param context 排程上下文
+     * @param structureName SKU结构名称
+     * @return true-结构命中参数清单；false-参数为空、结构为空或未精确命中
+     */
+    public static boolean isDailyStandardCapacityStructureMatched(LhScheduleContext context,
+                                                                  String structureName) {
+        return Objects.nonNull(context)
+                && Objects.nonNull(context.getScheduleConfig())
+                && context.getScheduleConfig().isDailyStandardCapacityStructureMatched(structureName);
+    }
+
+    /**
      * 获取奇数班产修正参数。
      *
      * @param context 排程上下文

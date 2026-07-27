@@ -3313,6 +3313,7 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
         int plannedRepairFixedQty = context.getParamIntValue(
                 LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
+        // 换活字块班次分配复用统一结构准入，保证与续作、新增排产的理论上限和补差口径一致。
         Map<Integer, Integer> dailyStandardShiftCapacityMap = calculateDailyStandardShiftCapacityMap(
                 context, result, shifts, startTime, shiftCapacity, lhTimeSeconds, mouldQty,
                 cleaningWindowList, maintenanceWindowList);
@@ -3621,6 +3622,9 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                 LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         String configPlusShiftType = ShiftCapacityResolverUtil.resolveOddShiftCapacityPlusShiftType(context);
         String remainShiftType = ShiftCapacityResolverUtil.resolveDailyStandardCapacityRemainShiftType(context);
+        boolean dailyStandardStructureMatched =
+                ShiftCapacityResolverUtil.isDailyStandardCapacityStructureMatched(
+                        context, result.getStructureName());
         int remainShiftCapacityUpperLimit =
                 ShiftCapacityResolverUtil.resolveDailyStandardRemainShiftCapacityUpperLimit(
                         context, result.getMaterialCode(), shiftCapacity);
@@ -3639,8 +3643,8 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             if (control == null || !control.isCanSchedule()) {
                 continue;
             }
-            // 日标准量高于“班产×3”时，仅剩余班次使用独立理论上限计算真实可排量。
-            int currentShiftCapacity = !singleControlMachine
+            // 仅参数清单内结构允许剩余班次使用独立理论上限；未命中结构始终从原始班产开始扣减。
+            int currentShiftCapacity = dailyStandardStructureMatched && !singleControlMachine
                     && ShiftCapacityResolverUtil.isDailyStandardRemainShift(shift, remainShiftType)
                     ? remainShiftCapacityUpperLimit : shiftCapacity;
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
@@ -3664,17 +3668,21 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             rawShiftCapacityMap.put(shift.getShiftIndex(), Math.max(0, shiftMaxQty));
         }
         int dailyStandardQty = ShiftCapacityResolverUtil.resolveDailyStandardQty(context, result.getMaterialCode());
-        Map<Integer, Integer> adjustedMap = ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
-                shifts, rawShiftCapacityMap, rawShiftCapacityMap, dailyStandardQty, shiftCapacity,
-                remainShiftCapacityUpperLimit, remainShiftType,
-                singleControlMachine, ScheduleTypeEnum.TYPE_BLOCK.getCode());
+        Map<Integer, Integer> adjustedMap = dailyStandardStructureMatched
+                ? ShiftCapacityResolverUtil.adjustShiftPlanQtyMapByDailyStandard(
+                        shifts, rawShiftCapacityMap, rawShiftCapacityMap, dailyStandardQty, shiftCapacity,
+                        remainShiftCapacityUpperLimit, remainShiftType,
+                        singleControlMachine, ScheduleTypeEnum.TYPE_BLOCK.getCode())
+                : rawShiftCapacityMap;
         if (!Objects.equals(rawShiftCapacityMap, adjustedMap)) {
-            log.info("日标准产量班次计划量修正, 当前流程: 换活字块排产, materialCode: {}, machineCode: {}, "
+            log.info("日标准产量班次计划量修正, 当前流程: 换活字块排产, materialCode: {}, "
+                            + "structureName: {}, 结构是否命中参数: {}, machineCode: {}, "
                             + "是否单控机台: {}, SKU日标准产量: {}, 班产: {}, 剩余班次理论上限: {}, "
                             + "日标准产量剩余班次参数值: {}, "
                             + "修正前班次计划量: {}, 修正后班次计划量: {}",
-                    result.getMaterialCode(), result.getLhMachineCode(), singleControlMachine,
-                    dailyStandardQty, shiftCapacity, remainShiftCapacityUpperLimit,
+                    result.getMaterialCode(), result.getStructureName(), dailyStandardStructureMatched,
+                    result.getLhMachineCode(), singleControlMachine, dailyStandardQty,
+                    shiftCapacity, remainShiftCapacityUpperLimit,
                     remainShiftType, rawShiftCapacityMap, adjustedMap);
         }
         return adjustedMap;

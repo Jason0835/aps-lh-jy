@@ -4067,10 +4067,13 @@ class NewSpecProductionStrategyRegressionTest {
         context.setScheduleDate(scheduleDate);
         context.setScheduleTargetDate(dateTime(2026, 6, 3, 0, 0));
         context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST, "PCR-日标准")));
 
         SkuScheduleDTO sku = buildSku();
         sku.setMaterialCode("3302001074");
         sku.setMaterialDesc("日标准产量与增机日期回归");
+        sku.setStructureName("PCR-日标准");
         sku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
         sku.setLhTimeSeconds(3600);
         sku.setShiftCapacity(16);
@@ -4120,6 +4123,36 @@ class NewSpecProductionStrategyRegressionTest {
                 "哪一天增机台，就应在那一天允许换模的首个班次开始换模");
         assertEquals(4, resolveShiftQty(addedResult, 4), "换模完成落在C4结束临界点，首检4应归属C4");
         assertEquals(16, resolveShiftQty(addedResult, 5), "第二台正常生产应从C5开始");
+    }
+
+    @Test
+    void applyDailyStandardCapacityAdjust_shouldSkipUnmatchedStructure() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = buildContext();
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST, "PCR-日标准")));
+        SkuScheduleDTO sku = buildSku();
+        sku.setMaterialCode("3302002177");
+        sku.setStructureName("PCR-未配置");
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode(sku.getMaterialCode());
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(50);
+        capacity.setApsCapacity(54);
+        context.getSkuLhCapacityMap().put(sku.getMaterialCode(), capacity);
+
+        Map<Integer, Integer> rawCapacityMap = new LinkedHashMap<Integer, Integer>(8);
+        for (LhShiftConfigVO shift : context.getScheduleWindowShifts()) {
+            rawCapacityMap.put(shift.getShiftIndex(), 16);
+        }
+        Map<Integer, Integer> adjustedCapacityMap = ReflectionTestUtils.invokeMethod(
+                strategy, "applyDailyStandardCapacityAdjust",
+                context, sku, "K1611", context.getScheduleWindowShifts(), rawCapacityMap, 16);
+
+        assertEquals(rawCapacityMap, adjustedCapacityMap,
+                "未命中结构必须保留原班产及既有扣减结果，不得执行日标准量补差");
+        assertEquals(16, adjustedCapacityMap.get(2).intValue(),
+                "未命中结构的中班不得使用APS日产折算理论上限18");
     }
 
     @Test

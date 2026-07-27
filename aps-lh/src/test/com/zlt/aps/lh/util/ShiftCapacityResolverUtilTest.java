@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -727,6 +728,24 @@ class ShiftCapacityResolverUtilTest {
                 context, "3302002177", 16);
 
         assertEquals(18, upperLimit, "APS日产54只应折算为中班理论上限18，日标准量仍由标准产能50决定");
+    }
+
+    @Test
+    void isDailyStandardCapacityStructureMatched_shouldReuseParsedConfigSnapshot() {
+        Map<String, String> paramMap = new HashMap<String, String>(1);
+        paramMap.put(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST,
+                "结构1, 结构2");
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleConfig(new LhScheduleConfig(paramMap));
+
+        assertTrue(ShiftCapacityResolverUtil.isDailyStandardCapacityStructureMatched(
+                context, "结构1"));
+        assertTrue(ShiftCapacityResolverUtil.isDailyStandardCapacityStructureMatched(
+                context, "结构2"));
+        assertFalse(ShiftCapacityResolverUtil.isDailyStandardCapacityStructureMatched(
+                context, "结构3"));
+        assertFalse(ShiftCapacityResolverUtil.isDailyStandardCapacityStructureMatched(
+                new LhScheduleContext(), "结构1"));
     }
 
     private int actualQty(List<LhShiftConfigVO> shifts, int shiftIndex, String configPlusShiftType) {

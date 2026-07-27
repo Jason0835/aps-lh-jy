@@ -211,6 +211,46 @@ public class LhScheduleConfigTest {
     }
 
     /**
+     * 用例说明：按日标准量排产结构清单应按英文逗号拆分、去除配置项前后空格、过滤空项并精确匹配。
+     */
+    @Test
+    public void shouldParseAndExactlyMatchDailyStandardCapacityStructureList() {
+        Map<String, String> paramMap = new HashMap<String, String>(1);
+        paramMap.put(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST,
+                " 结构1,结构2, ,结构1,,");
+
+        LhScheduleConfig config = new LhScheduleConfig(paramMap);
+
+        Assertions.assertTrue(config.isDailyStandardCapacityStructureMatched("结构1"));
+        Assertions.assertTrue(config.isDailyStandardCapacityStructureMatched("结构2"));
+        Assertions.assertFalse(config.isDailyStandardCapacityStructureMatched("结构3"));
+        Assertions.assertFalse(config.isDailyStandardCapacityStructureMatched(" 结构1"),
+                "只清洗参数配置项，SKU结构名称原值包含空格时不得命中");
+        Assertions.assertFalse(config.isDailyStandardCapacityStructureMatched("STRUCTURE1"),
+                "结构名称必须保持大小写敏感的精确匹配");
+    }
+
+    /**
+     * 用例说明：结构清单参数缺失、空字符串或纯空格时，所有结构均按原始班产排产。
+     */
+    @Test
+    public void shouldNotMatchAnyStructureWhenDailyStandardCapacityStructureListEmpty() {
+        LhScheduleConfig missingConfig = new LhScheduleConfig(new HashMap<String, String>(0));
+        Map<String, String> emptyParamMap = new HashMap<String, String>(1);
+        emptyParamMap.put(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST, "");
+        Map<String, String> blankParamMap = new HashMap<String, String>(1);
+        blankParamMap.put(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST, "   ");
+
+        Assertions.assertFalse(missingConfig.isDailyStandardCapacityStructureMatched("结构1"));
+        Assertions.assertFalse(new LhScheduleConfig(emptyParamMap)
+                .isDailyStandardCapacityStructureMatched("结构1"));
+        Assertions.assertFalse(new LhScheduleConfig(blankParamMap)
+                .isDailyStandardCapacityStructureMatched("结构1"));
+        Assertions.assertFalse(missingConfig.isDailyStandardCapacityStructureMatched(""));
+        Assertions.assertFalse(missingConfig.isDailyStandardCapacityStructureMatched(null));
+    }
+
+    /**
      * 用例说明：收尾小余量允许欠产偏差异常配置按默认2处理。
      */
     @Test

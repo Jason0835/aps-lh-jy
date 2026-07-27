@@ -1,13 +1,18 @@
 package com.zlt.aps.lh.engine.strategy.impl;
 
+import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
+import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
+import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -17,6 +22,8 @@ import java.time.ZoneId;
 import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 换活字块目标量规则测试。
@@ -98,6 +105,51 @@ public class TypeBlockProductionStrategyTest {
         Assertions.assertEquals(Integer.valueOf(5), pairResult.getClass1PlanQty());
         Assertions.assertEquals(Integer.valueOf(0),
                 context.getSkuProductionRemainingQtyMap().get(sku.getMaterialCode()));
+    }
+
+    /**
+     * 用例说明：换活字块只有结构命中参数时才允许使用日标准量理论上限和补差。
+     */
+    @Test
+    public void calculateDailyStandardShiftCapacityMap_shouldGateByStructureList() {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        Date scheduleDate = Date.from(LocalDate.of(2026, 7, 25)
+                .atStartOfDay(ZoneId.systemDefault()).toInstant());
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleWindowShifts(LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate));
+        context.setScheduleConfig(new LhScheduleConfig(Collections.singletonMap(
+                LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST, "PCR-日标准")));
+
+        MdmSkuLhCapacity capacity = new MdmSkuLhCapacity();
+        capacity.setMaterialCode("3302002177");
+        capacity.setClassCapacity(16);
+        capacity.setStandardCapacity(50);
+        capacity.setApsCapacity(54);
+        context.getSkuLhCapacityMap().put(capacity.getMaterialCode(), capacity);
+
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(capacity.getMaterialCode());
+        result.setLhMachineCode("K1611");
+        result.setStructureName("PCR-日标准");
+        List<LhShiftConfigVO> shifts = context.getScheduleWindowShifts();
+        Map<Integer, Integer> matchedCapacityMap = ReflectionTestUtils.invokeMethod(
+                strategy, "calculateDailyStandardShiftCapacityMap",
+                context, result, shifts, shifts.get(0).getShiftStartDateTime(),
+                16, 2880, 2, Collections.emptyList(), Collections.emptyList());
+
+        result.setStructureName("PCR-未配置");
+        Map<Integer, Integer> unmatchedCapacityMap = ReflectionTestUtils.invokeMethod(
+                strategy, "calculateDailyStandardShiftCapacityMap",
+                context, result, shifts, shifts.get(0).getShiftStartDateTime(),
+                16, 2880, 2, Collections.emptyList(), Collections.emptyList());
+
+        Assertions.assertEquals(Integer.valueOf(18), matchedCapacityMap.get(5),
+                "命中结构的中班应使用日标准量理论上限补足到18");
+        Assertions.assertEquals(Integer.valueOf(16), unmatchedCapacityMap.get(5),
+                "未命中结构的中班应保持原始班产16");
+        Assertions.assertEquals(Integer.valueOf(16), unmatchedCapacityMap.get(8),
+                "未命中结构的后续业务日中班也不得启用日标准量补差");
     }
 
     /**

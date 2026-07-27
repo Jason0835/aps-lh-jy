@@ -9,7 +9,9 @@ import org.apache.commons.lang3.StringUtils;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 硫化排程配置快照
@@ -23,6 +25,9 @@ public class LhScheduleConfig {
     /** 已解析的参数快照（值均为字符串，按需转换） */
     private final Map<String, String> resolvedParamMap;
 
+    /** 按日标准量排产结构集合；构造配置快照时一次解析，排产过程中只做精确匹配 */
+    private final Set<String> dailyStandardCapacityStructureSet;
+
     /**
      * 构造配置快照
      *
@@ -30,6 +35,8 @@ public class LhScheduleConfig {
      */
     public LhScheduleConfig(Map<String, String> resolvedParamMap) {
         this.resolvedParamMap = new HashMap<>(resolvedParamMap);
+        this.dailyStandardCapacityStructureSet = parseDailyStandardCapacityStructureSet(
+                this.resolvedParamMap.get(LhScheduleParamConstant.DAILY_STANDARD_CAPACITY_STRUCTURE_LIST));
     }
 
     /**
@@ -666,6 +673,19 @@ public class LhScheduleConfig {
     }
 
     /**
+     * 判断SKU结构是否配置为按日标准量排产。
+     * <p>参数项在配置快照构造阶段已完成去除前后空格、过滤空项和去重；
+     * 此处保留SKU结构名称原值进行大小写敏感的精确匹配，不对主数据做隐式修正。</p>
+     *
+     * @param structureName SKU结构名称
+     * @return true-命中按日标准量排产结构清单；false-未命中或参数未配置
+     */
+    public boolean isDailyStandardCapacityStructureMatched(String structureName) {
+        return StringUtils.isNotEmpty(structureName)
+                && dailyStandardCapacityStructureSet.contains(structureName);
+    }
+
+    /**
      * 判断新增选机是否启用当天空闲机台优先。
      *
      * @return true-启用；false-关闭
@@ -721,5 +741,34 @@ public class LhScheduleConfig {
         int qty = getParamIntValue(LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY,
                 LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
         return Math.max(0, qty);
+    }
+
+    /**
+     * 解析按日标准量排产结构清单。
+     * <p>仅按英文逗号拆分参数值，逐项去除前后空格并过滤空字符串；
+     * 使用集合去重后保存为不可变快照，避免续作、换活字块和新增排产重复解析参数。</p>
+     *
+     * @param structureListValue 结构清单参数原值
+     * @return 不可变结构名称集合
+     */
+    private Set<String> parseDailyStandardCapacityStructureSet(String structureListValue) {
+        if (StringUtils.isEmpty(structureListValue)) {
+            return Collections.emptySet();
+        }
+        String[] structureNameArray = StringUtils.split(structureListValue, ',');
+        if (structureNameArray == null || structureNameArray.length == 0) {
+            return Collections.emptySet();
+        }
+        Set<String> structureSet = new LinkedHashSet<String>(structureNameArray.length);
+        for (String structureName : structureNameArray) {
+            String trimmedStructureName = StringUtils.trim(structureName);
+            if (StringUtils.isNotEmpty(trimmedStructureName)) {
+                structureSet.add(trimmedStructureName);
+            }
+        }
+        if (structureSet.isEmpty()) {
+            return Collections.emptySet();
+        }
+        return Collections.unmodifiableSet(structureSet);
     }
 }
