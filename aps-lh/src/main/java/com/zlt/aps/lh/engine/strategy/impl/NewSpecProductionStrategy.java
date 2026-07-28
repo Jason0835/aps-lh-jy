@@ -146,6 +146,11 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private static final String ZERO_PLAN_UNSCHEDULED_REASON = "新增结果裁剪为0";
     private static final String SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON =
             "共用胎胚且硫化余量为0";
+    /** S4.3无排产目标量未排原因后缀（与ScheduleAdjustHandler模板保持一致，零量归并时按后缀识别保留） */
+    private static final String NO_PLAN_QTY_UNSCHEDULED_REASON_SUFFIX = "没有排产目标量，不进行排产";
+    /** S4.3余量与胎胚库存均为0未排原因后缀（与ScheduleAdjustHandler模板保持一致，零量归并时按后缀识别保留） */
+    private static final String ZERO_SURPLUS_AND_EMBRYO_UNSCHEDULED_REASON_SUFFIX =
+            "余量为0且胎胚库存为0，不需要排产";
     private static final String SMALL_ENDING_SURPLUS_UNSCHEDULED_REASON =
             SmallEndingSurplusSkipRule.UNSCHEDULED_REASON;
     private static final String TARGET_SKU_MOULD_ALL_OCCUPIED_UNSCHEDULED_REASON =
@@ -14292,11 +14297,12 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
                     || StringUtils.isEmpty(unscheduledResult.getMaterialCode())) {
                 continue;
             }
-            // 日计划准入拦截类未排（窗口内本就无日计划量，未排数量恒为0）代表“有SKU但无排产任务”，
-            // 是明确的未排记录，必须保留落库；其余零量/负量残留视为排产主链已消纳完毕，按原逻辑跳过。
+            // 零量未排中的“日计划准入拦截”与“S4.3前置剔除（共用胎胚零余量、无排产目标量、
+            // 余量与胎胚库存均为0）”代表“有SKU但无排产任务”，是明确的未排记录，必须保留落库；
+            // 其余零量/负量残留视为排产主链已消纳完毕，按原逻辑跳过。
             if (Objects.isNull(unscheduledResult.getUnscheduledQty())
                     || (unscheduledResult.getUnscheduledQty() <= 0
-                    && !isDailyPlanAdmissionUnscheduledReason(unscheduledResult.getUnscheduledReason()))) {
+                    && !isRetainableZeroQtyUnscheduledReason(unscheduledResult.getUnscheduledReason()))) {
                 continue;
             }
             String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
@@ -14330,6 +14336,32 @@ public class NewSpecProductionStrategy implements IProductionStrategy {
     private boolean isDailyPlanAdmissionUnscheduledReason(String reason) {
         return StringUtils.equals(PendingSkuUnscheduledRule.DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON, reason)
                 || StringUtils.equals(PendingSkuUnscheduledRule.CONTINUOUS_TRIAL_DAILY_PLAN_ADMISSION_UNSCHEDULED_REASON, reason);
+    }
+
+    /**
+     * 判断零量未排记录是否属于必须保留落库的明确未排原因。
+     * <p>除日计划准入拦截类外，S4.3阶段前置剔除产生的零量未排同样代表“有SKU但无排产任务”，
+     * 包括：共用胎胚且硫化余量为0预剔除、无排产目标量、余量与胎胚库存均为0三类。
+     * 若归并去重时因数量为0丢弃，SKU会在排程结果表和未排结果表同时消失，无法对账。</p>
+     *
+     * @param reason 未排原因
+     * @return true-必须保留的零量未排原因；false-其他
+     */
+    private boolean isRetainableZeroQtyUnscheduledReason(String reason) {
+        if (StringUtils.isEmpty(reason)) {
+            return false;
+        }
+        // 日计划准入拦截类原有白名单保持不变
+        if (isDailyPlanAdmissionUnscheduledReason(reason)) {
+            return true;
+        }
+        // S4.3共用胎胚零余量预剔除未排（未排数量恒为0）
+        if (StringUtils.equals(SHARED_EMBRYO_ZERO_SURPLUS_UNSCHEDULED_REASON, reason)) {
+            return true;
+        }
+        // S4.3无目标量未排原因为“物料：xxx + 固定后缀”模板，按后缀识别
+        return StringUtils.endsWith(reason, NO_PLAN_QTY_UNSCHEDULED_REASON_SUFFIX)
+                || StringUtils.endsWith(reason, ZERO_SURPLUS_AND_EMBRYO_UNSCHEDULED_REASON_SUFFIX);
     }
 
     /**
