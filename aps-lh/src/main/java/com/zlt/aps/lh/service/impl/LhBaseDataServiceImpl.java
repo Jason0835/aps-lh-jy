@@ -1,7 +1,9 @@
 package com.zlt.aps.lh.service.impl;
 
+import cn.hutool.core.collection.CollectionUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.zlt.aps.cx.api.domain.entity.CxStock;
+import com.zlt.aps.cx.entity.config.CxEmbryoLhTime;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -16,6 +18,7 @@ import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleStepEnum;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
+import com.zlt.aps.lh.mapper.CxEmbryoLhTimeMapper;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.MdmSkuScheduleCategoryMapper;
 import com.zlt.aps.lh.mapper.MpFactoryProductionVersionMapper;
@@ -193,6 +196,9 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
 
     @Resource
     private LhMouldChangePlanEntityMapper lhMouldChangePlanMapper;
+
+    @Resource
+    private CxEmbryoLhTimeMapper cxEmbryoLhTimeMapper;
 
     @Resource
     private CxStockMapper cxStockMapper;
@@ -1275,6 +1281,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 .filter(StringUtils::isNotEmpty)
                 .distinct()
                 .collect(java.util.stream.Collectors.toList());
+        context.setStructureEarliestLhTimeMap(new HashMap<>());
         Map<String, Integer> stockMap = new HashMap<>(Math.max(16, embryoCodeList.size()));
         if (CollectionUtils.isEmpty(embryoCodeList)) {
             context.setEmbryoRealtimeStockMap(stockMap);
@@ -1294,6 +1301,20 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
         context.setEmbryoRealtimeStockMap(stockMap);
         log.debug("胎胚实时库存加载完成, 数量: {}", stockMap.size());
+        //加载胎胚最早可供硫化时间，结构维度
+        List<CxEmbryoLhTime> embryoLhTimesList = cxEmbryoLhTimeMapper.selectList(new LambdaQueryWrapper<CxEmbryoLhTime>()
+                .eq(CxEmbryoLhTime::getFactoryCode, factoryCode)
+                .gt(CxEmbryoLhTime::getEarliestLhTime, stockDate));
+        if (embryoLhTimesList != null) {
+            Map<String, Date> timeMap = embryoLhTimesList.stream()
+                    .filter(e -> e.getEarliestLhTime() != null)
+                    .collect(Collectors.toMap(
+                            CxEmbryoLhTime::getStructureName,
+                            CxEmbryoLhTime::getEarliestLhTime,
+                            (v1, v2) -> v1 // 如果有重复，保留第一个
+                    ));
+            context.setStructureEarliestLhTimeMap(CollectionUtil.isNotEmpty(timeMap) ? timeMap : new HashMap<>());
+        }
     }
 
 

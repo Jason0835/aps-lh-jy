@@ -165,6 +165,10 @@ public class LhScheduleContext {
     private List<LhMouldCleanPlan> cleaningPlanList = new ArrayList<>();
     /** 胎胚实时库存Map, key=embryoCode；始终保存原始库存，内部排产额度分摊不得回写到该原始库存口径 */
     private Map<String, Integer> embryoRealtimeStockMap = new HashMap<>();
+    /**
+     * 结构胎胚最早可供硫化时间Map, key=structureName
+     */
+    private Map<String, Date> structureEarliestLhTimeMap = new HashMap<>();
     /** 胎胚收尾标识Map, key=embryoCode, value=1-收尾/0-非收尾；以胎胚维度合并硫化余量后按主销参与情况判定 */
     private Map<String, Integer> embryoEndingFlagMap = new HashMap<>();
     /** 日完成量Map（按物料+产品状态+完成日期聚合）, key=materialCode_productStatus_finishDate(yyyy-MM-dd) */

@@ -3,6 +3,7 @@
  */
 package com.zlt.aps.lh.engine.strategy.impl;
 
+import cn.hutool.core.collection.CollectionUtil;
 import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
@@ -26,11 +27,13 @@ import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 /**
  * 默认SKU排产优先级策略实现。
@@ -77,16 +80,20 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         // 新增规格按试制、量试、正规组分层；小批量作为正规组 SKU 继续走通用排序。
         Comparator<SkuScheduleDTO> newSpecComparator = buildNewSpecComparator(
                 context, structurePriorityMap, structureEndingDaysMap, tailComparator);
-        sortSkuList(context.getContinuousSkuList(), comparator);
-        sortSkuList(context.getNewSpecSkuList(), newSpecComparator);
+        sortSkuList(context.getContinuousSkuList(), context.getStructureEarliestLhTimeMap(),comparator);
+        sortSkuList(context.getNewSpecSkuList(), context.getStructureEarliestLhTimeMap(),newSpecComparator);
+
 
         // 同时对每个结构下的SKU列表排序，保证结构内顺序与主排序一致。
         for (Map.Entry<String, List<SkuScheduleDTO>> entry : context.getStructureSkuMap().entrySet()) {
             entry.getValue().sort(comparator);
+            //根据胎胚最早可供硫化时间重新排序
+            reorderByEarliestLhTime(entry.getValue(),context.getStructureEarliestLhTimeMap());
         }
 
         // 按统一优先级回写顺序号，供后续结果对象复用。
         List<SkuScheduleDTO> orderedSkuList = buildOrderedSkuList(context, newSpecComparator);
+        reorderByEarliestLhTime(orderedSkuList,context.getStructureEarliestLhTimeMap());
         int order = 1;
         for (SkuScheduleDTO sku : orderedSkuList) {
             sku.setScheduleOrder(order++);
@@ -113,6 +120,38 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
         }
         log.debug("SKU优先级排序完成, 排序后第一位: {}",
                 CollectionUtils.isEmpty(orderedSkuList) ? "空" : orderedSkuList.get(0).getMaterialCode());
+    }
+
+
+    /**
+     * 根据胎胚最早收尾时间，重新排序
+     * @param skuList SKU列表
+     * @param embryoLhTimeMap 胎胚最早收尾时间Map <结构，胎胚最早收尾时间>
+     */
+    private void reorderByEarliestLhTime(
+            List<SkuScheduleDTO> skuList,
+            Map<String, Date> embryoLhTimeMap) {
+
+        if (CollectionUtil.isEmpty(embryoLhTimeMap)){
+            return;
+        }
+
+        // 2. 找出所有有时间的元素，按时间排序
+        List<SkuScheduleDTO> sortedWithTime = skuList.stream()
+                .filter(sku -> embryoLhTimeMap.containsKey(sku.getStructureName()))
+                .sorted(Comparator.comparing(sku -> embryoLhTimeMap.get(sku.getStructureName())))
+                .collect(Collectors.toList());
+
+        // 3. 按原列表顺序，将排序后的"有时间"元素替换回原来的"有时间"位置
+        int timeIndex = 0;
+        for (int i = 0; i < skuList.size(); i++) {
+            SkuScheduleDTO sku = skuList.get(i);
+            if (embryoLhTimeMap.containsKey(sku.getStructureName())) {
+                // 这个位置原本是有时间的，用排序后的元素替换
+                skuList.set(i, sortedWithTime.get(timeIndex++));
+            }
+            // 无时间的元素保持不变
+        }
     }
 
     /**
@@ -603,11 +642,13 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
     /**
      * 排序列表，为空时直接跳过。
      */
-    private void sortSkuList(List<SkuScheduleDTO> skuList, Comparator<SkuScheduleDTO> comparator) {
+    private void sortSkuList(List<SkuScheduleDTO> skuList, Map<String,Date> embryoLhTimeMap,Comparator<SkuScheduleDTO> comparator) {
         if (CollectionUtils.isEmpty(skuList)) {
             return;
         }
         skuList.sort(comparator);
+        //根据胎胚最早可供硫化时间重新排序
+        reorderByEarliestLhTime(skuList,embryoLhTimeMap);
     }
 
     /**
