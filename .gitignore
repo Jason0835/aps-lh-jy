@@ -12,6 +12,7 @@
 /.kiro/
 /.claude/
 /.trae/
+/.workbuddy/
 /.worktrees/
 # 日志目录
 log/
@@ -24,4 +25,3 @@ node_modules/
 .codex/
 package.json
 package-lock.json
-/.workbuddy/

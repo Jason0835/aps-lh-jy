@@ -20,4 +20,14 @@
 修改排程算法须同步检查相关入口，禁止单点改动导致前后逻辑不一致。
 
 ---
+## 历史故障根因速查（详见 故障根因速查.md）
+- 完成量异常：月完成量 key 用 日LH_TYPE 拼 月PRODUCT_STATUS（语义不同），不一致则月累计=0。查 calculateSurplusQty 日志 monthFinishedAndScheDayQty；重启应用刷新 context 验证。
+- 试制量试未排：根因 evaluateDailyPlanAdmission 试制分支保留 hasPreviousT1MouldChangePlan 放行口；修复 PendingSkuUnscheduledRule 跳过T+1 + NewSpecProductionStrategy 保留零量未排记录。应用固定端口 9669。
+- 超排：真实根因为 applySharedEmbryoEndingStaggerPostpone（共用胎胚收尾错峰后延）末班追加产量；关 ENDING_AUTO_FILL_ENABLED 即可。须日志实证，勿误判 roundUpQtyToMouldMultiple。
+- 首检班次失败(S4505)：候选机台换模完成时间超窗→首检无归属班次→回滚。默认 MAX_FIRST_INSPECTION_PER_SHIFT=-1 不限量。
+- 加机台时机：续作机台<CEIL(dayQty/班产) 应生成补偿SKU进S4.5新增换模；推迟常因续作补偿未生成而走换活字块抢占。
+- 续作空班：停产保机语义为当日全部班次=0（ContinuousProductionStrategy:6420 触发）；ResultDowntimeSummaryUtil 未覆盖停产保机备注，空班原因需统一可追溯。
+- 按天驱动改造：distributeToShifts 按 shiftIndex 增量合并，跨天续写安全。
+- 日标准量修正：参数 SYS0304031 按结构门控；未命中结构时跳过 calculateDailyStandardShiftCapacityMap 冗余计算。
+
 （后续实践确认的内容追加在下方）
