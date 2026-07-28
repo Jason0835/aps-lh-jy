@@ -16,6 +16,7 @@ import com.zlt.aps.lh.engine.strategy.ICapacityCalculateStrategy;
 import com.zlt.aps.lh.engine.strategy.IFirstInspectionBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
+import com.zlt.aps.lh.engine.strategy.support.NewSpecEmbryoAvailableTimeResolver;
 import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
 import com.zlt.aps.lh.util.FirstInspectionQtyUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -465,6 +466,18 @@ public class LocalSearchMachineAllocatorStrategy {
         productionStartTime = FirstInspectionQtyUtil.resolveTrialProductionStartTime(
                 context, sku, shifts, firstInspectionBaseTime, repairAdjustedProductionStartTime,
                 ScheduleTypeEnum.NEW_SPEC.getCode());
+        Date earliestEmbryoAvailableTime =
+                NewSpecEmbryoAvailableTimeResolver.resolveEarliestAvailableTime(context, sku);
+        boolean embryoAvailableTimeConstrained = Objects.nonNull(earliestEmbryoAvailableTime);
+        if (embryoAvailableTimeConstrained) {
+            /*
+             * 局部搜索评分必须与正式 S4.5 落地使用同一生产时间下限。
+             * 这里只抬高生产起点，不修改候选换模开始和完成时间。
+             */
+            productionStartTime =
+                    NewSpecEmbryoAvailableTimeResolver.resolveActualProductionStartTime(
+                            productionStartTime, earliestEmbryoAvailableTime);
+        }
         if (productionStartTime == null) {
             return LocalSearchCapacityEstimate.empty();
         }
@@ -481,15 +494,18 @@ public class LocalSearchMachineAllocatorStrategy {
                 LhScheduleParamConstant.PLANNED_REPAIR_FIXED_QTY, LhScheduleConstant.PLANNED_REPAIR_FIXED_QTY);
 
         Date cursorStartTime = productionStartTime;
-        LhShiftConfigVO firstInspectionShift = FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
-                context, sku, shifts, firstInspectionBaseTime, ScheduleTypeEnum.NEW_SPEC.getCode());
+        LhShiftConfigVO firstInspectionShift = embryoAvailableTimeConstrained
+                ? NewSpecEmbryoAvailableTimeResolver.resolveProductionShift(shifts, productionStartTime)
+                : FirstInspectionQtyUtil.resolveFirstInspectionAttributionShift(
+                        context, sku, shifts, firstInspectionBaseTime, ScheduleTypeEnum.NEW_SPEC.getCode());
         int firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
                 || Objects.isNull(firstInspectionShift.getShiftIndex()) ? -1 : firstInspectionShift.getShiftIndex();
         int firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
-                context, sku, firstInspectionShift, shiftCapacity,
-                Math.max(remainingQty, shiftCapacity), ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
+                context, sku, firstInspectionShift, shiftCapacity, remainingQty,
+                ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
         Date specEndTime = null;
         int totalQty = 0;
+        boolean embryoFirstInspectionLanded = false;
         boolean started = false;
 
         for (LhShiftConfigVO shift : shifts) {
@@ -505,10 +521,65 @@ public class LocalSearchMachineAllocatorStrategy {
             }
             ShiftProductionControlDTO control = ShiftProductionControlUtil.resolveEffectiveControl(context, shift, cursorStartTime);
             if (control == null || !control.isCanSchedule()) {
+                if (embryoAvailableTimeConstrained
+                        && Objects.equals(shift.getShiftIndex(), firstInspectionShiftIndex)) {
+                    /*
+                     * 胎胚可供班次若被停机或班次管控完全占用，首检不能丢失；必须与正式
+                     * 落班一样整体顺延到下一个既有规则允许生产的班次后重新预演。
+                     */
+                    productionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                            context, machine.getMachineCode(), shift.getShiftEndDateTime(), shifts,
+                            shiftCapacity, lhTimeSeconds, mouldQty);
+                    if (Objects.isNull(productionStartTime)) {
+                        return LocalSearchCapacityEstimate.empty();
+                    }
+                    cursorStartTime = productionStartTime;
+                    firstInspectionShift = NewSpecEmbryoAvailableTimeResolver.resolveProductionShift(
+                            shifts, productionStartTime);
+                    firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
+                            || Objects.isNull(firstInspectionShift.getShiftIndex())
+                            ? -1 : firstInspectionShift.getShiftIndex();
+                    firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
+                            context, sku, firstInspectionShift, shiftCapacity, remainingQty,
+                            ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
+                }
                 continue;
             }
             Date effectiveStartTime = control.getEffectiveStartTime();
             Date effectiveEndTime = control.getEffectiveEndTime();
+            long shiftDurationSeconds = ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift);
+            boolean currentShiftFirstInspection = embryoAvailableTimeConstrained
+                    && Objects.equals(shift.getShiftIndex(), firstInspectionShiftIndex);
+            if (embryoAvailableTimeConstrained) {
+                /*
+                 * 局部搜索必须与正式落班共用实际生产窗口：首班从胎胚可供后的实际生产
+                 * 起点开始折算，不能因为班次管控从班次起点生效就高估完整班产。
+                 */
+                effectiveStartTime = NewSpecEmbryoAvailableTimeResolver.resolveEffectiveProductionWindowStart(
+                        effectiveStartTime, effectiveEndTime, cursorStartTime);
+                if (Objects.isNull(effectiveStartTime)) {
+                    if (currentShiftFirstInspection) {
+                        productionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                                context, machine.getMachineCode(), effectiveEndTime, shifts,
+                                shiftCapacity, lhTimeSeconds, mouldQty);
+                        if (Objects.isNull(productionStartTime)) {
+                            return LocalSearchCapacityEstimate.empty();
+                        }
+                        cursorStartTime = productionStartTime;
+                        firstInspectionShift = NewSpecEmbryoAvailableTimeResolver.resolveProductionShift(
+                                shifts, productionStartTime);
+                        firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
+                                || Objects.isNull(firstInspectionShift.getShiftIndex())
+                                ? -1 : firstInspectionShift.getShiftIndex();
+                        firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
+                                context, sku, firstInspectionShift, shiftCapacity, remainingQty,
+                                ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
+                    }
+                    continue;
+                }
+                shiftDurationSeconds = NewSpecEmbryoAvailableTimeResolver.resolveProductionWindowSeconds(
+                        effectiveStartTime, effectiveEndTime);
+            }
 
             // 统一按班产主口径或回退公式估算残班/整班计划量。
             int shiftMaxQty = ShiftCapacityResolverUtil.resolveShiftCapacityWithDowntime(
@@ -523,14 +594,52 @@ public class LocalSearchMachineAllocatorStrategy {
                     shiftCapacity,
                     lhTimeSeconds,
                     mouldQty,
-                    ShiftCapacityResolverUtil.resolveShiftDurationSeconds(shift),
+                    shiftDurationSeconds,
                     dryIceLossQty,
                     dryIceDurationHours,
                 plannedRepairFixedQty);
             shiftMaxQty = ShiftProductionControlUtil.deductCapacityByControl(control, shiftMaxQty, mouldQty);
+            if (currentShiftFirstInspection) {
+                int partialShiftTotalCapacity = FirstInspectionQtyUtil.resolveEmbryoAvailableShiftCapacity(
+                        context, sku, shift, shiftMaxQty, firstInspectionQty, shiftCapacity,
+                        ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
+                if (partialShiftTotalCapacity <= 0) {
+                    /*
+                     * 部分班次不足完整首检（或试制固定2小时后无正量）时，局部搜索也必须
+                     * 把首检整体顺延。否则会把不可落地候选错误判为高产能机台。
+                     */
+                    productionStartTime = ShiftProductionControlUtil.resolveFirstSchedulableStartIgnoringCleaning(
+                            context, machine.getMachineCode(), effectiveEndTime, shifts,
+                            shiftCapacity, lhTimeSeconds, mouldQty);
+                    if (Objects.isNull(productionStartTime)) {
+                        return LocalSearchCapacityEstimate.empty();
+                    }
+                    cursorStartTime = productionStartTime;
+                    firstInspectionShift = NewSpecEmbryoAvailableTimeResolver.resolveProductionShift(
+                            shifts, productionStartTime);
+                    firstInspectionShiftIndex = Objects.isNull(firstInspectionShift)
+                            || Objects.isNull(firstInspectionShift.getShiftIndex())
+                            ? -1 : firstInspectionShift.getShiftIndex();
+                    firstInspectionQty = FirstInspectionQtyUtil.resolvePreviewFirstInspectionQty(
+                            context, sku, firstInspectionShift, shiftCapacity, remainingQty,
+                            ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
+                    continue;
+                }
+                if (!embryoFirstInspectionLanded && firstInspectionQty > 0) {
+                    /*
+                     * 普通SKU首检条数先确认能完整落入本部分班次后再计入候选总量，
+                     * 后续常规产能从同一部分班次总产能中扣除该首检量。
+                     */
+                    totalQty += firstInspectionQty;
+                    remainingQty -= firstInspectionQty;
+                    specEndTime = effectiveStartTime;
+                }
+                embryoFirstInspectionLanded = true;
+            }
             shiftMaxQty = FirstInspectionQtyUtil.resolveNormalCapacityAfterFirstInspection(
                     context, sku, shift, shiftMaxQty, firstInspectionShiftIndex, firstInspectionQty,
-                    shiftCapacity, ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode());
+                    shiftCapacity, ScheduleTypeEnum.NEW_SPEC.getCode(), machine.getMachineCode(),
+                    embryoAvailableTimeConstrained);
             if (shiftMaxQty <= 0) {
                 continue;
             }
@@ -556,9 +665,12 @@ public class LocalSearchMachineAllocatorStrategy {
             // 当前班次结束后再推进到下一班次，避免跨班次重叠计算
             cursorStartTime = effectiveEndTime;
         }
-        totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
-                context, sku, shifts, firstInspectionShift, productionStartTime, shiftCapacity, totalQty,
-                machine.getMachineCode());
+        if (!embryoAvailableTimeConstrained) {
+            // 未命中胎胚配置时继续沿用原“生产窗口外首检量”估算，保持既有局部搜索评分。
+            totalQty += resolveFirstInspectionCapacityOutsideProductionWindow(
+                    context, sku, shifts, firstInspectionShift, productionStartTime, shiftCapacity, totalQty,
+                    machine.getMachineCode());
+        }
 
         if (totalQty <= 0 || specEndTime == null) {
             return LocalSearchCapacityEstimate.empty();

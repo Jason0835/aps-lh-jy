@@ -699,6 +699,104 @@ public final class FirstInspectionQtyUtil {
     }
 
     /**
+     * 按胎胚最早可供时间路径调整首检班次的部分班次总产能。
+     *
+     * <p>该方法只供 S4.5 命中胎胚时间配置时调用。普通 SKU 的首检条数属于部分班次
+     * 总产能的一部分，因此不再额外叠加；若残余总产能不足完整首检，当前班次直接归零。
+     * 试制 SKU 不生成首检条数，仍按现有规则固定扣减两小时对应产能。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前新增 SKU
+     * @param shifts 当前业务日班次
+     * @param attributionShift 实际生产开始班次，即首检归属班次
+     * @param shiftCapacityMap 已按实际生产开始时间折算的班次总产能
+     * @param shiftCapacity 运行态完整班产
+     * @param remainingQty 当前候选目标量
+     * @param scheduleType 排程类型
+     * @param machineCode 机台编码
+     * @return 胎胚时间及首检共同收口后的班次总产能图
+     */
+    public static Map<Integer, Integer> applyEmbryoAvailableFirstInspectionCapacity(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            List<LhShiftConfigVO> shifts,
+            LhShiftConfigVO attributionShift,
+            Map<Integer, Integer> shiftCapacityMap,
+            int shiftCapacity,
+            int remainingQty,
+            String scheduleType,
+            String machineCode) {
+        Map<Integer, Integer> adjustedMap = new LinkedHashMap<Integer, Integer>(
+                CollectionUtils.isEmpty(shifts) ? 0 : shifts.size());
+        if (CollectionUtils.isEmpty(shifts)) {
+            return adjustedMap;
+        }
+        int firstInspectionQty = resolvePreviewFirstInspectionQty(
+                context, sku, attributionShift, shiftCapacity, remainingQty, scheduleType, machineCode);
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift) || Objects.isNull(shift.getShiftIndex())) {
+                continue;
+            }
+            Integer originalCapacity = CollectionUtils.isEmpty(shiftCapacityMap)
+                    ? null : shiftCapacityMap.get(shift.getShiftIndex());
+            if (Objects.isNull(originalCapacity)) {
+                continue;
+            }
+            int adjustedCapacity = Math.max(0, originalCapacity);
+            if (Objects.nonNull(attributionShift)
+                    && Objects.equals(shift.getShiftIndex(), attributionShift.getShiftIndex())) {
+                adjustedCapacity = resolveEmbryoAvailableShiftCapacity(
+                        context, sku, shift, adjustedCapacity, firstInspectionQty,
+                        shiftCapacity, scheduleType, machineCode);
+            }
+            adjustedMap.put(shift.getShiftIndex(), adjustedCapacity);
+        }
+        return adjustedMap;
+    }
+
+    /**
+     * 解析胎胚时间所在部分班次扣除首检后的可用总产能。
+     *
+     * @param context 排程上下文
+     * @param sku 当前新增 SKU
+     * @param shift 首检归属班次
+     * @param partialShiftCapacity 从实际开始时间至班次结束的物理总产能
+     * @param firstInspectionQty 普通 SKU 完整首检条数
+     * @param shiftCapacity 运行态完整班产
+     * @param scheduleType 排程类型
+     * @param machineCode 机台编码
+     * @return 普通 SKU 返回可容纳完整首检的部分班次总产能；试制返回扣除两小时后的生产产能
+     */
+    public static int resolveEmbryoAvailableShiftCapacity(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LhShiftConfigVO shift,
+            int partialShiftCapacity,
+            int firstInspectionQty,
+            int shiftCapacity,
+            String scheduleType,
+            String machineCode) {
+        int currentCapacity = Math.max(0, partialShiftCapacity);
+        if (isTrialTimeBasedFirstInspection(sku, shift, scheduleType)) {
+            int actualShiftCapacity = resolveShiftCapacityCap(context, shift, shiftCapacity, scheduleType);
+            int inspectionCapacity = (int) ((long) actualShiftCapacity * TRIAL_FIRST_INSPECTION_HOURS
+                    / TRIAL_SHIFT_DURATION_HOURS);
+            int finalCapacity = Math.max(0, currentCapacity - inspectionCapacity);
+            log.debug("试制SKU胎胚可供部分班次首检产能收口, batchNo: {}, materialCode: {}, machineCode: {}, "
+                            + "班次: {}, 部分班次总产能: {}, 固定2小时首检折算量: {}, 剩余生产产能: {}",
+                    Objects.isNull(context) ? null : context.getBatchNo(),
+                    Objects.isNull(sku) ? null : sku.getMaterialCode(), machineCode,
+                    Objects.isNull(shift) ? null : shift.getShiftIndex(),
+                    currentCapacity, inspectionCapacity, finalCapacity);
+            return finalCapacity;
+        }
+        if (firstInspectionQty > 0 && currentCapacity < firstInspectionQty) {
+            return 0;
+        }
+        return currentCapacity;
+    }
+
+    /**
      * 解析当前班次扣除首检后的正常生产上限。
      *
      * @param context 排程上下文
@@ -763,6 +861,52 @@ public final class FirstInspectionQtyUtil {
         }
         int cap = resolveShiftCapacityCap(context, shift, shiftCapacity, scheduleType);
         return Math.min(Math.max(0, shiftMaxQty), Math.max(0, cap - firstInspectionQty));
+    }
+
+    /**
+     * 按胎胚可供部分班次口径解析首检后的正常生产量。
+     *
+     * <p>仅在 S4.5 命中胎胚时间配置时启用。传入的 shiftMaxQty 已是从实际开始时间
+     * 到班次结束的物理产能，普通 SKU 需直接从该产能扣除首检条数；试制 SKU 需直接
+     * 扣除固定两小时产能。未启用时完整复用原方法，其他排程入口不受影响。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 当前新增 SKU
+     * @param shift 当前班次
+     * @param shiftMaxQty 当前部分班次物理产能
+     * @param firstInspectionShiftIndex 首检归属班次
+     * @param firstInspectionQty 普通 SKU 首检条数
+     * @param shiftCapacity 运行态完整班产
+     * @param scheduleType 排程类型
+     * @param machineCode 机台编码
+     * @param embryoAvailableTimeConstrained 是否启用胎胚时间部分班次口径
+     * @return 首检扣减后的正常生产量
+     */
+    public static int resolveNormalCapacityAfterFirstInspection(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LhShiftConfigVO shift,
+            int shiftMaxQty,
+            int firstInspectionShiftIndex,
+            int firstInspectionQty,
+            int shiftCapacity,
+            String scheduleType,
+            String machineCode,
+            boolean embryoAvailableTimeConstrained) {
+        if (!embryoAvailableTimeConstrained
+                || Objects.isNull(shift)
+                || !Objects.equals(shift.getShiftIndex(), firstInspectionShiftIndex)) {
+            return resolveNormalCapacityAfterFirstInspection(
+                    context, sku, shift, shiftMaxQty, firstInspectionShiftIndex,
+                    firstInspectionQty, shiftCapacity, scheduleType, machineCode);
+        }
+        int availableCapacity = resolveEmbryoAvailableShiftCapacity(
+                context, sku, shift, shiftMaxQty, firstInspectionQty,
+                shiftCapacity, scheduleType, machineCode);
+        if (isTrialTimeBasedFirstInspection(sku, shift, scheduleType)) {
+            return availableCapacity;
+        }
+        return Math.max(0, availableCapacity - Math.max(0, firstInspectionQty));
     }
 
     /**

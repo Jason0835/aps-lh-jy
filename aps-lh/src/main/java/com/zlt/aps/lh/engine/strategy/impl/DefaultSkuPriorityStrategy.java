@@ -124,9 +124,12 @@ public class DefaultSkuPriorityStrategy implements ISkuPriorityStrategy {
 
 
     /**
-     * 根据胎胚最早收尾时间，重新排序
+     * 根据胎胚最早可供硫化时间重新排序。
+     *
+     * <p>本次仅修正历史注释口径；续作与新增 SKU 的既有排序行为继续保留，
+     * S4.5 的生产时间限制由新增排产中心解析器独立处理。</p>
      * @param skuList SKU列表
-     * @param embryoLhTimeMap 胎胚最早收尾时间Map <结构，胎胚最早收尾时间>
+     * @param embryoLhTimeMap 胎胚最早可供硫化时间 Map，key=结构名称，value=最早可供时间
      */
     private void reorderByEarliestLhTime(
             List<SkuScheduleDTO> skuList,

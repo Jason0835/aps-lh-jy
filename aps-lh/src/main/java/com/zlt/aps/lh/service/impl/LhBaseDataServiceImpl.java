@@ -1,6 +1,5 @@
 package com.zlt.aps.lh.service.impl;
 
-import cn.hutool.core.collection.CollectionUtil;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.zlt.aps.cx.api.domain.entity.CxStock;
 import com.zlt.aps.cx.entity.config.CxEmbryoLhTime;
@@ -290,6 +289,13 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         CompletableFuture<Void> embryoStockFuture = runAfterDataInitTask(monthPlanFuture, "胎胚实时库存",
                 () -> loadEmbryoRealtimeStock(context, factoryCode, startDate),
                 () -> sizeOf(context.getEmbryoRealtimeStockMap()));
+        /*
+         * 胎胚最早可供时间只依赖工厂和排程窗口，与月计划胎胚编码无关，必须独立加载。
+         * 这样即使当期月计划没有胎胚编码，也不会遗漏按结构配置的新增排产时间下限。
+         */
+        CompletableFuture<Void> embryoAvailableTimeFuture = runDataInitTaskAsync("胎胚最早可供硫化时间",
+                () -> loadStructureEarliestLhTime(context, factoryCode, startDate, endDate),
+                () -> sizeOf(context.getStructureEarliestLhTimeMap()));
         CompletableFuture<Void> monthFinishedQtyFuture = runAfterDataInitTask(monthPlanFuture, "月累计完成量",
                 () -> loadMaterialMonthFinishedQty(context, factoryCode,
                         requiredMonthMap, LhScheduleTimeUtil.addDays(scheduleDate, -1), year, month),
@@ -313,6 +319,7 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 monthPlanStatisticsFuture,
                 specialMaterialBomFuture,
                 embryoStockFuture,
+                embryoAvailableTimeFuture,
                 runDataInitTaskAsync("工作日历",
                         () -> loadWorkCalendar(context, factoryCode, calendarControlStartDate, endDate),
                         () -> sizeOf(context.getWorkCalendarList())),
@@ -1281,7 +1288,6 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
                 .filter(StringUtils::isNotEmpty)
                 .distinct()
                 .collect(java.util.stream.Collectors.toList());
-        context.setStructureEarliestLhTimeMap(new HashMap<>());
         Map<String, Integer> stockMap = new HashMap<>(Math.max(16, embryoCodeList.size()));
         if (CollectionUtils.isEmpty(embryoCodeList)) {
             context.setEmbryoRealtimeStockMap(stockMap);
@@ -1301,20 +1307,62 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
         }
         context.setEmbryoRealtimeStockMap(stockMap);
         log.debug("胎胚实时库存加载完成, 数量: {}", stockMap.size());
-        //加载胎胚最早可供硫化时间，结构维度
-        List<CxEmbryoLhTime> embryoLhTimesList = cxEmbryoLhTimeMapper.selectList(new LambdaQueryWrapper<CxEmbryoLhTime>()
-                .eq(CxEmbryoLhTime::getFactoryCode, factoryCode)
-                .gt(CxEmbryoLhTime::getEarliestLhTime, stockDate));
-        if (embryoLhTimesList != null) {
-            Map<String, Date> timeMap = embryoLhTimesList.stream()
-                    .filter(e -> e.getEarliestLhTime() != null)
-                    .collect(Collectors.toMap(
-                            CxEmbryoLhTime::getStructureName,
-                            CxEmbryoLhTime::getEarliestLhTime,
-                            (v1, v2) -> v1 // 如果有重复，保留第一个
-                    ));
-            context.setStructureEarliestLhTimeMap(CollectionUtil.isNotEmpty(timeMap) ? timeMap : new HashMap<>());
+    }
+
+    /**
+     * 独立加载排程窗口内按结构配置的胎胚最早可供硫化时间。
+     *
+     * <p>查询范围严格使用排程窗口左闭右开区间，结构名称保持大小写敏感的精确键；
+     * 同一结构存在多条配置时取最早时间，保证数据库返回顺序不会影响排程结果。</p>
+     *
+     * @param context 排程上下文
+     * @param factoryCode 分厂编号
+     * @param windowStartTime 排程窗口开始时间（包含）
+     * @param windowEndTime 排程窗口结束时间（不包含）
+     */
+    private void loadStructureEarliestLhTime(LhScheduleContext context,
+                                            String factoryCode,
+                                            Date windowStartTime,
+                                            Date windowEndTime) {
+        Map<String, Date> earliestTimeMap = new HashMap<String, Date>(16);
+        context.setStructureEarliestLhTimeMap(earliestTimeMap);
+        List<CxEmbryoLhTime> configuredTimeList = cxEmbryoLhTimeMapper.selectList(
+                new LambdaQueryWrapper<CxEmbryoLhTime>()
+                        .eq(CxEmbryoLhTime::getFactoryCode, factoryCode)
+                        .ge(CxEmbryoLhTime::getScheduleDate, windowStartTime)
+                        .lt(CxEmbryoLhTime::getScheduleDate, windowEndTime)
+                        // 已逻辑删除的成型配置不再代表有效胎胚供料承诺，禁止作为生产时间下限。
+                        .eq(CxEmbryoLhTime::getIsDelete, DeleteFlagEnum.NORMAL.getCode()));
+        int ignoredCount = 0;
+        int duplicateCount = 0;
+        if (!CollectionUtils.isEmpty(configuredTimeList)) {
+            for (CxEmbryoLhTime configuredTime : configuredTimeList) {
+                if (Objects.isNull(configuredTime)
+                        || StringUtils.isEmpty(configuredTime.getStructureName())
+                        || Objects.isNull(configuredTime.getEarliestLhTime())
+                        || (Objects.nonNull(configuredTime.getIsDelete())
+                        && !Objects.equals(DeleteFlagEnum.NORMAL.getCode(), configuredTime.getIsDelete()))) {
+                    ignoredCount++;
+                    continue;
+                }
+                String structureName = configuredTime.getStructureName();
+                Date currentEarliestTime = earliestTimeMap.get(structureName);
+                if (Objects.nonNull(currentEarliestTime)) {
+                    duplicateCount++;
+                }
+                if (Objects.isNull(currentEarliestTime)
+                        || configuredTime.getEarliestLhTime().before(currentEarliestTime)) {
+                    earliestTimeMap.put(structureName, configuredTime.getEarliestLhTime());
+                }
+            }
         }
+        log.info("胎胚最早可供硫化时间加载完成, factoryCode: {}, windowStartTime: {}, windowEndTime: {}, "
+                        + "queryCount: {}, validStructureCount: {}, duplicateStructureCount: {}, ignoredCount: {}, "
+                        + "finalEarliestTimeMap: {}",
+                factoryCode, LhScheduleTimeUtil.formatDateTime(windowStartTime),
+                LhScheduleTimeUtil.formatDateTime(windowEndTime),
+                CollectionUtils.isEmpty(configuredTimeList) ? 0 : configuredTimeList.size(),
+                earliestTimeMap.size(), duplicateCount, ignoredCount, earliestTimeMap);
     }
 
 

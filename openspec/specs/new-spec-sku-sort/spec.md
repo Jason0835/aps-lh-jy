@@ -2,6 +2,8 @@
 
 规范新增排产（S4.5）阶段对 `newSpecSkuList` 进行 SKU 排序时的优先级层级，保证补偿 SKU、试制/量试 SKU、正规 SKU 等不同来源的 SKU 在排序阶段遵循统一规则。
 
+现有按结构胎胚最早可供硫化时间进行的稳定重排继续保留。该排序只影响 SKU 执行顺序；命中配置后的生产时间下限、首检归属和部分班次产能统一由 `new-spec-embryo-available-time` 主规格约束。
+
 ## Requirements
 
 ### Requirement: 新增排产 SKU 排序层级

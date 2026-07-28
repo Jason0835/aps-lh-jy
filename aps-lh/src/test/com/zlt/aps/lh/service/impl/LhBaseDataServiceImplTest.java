@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.zlt.aps.cx.api.domain.entity.CxStock;
+import com.zlt.aps.cx.entity.config.CxEmbryoLhTime;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.entity.LhDayFinishQty;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
@@ -13,6 +14,7 @@ import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.mapper.CxStockMapper;
+import com.zlt.aps.lh.mapper.CxEmbryoLhTimeMapper;
 import com.zlt.aps.lh.mapper.FactoryMonthPlanProductionFinalResultMapper;
 import com.zlt.aps.lh.mapper.LhDayFinishQtyMapper;
 import com.zlt.aps.lh.mapper.LhMachineInfoMapper;
@@ -73,6 +75,43 @@ import java.util.concurrent.atomic.AtomicInteger;
  * @author APS
  */
 public class LhBaseDataServiceImplTest {
+
+    /**
+     * 用例说明：胎胚最早可供时间必须独立加载，同结构有效重复配置取最早值，
+     * 逻辑删除、空结构和空时间不得进入上下文。
+     */
+    @Test
+    public void loadStructureEarliestLhTimeShouldKeepMinimumTimeForDuplicateStructure() throws Exception {
+        LhBaseDataServiceImpl service = new LhBaseDataServiceImpl();
+        CxEmbryoLhTimeMapper mapper = Mockito.mock(CxEmbryoLhTimeMapper.class);
+        injectField(service, "cxEmbryoLhTimeMapper", mapper);
+        CxEmbryoLhTime later = new CxEmbryoLhTime();
+        later.setStructureName("STRUCTURE-A");
+        later.setEarliestLhTime(buildDateTime(2026, 7, 19, 12, 0));
+        CxEmbryoLhTime earlier = new CxEmbryoLhTime();
+        earlier.setStructureName("STRUCTURE-A");
+        earlier.setEarliestLhTime(buildDateTime(2026, 7, 19, 10, 0));
+        CxEmbryoLhTime logicallyDeleted = new CxEmbryoLhTime();
+        logicallyDeleted.setStructureName("STRUCTURE-A");
+        logicallyDeleted.setEarliestLhTime(buildDateTime(2026, 7, 19, 7, 0));
+        logicallyDeleted.setIsDelete(1);
+        CxEmbryoLhTime blankStructure = new CxEmbryoLhTime();
+        blankStructure.setStructureName("");
+        blankStructure.setEarliestLhTime(buildDateTime(2026, 7, 19, 8, 0));
+        Mockito.when(mapper.selectList(ArgumentMatchers.any()))
+                .thenReturn(Arrays.asList(later, earlier, logicallyDeleted, blankStructure));
+        LhScheduleContext context = new LhScheduleContext();
+
+        ReflectionTestUtils.invokeMethod(
+                service, "loadStructureEarliestLhTime", context, "116",
+                buildDate(2026, 7, 18), buildDate(2026, 7, 21));
+
+        Assertions.assertEquals(1, context.getStructureEarliestLhTimeMap().size());
+        Assertions.assertEquals(
+                earlier.getEarliestLhTime(),
+                context.getStructureEarliestLhTimeMap().get("STRUCTURE-A"),
+                "同结构多条配置必须确定性取最早可供时间");
+    }
 
     /**
      * 用例说明：启用机台年度精准计划缺失或重复时只记录告警，不中断排程上下文。
@@ -806,6 +845,8 @@ public class LhBaseDataServiceImplTest {
         injectField(service, "lhMouldChangePlanMapper", mockMapper(LhMouldChangePlanEntityMapper.class));
         injectField(service, "mouldDeliveryPlanEntityMapper", mockMapper(MpMouldDeliveryPlanEntityMapper.class));
         injectField(service, "cxStockMapper", mockMapper(CxStockMapper.class));
+        // 胎胚最早可供时间已从库存链拆为独立任务，默认测试夹具必须同步注入空 Mapper。
+        injectField(service, "cxEmbryoLhTimeMapper", mockMapper(CxEmbryoLhTimeMapper.class));
         injectField(service, "lhSpecialMaterialBomEntityMapper", mockMapper(LhSpecialMaterialBomEntityMapper.class));
         injectField(service, "skuConstructionRefMapper", mockMapper(MdmSkuConstructionRefMapper.class));
         injectField(service, "skuScheduleCategoryMapper", mockMapper(MdmSkuScheduleCategoryMapper.class));
@@ -889,6 +930,23 @@ public class LhBaseDataServiceImplTest {
         calendar.set(Calendar.YEAR, year);
         calendar.set(Calendar.MONTH, month - 1);
         calendar.set(Calendar.DAY_OF_MONTH, day);
+        return calendar.getTime();
+    }
+
+    /**
+     * 构造包含时分的测试时间。
+     *
+     * @param year 年
+     * @param month 月
+     * @param day 日
+     * @param hour 24小时制小时
+     * @param minute 分钟
+     * @return 测试时间
+     */
+    private Date buildDateTime(int year, int month, int day, int hour, int minute) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.clear();
+        calendar.set(year, month - 1, day, hour, minute);
         return calendar.getTime();
     }
 
