@@ -8892,8 +8892,9 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
                 setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
                 continue;
             }
-            int shiftQty = ShiftCapacityResolverUtil.normalizeAllocatedShiftQty(
-                    Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
+            // 二次班次重分配必须复用统一目标量入口，胎胚库存精确硬目标允许奇数尾量落在最早可排班次。
+            int shiftQty = getTargetScheduleQtyResolver().resolveAllocatedShiftQty(
+                    context, result, Math.min(remaining, shiftMaxQty), shiftMaxQty, mouldQty);
             if (shiftQty <= 0) {
                 setShiftPlanQty(result, shift.getShiftIndex(), 0, null, null);
                 continue;
@@ -8912,6 +8913,17 @@ public class ContinuousProductionStrategy implements IProductionStrategy {
             cursorStartTime = effectiveEndTime;
         }
         refreshResultSummary(context, result, shifts);
+        if (getTargetScheduleQtyResolver().isEmbryoStockEnding(context, result)) {
+            log.info("胎胚库存硬目标班次重分配完成, materialCode: {}, machineCode: {}, 原始目标量: {}, "
+                            + "精确硬目标: {}, 模台数: {}, 最终排产量: {}, 班次分布: "
+                            + "[class1={}, class2={}, class3={}, class4={}, class5={}, class6={}, class7={}, class8={}]",
+                    result.getMaterialCode(), result.getLhMachineCode(), targetQty,
+                    targetQty, mouldQty, ShiftFieldUtil.resolveScheduledQty(result),
+                    ShiftFieldUtil.getShiftPlanQty(result, 1), ShiftFieldUtil.getShiftPlanQty(result, 2),
+                    ShiftFieldUtil.getShiftPlanQty(result, 3), ShiftFieldUtil.getShiftPlanQty(result, 4),
+                    ShiftFieldUtil.getShiftPlanQty(result, 5), ShiftFieldUtil.getShiftPlanQty(result, 6),
+                    ShiftFieldUtil.getShiftPlanQty(result, 7), ShiftFieldUtil.getShiftPlanQty(result, 8));
+        }
     }
 
     /**

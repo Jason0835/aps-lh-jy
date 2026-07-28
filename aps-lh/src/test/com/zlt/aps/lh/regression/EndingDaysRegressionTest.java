@@ -2,6 +2,7 @@ package com.zlt.aps.lh.regression;
 
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -205,6 +206,30 @@ class EndingDaysRegressionTest {
 
         assertFalse(strategy.isFinalEnding(context, dto, 79), "排后实际排产量未达到清尾目标量时不能落最终收尾");
         assertTrue(strategy.isFinalEnding(context, dto, 80), "排后实际排产量达到清尾目标量时应落最终收尾");
+    }
+
+    @Test
+    void isFinalEnding_embryoStockHardTarget_shouldCompareExactOddTarget() {
+        DefaultEndingJudgmentStrategy strategy = new DefaultEndingJudgmentStrategy();
+        TargetScheduleQtyResolver resolver = new TargetScheduleQtyResolver();
+        ReflectionTestUtils.setField(strategy, "targetScheduleQtyResolver", resolver);
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(new java.util.Date());
+        context.getEmbryoEndingFlagMap().put("215101882", 1);
+        SkuScheduleDTO dto = new SkuScheduleDTO();
+        dto.setMaterialCode("3302001318");
+        dto.setEmbryoCode("215101882");
+        dto.setSkuTag(SkuTagEnum.ENDING.getCode());
+        dto.setEndingDaysRemaining(1);
+        dto.setSurplusQty(0);
+        dto.setEmbryoStock(31);
+        dto.setTargetScheduleQty(31);
+        dto.setMouldQty(2);
+        context.getContinuousSkuList().add(dto);
+        resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, dto, "最终收尾单测");
+
+        assertFalse(strategy.isFinalEnding(context, dto, 30), "实际排产30条未达到精确硬目标31条时不能收尾");
+        assertTrue(strategy.isFinalEnding(context, dto, 31), "实际排产31条达到精确硬目标时必须收尾");
     }
 
     private SkuScheduleDTO sku(int pendingQty, int shiftCapacity) {

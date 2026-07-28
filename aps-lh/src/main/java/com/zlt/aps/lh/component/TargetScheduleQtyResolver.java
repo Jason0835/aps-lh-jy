@@ -983,6 +983,48 @@ public class TargetScheduleQtyResolver {
     }
 
     /**
+     * 解析最终收尾判断使用的严格目标量。
+     * <p>成型胎胚库存收尾属于精确硬目标，直接使用已经完成单胎胚库存赋值或共用胎胚分摊后的SKU目标量，
+     * 不再按模台数向上归整；普通收尾继续沿用共用胎胚仅取硫化余量、单胎胚取MAX(余量,库存)并按模台数归整的口径。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU排程DTO
+     * @return 最终收尾比较目标量
+     */
+    public int resolveFinalEndingTargetQty(LhScheduleContext context, SkuScheduleDTO sku) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        int originalTargetQty = Math.max(0, sku.resolveTargetScheduleQty());
+        int mouldQty = ShiftCapacityResolverUtil.resolveMachineMouldQty(sku.getMouldQty());
+        if (isEmbryoStockEnding(context, sku)) {
+            log.info("最终收尾目标量解析, materialCode: {}, 胎胚编码: {}, 原始目标量: {}, "
+                            + "精确硬目标: {}, 模台数: {}, 最终比较目标: {}, rule: 胎胚库存硬目标不做模台数归整",
+                    sku.getMaterialCode(), sku.getEmbryoCode(), originalTargetQty,
+                    originalTargetQty, mouldQty, originalTargetQty);
+            return originalTargetQty;
+        }
+
+        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int embryoStock = Math.max(0, sku.getEmbryoStock());
+        boolean sharedEmbryo = isSharedEmbryoInWindow(context, sku);
+        int baseTargetQty = sharedEmbryo ? surplusQty : Math.max(surplusQty, embryoStock);
+        int finalTargetQty = ShiftCapacityResolverUtil.roundUpQtyToMouldMultiple(baseTargetQty, mouldQty);
+        if (sharedEmbryo && embryoStock > surplusQty) {
+            log.debug("共用胎胚收尾判定比较量下调, materialCode: {}, 胎胚编码: {}, "
+                            + "原口径MAX(余量,库存): {}, 新口径仅余量: {}, 下调幅度: {}",
+                    sku.getMaterialCode(), sku.getEmbryoCode(),
+                    Math.max(surplusQty, embryoStock), surplusQty,
+                    Math.max(surplusQty, embryoStock) - surplusQty);
+        }
+        log.debug("最终收尾目标量解析, materialCode: {}, 胎胚编码: {}, 原始目标量: {}, "
+                        + "精确硬目标: 无, 基础比较量: {}, 模台数: {}, 最终比较目标: {}",
+                sku.getMaterialCode(), sku.getEmbryoCode(), originalTargetQty,
+                baseTargetQty, mouldQty, finalTargetQty);
+        return finalTargetQty;
+    }
+
+    /**
      * 解析账本裁剪后的班次保留量。
      * <p>成型胎胚库存收尾必须严格保留剩余胎胚库存数量，不按模台数向下裁成偶数。</p>
      *

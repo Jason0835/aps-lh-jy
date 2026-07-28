@@ -6,7 +6,6 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
-import com.zlt.aps.lh.util.ShiftCapacityResolverUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -259,31 +258,15 @@ public class DefaultEndingJudgmentStrategy implements IEndingJudgmentStrategy {
 
     /**
      * 计算收尾比较量。
-     * <p>共用胎胚收尾只按硫化余量判定，不按胎胚库存；单胎胚仍按 MAX(余量, 库存)。</p>
+     * <p>统一委托目标量解析器：胎胚库存硬目标保持精确数量，普通收尾继续沿用现有模台数归整口径。</p>
      *
      * @param context 排程上下文
      * @param sku SKU排程DTO
      * @return 收尾比较量
      */
     private int resolveTailTargetQty(LhScheduleContext context, SkuScheduleDTO sku) {
-        int surplusQty = Math.max(0, sku.getSurplusQty());
-        int embryoStock = Math.max(0, sku.getEmbryoStock());
-        int baseTargetQty;
-        // 共用胎胚收尾只按硫化余量，不按胎胚库存
-        if (getTargetScheduleQtyResolver().isSharedEmbryoInWindow(context, sku)) {
-            if (embryoStock > surplusQty) {
-                log.debug("共用胎胚收尾判定比较量下调, materialCode: {}, 胎胚编码: {}, "
-                                + "原口径MAX(余量,库存): {}, 新口径仅余量: {}, 下调幅度: {}",
-                        sku.getMaterialCode(), sku.getEmbryoCode(),
-                        Math.max(surplusQty, embryoStock), surplusQty,
-                        Math.max(surplusQty, embryoStock) - surplusQty);
-            }
-            baseTargetQty = surplusQty;
-        } else {
-            baseTargetQty = Math.max(surplusQty, embryoStock);
-        }
-        // 收尾目标量沿用项目既有模台数归整口径，保证奇数余量和多模目标量前后一致。
-        return ShiftCapacityResolverUtil.roundUpQtyToMouldMultiple(baseTargetQty, sku.getMouldQty());
+        // 收尾预判和排后最终判定必须共用同一目标量，避免胎胚库存硬目标在最后一步再次被模台数放大。
+        return getTargetScheduleQtyResolver().resolveFinalEndingTargetQty(context, sku);
     }
 
     /**

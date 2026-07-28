@@ -11,6 +11,7 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.ShiftEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
@@ -113,6 +114,53 @@ public class ContinuousProductionStrategyTest {
 
         assertTrue(originalSkip, "旧SKU收尾小余量规则在该场景会命中");
         assertFalse(guardedSkip, "成型胎胚库存收尾应优先按胎胚库存排产，不能提前未排");
+    }
+
+    /**
+     * 胎胚库存精确硬目标在二次班次重分配时，奇数尾量必须落到最早可排班次。
+     */
+    @Test
+    public void redistributeShiftQty_shouldKeepOddHardTargetOnEarliestAvailableShift() {
+        ContinuousProductionStrategy strategy = new ContinuousProductionStrategy();
+        ReflectionTestUtils.setField(strategy, "targetScheduleQtyResolver", new TargetScheduleQtyResolver());
+        ReflectionTestUtils.setField(strategy, "capsuleReplacementRuleService",
+                new CapsuleReplacementRuleService() {
+                    @Override
+                    public int resolveReplacementShiftCapacityUpperLimit(LhScheduleContext context,
+                                                                         LhScheduleResult result,
+                                                                         LhShiftConfigVO shift,
+                                                                         int capacityBeforeReplacement) {
+                        // 模拟日标准收敛后第二班上限为14，验证剩余1条继续落到紧邻的第三班。
+                        return shift.getShiftIndex() == 2 ? 14 : capacityBeforeReplacement;
+                    }
+                });
+        LhScheduleContext context = new LhScheduleContext();
+        Date scheduleDate = Date.from(LocalDate.of(2026, 7, 23)
+                .atStartOfDay(ZONE_ID).toInstant());
+        context.setScheduleDate(scheduleDate);
+        context.setScheduleTargetDate(scheduleDate);
+        List<LhShiftConfigVO> shifts = LhScheduleTimeUtil.buildDefaultScheduleShifts(context, scheduleDate);
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode("3302001318");
+        result.setProductStatus("S");
+        result.setEmbryoCode("215101882");
+        result.setLhMachineCode("K1506");
+        result.setMouldQty(2);
+        result.setSingleMouldShiftQty(16);
+        result.setLhTime(3600);
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 31,
+                shifts.get(0).getShiftStartDateTime(), shifts.get(1).getShiftEndDateTime());
+        context.getEmbryoStockHardTargetMaterialSet().add(
+                MonthPlanDateResolver.buildMaterialStatusKey(result.getMaterialCode(), result.getProductStatus()));
+
+        ReflectionTestUtils.invokeMethod(strategy, "redistributeShiftQty", context, result, shifts, 31);
+
+        assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(result, 1));
+        assertEquals(Integer.valueOf(14), ShiftFieldUtil.getShiftPlanQty(result, 2));
+        assertEquals(Integer.valueOf(1), ShiftFieldUtil.getShiftPlanQty(result, 3));
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(result, 4));
+        assertEquals(Integer.valueOf(0), ShiftFieldUtil.getShiftPlanQty(result, 5));
+        assertEquals(31, ShiftFieldUtil.resolveScheduledQty(result));
     }
 
     @Test

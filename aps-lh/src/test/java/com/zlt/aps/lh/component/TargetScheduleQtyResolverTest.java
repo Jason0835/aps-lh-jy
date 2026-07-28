@@ -503,30 +503,36 @@ public class TargetScheduleQtyResolverTest {
         LhScheduleContext context = new LhScheduleContext();
         setScheduleDate(context);
         context.getEmbryoEndingFlagMap().put("EMB-07", 1);
-        SkuScheduleDTO sku = buildSku("3302003009", "EMB-07", 10, 3, 3);
+        SkuScheduleDTO sku = buildSku("3302003009", "EMB-07", 31, 31, 31);
         sku.setSkuTag("02");
         sku.setEndingDaysRemaining(1);
         sku.setMouldQty(2);
         resolver.applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "新增排产");
-        int allocatedQty = resolver.resolveAllocatedShiftQty(context, sku, 3, 16, 2);
+        int allocatedQty = resolver.resolveAllocatedShiftQty(context, sku, 1, 16, 2);
+        int finalEndingTargetQty = resolver.resolveFinalEndingTargetQty(context, sku);
         LhScheduleResult result = new LhScheduleResult();
         result.setMaterialCode("3302003009");
         result.setEmbryoCode("EMB-07");
         result.setLhMachineCode("K1108");
         result.setMouldQty(2);
-        ShiftFieldUtil.setShiftPlanQty(result, 1, 4, new Date(), null);
+        ShiftFieldUtil.setShiftPlanQty(result, 1, 16, new Date(), null);
+        ShiftFieldUtil.setShiftPlanQty(result, 2, 16, new Date(), null);
         ShiftFieldUtil.syncDailyPlanQty(result);
-        context.getSkuProductionRemainingQtyMap().put("3302003009", 3);
+        context.getSkuProductionRemainingQtyMap().put("3302003009", 31);
         LhShiftConfigVO firstShift = new LhShiftConfigVO();
         firstShift.setShiftIndex(1);
+        LhShiftConfigVO secondShift = new LhShiftConfigVO();
+        secondShift.setShiftIndex(2);
 
         int cappedQty = resolver.capResultByProductionRemainingQty(
-                context, sku, result, Collections.singletonList(firstShift), "新增排产");
+                context, sku, result, Arrays.asList(firstShift, secondShift), "新增排产");
 
-        Assertions.assertEquals(3, allocatedQty);
-        Assertions.assertEquals(3, cappedQty);
-        Assertions.assertEquals(Integer.valueOf(3), ShiftFieldUtil.getShiftPlanQty(result, 1));
-        Assertions.assertEquals(Integer.valueOf(3), result.getDailyPlanQty());
+        Assertions.assertEquals(1, allocatedQty);
+        Assertions.assertEquals(31, finalEndingTargetQty);
+        Assertions.assertEquals(31, cappedQty);
+        Assertions.assertEquals(Integer.valueOf(16), ShiftFieldUtil.getShiftPlanQty(result, 1));
+        Assertions.assertEquals(Integer.valueOf(15), ShiftFieldUtil.getShiftPlanQty(result, 2));
+        Assertions.assertEquals(Integer.valueOf(31), result.getDailyPlanQty());
     }
 
     /**
