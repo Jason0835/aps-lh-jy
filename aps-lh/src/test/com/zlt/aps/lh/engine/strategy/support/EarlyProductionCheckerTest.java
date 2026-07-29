@@ -3,6 +3,9 @@ package com.zlt.aps.lh.engine.strategy.support;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import org.junit.jupiter.api.Test;
@@ -282,6 +285,72 @@ class EarlyProductionCheckerTest {
                 context, sku, day1, day2);
 
         assertFalse(endingLargeSurplus, "已排机台日产乘积超过int范围时，不应因溢出误判为大余量");
+    }
+
+    /**
+     * 验证提前生产只允许正规新增来源，续作补偿、换活字块回流、试制和量试均不得进入。
+     */
+    @Test
+    void isEligibleNewProductionSku_shouldRejectExcludedScheduleScenes() {
+        SkuScheduleDTO formalNewSku = new SkuScheduleDTO();
+        formalNewSku.setConstructionStage(ConstructionStageEnum.FORMAL.getCode());
+        formalNewSku.setScheduleType(ScheduleTypeEnum.NEW_SPEC.getCode());
+        assertTrue(EarlyProductionChecker.isEligibleNewProductionSku(formalNewSku));
+
+        SkuScheduleDTO emptyStageFormalNewSku = new SkuScheduleDTO();
+        emptyStageFormalNewSku.setProductStatus("X");
+        assertTrue(EarlyProductionChecker.isEligibleNewProductionSku(emptyStageFormalNewSku),
+                "提前生产不得把产品状态是否为S作为正规新增的附加条件");
+
+        SkuScheduleDTO continuationSku = new SkuScheduleDTO();
+        continuationSku.setContinuousCompensationSku(true);
+        assertFalse(EarlyProductionChecker.isEligibleNewProductionSku(continuationSku));
+
+        SkuScheduleDTO continuationSourceSku = new SkuScheduleDTO();
+        continuationSourceSku.setSourceType(
+                SkuScheduleSourceTypeEnum.CONTINUATION_ADD_MACHINE.getCode());
+        assertFalse(EarlyProductionChecker.isEligibleNewProductionSku(continuationSourceSku));
+
+        SkuScheduleDTO typeBlockSku = new SkuScheduleDTO();
+        typeBlockSku.setSourceType(
+                SkuScheduleSourceTypeEnum.TYPE_BLOCK_TO_NEW_SPEC.getCode());
+        assertFalse(EarlyProductionChecker.isEligibleNewProductionSku(typeBlockSku));
+
+        SkuScheduleDTO trialSku = new SkuScheduleDTO();
+        trialSku.setConstructionStage(ConstructionStageEnum.TRIAL.getCode());
+        assertFalse(EarlyProductionChecker.isEligibleNewProductionSku(trialSku));
+
+        SkuScheduleDTO massTrialSku = new SkuScheduleDTO();
+        massTrialSku.setConstructionStage(ConstructionStageEnum.MASS_TRIAL.getCode());
+        assertFalse(EarlyProductionChecker.isEligibleNewProductionSku(massTrialSku));
+    }
+
+    /**
+     * 验证结构收尾余量判断按正在处理的业务日读取动态历史欠产，而不是固定使用 T 日 DTO 快照。
+     */
+    @Test
+    void checkEarlyProduction_shouldUseCurrentBusinessDateHistoryShortageCache() {
+        LocalDate day1 = LocalDate.of(2026, 7, 30);
+        LocalDate day2 = LocalDate.of(2026, 7, 31);
+        LocalDate day3 = LocalDate.of(2026, 8, 1);
+        LhScheduleContext context = contextWithStructurePlan(day1, "L1", 0);
+        context.addStructurePlanMachineCount(day2, "L1", 0);
+        context.getMonthlyHistoryShortageQtyMap().put(
+                day1, new HashMap<String, Integer>(2));
+        context.getMonthlyHistoryShortageQtyMap().get(day1).put("3302001001_S", 90);
+        SkuScheduleDTO sku = sku("3302001001", "L1", 0, 40,
+                quotaMap(day1, day2, day3, 0, 60, 0));
+        sku.setProductStatus("S");
+        context.recordScheduledMachine(day1, "L1", sku.getMaterialCode(),
+                sku.getProductStatus(), "K1101");
+
+        EarlyProductionDecision decision = EarlyProductionChecker.checkEarlyProduction(
+                context, sku, day1, day1, day3, 200);
+
+        assertTrue(decision.isAllowed(),
+                "动态历史欠产90大于已排1台日产40时，应按结构收尾大余量放行");
+        assertEquals(EarlyProductionDecision.SCENE_STRUCTURE_ENDING,
+                decision.getSceneType());
     }
 
     private LhScheduleContext contextWithStructurePlan(LocalDate date, String structureName, int machineCount) {

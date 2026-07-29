@@ -186,6 +186,36 @@ class SkuDailyPlanQuotaUtilRegressionTest {
         assertNotSame(quotaMap.get(day4), shiftedQuotaMap.get(day1), "动态前移视图必须克隆来源对象");
     }
 
+    /**
+     * 提前两天时，T～T+2 必须分别读取原始 T+2～T+4，且跨月日期仍按真实日期映射。
+     */
+    @Test
+    void buildShiftedEarlyProductionQuotaMap_shouldShiftTwoDaysAcrossMonthBoundary() {
+        LocalDate day1 = LocalDate.of(2026, 7, 31);
+        LocalDate day2 = LocalDate.of(2026, 8, 1);
+        LocalDate day3 = LocalDate.of(2026, 8, 2);
+        LocalDate day4 = LocalDate.of(2026, 8, 3);
+        LocalDate day5 = LocalDate.of(2026, 8, 4);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(8);
+        quotaMap.put(day1, quota("3302001724", day1, 0));
+        quotaMap.put(day2, quota("3302001724", day2, 0));
+        quotaMap.put(day3, quota("3302001724", day3, 46));
+        quotaMap.put(day4, quota("3302001724", day4, 50));
+        quotaMap.put(day5, quota("3302001724", day5, 54));
+
+        Map<LocalDate, SkuDailyPlanQuotaDTO> shiftedQuotaMap =
+                SkuDailyPlanQuotaUtil.buildShiftedEarlyProductionQuotaMap(
+                        quotaMap, day1, day3, day3);
+
+        assertEquals(46, shiftedQuotaMap.get(day1).getDayPlanQty());
+        assertEquals(50, shiftedQuotaMap.get(day2).getDayPlanQty());
+        assertEquals(54, shiftedQuotaMap.get(day3).getDayPlanQty());
+        assertEquals(0, quotaMap.get(day1).getDayPlanQty(),
+                "跨月前移不得修改原始七月日计划");
+        assertEquals(46, quotaMap.get(day3).getDayPlanQty(),
+                "跨月前移不得修改原始八月日计划");
+    }
+
     private SkuDailyPlanQuotaDTO quota(String materialCode, LocalDate productionDate, int dayPlanQty) {
         SkuDailyPlanQuotaDTO quota = new SkuDailyPlanQuotaDTO();
         quota.setMaterialCode(materialCode);

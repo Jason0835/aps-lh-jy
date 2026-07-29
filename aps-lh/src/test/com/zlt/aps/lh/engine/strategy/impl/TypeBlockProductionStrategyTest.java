@@ -13,6 +13,7 @@ import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuLhCapacity;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -249,6 +250,41 @@ public class TypeBlockProductionStrategyTest {
         Assertions.assertEquals("仅历史欠产、后续无月计划，且最近一次（前一次）已有完成量，本次跳过不排",
                 context.getUnscheduledResultList().get(0).getUnscheduledReason());
         Assertions.assertTrue(failureReason.toString().contains("仅历史欠产"));
+    }
+
+    /**
+     * 用例说明：换活字块实际开产业务日只能读取原始 dayN，
+     * 当前日为 0 时即使未来日有计划也不得主动提前拉取。
+     */
+    @Test
+    public void resolveTypeBlockOriginalDayPlanQty_shouldRequireActualWorkDatePlan() {
+        TypeBlockProductionStrategy strategy = new TypeBlockProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        FactoryMonthPlanProductionFinalResult plan =
+                new FactoryMonthPlanProductionFinalResult();
+        plan.setMaterialCode("3302003001");
+        plan.setProductStatus("S");
+        plan.setYear(2026);
+        plan.setMonth(7);
+        plan.setDay30(0);
+        plan.setDay31(46);
+        context.setMonthPlanList(Collections.singletonList(plan));
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode(plan.getMaterialCode());
+        sku.setProductStatus(plan.getProductStatus());
+
+        Integer currentDayPlanQty = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveTypeBlockOriginalDayPlanQty",
+                context, sku, LocalDate.of(2026, 7, 30));
+        Integer futureDayPlanQty = ReflectionTestUtils.invokeMethod(
+                strategy, "resolveTypeBlockOriginalDayPlanQty",
+                context, sku, LocalDate.of(2026, 7, 31));
+
+        Assertions.assertEquals(Integer.valueOf(0), currentDayPlanQty,
+                "换活字块当前业务日原始计划为0时必须禁止开产");
+        Assertions.assertEquals(Integer.valueOf(46), futureDayPlanQty,
+                "到达真实计划业务日后才允许复用换活字块主链");
     }
 
     /**

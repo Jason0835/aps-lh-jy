@@ -1005,6 +1005,16 @@ public class TargetScheduleQtyResolver {
                     originalTargetQty, mouldQty, originalTargetQty);
             return originalTargetQty;
         }
+        /*
+         * 当前月 TOTAL_QTY=0 的提前生产 SKU 已由中心运行视图建立唯一总目标。调用处必须在
+         * 通用余量和胎胚库存收尾计算之前读取该目标，避免排前收尾判断与排后 isEnd 判断再次
+         * 回落到 surplusQty=0 或局部胎胚库存口径。成型胎胚库存硬目标已在上方优先处理。
+         */
+        Integer earlyProductionTargetQty =
+                EarlyProductionQuantityCalculator.resolveActiveFutureOnlyEndingTargetQty(context, sku);
+        if (Objects.nonNull(earlyProductionTargetQty)) {
+            return earlyProductionTargetQty;
+        }
 
         int surplusQty = Math.max(0, sku.getSurplusQty());
         int embryoStock = Math.max(0, sku.getEmbryoStock());
@@ -2073,6 +2083,26 @@ public class TargetScheduleQtyResolver {
         if (applyEmbryoStockEndingTargetQtyIfNecessary(context, sku, "收尾目标量")) {
             return sku.resolveTargetScheduleQty();
         }
+        /*
+         * future-only 提前生产中心目标不能被普通收尾的 MAX(余量,胎胚库存) 或共用胎胚
+         * 零余量口径覆盖。这里只恢复并保留中心总目标，同时保留已经扣减的实际消费账本；
+         * 禁止调用 syncProductionRemainingQtyToTarget，否则跨业务日会把已排数量重新加回。
+         */
+        Integer earlyProductionTargetQty =
+                EarlyProductionQuantityCalculator.resolveActiveFutureOnlyEndingTargetQty(context, sku);
+        if (Objects.nonNull(earlyProductionTargetQty)) {
+            int runtimeRemainingQty = resolveProductionRemainingQty(context, sku);
+            sku.setStrictTargetQty(true);
+            sku.setTargetScheduleQty(earlyProductionTargetQty);
+            sku.setRemainingScheduleQty(runtimeRemainingQty);
+            log.info("提前生产中心目标保留完成, materialCode: {}, productStatus: {}, "
+                            + "effectiveTargetQty: {}, runtimeRemainingQty: {}, genericSurplusQty: {}, "
+                            + "embryoStock: {}, rule: 普通收尾不得覆盖中心目标",
+                    sku.getMaterialCode(), sku.getProductStatus(), earlyProductionTargetQty,
+                    runtimeRemainingQty, Math.max(0, sku.getSurplusQty()),
+                    Math.max(0, sku.getEmbryoStock()));
+            return earlyProductionTargetQty;
+        }
         // 收尾场景下严格限制目标量，禁止补满班次超排
         sku.setStrictTargetQty(true);
 
@@ -2193,6 +2223,18 @@ public class TargetScheduleQtyResolver {
      */
     public boolean isSharedEmbryoZeroSurplusEnding(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(sku) || sku.getSurplusQty() > 0) {
+            return false;
+        }
+        /*
+         * 激活态 future-only SKU 的通用 surplusQty 按要求保持为0，但其中心运行视图已经
+         * 持有可消费目标量。该场景不能命中“共用胎胚且硫化余量为0”未排规则，否则会在
+         * 正常资源校验之前错误终止提前生产；普通 SKU 仍继续执行下方原有判断。
+         */
+        if (EarlyProductionQuantityCalculator.isActiveFutureOnlyRuntimeView(context, sku)) {
+            log.info("提前生产中心运行视图忽略共用胎胚零余量未排判断, materialCode: {}, "
+                            + "productStatus: {}, genericSurplusQty: {}, runtimeTargetQty: {}",
+                    sku.getMaterialCode(), sku.getProductStatus(), Math.max(0, sku.getSurplusQty()),
+                    EarlyProductionQuantityCalculator.resolveActiveFutureOnlyEndingTargetQty(context, sku));
             return false;
         }
         ensureActiveEmbryoSkuMap(context, sku);

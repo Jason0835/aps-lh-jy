@@ -5,6 +5,7 @@ import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.component.EarlyProductionQuantityCalculator;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
@@ -266,23 +267,63 @@ public final class PendingSkuUnscheduledRule {
                                                SkuScheduleDTO sku,
                                                boolean smallEndingRuleEnding,
                                                boolean embryoStockEndingTargetApplied) {
+        int genericSurplusQty = Objects.isNull(sku)
+                ? 0 : Math.max(0, sku.getSurplusQty());
+        return evaluate(context, sku, smallEndingRuleEnding,
+                embryoStockEndingTargetApplied, genericSurplusQty);
+    }
+
+    /**
+     * 按优先级评估新增待排SKU是否需要直接进入未排，并允许调用方传入当前运行场景的规则余量。
+     *
+     * <p>该重载仅替换“收尾小余量”规则的数量输入，不改变仅历史欠产规则使用通用硫化余量的
+     * 既有口径。提前生产中心运行视图必须传入实际消费账本剩余量；其他调用继续使用原重载，
+     * 从而保持续作、换活字块和普通新增排产行为不变。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 新增待排SKU
+     * @param smallEndingRuleEnding 是否按收尾小余量规则视为收尾
+     * @param embryoStockEndingTargetApplied 是否已命中成型胎胚库存收尾目标
+     * @param smallEndingRuleQty 收尾小余量规则本轮应使用的有效余量
+     * @return 命中规则时返回未排结果；未命中返回null
+     */
+    public static LhUnscheduledResult evaluate(LhScheduleContext context,
+                                               SkuScheduleDTO sku,
+                                               boolean smallEndingRuleEnding,
+                                               boolean embryoStockEndingTargetApplied,
+                                               int smallEndingRuleQty) {
         if (Objects.isNull(context) || Objects.isNull(sku)) {
             return null;
         }
-        // 收尾小余量使用原始硫化余量判断，优先级高于仅历史欠产规则。
-        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int genericSurplusQty = Math.max(0, sku.getSurplusQty());
+        int resolvedSmallEndingRuleQty = Math.max(0, smallEndingRuleQty);
+        boolean runtimeRemainingQtyApplied =
+                EarlyProductionQuantityCalculator.shouldUseRuntimeRemainingQtyForSmallEnding(
+                        context, sku);
+        String quantitySource = runtimeRemainingQtyApplied
+                ? "EARLY_PRODUCTION_RUNTIME_REMAINING" : "GENERIC_SURPLUS";
         int toleranceQty = SmallEndingSurplusSkipRule.resolveToleranceQty(context);
-        if (!embryoStockEndingTargetApplied && smallEndingRuleEnding && surplusQty <= toleranceQty) {
+        if (!embryoStockEndingTargetApplied && smallEndingRuleEnding) {
+            log.info("待排SKU收尾小余量规则数量确认, materialCode: {}, genericSurplusQty: {}, "
+                            + "smallEndingRuleQty: {}, quantitySource: {}, toleranceQty: {}",
+                    sku.getMaterialCode(), genericSurplusQty, resolvedSmallEndingRuleQty,
+                    quantitySource, toleranceQty);
+        }
+        if (!embryoStockEndingTargetApplied
+                && smallEndingRuleEnding
+                && resolvedSmallEndingRuleQty <= toleranceQty) {
             int previousNightPlanQty = SmallEndingSurplusSkipRule.resolveTargetPreviousT1NightPlanQty(
                     context, sku.getMaterialCode());
             boolean smallEndingSkipped = SmallEndingSurplusSkipRule.shouldSkip(
-                    context, sku, smallEndingRuleEnding);
-            log.info("待排SKU收尾小余量规则判断, materialCode: {}, surplusQty: {}, toleranceQty: {}, "
+                    context, sku, smallEndingRuleEnding, resolvedSmallEndingRuleQty);
+            log.info("待排SKU收尾小余量规则判断, materialCode: {}, genericSurplusQty: {}, "
+                            + "smallEndingRuleQty: {}, quantitySource: {}, toleranceQty: {}, "
                             + "previousT1NightPlanQty: {}, shiftCapacity: {}, skipped: {}",
-                    sku.getMaterialCode(), surplusQty, toleranceQty, previousNightPlanQty,
+                    sku.getMaterialCode(), genericSurplusQty, resolvedSmallEndingRuleQty,
+                    quantitySource, toleranceQty, previousNightPlanQty,
                     sku.getShiftCapacity(), smallEndingSkipped);
             if (smallEndingSkipped) {
-                return buildUnscheduledResult(context, sku, surplusQty,
+                return buildUnscheduledResult(context, sku, resolvedSmallEndingRuleQty,
                         SmallEndingSurplusSkipRule.UNSCHEDULED_REASON);
             }
         }

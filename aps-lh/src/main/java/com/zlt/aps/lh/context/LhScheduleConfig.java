@@ -580,12 +580,36 @@ public class LhScheduleConfig {
      * @return 提前生产天数阈值，范围1～31
      */
     public int getEarlyProductionDaysThreshold() {
-        int threshold = getParamIntValue(LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD,
-                LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD);
-        if (threshold <= 0) {
+        String rawValue =
+                resolvedParamMap.get(LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD);
+        if (StringUtils.isEmpty(rawValue)) {
+            log.warn("SKU提前生产天数阈值缺失或为空，使用默认值, paramCode: {}, defaultValue: {}",
+                    LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD,
+                    LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD);
             return LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
         }
-        return Math.min(threshold, LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD);
+        final int threshold;
+        try {
+            threshold = Integer.parseInt(rawValue.trim());
+        } catch (NumberFormatException exception) {
+            log.warn("SKU提前生产天数阈值非法，使用默认值, paramCode: {}, rawValue: {}, defaultValue: {}",
+                    LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD, rawValue,
+                    LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD);
+            return LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        if (threshold <= 0) {
+            log.warn("SKU提前生产天数阈值小于等于0，使用默认值, paramCode: {}, rawValue: {}, defaultValue: {}",
+                    LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD, rawValue,
+                    LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD);
+            return LhScheduleConstant.DEFAULT_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        if (threshold > LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD) {
+            log.warn("SKU提前生产天数阈值超过允许上限，按上限使用, paramCode: {}, rawValue: {}, maxValue: {}",
+                    LhScheduleParamConstant.EARLY_PRODUCTION_DAYS_THRESHOLD, rawValue,
+                    LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD);
+            return LhScheduleConstant.MAX_EARLY_PRODUCTION_DAYS_THRESHOLD;
+        }
+        return threshold;
     }
 
     /**

@@ -21,6 +21,7 @@ import com.zlt.aps.lh.api.enums.CleaningTypeEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.MachineStopTypeEnum;
 import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuTagEnum;
 import com.zlt.aps.lh.component.OrderNoGenerator;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
@@ -963,6 +964,11 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
             return;
         }
         if (context.getNewSpecSkuList().contains(sku) && sku.getRemainingScheduleQty() > 0) {
+            /*
+             * 调用处明确标记换活字块回流来源。S4.5 后续仍可在有原始日计划的业务日
+             * 复用新增换模主链，但 EarlyProductionChecker 会据此禁止主动拉取未来 SKU。
+             */
+            sku.setSourceType(SkuScheduleSourceTypeEnum.TYPE_BLOCK_TO_NEW_SPEC.getCode());
             returnedToNewSpecMaterialCodes.add(MonthPlanDateResolver.buildMaterialStatusKey(
                     sku.getMaterialCode(), sku.getProductStatus()));
         }
@@ -2043,13 +2049,92 @@ public class TypeBlockProductionStrategy implements ITypeBlockProductionStrategy
                                                       List<LhShiftConfigVO> shifts,
                                                       boolean isSingleMachine,
                                                       StringBuilder failureReason) {
-        boolean success = appendFollowUpResult(context, machine, sku, startTime, switchStartTime, shifts,
-                isSingleMachine, failureReason);
+        /*
+         * 换活字块只能承接实际开产业务日已有原始 dayN 的 SKU。该校验必须在结果写入前执行，
+         * 且直接读取月计划原始值，禁止使用临时前移账本、历史欠产或剩余目标量替代。
+         */
+        LocalDate productionWorkDate = resolveTypeBlockProductionWorkDate(shifts, startTime);
+        int originalDayPlanQty = resolveTypeBlockOriginalDayPlanQty(
+                context, sku, productionWorkDate);
+        boolean success = originalDayPlanQty > 0;
+        if (!success) {
+            String reason = Objects.isNull(productionWorkDate)
+                    ? "换活字块实际开产业务日无法从班次窗口解析"
+                    : "换活字块实际开产业务日原始日计划量为0，禁止主动拉取未来SKU";
+            if (Objects.nonNull(failureReason)) {
+                if (failureReason.length() > 0) {
+                    failureReason.append('；');
+                }
+                failureReason.append(reason);
+            }
+            log.info("换活字块原始日计划准入未通过, materialCode: {}, machineCode: {}, "
+                            + "productionWorkDate: {}, originalDayPlanQty: {}, reason: {}",
+                    sku.getMaterialCode(), machine.getMachineCode(), productionWorkDate,
+                    originalDayPlanQty, reason);
+        } else {
+            // 调用处通过原始日计划准入后，继续复用既有换活字块结果构造和资源扣减主链。
+            success = appendFollowUpResult(
+                    context, machine, sku, startTime, switchStartTime, shifts,
+                    isSingleMachine, failureReason);
+        }
         if (!success && switchStartTime != null) {
             // 换活字块结果落地失败时，回滚本轮已占用的切换配额。
             getMouldChangeBalanceStrategy().rollbackMouldChange(context, switchStartTime);
         }
         return success;
+    }
+
+    /**
+     * 读取换活字块实际开产业务日的原始日计划量。
+     *
+     * <p>该方法只读取月计划原始 dayN，不读取 SKU 运行态剩余量或提前生产临时账本。
+     * 调用处必须在写入换活字块结果及扣减资源前执行，避免换活字块主动拉取未来 SKU。</p>
+     *
+     * @param context 排程上下文
+     * @param sku 换活字块目标 SKU
+     * @param productionWorkDate 实际开产业务日期
+     * @return 原始日计划量；上下文、SKU 或业务日期缺失时返回 0
+     */
+    private int resolveTypeBlockOriginalDayPlanQty(
+            LhScheduleContext context,
+            SkuScheduleDTO sku,
+            LocalDate productionWorkDate) {
+        if (Objects.isNull(context) || Objects.isNull(sku)
+                || Objects.isNull(productionWorkDate)) {
+            return 0;
+        }
+        return Math.max(0, MonthPlanDateResolver.resolveDayQty(
+                context, sku.getMaterialCode(), sku.getProductStatus(),
+                productionWorkDate));
+    }
+
+    /**
+     * 根据实际开产时刻解析换活字块结果所属业务日期。
+     *
+     * @param shifts 排程窗口班次
+     * @param startTime 实际开产时刻
+     * @return 命中的班次业务日期；未命中返回 null
+     */
+    private LocalDate resolveTypeBlockProductionWorkDate(
+            List<LhShiftConfigVO> shifts,
+            Date startTime) {
+        if (CollectionUtils.isEmpty(shifts) || Objects.isNull(startTime)) {
+            return null;
+        }
+        for (LhShiftConfigVO shift : shifts) {
+            if (Objects.isNull(shift)
+                    || Objects.isNull(shift.getShiftStartDateTime())
+                    || Objects.isNull(shift.getShiftEndDateTime())
+                    || Objects.isNull(shift.getWorkDate())) {
+                continue;
+            }
+            if (!startTime.before(shift.getShiftStartDateTime())
+                    && startTime.before(shift.getShiftEndDateTime())) {
+                return shift.getWorkDate().toInstant()
+                        .atZone(ZoneId.systemDefault()).toLocalDate();
+            }
+        }
+        return null;
     }
 
     /**

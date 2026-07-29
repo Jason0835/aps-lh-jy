@@ -1522,6 +1522,12 @@ public class SpecialMaterialMachineSubstitutionService {
             return findScheduledSpecialMaterialResult(
                     context, sku.getMaterialCode(), sku.getProductStatus(), machineCode);
         } finally {
+            /*
+             * 特殊材料置换会独立复用 scheduleNewSpecs，不经过 NewProductionHandler 的
+             * S4.5 生命周期收口。调用处必须清理本轮可能生成的提前生产临时视图，避免
+             * 指定机台置换结束后把前移日计划或中心目标遗留给后续步骤。
+             */
+            context.clearEarlyProductionRuntimePlans();
             context.setNewSpecSkuList(originalPendingSkuList);
             context.clearSpecialMaterialSpecifiedMachineDirective();
         }

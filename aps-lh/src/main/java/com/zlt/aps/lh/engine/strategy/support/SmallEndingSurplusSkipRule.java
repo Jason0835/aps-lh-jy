@@ -41,10 +41,31 @@ public final class SmallEndingSurplusSkipRule {
      * @return true-命中规则，本次不排产；false-继续按原排程逻辑处理
      */
     public static boolean shouldSkip(LhScheduleContext context, SkuScheduleDTO sku, boolean isEnding) {
+        int genericSurplusQty = Objects.isNull(sku)
+                ? 0 : Math.max(0, sku.getSurplusQty());
+        return shouldSkip(context, sku, isEnding, genericSurplusQty);
+    }
+
+    /**
+     * 使用调用场景明确传入的有效余量判断是否命中收尾小余量不排产规则。
+     *
+     * <p>提前生产中心运行视图使用实际消费账本剩余量；其他场景通过原重载继续使用通用
+     * 硫化余量。该方法只统一规则判断，不负责计算提前生产目标量。</p>
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param isEnding 是否收尾
+     * @param ruleSurplusQty 当前运行场景下的有效余量
+     * @return true-命中规则，本次不排产；false-继续按原排程逻辑处理
+     */
+    public static boolean shouldSkip(LhScheduleContext context,
+                                     SkuScheduleDTO sku,
+                                     boolean isEnding,
+                                     int ruleSurplusQty) {
         if (!isEnding || Objects.isNull(sku)) {
             return false;
         }
-        int surplusQty = Math.max(0, sku.getSurplusQty());
+        int surplusQty = Math.max(0, ruleSurplusQty);
         int toleranceQty = resolveToleranceQty(context);
         if (surplusQty > toleranceQty) {
             return false;

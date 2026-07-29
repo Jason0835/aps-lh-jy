@@ -4,6 +4,9 @@ import com.zlt.aps.lh.api.constant.LhScheduleConstant;
 import com.zlt.aps.lh.api.constant.LhScheduleParamConstant;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
+import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
+import com.zlt.aps.lh.api.enums.ScheduleTypeEnum;
+import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import lombok.extern.slf4j.Slf4j;
@@ -67,6 +70,10 @@ public final class EarlyProductionChecker {
                 || CollectionUtils.isEmpty(sku.getDailyPlanQuotaMap())) {
             return EarlyProductionDecision.notEarlyProduction(true, "非提前生产判定范围");
         }
+        if (!isEligibleNewProductionSku(sku)) {
+            return EarlyProductionDecision.notEarlyProduction(false,
+                    "非正规新增排产SKU或换活字块回流场景");
+        }
         if (hasCurrentDayPlan(context, sku, currentDate)) {
             return EarlyProductionDecision.notEarlyProduction(true, "当前业务日已有日计划量");
         }
@@ -85,7 +92,7 @@ public final class EarlyProductionChecker {
         int earlyDays = (int) ChronoUnit.DAYS.between(currentDate, firstFuturePlanDate);
         List<Integer> structurePlanMachineCounts = resolveWindowStructurePlanMachineCounts(
                 context, sku.getStructureName(), windowStartDate);
-        int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
+        int historyShortageQty = resolveHistoryShortageQty(context, sku, currentDate);
         int threshold = Math.max(0, shortageThreshold);
         if (historyShortageQty > threshold) {
             logEarlyProductionDecision(context, sku, currentDate, firstFuturePlanDate, 0,
@@ -99,6 +106,8 @@ public final class EarlyProductionChecker {
         }
         int currentPlanMachineCount = context.getStructurePlanMachineCount(
                 currentDate, sku.getStructureName());
+        int futurePlanMachineCount = context.getStructurePlanMachineCount(
+                firstFuturePlanDate, sku.getStructureName());
         int planMachineCount = resolveEffectiveStructurePlanMachineCount(
                 context, sku, currentDate, firstFuturePlanDate);
         int scheduledStructureCount = context.getStructureScheduledMachineCount(
@@ -113,6 +122,14 @@ public final class EarlyProductionChecker {
                     allowed ? "结构已排机台数未达到计划机台数" : "结构已排机台数已达到计划机台数");
             String sceneType = currentPlanMachineCount > 0
                     ? EarlyProductionDecision.SCENE_NORMAL : EarlyProductionDecision.SCENE_STRUCTURE_SWITCH;
+            if (currentPlanMachineCount == 0) {
+                log.info("提前生产结构切换准入, currentDate: {}, futurePlanDate: {}, structureName: {}, "
+                                + "currentPlanMachineCount: {}, futurePlanMachineCount: {}, "
+                                + "scheduledStructureCount: {}, result: {}",
+                        currentDate, firstFuturePlanDate, sku.getStructureName(),
+                        currentPlanMachineCount, futurePlanMachineCount,
+                        scheduledStructureCount, allowed);
+            }
             return EarlyProductionDecision.earlyProduction(allowed, sceneType, firstFuturePlanDate,
                     structurePlanMachineCounts,
                     allowed ? "结构已排机台数未达到计划机台数" : "结构已排机台数已达到计划机台数");
@@ -174,7 +191,7 @@ public final class EarlyProductionChecker {
         if (effectivePlanMachineCount > 0) {
             return false;
         }
-        int historyShortageQty = Math.max(0, sku.getMonthlyHistoryShortageQty());
+        int historyShortageQty = resolveHistoryShortageQty(context, sku, currentDate);
         int scheduledSkuCount = context.getSkuScheduledMachineCount(
                 currentDate, sku.getMaterialCode(), sku.getProductStatus());
         int dailyCapacity = Math.max(0, sku.getDailyCapacity());
@@ -236,6 +253,62 @@ public final class EarlyProductionChecker {
      */
     private static boolean hasCurrentDayPlan(LhScheduleContext context, SkuScheduleDTO sku, LocalDate currentDate) {
         return resolveDayPlanQty(context, sku, currentDate) > 0;
+    }
+
+    /**
+     * 判断 SKU 是否属于提前生产允许的正规新增排产范围。
+     *
+     * <p>施工阶段 01/02 明确排除；续作补偿和换活字块回流只允许等待其原计划日期，
+     * 不得通过提前生产主动拉取未来 SKU。空来源或 NORMAL_NEW_SPEC 均视为普通新增来源，
+     * 兼容当前项目尚未统一回写来源编码的历史数据。</p>
+     *
+     * @param sku SKU
+     * @return true-可进入提前生产判断；false-不适用
+     */
+    public static boolean isEligibleNewProductionSku(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || sku.isContinuousCompensationSku()) {
+            return false;
+        }
+        if (StringUtils.isNotEmpty(sku.getScheduleType())
+                && !StringUtils.equals(
+                ScheduleTypeEnum.NEW_SPEC.getCode(), sku.getScheduleType())) {
+            return false;
+        }
+        if (StringUtils.equals(ConstructionStageEnum.TRIAL.getCode(), sku.getConstructionStage())
+                || StringUtils.equals(
+                ConstructionStageEnum.MASS_TRIAL.getCode(), sku.getConstructionStage())) {
+            return false;
+        }
+        return !StringUtils.equals(
+                SkuScheduleSourceTypeEnum.TYPE_BLOCK_TO_NEW_SPEC.getCode(), sku.getSourceType())
+                && !StringUtils.equals(
+                SkuScheduleSourceTypeEnum.CONTINUATION_ADD_MACHINE.getCode(), sku.getSourceType());
+    }
+
+    /**
+     * 解析当前业务日应使用的本月前日累计欠产。
+     *
+     * @param context 排程上下文
+     * @param sku SKU
+     * @param currentDate 当前业务日期
+     * @return 动态历史欠产量
+     */
+    public static int resolveHistoryShortageQty(LhScheduleContext context,
+                                                SkuScheduleDTO sku,
+                                                LocalDate currentDate) {
+        if (Objects.isNull(sku)) {
+            return 0;
+        }
+        if (Objects.nonNull(context) && Objects.nonNull(currentDate)) {
+            int cachedShortageQty = context.getMonthlyHistoryShortageQty(
+                    currentDate, sku.getMaterialCode(), sku.getProductStatus());
+            Map<LocalDate, Map<String, Integer>> shortageMap =
+                    context.getMonthlyHistoryShortageQtyMap();
+            if (!CollectionUtils.isEmpty(shortageMap) && shortageMap.containsKey(currentDate)) {
+                return Math.max(0, cachedShortageQty);
+            }
+        }
+        return Math.max(0, sku.getMonthlyHistoryShortageQty());
     }
 
     /**
@@ -361,7 +434,7 @@ public final class EarlyProductionChecker {
                         + "earlyProductionDaysThreshold: {}, earlyDays: {}, futurePlanQty: {}, "
                         + "result: {}, reason: {}",
                 context.getFactoryCode(), currentDate, futurePlanDate, sku.getMaterialCode(),
-                sku.getStructureName(), Math.max(0, sku.getMonthlyHistoryShortageQty()), threshold,
+                sku.getStructureName(), resolveHistoryShortageQty(context, sku, currentDate), threshold,
                 planMachineCount, scheduledStructureCount, scheduledSkuCount,
                 Math.max(0, sku.getDailyCapacity()), earlyProductionDaysThreshold, earlyDays,
                 futurePlanQty, allowed, reason);

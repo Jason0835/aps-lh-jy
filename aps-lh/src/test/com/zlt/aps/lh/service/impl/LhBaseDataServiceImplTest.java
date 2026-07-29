@@ -12,6 +12,7 @@ import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
 import com.zlt.aps.lh.component.SkuDecrementChecker;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
+import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.handler.ScheduleAdjustHandler;
 import com.zlt.aps.lh.mapper.CxStockMapper;
 import com.zlt.aps.lh.mapper.CxEmbryoLhTimeMapper;
@@ -643,8 +644,11 @@ public class LhBaseDataServiceImplTest {
         trialPlan.setMonth(6);
         trialPlan.setDay29(8);
 
-        List<FactoryMonthPlanProductionFinalResult> selectedPlanList = ReflectionTestUtils.invokeMethod(service,
-                "selectSchedulingMonthPlanList", context, Arrays.asList(formalPlan, trialPlan));
+        // 月计划归集在基础数据初始化阶段接收显式窗口边界，测试需与生产调用保持相同参数口径。
+        Date earlyProductionRangeEndDate = buildDate(2026, 7, 3);
+        List<FactoryMonthPlanProductionFinalResult> selectedPlanList = ReflectionTestUtils.invokeMethod(
+                service, "selectSchedulingMonthPlanList", context, Arrays.asList(formalPlan, trialPlan),
+                context.getWindowEndDate(), earlyProductionRangeEndDate);
 
         Assertions.assertEquals(2, selectedPlanList.size(), "同物料不同产品状态必须分别生成归集基础计划");
     }
@@ -797,12 +801,12 @@ public class LhBaseDataServiceImplTest {
     }
 
     /**
-     * 用例说明：月计划结构机台统计 dayN 非法JSON时按0处理并继续排程。
+     * 用例说明：月计划结构机台统计 dayN 非法 JSON 属于基础数据错误，必须中断排程。
      *
      * @throws Exception 反射注入异常
      */
     @Test
-    public void loadAllBaseDataShouldContinueWhenMonthPlanStatisticsDayJsonInvalid() throws Exception {
+    public void loadAllBaseDataShouldThrowWhenMonthPlanStatisticsDayJsonInvalid() throws Exception {
         LhBaseDataServiceImpl service = buildServiceWithDefaultMocks();
         MpMonthPlanStatistics statistics = new MpMonthPlanStatistics();
         statistics.setStructureName("STRUCT-001");
@@ -814,12 +818,15 @@ public class LhBaseDataServiceImplTest {
         injectField(service, "lhDataInitExecutor", (Executor) Runnable::run);
         LhScheduleContext context = buildContext();
 
-        service.loadAllBaseData(context);
+        ScheduleException exception = Assertions.assertThrows(
+                ScheduleException.class, () -> service.loadAllBaseData(context));
 
-        Assertions.assertFalse(context.isInterrupted(), "dayN非法JSON不应中断排程");
-        Assertions.assertEquals(0,
-                context.getStructurePlanMachineCount(LocalDate.of(2026, 1, 1), "STRUCT-001"),
-                "dayN非法JSON时当前结构计划机台数应按0处理");
+        Assertions.assertTrue(exception.getMessage().contains("dayN"),
+                "基础数据异常必须保留 dayN 定位信息");
+        Assertions.assertTrue(exception.getMessage().contains("STRUCT-001"),
+                "基础数据异常必须保留结构名称");
+        Assertions.assertTrue(exception.getMessage().contains("2026-01-01"),
+                "基础数据异常必须保留真实业务日期");
     }
 
     private LhBaseDataServiceImpl buildServiceWithDefaultMocks() throws Exception {

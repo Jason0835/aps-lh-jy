@@ -22,6 +22,7 @@ import com.zlt.aps.lh.engine.strategy.IEndingJudgmentStrategy;
 import com.zlt.aps.lh.engine.strategy.support.PendingSkuUnscheduledRule;
 import com.zlt.aps.lh.api.domain.dto.CuringMonthPlanTotalResult;
 import com.zlt.aps.lh.component.CuringMonthPlanTotalCalculator;
+import com.zlt.aps.lh.component.EarlyProductionQuantityCalculator;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.MonthPlanDayQtyUtil;
 import com.zlt.aps.lh.util.PriorityTraceLogHelper;
@@ -123,6 +124,13 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
                 context.getMonthPlanList().size(), context.getPreviousScheduleResultList().size());
         // S4.3.1 前日排程欠/超产量调整
         adjustPreviousSchedule(context);
+        /*
+         * S4.3 每次重新归集前先清理上一次运行视图。候选态将在本步骤按当前月 TOTAL_QTY
+         * 和未来原始日计划重新建立，并由 S4.5 持续使用至整个三天窗口结束。
+         */
+        context.clearEarlyProductionRuntimePlans();
+        // 在 SKU 归集前统一初始化提前生产数量视图，后续准入只读按业务日隔离的历史欠产缓存。
+        EarlyProductionQuantityCalculator.initializeMonthlyHistoryShortageByBusinessDate(context);
 
         // S4.3.2 按产品结构归集SKU，计算硫化余量
         gatherSkuByStructure(context);
@@ -232,15 +240,31 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
             }
 
             int targetScheduleQty = dto.resolveTargetScheduleQty();
+            LocalDate scheduleStartDate = toLocalDate(context.getScheduleDate());
+            if (EarlyProductionQuantityCalculator.applyCurrentMonthTotalRoute(
+                    context, dto, scheduleStartDate, getTargetScheduleQtyResolver())) {
+                /*
+                 * 当前业务月 TOTAL_QTY=0 是排产路由硬门禁，与通用余量、欠产、收尾和胎胚库存
+                 * 无关。专用计算器已清零正常目标并尝试保留未来日计划候选；调用处只负责决定
+                 * 是否继续加入结构待排视图，禁止未来月余量反灌正常主链。
+                 */
+                targetScheduleQty = 0;
+                if (!context.isFutureOnlyEarlyProductionCandidate(dto)) {
+                    addNoPlanUnscheduledResult(context, dto);
+                    continue;
+                }
+            }
 
-            // 当前无排产目标量时，直接记未排产并跳过。
-            if (targetScheduleQty <= 0) {
+            // 非提前生产候选当前无排产目标量时，直接记未排产并跳过。
+            if (targetScheduleQty <= 0
+                    && !context.isFutureOnlyEarlyProductionCandidate(dto)) {
                 addNoPlanUnscheduledResult(context, dto);
                 continue;
             }
 
             // 排程窗口没有计划量但存在余量/正向结转目标量时，允许继续排产，并给出明确告警。
-            if (dto.getWindowPlanQty() <= 0) {
+            if (dto.getWindowPlanQty() <= 0
+                    && !context.isFutureOnlyEarlyProductionCandidate(dto)) {
                 if (getTargetScheduleQtyResolver().isFullCapacityMode(context)) {
                     log.warn(String.format(FULL_CAPACITY_WARN_TEMPLATE, dto.getMaterialCode(), targetScheduleQty));
                 } else {
@@ -253,7 +277,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         }
 
         context.setMaterialSharedEmbryoMap(buildMaterialSharedEmbryoMap(validScheduleSkuList));
-        context.setActiveEmbryoSkuMap(buildActiveEmbryoSkuMap(validScheduleSkuList));
+        context.setActiveEmbryoSkuMap(buildActiveEmbryoSkuMap(context, validScheduleSkuList));
         context.setStructureSkuMap(structureSkuMap);
         int totalSkuCount = structureSkuMap.values().stream().mapToInt(List::size).sum();
         log.info("SKU按结构归集完成, 结构数量: {}, SKU总数: {}", structureSkuMap.size(), totalSkuCount);
@@ -295,17 +319,21 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      * 构建当前有效参与排产的胎胚SKU集合。
      * <p>只记录已进入结构分组的有效SKU，后续收尾目标量计算会按运行态继续刷新。</p>
      *
+     * @param context 排程上下文
      * @param skuList 有效待排SKU列表
      * @return 胎胚有效待排SKU集合
      */
-    private Map<String, List<String>> buildActiveEmbryoSkuMap(List<SkuScheduleDTO> skuList) {
+    private Map<String, List<String>> buildActiveEmbryoSkuMap(
+            LhScheduleContext context,
+            List<SkuScheduleDTO> skuList) {
         Map<String, List<String>> activeEmbryoSkuMap = new LinkedHashMap<>();
         if (CollectionUtils.isEmpty(skuList)) {
             return activeEmbryoSkuMap;
         }
         for (SkuScheduleDTO sku : skuList) {
             if (sku == null || StringUtils.isEmpty(sku.getMaterialCode())
-                    || StringUtils.isEmpty(sku.getEmbryoCode())) {
+                    || StringUtils.isEmpty(sku.getEmbryoCode())
+                    || context.isFutureOnlyEarlyProductionCandidate(sku)) {
                 continue;
             }
             List<String> activeSkuList = activeEmbryoSkuMap.computeIfAbsent(
@@ -358,7 +386,7 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         context.getStructureSkuMap().entrySet().removeIf(entry -> CollectionUtils.isEmpty(entry.getValue()));
         List<SkuScheduleDTO> remainingSkuList = collectStructureSkus(context);
         context.setMaterialSharedEmbryoMap(buildMaterialSharedEmbryoMap(remainingSkuList));
-        context.setActiveEmbryoSkuMap(buildActiveEmbryoSkuMap(remainingSkuList));
+        context.setActiveEmbryoSkuMap(buildActiveEmbryoSkuMap(context, remainingSkuList));
         normalizeDynamicSingleEmbryoEndingSkus(context, affectedEmbryoSet, remainingSkuList);
         logNormalizedEmbryoGroups(context, affectedEmbryoSet);
         log.info("共用胎胚零余量SKU预剔除完成, 剔除数量: {}", pruneSkuList.size());
@@ -395,6 +423,11 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
      */
     private boolean isSharedEmbryoZeroSurplusSku(LhScheduleContext context, SkuScheduleDTO sku) {
         if (Objects.isNull(sku)
+                /*
+                 * 提前生产候选在激活前正常目标量固定为0，但未来月余量保存在中心运行视图。
+                 * 此处不得按通用零余量提前删除，否则候选永远无法等到 futurePlanDate 进入阈值。
+                 */
+                || context.isFutureOnlyEarlyProductionCandidate(sku)
                 || sku.getSurplusQty() > 0
                 || StringUtils.isEmpty(sku.getEmbryoCode())
                 || StringUtils.isEmpty(sku.getMaterialCode())
@@ -609,7 +642,13 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int scheDayFinishQty = resolveScheDayFinishQty(
                 context, plan.getMaterialCode(), plan.getProductStatus());
         int lastMonthOverdueQty = resolveEffectiveLastMonthOverdueQty(plan);
-        CuringMonthPlanTotalResult monthPlanTotalResult = CuringMonthPlanTotalCalculator.calculate(
+        /*
+         * 通用正常余量只读取当前排程窗口对应的月计划段，保持既有完成量和超欠产口径。
+         * 提前生产未来月计划量、完成量和余量由 EarlyProductionQuantityCalculator
+         * 写入独立运行视图，禁止反灌到正常余量。
+         */
+        CuringMonthPlanTotalResult monthPlanTotalResult =
+                CuringMonthPlanTotalCalculator.calculate(
                 context, plan, toLocalDate(context.getScheduleDate()), toLocalDate(context.getWindowEndDate()),
                 actualFinishedQty, lastMonthOverdueQty);
         int totalPlanQty = monthPlanTotalResult.getMonthPlanTotal();
@@ -961,9 +1000,9 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         if (Objects.isNull(targetDate)) {
             return plan;
         }
-        FactoryMonthPlanProductionFinalResult targetMonthPlan =
-                MonthPlanDateResolver.resolvePlan(context, plan.getMaterialCode(), plan.getProductStatus(), targetDate);
-        return Objects.nonNull(targetMonthPlan) ? targetMonthPlan : plan;
+        // 目标月份选择涉及提前生产 futurePlanDate，统一委托专用数量计算器保持跨月口径一致。
+        return EarlyProductionQuantityCalculator.resolveTargetMonthPlan(
+                context, plan, targetDate);
     }
 
     /**
@@ -1810,6 +1849,13 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
         int endingCount = 0;
         for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
             for (SkuScheduleDTO sku : skuList) {
+                /*
+                 * 当前月 TOTAL_QTY=0 的提前生产候选尚未激活，通用余量不代表未来月余量。
+                 * 此处不得据此改变候选 SKU 的收尾标签和既有排序优先级。
+                 */
+                if (context.isFutureOnlyEarlyProductionCandidate(sku)) {
+                    continue;
+                }
                 if (endingJudgmentStrategy.isExpectedEnding(context, sku)) {
                     sku.setSkuTag(SkuTagEnum.ENDING.getCode());
                     int endingDays = endingJudgmentStrategy.calculateEndingDays(context, sku);
@@ -1852,6 +1898,13 @@ public class ScheduleAdjustHandler extends AbsScheduleStepHandler {
          * 试制、量试SKU。过滤后列表保持原顺序，后续续作机台、加减机台和数量账本不做额外分支。
          */
         filterContinuousTrialDailyPlanAdmission(context, continuousSkuList);
+        for (SkuScheduleDTO continuousSku : continuousSkuList) {
+            /*
+             * 提前生产只适用于新增排产。MES 在机匹配后最终属于续作的 SKU 即使当前月
+             * TOTAL_QTY=0 且未来有计划，也必须删除候选视图，不能由新增阶段主动拉取。
+             */
+            context.removeEarlyProductionRuntimePlan(continuousSku);
+        }
 
         for (List<SkuScheduleDTO> skuList : context.getStructureSkuMap().values()) {
             for (SkuScheduleDTO sku : skuList) {

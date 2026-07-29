@@ -4,6 +4,7 @@ import com.zlt.aps.lh.api.domain.dto.CleaningScheduleDateFillItem;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftProductionControlDTO;
 import com.zlt.aps.lh.api.domain.dto.ShiftRuntimeState;
+import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.enums.SingleControlMachineModeEnum;
 import com.zlt.aps.lh.api.domain.entity.LhMachineInfo;
@@ -19,6 +20,7 @@ import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.engine.strategy.support.HistoricalReverseSelectionDirective;
 import com.zlt.aps.lh.engine.strategy.support.SpecialMaterialSubstitutionRecord;
+import com.zlt.aps.lh.engine.strategy.support.EarlyProductionRuntimePlan;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.util.SkuConstructionRefResolverUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmDevicePlanShut;
@@ -323,6 +325,12 @@ public class LhScheduleContext {
     /** 业务日期 -> 物料状态复合键 -> 已排硫化机台编码集合，用于SKU级机台数判断 */
     private Map<LocalDate, Map<String, Set<String>>> skuScheduledMachineCodeMap =
             new LinkedHashMap<LocalDate, Map<String, Set<String>>>(4);
+    /**
+     * 业务日期 -> 物料状态复合键 -> 当月截至前一日累计欠产量。
+     * <p>提前生产按正在处理的业务日读取，禁止固定沿用窗口 T 日的历史欠产快照。</p>
+     */
+    private Map<LocalDate, Map<String, Integer>> monthlyHistoryShortageQtyMap =
+            new LinkedHashMap<LocalDate, Map<String, Integer>>(4);
     /** 续作SKU列表，来源于 MES 在机/前批次状态，S4.4 优先排产 */
     private List<SkuScheduleDTO> continuousSkuList = new ArrayList<>();
     /** 新增SKU列表，续作和换活字块未消费完的 SKU 会继续保留到 S4.5 新增链路 */
@@ -363,6 +371,12 @@ public class LhScheduleContext {
     private Map<SkuScheduleDTO, Boolean> newSpecTypeRuleBlockedMap = new IdentityHashMap<>();
     /** 新增SKU提前生产准入结果，供选机和首日排产判断识别提前生产场景，使用对象身份避免同物料编码互相覆盖 */
     private Map<SkuScheduleDTO, Boolean> newSpecEarlyProductionAllowedMap = new IdentityHashMap<>();
+    /**
+     * 当前提前生产阶段的 SKU 中心化运行视图。
+     * <p>使用对象身份作为 key，避免同物料不同产品状态或补偿副本共享错误的临时日计划账本。</p>
+     */
+    private Map<SkuScheduleDTO, EarlyProductionRuntimePlan> earlyProductionRuntimePlanMap =
+            new IdentityHashMap<SkuScheduleDTO, EarlyProductionRuntimePlan>();
     /** 新增SKU进入S4.5时是否命中结构五天内收尾层级快照，使用对象身份避免SKU出队后判定漂移 */
     private Map<SkuScheduleDTO, Boolean> newSpecSingleControlStructureEndingLayerMap = new IdentityHashMap<>();
     /** 单控模式初始目标量快照，key=materialCode_productStatus；S4.3结束时冻结，后续禁止随剩余量变化 */
@@ -663,9 +677,125 @@ public class LhScheduleContext {
             recordMachine(structureScheduledMachineCodeMap, productionDate, structureName, machineCode);
         }
         if (StringUtils.isNotEmpty(materialCode)) {
-            String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(materialCode, productStatus);
+            // 已排统计与读取入口使用同一产品状态归一化规则，空状态统一按正规 S 处理。
+            String normalizedProductStatus = StringUtils.isEmpty(productStatus)
+                    ? FORMAL_PRODUCT_STATUS : productStatus;
+            String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(materialCode, normalizedProductStatus);
             recordMachine(skuScheduledMachineCodeMap, productionDate, skuKey, machineCode);
         }
+    }
+
+    /**
+     * 获取指定业务日的动态历史欠产量。
+     *
+     * @param productionDate 当前业务日期
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @return 当前月月初至业务日前一日的累计欠产量
+     */
+    public int getMonthlyHistoryShortageQty(LocalDate productionDate,
+                                           String materialCode,
+                                           String productStatus) {
+        if (Objects.isNull(productionDate) || StringUtils.isEmpty(materialCode)
+                || CollectionUtils.isEmpty(monthlyHistoryShortageQtyMap)) {
+            return 0;
+        }
+        Map<String, Integer> dateShortageMap = monthlyHistoryShortageQtyMap.get(productionDate);
+        if (CollectionUtils.isEmpty(dateShortageMap)) {
+            return 0;
+        }
+        // 月计划通常以 S 标识正规品，运行态 SKU 的空状态按项目既有口径归一化为 S 后再读取。
+        String normalizedProductStatus = StringUtils.isEmpty(productStatus)
+                ? FORMAL_PRODUCT_STATUS : productStatus;
+        String skuKey = MonthPlanDateResolver.buildMaterialStatusKey(
+                materialCode, normalizedProductStatus);
+        Integer shortageQty = dateShortageMap.get(skuKey);
+        return Objects.isNull(shortageQty) ? 0 : Math.max(0, shortageQty);
+    }
+
+    /**
+     * 登记当前提前生产阶段的中心化运行视图。
+     *
+     * @param sku 提前生产 SKU
+     * @param runtimePlan 运行视图
+     */
+    public void registerEarlyProductionRuntimePlan(SkuScheduleDTO sku,
+                                                   EarlyProductionRuntimePlan runtimePlan) {
+        if (Objects.nonNull(sku) && Objects.nonNull(runtimePlan)) {
+            earlyProductionRuntimePlanMap.put(sku, runtimePlan);
+        }
+    }
+
+    /**
+     * 获取 SKU 当前生效的提前生产运行视图。
+     *
+     * @param sku SKU
+     * @return 当前运行视图；非提前生产阶段返回 null
+     */
+    public EarlyProductionRuntimePlan getEarlyProductionRuntimePlan(SkuScheduleDTO sku) {
+        if (Objects.isNull(sku) || CollectionUtils.isEmpty(earlyProductionRuntimePlanMap)) {
+            return null;
+        }
+        return earlyProductionRuntimePlanMap.get(sku);
+    }
+
+    /**
+     * 判断 SKU 是否为当前月无总计划量、仅允许进入提前生产流程的候选。
+     *
+     * <p>该判断只负责路由隔离。候选态不代表已经通过结构、机台、模具或胎胚准入，
+     * 正常新增阶段必须据此跳过，提前生产阶段再按业务日尝试激活。</p>
+     *
+     * @param sku SKU
+     * @return true-仅允许走提前生产流程；false-沿用正常排产流程
+     */
+    public boolean isFutureOnlyEarlyProductionCandidate(SkuScheduleDTO sku) {
+        EarlyProductionRuntimePlan runtimePlan = getEarlyProductionRuntimePlan(sku);
+        return Objects.nonNull(runtimePlan) && runtimePlan.isFutureOnlyCandidate();
+    }
+
+    /**
+     * 删除指定 SKU 的提前生产运行视图。
+     *
+     * <p>SKU 最终识别为续作、被减量规则移除或不再属于新增排产时调用，防止候选态
+     * 残留后继续影响正常资源视图。</p>
+     *
+     * @param sku SKU
+     */
+    public void removeEarlyProductionRuntimePlan(SkuScheduleDTO sku) {
+        if (Objects.nonNull(sku)) {
+            earlyProductionRuntimePlanMap.remove(sku);
+            newSpecEarlyProductionAllowedMap.remove(sku);
+        }
+    }
+
+    /**
+     * 解析当前排产调用应使用的日计划账本。
+     *
+     * <p>提前生产阶段返回临时前移账本，其他场景返回 SKU 原始运行态账本。该方法是选机、
+     * 加机台、产能模拟和实际扣账的统一入口，调用方不得自行重新构造提前生产账本。</p>
+     *
+     * @param sku SKU
+     * @return 当前生效的日计划账本
+     */
+    public Map<LocalDate, SkuDailyPlanQuotaDTO> resolveEffectiveDailyPlanQuotaMap(
+            SkuScheduleDTO sku) {
+        EarlyProductionRuntimePlan runtimePlan = getEarlyProductionRuntimePlan(sku);
+        if (Objects.nonNull(runtimePlan)
+                && runtimePlan.isActive()
+                && !CollectionUtils.isEmpty(runtimePlan.getShiftedDailyPlanQuotaMap())) {
+            return runtimePlan.getShiftedDailyPlanQuotaMap();
+        }
+        return Objects.isNull(sku) ? Collections.emptyMap() : sku.getDailyPlanQuotaMap();
+    }
+
+    /**
+     * 清理当前提前生产阶段的全部临时运行视图。
+     *
+     * <p>只清理内存临时视图，不恢复或改写原始月计划和原始日计划账本。</p>
+     */
+    public void clearEarlyProductionRuntimePlans() {
+        earlyProductionRuntimePlanMap.clear();
+        newSpecEarlyProductionAllowedMap.clear();
     }
 
     /**

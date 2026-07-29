@@ -352,6 +352,49 @@ class PendingSkuUnscheduledRuleTest {
     }
 
     /**
+     * 提前生产中心运行视图的有效余量大于容差时，即使通用余量为0，也不得被收尾小余量规则拦截。
+     */
+    @Test
+    void evaluate_shouldUseExplicitEarlyProductionRuleQtyInsteadOfGenericSurplus() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 30);
+        LhScheduleContext context = buildContext(
+                scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO sku = buildSku(
+                "3302002585", "S", ConstructionStageEnum.FORMAL.getCode());
+        sku.setSurplusQty(0);
+        sku.setShiftCapacity(46);
+
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluate(
+                context, sku, true, false, 102);
+
+        assertNull(result, "有效余量102大于小余量容差，不得按通用余量0错误拦截");
+        assertEquals(0, sku.getSurplusQty(), "显式规则余量不得修改通用余量");
+    }
+
+    /**
+     * 提前生产实际消费账本的实时剩余量已降到容差内时，仍应执行既有小余量规则，
+     * 证明本次修复只切换数量来源，没有整体绕过收尾约束。
+     */
+    @Test
+    void evaluate_shouldKeepSmallEndingRuleWhenRuntimeRemainingQtyWithinTolerance() {
+        LocalDate scheduleDate = LocalDate.of(2026, 7, 30);
+        LhScheduleContext context = buildContext(
+                scheduleDate, scheduleDate.plusDays(2), 2);
+        SkuScheduleDTO sku = buildSku(
+                "3302002585", "S", ConstructionStageEnum.FORMAL.getCode());
+        sku.setSurplusQty(0);
+        sku.setShiftCapacity(46);
+
+        LhUnscheduledResult result = PendingSkuUnscheduledRule.evaluate(
+                context, sku, true, false, 2);
+
+        assertNotNull(result);
+        assertEquals(2, result.getUnscheduledQty().intValue());
+        assertEquals(SmallEndingSurplusSkipRule.UNSCHEDULED_REASON,
+                result.getUnscheduledReason());
+    }
+
+    /**
      * 构造排程上下文。
      *
      * @param scheduleDate 排程窗口首日

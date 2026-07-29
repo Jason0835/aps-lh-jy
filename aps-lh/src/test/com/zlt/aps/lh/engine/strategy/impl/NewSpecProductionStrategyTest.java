@@ -10,6 +10,8 @@ import com.zlt.aps.lh.api.enums.ConstructionStageEnum;
 import com.zlt.aps.lh.api.enums.MouldChangeTypeEnum;
 import com.zlt.aps.lh.api.enums.SkuScheduleSourceTypeEnum;
 import com.zlt.aps.lh.component.CapsuleReplacementRuleService;
+import com.zlt.aps.lh.component.EarlyProductionQuantityCalculator;
+import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.component.TargetScheduleQtyResolver;
 import com.zlt.aps.lh.context.LhScheduleConfig;
 import com.zlt.aps.lh.context.LhScheduleContext;
@@ -21,6 +23,7 @@ import com.zlt.aps.lh.engine.strategy.support.DailyCandidateReason;
 import com.zlt.aps.lh.engine.strategy.support.DailyNewSpecCandidate;
 import com.zlt.aps.lh.engine.strategy.support.DailySchedulePhase;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionDecision;
+import com.zlt.aps.lh.engine.strategy.support.EarlyProductionRuntimePlan;
 import com.zlt.aps.lh.engine.strategy.support.HistoricalReverseSelectionDirective;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceAllocationResult;
 import com.zlt.aps.lh.engine.strategy.support.NewSpecCandidateCache;
@@ -29,6 +32,7 @@ import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
 import com.zlt.aps.mdm.api.domain.entity.MdmModelInfo;
 import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
+import com.zlt.aps.mp.api.domain.entity.FactoryMonthPlanProductionFinalResult;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -92,8 +96,15 @@ public class NewSpecProductionStrategyTest {
                 "历史反选不得绕过当天日计划准入");
 
         Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap = new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(2);
-        quotaMap.put(scheduleDate, buildQuota(60, 60));
+        quotaMap.put(scheduleDate, buildQuota(0, 60));
         sku.setDailyPlanQuotaMap(quotaMap);
+        DailyNewSpecCandidate historyShiftedCandidate = ReflectionTestUtils.invokeMethod(
+                strategy, "buildDailyCandidate", context, dayContext, state,
+                DailySchedulePhase.TODAY_PLAN_AND_LOCKED, sku);
+        Assertions.assertNull(historyShiftedCandidate,
+                "临时追加的历史欠产使remainingQty大于0时，仍不得改变原始dayN为0的阶段归属");
+
+        quotaMap.put(scheduleDate, buildQuota(60, 60));
         DailyNewSpecCandidate plannedCandidate = ReflectionTestUtils.invokeMethod(
                 strategy, "buildDailyCandidate", context, dayContext, state,
                 DailySchedulePhase.TODAY_PLAN_AND_LOCKED, sku);
@@ -102,6 +113,216 @@ public class NewSpecProductionStrategyTest {
         Assertions.assertTrue(plannedCandidate.hasReason(DailyCandidateReason.TODAY_PLAN));
         Assertions.assertTrue(plannedCandidate.hasReason(
                 DailyCandidateReason.ALTERNATE_PLAN_REVERSE_SELECT));
+    }
+
+    /**
+     * 用例说明：当前月 TOTAL_QTY=0 的 future-only 候选即使通用余量和目标量为正，
+     * 也不得进入当天计划、正常加机台或历史欠产/收尾遗留阶段。
+     */
+    @Test
+    public void shouldKeepFutureOnlyCandidateOutOfAllNormalPhases() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 29, 0, 0, 0));
+        List<LhShiftConfigVO> shifts =
+                LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate());
+        LocalDate scheduleDate = resolveWorkDate(shifts.get(0));
+        DayScheduleContext dayContext = new DayScheduleContext(
+                scheduleDate, shifts.subList(0, 2), true, false);
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001080");
+        sku.setProductStatus("S");
+        sku.setSurplusQty(500);
+        sku.setPendingQty(500);
+        sku.setTargetScheduleQty(500);
+        Map<LocalDate, SkuDailyPlanQuotaDTO> quotaMap =
+                new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(1);
+        quotaMap.put(scheduleDate, buildQuota(0, 0));
+        sku.setDailyPlanQuotaMap(quotaMap);
+        EarlyProductionRuntimePlan runtimePlan = new EarlyProductionRuntimePlan();
+        runtimePlan.setFutureOnlyCandidate(true);
+        runtimePlan.setActive(false);
+        runtimePlan.setFuturePlanDate(LocalDate.of(2026, 8, 1));
+        context.registerEarlyProductionRuntimePlan(sku, runtimePlan);
+        DayDrivenScheduleState state =
+                new DayDrivenScheduleState(Collections.singletonList(sku));
+
+        // 调用处分别验证三个正常阶段入口，候选态不得与正常 SKU 同轮竞争资源。
+        DailyNewSpecCandidate todayCandidate = ReflectionTestUtils.invokeMethod(
+                strategy, "buildDailyCandidate", context, dayContext, state,
+                DailySchedulePhase.TODAY_PLAN_AND_LOCKED, sku);
+        DailyNewSpecCandidate addMachineCandidate = ReflectionTestUtils.invokeMethod(
+                strategy, "buildDailyCandidate", context, dayContext, state,
+                DailySchedulePhase.ADD_MACHINE, sku);
+        DailyNewSpecCandidate legacyCandidate = ReflectionTestUtils.invokeMethod(
+                strategy, "buildDailyCandidate", context, dayContext, state,
+                DailySchedulePhase.ADD_MACHINE, sku, true);
+
+        Assertions.assertNull(todayCandidate);
+        Assertions.assertNull(addMachineCandidate);
+        Assertions.assertNull(legacyCandidate);
+    }
+
+    /**
+     * 用例说明：futurePlanDate 在 T 日尚未进入 N 天阈值时只保留候选；业务日推进后
+     * 一旦进入阈值并通过结构切换准入，才激活临时前移账本和未来月目标量。
+     */
+    @Test
+    public void shouldActivateFutureOnlyCandidateWhenFuturePlanEntersThreshold() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LocalDate scheduleStartDate = LocalDate.of(2026, 7, 29);
+        LocalDate windowEndDate = LocalDate.of(2026, 7, 31);
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 29, 0, 0, 0));
+        context.setScheduleTargetDate(toDate(2026, 7, 31, 0, 0, 0));
+        context.setWindowEndDate(toDate(2026, 7, 31, 0, 0, 0));
+        FactoryMonthPlanProductionFinalResult julyPlan =
+                buildMonthPlan("3302001080", 2026, 7, 0);
+        FactoryMonthPlanProductionFinalResult augustPlan =
+                buildMonthPlan("3302001080", 2026, 8, 128);
+        augustPlan.setDay1(48);
+        augustPlan.setDay2(48);
+        List<FactoryMonthPlanProductionFinalResult> planList =
+                Arrays.asList(julyPlan, augustPlan);
+        context.setMonthPlanList(planList);
+        context.setLoadedMonthPlanList(planList);
+        context.setMonthPlanByMaterialMonthMap(
+                MonthPlanDateResolver.buildMaterialMonthPlanMap(planList));
+        context.getStructurePlanMachineCountMap()
+                .computeIfAbsent(LocalDate.of(2026, 8, 1),
+                        key -> new LinkedHashMap<String, Integer>(1))
+                .put("285/75R24.5", 7);
+
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001080");
+        sku.setProductStatus("S");
+        sku.setConstructionStage("03");
+        sku.setScheduleType("02");
+        sku.setStructureName("285/75R24.5");
+        sku.setDailyCapacity(48);
+        sku.setDailyPlanQuotaMap(new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(3));
+        sku.getDailyPlanQuotaMap().put(
+                scheduleStartDate, buildQuota(0, 0));
+        sku.getDailyPlanQuotaMap().put(
+                scheduleStartDate.plusDays(1), buildQuota(0, 0));
+        sku.getDailyPlanQuotaMap().put(
+                windowEndDate, buildQuota(0, 0));
+        context.getNewSpecSkuList().add(sku);
+        context.getStructureSkuMap().put(
+                sku.getStructureName(), new ArrayList<SkuScheduleDTO>(Collections.singletonList(sku)));
+        EarlyProductionRuntimePlan candidatePlan =
+                EarlyProductionQuantityCalculator.registerFutureOnlyCandidateView(
+                        context, sku, scheduleStartDate);
+        Assertions.assertNotNull(candidatePlan);
+        List<LhShiftConfigVO> scheduleShifts =
+                LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate());
+
+        // T日距离08.01为3天，超过默认阈值2天，只保留候选，不得生成运行态目标和前移账本。
+        EarlyProductionRuntimePlan waitingPlan = ReflectionTestUtils.invokeMethod(
+                strategy, "prepareEarlyProductionRuntimePlan", context,
+                new DayScheduleContext(scheduleStartDate, scheduleShifts.subList(0, 2), true, false),
+                sku);
+        Assertions.assertSame(candidatePlan, waitingPlan);
+        Assertions.assertFalse(waitingPlan.isActive());
+        Assertions.assertEquals(0, sku.resolveTargetScheduleQty());
+
+        // 业务日推进到07.30后，08.01进入2天阈值，并按未来结构计划7台完成结构切换准入。
+        EarlyProductionRuntimePlan activePlan = ReflectionTestUtils.invokeMethod(
+                strategy, "prepareEarlyProductionRuntimePlan", context,
+                new DayScheduleContext(scheduleStartDate.plusDays(1),
+                        scheduleShifts.subList(2, 5), false, false),
+                sku);
+
+        Assertions.assertSame(candidatePlan, activePlan);
+        Assertions.assertTrue(activePlan.isActive());
+        Assertions.assertTrue(activePlan.getDecision().isAllowed());
+        Assertions.assertEquals(LocalDate.of(2026, 8, 1), activePlan.getFuturePlanDate());
+        Assertions.assertEquals(96, activePlan.getFutureMonthSurplusQty());
+        Assertions.assertEquals(96, activePlan.getEffectiveTargetQty());
+        Assertions.assertEquals(48, activePlan.getShiftedDailyPlanQuotaMap()
+                .get(LocalDate.of(2026, 7, 30)).getDayPlanQty());
+        Assertions.assertEquals(96, sku.resolveTargetScheduleQty());
+    }
+
+    /**
+     * 用例说明：提前生产已经排入部分数量后，最终剩余原因必须反映“已使用剩余资源”，
+     * 不能误报为从未命中提前生产候选。
+     */
+    @Test
+    public void shouldDescribePartialEarlyProductionRemainingAccurately() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302001523");
+        sku.setProductStatus("S");
+        context.registerEarlyProductionRuntimePlan(sku, new EarlyProductionRuntimePlan());
+        LhScheduleResult earlyResult = new LhScheduleResult();
+        earlyResult.setMaterialCode(sku.getMaterialCode());
+        earlyResult.setProductStatus(sku.getProductStatus());
+        earlyResult.setIsEarlyProduction("1");
+        context.getScheduleResultList().add(earlyResult);
+
+        String reason = ReflectionTestUtils.invokeMethod(
+                strategy, "buildEarlyProductionPartialRemainingReason", 394);
+        Boolean partiallyScheduled = ReflectionTestUtils.invokeMethod(
+                strategy, "hasPartiallyScheduledEarlyProductionResult", context, sku);
+
+        Assertions.assertEquals(
+                "提前生产已使用正常阶段后的剩余资源，按当前结构及日计划机台节奏不再扩机，"
+                        + "剩余394保留原计划日期",
+                reason);
+        Assertions.assertFalse(reason.contains("未命中提前生产候选"));
+        Assertions.assertTrue(Boolean.TRUE.equals(partiallyScheduled),
+                "中心运行视图与提前生产结果同时存在时，应识别为提前生产部分成功");
+    }
+
+    /**
+     * 用例说明：结构/SKU已排机台统计重建必须按机台 Set 去重，并在结果释放或班次计划量
+     * 清零后删除旧缓存，避免残留机台数阻断后续提前生产准入。
+     */
+    @Test
+    public void shouldRebuildScheduledMachineCountAfterResultReleaseOrPlanClear() {
+        NewSpecProductionStrategy strategy = new NewSpecProductionStrategy();
+        LhScheduleContext context = new LhScheduleContext();
+        context.setScheduleDate(toDate(2026, 7, 29, 0, 0, 0));
+        List<LhShiftConfigVO> shifts =
+                LhScheduleTimeUtil.buildDefaultScheduleShifts(context, context.getScheduleDate());
+        LocalDate businessDate = resolveWorkDate(shifts.get(0));
+
+        LhScheduleResult firstSkuResult = buildScheduledMachineResult(
+                "3302001001", "S", "STRUCT-01", "K1101", 10);
+        firstSkuResult.setClass2PlanQty(10);
+        LhScheduleResult secondSkuSameMachineResult = buildScheduledMachineResult(
+                "3302001002", "S", "STRUCT-01", "K1101", 8);
+        context.getScheduleResultList().add(firstSkuResult);
+        context.getScheduleResultList().add(secondSkuSameMachineResult);
+
+        ReflectionTestUtils.invokeMethod(
+                strategy, "rebuildScheduledMachineCountMap", context, shifts);
+
+        Assertions.assertEquals(
+                1, context.getStructureScheduledMachineCount(businessDate, "STRUCT-01"),
+                "同结构多个SKU共用同一机台时只能统计一台");
+        Assertions.assertEquals(
+                1, context.getSkuScheduledMachineCount(
+                        businessDate, "3302001001", "S"),
+                "同一SKU同一机台多个班次只能统计一台");
+        Assertions.assertEquals(
+                1, context.getSkuScheduledMachineCount(
+                        businessDate, "3302001002", "S"));
+
+        // 模拟结果释放和剩余结果班次计划量清零，再次重建时不得保留任何旧机台缓存。
+        context.getScheduleResultList().remove(secondSkuSameMachineResult);
+        firstSkuResult.setClass1PlanQty(0);
+        firstSkuResult.setClass2PlanQty(0);
+        ReflectionTestUtils.invokeMethod(
+                strategy, "rebuildScheduledMachineCountMap", context, shifts);
+
+        Assertions.assertEquals(
+                0, context.getStructureScheduledMachineCount(businessDate, "STRUCT-01"));
+        Assertions.assertEquals(
+                0, context.getSkuScheduledMachineCount(
+                        businessDate, "3302001001", "S"));
     }
 
     /**
@@ -116,7 +337,8 @@ public class NewSpecProductionStrategyTest {
             @Override
             public int calcMachineAvailableCapacityInWindow(LhScheduleContext context,
                                                             SkuScheduleDTO sku,
-                                                            MachineScheduleDTO machine) {
+                                                            MachineScheduleDTO machine,
+                                                            Date productionNotBeforeTime) {
                 if ("K1111L".equals(machine.getMachineCode())) {
                     return 20;
                 }
@@ -172,7 +394,8 @@ public class NewSpecProductionStrategyTest {
             @Override
             public int calcMachineAvailableCapacityInWindow(LhScheduleContext context,
                                                             SkuScheduleDTO sku,
-                                                            MachineScheduleDTO machine) {
+                                                            MachineScheduleDTO machine,
+                                                            Date productionNotBeforeTime) {
                 if ("K1105".equals(machine.getMachineCode())) {
                     return 112;
                 }
@@ -323,7 +546,8 @@ public class NewSpecProductionStrategyTest {
             @Override
             public int calcMachineAvailableCapacityInWindow(LhScheduleContext context,
                                                             SkuScheduleDTO sku,
-                                                            MachineScheduleDTO machine) {
+                                                            MachineScheduleDTO machine,
+                                                            Date productionNotBeforeTime) {
                 if ("K1407".equals(machine.getMachineCode()) || "K1105".equals(machine.getMachineCode())) {
                     return 40;
                 }
@@ -1172,6 +1396,31 @@ public class NewSpecProductionStrategyTest {
         return result;
     }
 
+    /**
+     * 构造已占用指定业务日首班的最小排程结果。
+     *
+     * @param materialCode 物料编码
+     * @param productStatus 产品状态
+     * @param structureName 结构名称
+     * @param machineCode 机台编码
+     * @param class1PlanQty 首班计划量
+     * @return 可用于结构/SKU机台统计重建的排程结果
+     */
+    private LhScheduleResult buildScheduledMachineResult(
+            String materialCode,
+            String productStatus,
+            String structureName,
+            String machineCode,
+            int class1PlanQty) {
+        LhScheduleResult result = new LhScheduleResult();
+        result.setMaterialCode(materialCode);
+        result.setProductStatus(productStatus);
+        result.setStructureName(structureName);
+        result.setLhMachineCode(machineCode);
+        result.setClass1PlanQty(class1PlanQty);
+        return result;
+    }
+
     private MouldResourceAllocationResult invokeTryAllocateMouldResourceForAddMachine(
             NewSpecProductionStrategy strategy,
             LhScheduleContext context,
@@ -1253,6 +1502,33 @@ public class NewSpecProductionStrategyTest {
         result.setMouldQty(1);
         result.setLhTime(3600);
         return result;
+    }
+
+    /**
+     * 构造提前生产跨月测试所需月计划。
+     *
+     * @param materialCode 物料编码
+     * @param year 年份
+     * @param month 月份
+     * @param totalQty 月计划 TOTAL_QTY
+     * @return 月计划
+     */
+    private FactoryMonthPlanProductionFinalResult buildMonthPlan(
+            String materialCode,
+            int year,
+            int month,
+            int totalQty) {
+        FactoryMonthPlanProductionFinalResult plan =
+                new FactoryMonthPlanProductionFinalResult();
+        plan.setFactoryCode("116");
+        plan.setMaterialCode(materialCode);
+        plan.setProductStatus("S");
+        plan.setStructureName("285/75R24.5");
+        plan.setConstructionStage("03");
+        plan.setYear(year);
+        plan.setMonth(month);
+        plan.setTotalQty(totalQty);
+        return plan;
     }
 
     private SkuDailyPlanQuotaDTO buildQuota(int remainingQty) {

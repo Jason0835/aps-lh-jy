@@ -63,68 +63,77 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
          */
         captureSpecialMaterialContinuationSnapshot(context);
 
-        // 获取 S4.5 新增排产策略；特殊材料置换由本 Handler 完成后的独立 S4.5.1 步骤执行。
-        IProductionStrategy strategy = strategyFactory.getProductionStrategy(
-                ScheduleTypeEnum.NEW_SPEC.getCode());
+        try {
+            // 获取 S4.5 新增排产策略；特殊材料置换由本 Handler 完成后的独立 S4.5.1 步骤执行。
+            IProductionStrategy strategy = strategyFactory.getProductionStrategy(
+                    ScheduleTypeEnum.NEW_SPEC.getCode());
 
-        // S4.5.2 SKU优先级排序
-        ISkuPriorityStrategy priorityStrategy = strategyFactory.getSkuPriorityStrategy();
-        priorityStrategy.sortByPriority(context);
-        log.debug("新增规格SKU优先级排序完成, 待排新增SKU: {}", context.getNewSpecSkuList().size());
+            // S4.5.2 SKU优先级排序
+            ISkuPriorityStrategy priorityStrategy = strategyFactory.getSkuPriorityStrategy();
+            priorityStrategy.sortByPriority(context);
+            log.debug("新增规格SKU优先级排序完成, 待排新增SKU: {}", context.getNewSpecSkuList().size());
 
-        /*
-         * S4.5.3 前日交替计划机台反选：
-         * 必须在新增SKU业务优先级排序完成后、普通新增选机前执行。反选策略会按历史班次4、5的
-         * “机台+后物料”关系登记指定机台指令；目标 SKU 轮到时优先尝试该机台，但绝不改写上一步
-         * 已确定的 SKU 业务排序，避免历史计划覆盖当前月计划、产品状态和排序 tie-break 规则。
-         */
-        historicalReverseSelectionStrategy.reverseSelect(context);
-        log.info("前日交替计划机台反选完成, 排程结果数: {}, 待新增SKU: {}, 指令数: {}",
-                context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
-                context.getHistoricalReverseSelectionDirectiveList().size());
+            /*
+             * S4.5.3 前日交替计划机台反选：
+             * 必须在新增SKU业务优先级排序完成后、普通新增选机前执行。反选策略会按历史班次4、5的
+             * “机台+后物料”关系登记指定机台指令；目标 SKU 轮到时优先尝试该机台，但绝不改写上一步
+             * 已确定的 SKU 业务排序，避免历史计划覆盖当前月计划、产品状态和排序 tie-break 规则。
+             */
+            historicalReverseSelectionStrategy.reverseSelect(context);
+            log.info("前日交替计划机台反选完成, 排程结果数: {}, 待新增SKU: {}, 指令数: {}",
+                    context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
+                    context.getHistoricalReverseSelectionDirectiveList().size());
 
-        // S4.5.4 遍历新增SKU, 匹配机台
-        IMachineMatchStrategy machineMatchStrategy = strategyFactory.getMachineMatchStrategy();
+            // S4.5.4 遍历新增SKU, 匹配机台
+            IMachineMatchStrategy machineMatchStrategy = strategyFactory.getMachineMatchStrategy();
 
-        // S4.5.5 换模时间分配（开关开启时附带换模均衡）
-        IMouldChangeBalanceStrategy mouldChangeStrategy = strategyFactory.getMouldChangeBalanceStrategy();
+            // S4.5.5 换模时间分配（开关开启时附带换模均衡）
+            IMouldChangeBalanceStrategy mouldChangeStrategy = strategyFactory.getMouldChangeBalanceStrategy();
 
-        // S4.5.6 首检均衡分配
-        IFirstInspectionBalanceStrategy inspectionStrategy = strategyFactory.getFirstInspectionBalanceStrategy();
+            // S4.5.6 首检均衡分配
+            IFirstInspectionBalanceStrategy inspectionStrategy = strategyFactory.getFirstInspectionBalanceStrategy();
 
-        // S4.5.7 计算开产时间
-        ICapacityCalculateStrategy capacityStrategy = strategyFactory.getCapacityCalculateStrategy();
+            // S4.5.7 计算开产时间
+            ICapacityCalculateStrategy capacityStrategy = strategyFactory.getCapacityCalculateStrategy();
 
-        /*
-         * S4.5.8 新增排产按业务日编排：
-         * 1. 保持上方已生成的SKU顺序和历史反选指令，不在日循环内重新排序；
-         * 2. 将class1～class8按workDate拆为T日2班、T+1/T+2各3班；
-         * 3. 每日依次执行“在机延续、当天计划/锁定、加机台、提前生产、日终结转”；
-         * 4. 单个候选仍复用现有选机、换模、首检、目标量、单控和排满内核；
-         * 5. 临时资源失败只登记延期，T+2 的提前生产阶段完成后再统一写最终未排；
-         * 6. 三天全部完成后，才执行下方窗口级胎胚调整和后续特殊材料置换。
-         *
-         * 该调用仍使用IProductionStrategy原接口，数据库字段、Mapper和保存链路均不改变。
-         */
-        strategy.scheduleNewSpecs(context, machineMatchStrategy,
-                mouldChangeStrategy, inspectionStrategy, capacityStrategy);
-        log.info("新增规格选机排产完成, 排程结果数: {}, 剩余新增SKU: {}, 未排产数: {}",
-                context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
-                context.getUnscheduledResultList().size());
-        strategy.allocateShiftPlanQty(context);
-        strategy.adjustEmbryoStock(context);
-        log.info("新增规格胎胚库存调整完成, 排程结果数: {}, 剩余新增SKU: {}, 未排产数: {}",
-                context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
-                context.getUnscheduledResultList().size());
-        strategy.scheduleReduceMould(context);
-        /*
-         * S4.5结束后只同步阶段级判断已经命中的结构状态，不重新计算是否触发保机。
-         * 同结构SKU若已接管保机机台，此处负责清理旧结果中的纯保机占位、转移剩余保机区间，
-         * 并把命中标识同步到本阶段新增的同结构结果。
-         */
-        structureMinMachineRetentionService.synchronizeRetainedState(context);
-        log.info("新增规格排产处理完成, 排程结果数: {}, 未排产数: {}",
-                context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
+            /*
+             * S4.5.8 新增排产按业务日编排：
+             * 1. 保持上方已生成的SKU顺序和历史反选指令，不在日循环内重新排序；
+             * 2. 将class1～class8按workDate拆为T日2班、T+1/T+2各3班；
+             * 3. 每日依次执行“在机延续、当天计划/锁定、加机台、提前生产、日终结转”；
+             * 4. 单个候选仍复用现有选机、换模、首检、目标量、单控和排满内核；
+             * 5. 临时资源失败只登记延期，T+2 的提前生产阶段完成后再统一写最终未排；
+             * 6. 三天全部完成后，才执行下方窗口级胎胚调整和后续特殊材料置换。
+             *
+             * 该调用仍使用IProductionStrategy原接口，数据库字段、Mapper和保存链路均不改变。
+             */
+            strategy.scheduleNewSpecs(context, machineMatchStrategy,
+                    mouldChangeStrategy, inspectionStrategy, capacityStrategy);
+            log.info("新增规格选机排产完成, 排程结果数: {}, 剩余新增SKU: {}, 未排产数: {}",
+                    context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
+                    context.getUnscheduledResultList().size());
+            strategy.allocateShiftPlanQty(context);
+            strategy.adjustEmbryoStock(context);
+            log.info("新增规格胎胚库存调整完成, 排程结果数: {}, 剩余新增SKU: {}, 未排产数: {}",
+                    context.getScheduleResultList().size(), context.getNewSpecSkuList().size(),
+                    context.getUnscheduledResultList().size());
+            strategy.scheduleReduceMould(context);
+            /*
+             * S4.5结束后只同步阶段级判断已经命中的结构状态，不重新计算是否触发保机。
+             * 同结构SKU若已接管保机机台，此处负责清理旧结果中的纯保机占位、转移剩余保机区间，
+             * 并把命中标识同步到本阶段新增的同结构结果。
+             */
+            structureMinMachineRetentionService.synchronizeRetainedState(context);
+            log.info("新增规格排产处理完成, 排程结果数: {}, 未排产数: {}",
+                    context.getScheduleResultList().size(), context.getUnscheduledResultList().size());
+        } finally {
+            /*
+             * 提前生产中心视图不仅服务 scheduleNewSpecs，还要支撑后续班次分配、胎胚回裁和
+             * isEnd 最终复核。必须等整个 S4.5 完成后再清理；异常退出时同样清理，避免临时
+             * 前移日计划或中心目标泄漏到后续特殊材料置换及其他排程步骤。
+             */
+            context.clearEarlyProductionRuntimePlans();
+        }
     }
 
     /**

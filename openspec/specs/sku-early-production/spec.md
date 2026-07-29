@@ -16,21 +16,20 @@
 - **THEN** 系统 SHALL 允许该 SKU 进入当前业务日新增机台判断
 - **AND** 系统 SHALL 继续执行候选机台、模具、胎胚、换模、换活字块、首检、晚班不可换模和班次产能等既有校验
 
-#### Scenario: 续作补偿 SKU 单控候选必须真实落在当前业务日开产
+#### Scenario: 只允许正规新增排产 SKU
 
-- **WHEN** 续作补偿 SKU 已转入 S4.5 新增排产
-- **AND** 该 SKU 通过提前生产准入并按既有选机顺序试算到单控候选
-- **AND** 某个单控候选经过换模和首检试算后的开产业务日不是当前业务日
-- **THEN** 系统 SHALL 回滚该候选的换模和模具预占
-- **AND** 系统 SHALL 记录该候选排除原因为提前生产开产未落在当前业务日
-- **AND** 系统 SHALL 继续尝试后续候选机台
+- **WHEN** SKU 属于 S4.5 普通新增排产
+- **AND** `constructionStage` 不是 `01` 或 `02`
+- **AND** SKU 不是续作补偿、续作加机台或换活字块回流来源
+- **THEN** 系统 SHALL 允许其继续执行提前生产准入判断
+- **AND** 系统 SHALL NOT 额外要求 `productStatus` 必须等于 `S`
 
-#### Scenario: 续作补偿 SKU 通过提前生产准入时保持原新增队列顺序
+#### Scenario: 续作、换活字块、试制和量试不得提前生产
 
-- **WHEN** 续作补偿 SKU 已转入 S4.5 新增排产
-- **AND** 该 SKU 通过提前生产准入
-- **THEN** 系统 SHALL 保持 S4.5 已有新增 SKU 排序顺序
-- **AND** 系统 SHALL NOT 因提前生产准入将补偿 SKU 前移到普通新增 SKU 前
+- **WHEN** SKU 属于续作补偿、续作加机台、换活字块回流、试制或量试任一场景
+- **THEN** 系统 SHALL NOT 对该 SKU 执行提前生产
+- **AND** 系统 SHALL 保持其原计划日期、原顺延及原入口约束
+- **AND** 换活字块 SHALL NOT 主动拉取未来 SKU
 
 #### Scenario: 正规 SKU 单控整机候选作为普通机台后的回落候选
 
@@ -84,7 +83,9 @@
 
 ### Requirement: 提前生产临时日计划量同步前移
 
-系统 SHALL 在 SKU 提前生产准入通过后，为当前 SKU 当前轮次新增机台判断构造临时日计划量视图，临时视图 SHALL 仅用于新增机台判断、日计划量判断和产能模拟，不得写回月计划表，不得污染其他 SKU 或后续正常业务日期的原始 `dailyPlanQuotaMap`。
+系统 SHALL 在 S4.3 先为“当前业务月 `TOTAL_QTY=0` 且未来观察范围存在原始日计划”的 SKU 构造候选态 `EarlyProductionRuntimePlan`；在某业务日通过提前生产准入后再切换为激活态。运行视图统一承载候选/激活状态、当前月 `TOTAL_QTY`、`currentDate`、`futurePlanDate`、`earlyDays`、阈值、未来月计划量、未来月完成量、未来月余量、动态历史欠产、有效目标量、`EarlyProductionDecision` 和 `shiftedDailyPlanQuotaMap`。
+
+候选态 SHALL NOT 生成临时前移账本、不得取得运行目标量、不得参与正常阶段或提前生产阶段的资源竞争。激活后，选机、加机台、逐日后看、产能模拟、日计划扣账和同一 SKU 多机台 SHALL 读取同一份临时账本实例；运行视图 SHALL NOT 替换 SKU 原始 `dailyPlanQuotaMap`，不得写回月计划表，不得污染其他 SKU。已提前上机 SKU 在窗口内跨业务日延续时 SHALL 继续共享该运行视图。运行视图 SHALL 覆盖 `scheduleNewSpecs`、班次计划量分配、胎胚库存调整、排后 `isEnd` 复核和降模后处理，整个 S4.5 全部完成后统一清理；S4.5 任一步骤异常退出时也 SHALL 清理。独立复用新增主链的特殊材料置换 SHALL 在自身调用结束后清理本轮临时视图。
 
 临时前移规则 SHALL 按实际提前天数 `shiftDays = futurePlanDate - currentDate` 计算：`shifted[D] = original[D + shiftDays]`。当原始来源日期无计划量时，对应 `shifted[D]` 按无计划量口径处理。
 
@@ -101,9 +102,148 @@
 - **THEN** 原始 `dailyPlanQuotaMap` SHALL 保持原始业务日期和日计划量
 - **AND** 排程结束后系统 SHALL NOT 将临时前移日计划量回写月计划表
 
+#### Scenario: 同一 SKU 多台机共享临时账本
+
+- **WHEN** 同一提前生产 SKU 在剩余资源中成功新增多台机
+- **THEN** 所有机台 SHALL 共同消费同一个 `shiftedDailyPlanQuotaMap`
+- **AND** 系统 SHALL NOT 为每台机复制或重建一份独立额度
+
+#### Scenario: 原始日计划分组不受临时前移影响
+
+- **WHEN** SKU 当前业务日原始 `dayN` 为 0
+- **AND** 临时前移或历史欠产追加后当前日临时 `remainingQty` 大于 0
+- **THEN** 系统 SHALL 仍将该 SKU 归入提前生产组或历史欠产遗留组
+- **AND** 系统 SHALL NOT 将其放入当日正常计划组
+
+### Requirement: 提前生产数量口径集中计算
+
+系统 SHALL 由 `EarlyProductionQuantityCalculator` 集中处理当前业务月 `TOTAL_QTY` 路由、候选态注册、跨月计划段、未来月完成量/余量、目标月份计划选择和按业务日历史欠产缓存。该类 SHALL 只读取已批量加载的月计划、月完成量、日完成量和提前生产阈值，不得修改数据库月计划、原始 `dayN` 或全局日计划账本。
+
+`CuringMonthPlanTotalCalculator` SHALL 保持通用硫化月计划总量职责，不得直接感知提前生产天数阈值或扩展未来月份观察范围。正常硫化余量仍 SHALL 复用该通用计算器，提前生产未来月计划量、完成量和余量 SHALL 只保存在 `EarlyProductionRuntimePlan` 中，不得回写或替换 `SkuScheduleDTO.surplusQty`。
+
+`ScheduleAdjustHandler` SHALL 仅在 SKU 归集前初始化提前生产历史欠产缓存，并调用 `EarlyProductionQuantityCalculator` 应用当前月 `TOTAL_QTY` 路由及注册候选视图；不得在处理器内重复实现提前生产的余量、完成量或超欠产扫描。
+
+提前生产中心运行视图进入激活态后，收尾小余量规则 SHALL 通过 `EarlyProductionQuantityCalculator` 读取 SKU 实际消费账本的实时剩余目标量，不得继续使用为保护通用正常余量而保持不变的 `SkuScheduleDTO.surplusQty`。候选态、普通新增、续作和换活字块 SHALL 继续使用通用硫化余量。该规则只切换数量来源，不得整体绕过收尾小余量判断。
+
+提前生产中心运行视图进入激活态后，普通收尾预判、普通收尾目标调整和排后最终 `isEnd` 判断 SHALL 使用运行视图初始化时冻结的 `effectiveTargetQty` 作为 SKU 总目标，不得使用通用 `surplusQty`、局部胎胚库存或二者的模台数归整结果覆盖该中心总目标。普通收尾处理 SHALL 保留实际消费账本已经扣减的剩余量，不得把账本重新同步为 `effectiveTargetQty`。成型胎胚库存收尾的精确硬目标 SHALL 保持现有更高优先级；普通新增、续作、换活字块以及尚未激活的候选态 SHALL 继续使用通用收尾口径。
+
+#### Scenario: 激活态提前生产使用实时剩余量判断收尾小余量
+
+- **WHEN** 当前月 `TOTAL_QTY=0` 的正规新增 SKU 已通过提前生产准入并激活中心运行视图
+- **AND** 通用 `surplusQty=0`
+- **AND** 实际消费账本剩余目标量大于允许欠产偏差值
+- **THEN** 系统 SHALL 使用实际消费账本剩余目标量执行收尾小余量判断
+- **AND** 系统 SHALL NOT 因通用 `surplusQty=0` 将该 SKU 错误写入收尾小余量未排
+- **AND** 系统 SHALL 保持通用 `surplusQty` 原值不变
+
+#### Scenario: 部分提前生产后使用最新剩余量
+
+- **WHEN** 提前生产 SKU 已形成部分有效排程结果
+- **THEN** 收尾小余量规则 SHALL 使用实际消费账本扣减后的最新剩余量
+- **AND** 系统 SHALL NOT 使用中心运行视图初始化时的 `effectiveTargetQty` 固定快照
+
+#### Scenario: 提前生产实时剩余量已经进入小余量范围
+
+- **WHEN** 激活态提前生产 SKU 的实际消费账本剩余量小于等于允许欠产偏差值
+- **THEN** 系统 SHALL 继续执行既有前日 T+1 夜班是否排满判断
+- **AND** 命中规则时未排数量 SHALL 使用该实时剩余量
+- **AND** 系统 SHALL NOT 因提前生产身份无条件绕过收尾小余量规则
+
+#### Scenario: 通用余量为0且胎胚库存小于中心总目标
+
+- **WHEN** 当前月 `TOTAL_QTY=0` 的正规新增 SKU 已激活提前生产中心运行视图
+- **AND** 中心 `effectiveTargetQty=102`
+- **AND** 通用 `surplusQty=0`、局部胎胚库存为29
+- **AND** SKU 未命中成型胎胚库存收尾精确硬目标
+- **THEN** 普通收尾目标、排前收尾比较量和排后最终 `isEnd` 比较量 SHALL 保持为102
+- **AND** 系统 SHALL NOT 将中心目标下调为29或按模台数归整后的数量
+- **AND** 系统 SHALL NOT 因通用 `surplusQty=0` 命中共用胎胚零余量未排
+
+#### Scenario: 部分提前生产后普通收尾不得重置消费账本
+
+- **WHEN** 中心 `effectiveTargetQty=102` 的提前生产 SKU 已有效排产28条
+- **AND** 实际消费账本剩余74条
+- **THEN** 普通收尾和最终 `isEnd` 判断 SHALL 继续以102作为总目标
+- **AND** 后续可排数量 SHALL 读取实际消费账本剩余74条
+- **AND** 普通收尾处理 SHALL NOT 把实际消费账本重新同步为102
+
+### Requirement: 当前业务月 TOTAL_QTY 决定正常排产路由
+
+系统 SHALL 使用排程窗口开始日真实所属年月的月计划原始 `TOTAL_QTY` 判断 SKU 是否允许进入正常排产。当前月记录缺失、`TOTAL_QTY` 为空或 `TOTAL_QTY <= 0` SHALL 统一按0处理。
+
+当前月 `TOTAL_QTY=0` 时，不论通用硫化余量、历史欠产、上月超欠产、胎胚库存或收尾判断结果为何，系统 SHALL 清除该 SKU 的正常运行目标并禁止其进入当天计划、正常加机台、历史欠产/收尾遗留和续作排产。该门禁 SHALL NOT 修改通用正常余量公式或 `SkuScheduleDTO.surplusQty`。
+
+#### Scenario: 当前月 TOTAL_QTY 大于0
+
+- **WHEN** SKU 在排程窗口开始日所属月份的原始 `TOTAL_QTY > 0`
+- **THEN** 系统 SHALL 保持现有正常余量、正常排产和提前生产准入逻辑
+- **AND** 系统 SHALL NOT 将该 SKU 标记为 `futureOnlyCandidate`
+
+#### Scenario: 当前月 TOTAL_QTY 为0但通用余量大于0
+
+- **WHEN** SKU 当前月原始 `TOTAL_QTY=0`
+- **AND** 通用余量、历史欠产、胎胚库存或收尾目标任一大于0
+- **THEN** 系统 SHALL NOT 允许该 SKU 进入任何正常排产阶段
+- **AND** 系统 SHALL 保持通用 `surplusQty` 原值不变
+
+#### Scenario: 当前月记录缺失与 TOTAL_QTY 为0同口径
+
+- **WHEN** SKU 当前月月计划记录不存在
+- **THEN** 系统 SHALL 按当前月 `TOTAL_QTY=0` 执行相同路由
+- **AND** 系统 SHALL NOT 从未来月份 `TOTAL_QTY` 反推当前月正常排产资格
+
+### Requirement: 当前月无总计划量的未来 SKU 先候选后激活
+
+当前月 `TOTAL_QTY=0` 且从“排程窗口开始日+1”到“排程窗口结束日+N”存在原始日计划时，系统 SHALL 保留该 SKU 为 `futureOnlyCandidate`。该候选观察范围只用于保证 SKU 不被 S4.3 的零目标量过滤；实际提前生产仍 SHALL 对每个 `currentDate` 严格查找 `[currentDate+1, currentDate+N]`。
+
+#### Scenario: 未来计划尚未进入当前业务日阈值
+
+- **WHEN** 候选 SKU 的 `futurePlanDate` 位于候选观察范围内
+- **AND** `futurePlanDate` 尚未进入 `[currentDate+1, currentDate+N]`
+- **THEN** 系统 SHALL 保持候选态并推进到下一业务日重新判断
+- **AND** 系统 SHALL NOT 创建前移账本、运行目标量或占用任何资源
+
+#### Scenario: 未来计划进入阈值并通过准入
+
+- **WHEN** 候选 SKU 的 `futurePlanDate` 进入 `[currentDate+1, currentDate+N]`
+- **AND** 结构计划机台数及剩余资源准入全部通过
+- **THEN** 系统 SHALL 将候选视图切换为激活态
+- **AND** 系统 SHALL 使用未来计划月余量加当前业务月历史欠产建立运行目标
+- **AND** 系统 SHALL 构造并共享 `shiftedDailyPlanQuotaMap`
+
+#### Scenario: 当前月无总计划量且候选观察范围无未来计划
+
+- **WHEN** SKU 当前月 `TOTAL_QTY=0`
+- **AND** 候选观察范围内不存在原始日计划
+- **THEN** 系统 SHALL 不保留提前生产候选
+- **AND** 系统 SHALL 不允许该 SKU 进入正常排产
+
+### Requirement: 提前生产跨月数量与历史欠产按真实业务日期隔离
+
+系统 SHALL 使用 `futurePlanDate` 真实所属年月计算未来计划段、完成量及余量，并按每个 `currentDate` 真实所属月份计算截至前一日的历史欠产；跨月、跨年时不得复用其他月份的完成量或构造虚假 `dayN`。
+
+#### Scenario: 通用月计划计算不感知提前生产
+
+- **WHEN** 非提前生产逻辑调用 `CuringMonthPlanTotalCalculator`
+- **THEN** 系统 SHALL 继续按原排程窗口和原月计划断点计算月计划总量
+- **AND** 系统 SHALL NOT 因提前生产阈值扩大通用计算器的未来查找范围
+
+#### Scenario: 提前生产跨月数量统一计算
+
+- **WHEN** 提前生产阈值内最早 `futurePlanDate` 属于未来月份或未来年份
+- **THEN** `EarlyProductionQuantityCalculator` SHALL 使用该日期真实所属年月的计划段和完成量口径
+- **AND** `ScheduleAdjustHandler` SHALL NOT 自行再次扫描未来月份或重新计算跨月余量
+
+#### Scenario: 按业务日计算历史欠产
+
+- **WHEN** 排程窗口包含多个业务日或跨月、跨年
+- **THEN** `EarlyProductionQuantityCalculator` SHALL 分别从各业务日所属月月初累计至该业务日前一日
+- **AND** 单日超产 SHALL NOT 抵扣其他日期欠产
+- **AND** 计算结果 SHALL 按物料编码和产品状态写入 `monthlyHistoryShortageQtyMap`
+
 ### Requirement: 欠产超过阈值时复用原强制扩机语义
 
-系统 SHALL 复用项目已有的新增排产欠产增机台阈值；当本月前日累计欠产严格大于阈值时，直接进入现有强制加机台逻辑，不执行结构计划机台数限制。
+系统 SHALL 复用项目已有的新增排产欠产增机台阈值；当本月前日累计欠产严格大于阈值时，直接进入现有强制加机台逻辑，不执行结构计划机台数限制。历史欠产 SHALL 按正在处理的 `currentDate` 真实所属年月，从月初累计至 `currentDate - 1`，不得固定沿用窗口 T 日快照。
 
 #### Scenario: 历史欠产超过阈值
 
@@ -114,6 +254,13 @@
 
 - **WHEN** SKU 本月前日累计欠产小于等于欠产增机台阈值
 - **THEN** 系统 SHALL 按业务日期和产品结构执行结构计划机台数判断
+
+#### Scenario: 提前生产跨月目标量
+
+- **WHEN** `futurePlanDate` 属于未来月份或未来年份
+- **THEN** 系统 SHALL 使用 `futurePlanDate` 所属年月的月计划、完成量、余量和版本
+- **AND** 系统 SHALL 将 `currentDate` 所属月截至前一日的历史欠产追加到临时运行目标
+- **AND** 即使未来月计划携带有效上月超欠产，系统 SHALL 仍按上述口径完整追加当前业务月历史欠产
 
 ### Requirement: 当前日和未来计划日统一校验结构计划机台数
 
@@ -171,13 +318,13 @@
 - **WHEN** 当前业务日该 SKU 已排机台数乘以 SKU 日硫化量超过 `int` 最大值
 - **THEN** 系统 SHALL 使用 `long` 结果完成余量比较，不得因整数溢出误判为大余量
 
-### Requirement: 月计划结构机台统计加载异常不得阻断排程
+### Requirement: 月计划结构机台统计按真实年月加载并严格校验
 
 系统 SHALL 在基础数据初始化阶段按工厂、年月、定稿排产版本以及 `tempFlag = 0 OR tempFlag IS NULL OR tempFlag = ''` 条件批量查询 `T_MP_MONTH_PLAN_STATISTICS`，读取 `DAY_1`～`DAY_31` 中的 `lhMachines`，并按业务日期和 `structureName` 聚合后缓存到排程上下文。
 
 基础数据初始化 SHALL 将月计划和月计划结构机台统计的加载视野扩展到 `windowEndDate + N`，其中 `N = min(SKU提前生产天数阈值, 31)`，并 SHALL 按日期所属真实年月批量加载，避免跨月、跨年提前生产误用当前月 dayN 或循环查库。
 
-月计划结构机台统计仅用于提前生产的结构机台数判断；查询无数据、过滤后无有效结构或 `dayN` 非法 JSON 时，系统 SHALL 记录告警并按空缓存或计划机台数 0 继续排程，不得中断硫化排程主流程。
+月计划结构机台统计查询无数据或过滤后无有效结构时，系统 SHALL 记录告警并保留空缓存。`dayN` 为空或合法 JSON 缺少 `lhMachines` 时按 0 处理；`dayN` 为非法 JSON 时属于 S4.2 排程基础数据异常，系统 SHALL 抛出异常并中断本次排程，禁止静默按 0 继续。
 
 #### Scenario: 提前生产视野跨月
 
@@ -198,8 +345,9 @@
 #### Scenario: 日统计 JSON 非法
 
 - **WHEN** 月计划统计记录的 `dayN` 不是合法 JSON
-- **THEN** 系统 SHALL 记录包含工厂、排产版本、结构和业务日期的告警
-- **AND** 系统 SHALL 将该结构当日计划硫化机台数按 0 处理并继续排程
+- **THEN** 系统 SHALL 抛出包含工厂、需求版本、排产版本、结构和真实业务日期的 S4.2 基础数据异常
+- **AND** 系统 SHALL 中断本次硫化排程
+- **AND** 系统 SHALL NOT 将非法 JSON 静默转换为 0
 
 #### Scenario: 月计划结构机台统计查询为空
 
@@ -401,7 +549,9 @@
 
 ### Requirement: 提前生产必须在每日正常任务之后执行
 
-S4.5 按业务日编排时，提前生产 SHALL 只在当前日的在机延续、当天计划/锁定任务和加机台需求完成后进入候选池，并使用前三阶段提交后的剩余资源。提前生产成功后 SHALL 消费命中的未来计划日实时额度。
+S4.5 SHALL 按业务日期和原始日计划量分成两个复合阶段。正常复合阶段内部继续执行在机延续、当天计划/锁定、正常加机台以及无未来计划的历史欠产/收尾遗留任务；提前生产复合阶段必须在正常复合阶段全部完成后执行。两个复合阶段内部均保持 S4.5 既有 SKU 排序，正常复合阶段整体优先于提前生产复合阶段。
+
+进入提前生产阶段前，系统 SHALL 基于最新排程结果重建结构和 SKU 已排机台 Set 统计，并将正常阶段已经生成的结果、机台、模具、胎胚、换模、首检和班次容量占用视为已提交资源。提前生产只能复用现有选机和资源分配主链使用真实剩余资源，不得释放、替换、减少或延后正常 SKU 结果。
 
 #### Scenario: 提前生产不得抢占当天计划资源
 
@@ -409,8 +559,80 @@ S4.5 按业务日编排时，提前生产 SHALL 只在当前日的在机延续�
 - **THEN** 系统 SHALL 先完成正常日计划及加机台阶段
 - **AND** 提前生产 SKU SHALL 只使用剩余资源
 
-#### Scenario: 来源日实时额度跨日生效
+#### Scenario: 正常阶段只按原始日计划分组
 
-- **WHEN** 当前日已提前消费未来计划日额度
-- **THEN** 系统在未来计划日构建正常候选时 SHALL 读取扣减后的实时余额
-- **AND** 系统 SHALL NOT 按原始额度重复排产
+- **WHEN** SKU 当前业务日原始 `dayN` 大于 0
+- **THEN** 系统 SHALL 将其归入正常复合阶段
+- **AND** 系统 SHALL 在所有提前生产 SKU 之前完成其选机、换模、首检和产能提交
+
+#### Scenario: 正常阶段后只有部分班次产能
+
+- **WHEN** 正常阶段完成后某机台仅剩部分班次可用
+- **THEN** 提前生产 SKU SHALL 只能使用这些真实剩余班次
+- **AND** 系统 SHALL NOT 延后正常 SKU 开产时间或减少正常 SKU 计划量
+
+#### Scenario: 正常阶段后无剩余资源
+
+- **WHEN** 正常阶段完成后没有满足机台、模具、胎胚、换模、首检和班次限制的剩余资源
+- **THEN** 系统 SHALL 跳过当前业务日提前生产
+- **AND** 系统 SHALL 保持 futurePlanDate 或原顺延逻辑
+- **AND** 欠产超过阈值或结构收尾强制扩机 SHALL NOT 绕过该资源优先级
+
+#### Scenario: 提前生产使用同日尾部剩余资源
+
+- **WHEN** 正常阶段完成后当前业务日仍存在满足全部约束的机台尾部产能
+- **THEN** 提前生产 SKU SHALL 允许从当前业务日真实剩余时刻开始排产
+- **AND** 系统 SHALL NOT 被固定顺延到 T+1
+
+#### Scenario: 排程结果窗口不扩大
+
+- **WHEN** `futurePlanDate` 位于排程窗口结束日之后
+- **THEN** 系统 SHALL 只将该日期计划用于提前生产准入和临时节奏视图
+- **AND** 所有实际结果 SHALL 仍只写入 T～T+2 共 3 天、8 个班次
+
+### Requirement: 换活字块实际开产必须具备当日原始计划
+
+换活字块策略 SHALL 在结果写入和资源扣减前，根据实际开产时刻命中的班次 `workDate` 读取月计划原始 `dayN`。只有该业务日原始日计划量大于 0 时才允许继续复用换活字块结果构造主链，不得使用历史欠产、剩余目标量或提前生产临时账本替代。
+
+#### Scenario: 换活字块当前日无原始计划
+
+- **WHEN** 换活字块目标 SKU 的实际开产业务日原始 `dayN` 为 0
+- **AND** 未来业务日原始 `dayN` 大于 0
+- **THEN** 系统 SHALL 拒绝在当前业务日生成换活字块结果
+- **AND** 系统 SHALL 回滚本轮换模和模具预占
+- **AND** 系统 SHALL 记录“换活字块实际开产业务日原始日计划量为0”的原因
+
+#### Scenario: 到达原计划业务日
+
+- **WHEN** 换活字块目标 SKU 的实际开产业务日原始 `dayN` 大于 0
+- **THEN** 系统 SHALL 继续执行既有换活字块机台、模具、胎胚、换模、首检和产能约束
+
+### Requirement: 提前生产失败按窗口统一收口
+
+提前生产 SKU 在单个业务日准入失败或资源不足时 SHALL 只记录当日过程日志和最后硬阻断原因，不得每天重复写最终未排。T～T+2 全部业务日结束后仍未形成有效结果时，系统 SHALL 按物料和产品状态生成一条最终未排记录，数量使用窗口收口时真实剩余目标量。
+
+#### Scenario: 多日均无剩余资源
+
+- **WHEN** 同一提前生产 SKU 在多个业务日均因资源不足未生成有效结果
+- **THEN** 系统 SHALL 在窗口结束时只生成一条最终未排记录
+- **AND** 未排原因 SHALL 使用最后一次有效硬阻断原因
+- **AND** 未排数量 SHALL 使用最终剩余目标量
+
+#### Scenario: 中途成功排产
+
+- **WHEN** 提前生产 SKU 前一业务日失败但后续业务日使用剩余资源成功生成结果
+- **THEN** 系统 SHALL 不保留数量为 0 的提前生产未排记录
+- **AND** 结构和 SKU 已排机台 Set SHALL 在结果落地后立即更新或在阶段结束后重建
+
+### Requirement: 废弃旧提前生产口径
+
+系统 SHALL 废弃“只允许提前 1 天”“提前 SKU 与正常 SKU 同轮竞争资源”和“续作补偿可通过提前生产主动拉取未来计划”的旧口径。提前生产天数只由 `SYS0304028` 及其默认值、上限决定，资源竞争只允许发生在正常复合阶段已经完成并冻结之后。
+
+#### Scenario: 参数化提前天数与正常阶段资源优先级同时生效
+
+- **WHEN** 正规新增 SKU 的最早未来计划日在参数化提前生产阈值范围内
+- **AND** 当前业务日正常复合阶段尚未完成
+- **THEN** 系统 SHALL 等待正常复合阶段完成并冻结资源后再判断提前生产
+- **AND** 系统 SHALL NOT 将提前天数固定为1天
+- **AND** 系统 SHALL NOT 将提前生产 SKU 与正常 SKU 放入同一轮资源竞争
+- **AND** 系统 SHALL NOT 通过续作或换活字块入口主动拉取未来计划

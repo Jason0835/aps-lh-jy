@@ -13,6 +13,7 @@ import com.zlt.aps.lh.engine.strategy.IMachineMatchStrategy;
 import com.zlt.aps.lh.engine.strategy.IMouldChangeBalanceStrategy;
 import com.zlt.aps.lh.engine.strategy.IProductionStrategy;
 import com.zlt.aps.lh.engine.strategy.ISkuPriorityStrategy;
+import com.zlt.aps.lh.engine.strategy.support.EarlyProductionRuntimePlan;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -25,6 +26,8 @@ import java.util.Arrays;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -161,5 +164,50 @@ class NewProductionHandlerTest {
                 any(ICapacityCalculateStrategy.class));
 
         handler.handle(context);
+    }
+
+    /**
+     * 验证提前生产中心运行视图覆盖完整 S4.5 生命周期：胎胚调整和最终收尾复核执行时
+     * 视图仍然有效，全部后处理结束后再统一清理。
+     */
+    @Test
+    void handle_shouldKeepEarlyProductionRuntimeViewUntilAllPostStepsFinish() {
+        when(strategyFactory.getProductionStrategy("02")).thenReturn(strategy);
+        when(strategyFactory.getSkuPriorityStrategy()).thenReturn(skuPriorityStrategy);
+        when(strategyFactory.getMachineMatchStrategy()).thenReturn(machineMatchStrategy);
+        when(strategyFactory.getMouldChangeBalanceStrategy()).thenReturn(mouldChangeBalanceStrategy);
+        when(strategyFactory.getFirstInspectionBalanceStrategy()).thenReturn(firstInspectionBalanceStrategy);
+        when(strategyFactory.getCapacityCalculateStrategy()).thenReturn(capacityCalculateStrategy);
+
+        LhScheduleContext context = new LhScheduleContext();
+        SkuScheduleDTO sku = new SkuScheduleDTO();
+        sku.setMaterialCode("3302002746");
+        sku.setProductStatus("S");
+        EarlyProductionRuntimePlan runtimePlan = new EarlyProductionRuntimePlan();
+        runtimePlan.setFutureOnlyCandidate(true);
+        runtimePlan.setActive(true);
+        runtimePlan.setEffectiveTargetQty(102);
+        context.registerEarlyProductionRuntimePlan(sku, runtimePlan);
+
+        doAnswer(invocation -> {
+            assertNotNull(context.getEarlyProductionRuntimePlan(sku),
+                    "班次分配执行时中心运行视图不得提前清理");
+            return null;
+        }).when(strategy).allocateShiftPlanQty(context);
+        doAnswer(invocation -> {
+            assertNotNull(context.getEarlyProductionRuntimePlan(sku),
+                    "胎胚调整和最终isEnd复核执行时中心运行视图不得提前清理");
+            return null;
+        }).when(strategy).adjustEmbryoStock(context);
+        doAnswer(invocation -> {
+            assertNotNull(context.getEarlyProductionRuntimePlan(sku),
+                    "降模后处理执行时中心运行视图不得提前清理");
+            return null;
+        }).when(strategy).scheduleReduceMould(context);
+
+        handler.handle(context);
+
+        assertNull(context.getEarlyProductionRuntimePlan(sku),
+                "完整S4.5结束后必须清理提前生产临时运行视图");
     }
 }
