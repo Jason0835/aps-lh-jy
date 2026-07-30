@@ -12,6 +12,7 @@ import com.zlt.aps.lh.component.MonthPlanDateResolver;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.exception.ScheduleDomainExceptionHelper;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
+import com.zlt.aps.lh.util.LhMouldCodeUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.ResultDowntimeSummaryUtil;
 import com.zlt.aps.lh.util.ShiftFieldUtil;
@@ -83,8 +84,25 @@ public class RollingScheduleHandoffService {
 
         // Step4: 逐条继承前批排程结果，校验物料/版本一致性，重映射班次索引
         Map<String, FactoryMonthPlanProductionFinalResult> currentMaterialPlanMap = buildCurrentMaterialPlanMap(context);
+        /*
+         * 调用统一 MES 模具归属口径校验历史结果。当前 MES 已明确将模具转移到其他物理机台时，
+         * 旧批次结果不能再继承该模具；否则会与新机台续作或共用模具置换形成并发重复占用。
+         */
+        Map<String, String> mouldOwnerMachineMap =
+                LhMouldCodeUtil.buildLatestInMachineMouldOwnerMap(
+                        context.getMachineOnlineInfoMap());
         List<LhScheduleResult> inheritedResults = new ArrayList<>(context.getPreviousScheduleResultList().size());
         for (LhScheduleResult previousResult : context.getPreviousScheduleResultList()) {
+            if (Objects.nonNull(previousResult)
+                    && LhMouldCodeUtil.hasInMachineMouldOwnershipConflict(
+                    mouldOwnerMachineMap,
+                    previousResult.getLhMachineCode(),
+                    previousResult.getMouldCode())) {
+                log.warn("滚动排程跳过已转移模具的历史结果, 批次: {}, 机台: {}, 物料: {}, 模具: {}",
+                        context.getBatchNo(), previousResult.getLhMachineCode(),
+                        previousResult.getMaterialCode(), previousResult.getMouldCode());
+                continue;
+            }
             LhScheduleResult inheritedResult = buildInheritedResult(context, previousResult,
                     currentInheritedShifts, inheritStartTime, appendStartTime, currentMaterialPlanMap);
             if (context.isInterrupted()) {
@@ -105,7 +123,8 @@ public class RollingScheduleHandoffService {
         }
 
         // Step5: 继承重叠窗口内的模具交替计划
-        inheritMouldChangePlans(context, appendStartTime);
+        // 历史换模计划使用与历史结果相同的模具归属硬校验，避免只跳过结果却遗留冲突换模任务。
+        inheritMouldChangePlans(context, appendStartTime, mouldOwnerMachineMap);
         backfillInheritedMouldChangeQuota(context);
         // Step6: 回写机台继承终态，空闲机台推进到追加起点
         syncMachineState(context, inheritedResults, appendStartTime);
@@ -262,8 +281,11 @@ public class RollingScheduleHandoffService {
      *
      * @param context 排程上下文
      * @param appendStartTime 追加排程起点
+     * @param mouldOwnerMachineMap 当前 MES 模具唯一归属 Map
      */
-    private void inheritMouldChangePlans(LhScheduleContext context, Date appendStartTime) {
+    private void inheritMouldChangePlans(LhScheduleContext context,
+                                         Date appendStartTime,
+                                         Map<String, String> mouldOwnerMachineMap) {
         if (CollectionUtils.isEmpty(context.getPreviousMouldChangePlanList())) {
             return;
         }
@@ -271,6 +293,15 @@ public class RollingScheduleHandoffService {
         int planOrder = context.getMouldChangePlanList().size() + 1;
         for (LhMouldChangePlan previousPlan : context.getPreviousMouldChangePlanList()) {
             if (!isInInheritedWindow(previousPlan.getPlanDate(), inheritStartTime, appendStartTime)) {
+                continue;
+            }
+            if (LhMouldCodeUtil.hasInMachineMouldOwnershipConflict(
+                    mouldOwnerMachineMap,
+                    previousPlan.getLhMachineCode(),
+                    previousPlan.getMouldCode())) {
+                log.warn("滚动排程跳过已转移模具的历史换模计划, 批次: {}, 机台: {}, 后物料: {}, 模具: {}",
+                        context.getBatchNo(), previousPlan.getLhMachineCode(),
+                        previousPlan.getAfterMaterialCode(), previousPlan.getMouldCode());
                 continue;
             }
             LhMouldChangePlan inheritedPlan = new LhMouldChangePlan();

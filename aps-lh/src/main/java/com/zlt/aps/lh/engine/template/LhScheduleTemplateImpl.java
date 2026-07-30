@@ -83,6 +83,7 @@ public class LhScheduleTemplateImpl extends AbsLhScheduleTemplate {
 
     @Override
     protected void doSpecialMaterialSubstitution(LhScheduleContext context) {
+        // S4.5.1 Handler 内部固定按“共用模具联动置换 -> 原特殊材料兜底置换”顺序执行。
         specialMaterialSubstitutionHandler.handle(context);
     }
 

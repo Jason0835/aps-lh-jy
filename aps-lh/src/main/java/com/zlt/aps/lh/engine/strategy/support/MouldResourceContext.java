@@ -160,6 +160,209 @@ public class MouldResourceContext {
     }
 
     /**
+     * 无副作用读取 SKU 当前日期下的有效空闲模具。
+     *
+     * <p>返回结果只包含已经通过现有启用状态、台账及到货日期校验，且当前未被任何机台占用或
+     * 预占的模具。调用方可继续传入本次需要排除的转交模具，确保 B 的剩余模具不会包含
+     * 已转给 A 的整套共用模具。</p>
+     *
+     * @param materialCode SKU 编码
+     * @param excludedMouldCodeSet 本次额外排除的模具号
+     * @return 有效且空闲的模具号，返回副本
+     */
+    public synchronized List<String> resolveFreeValidMouldCodes(
+            String materialCode,
+            Set<String> excludedMouldCodeSet) {
+        List<String> availableMouldCodeList = skuAvailableMouldCodeMap.get(materialCode);
+        if (CollectionUtils.isEmpty(availableMouldCodeList)) {
+            return new ArrayList<String>(0);
+        }
+        List<String> resultList = new ArrayList<String>(availableMouldCodeList.size());
+        for (String mouldCode : availableMouldCodeList) {
+            if (occupiedMouldCodeSet.contains(mouldCode)
+                    || (!CollectionUtils.isEmpty(excludedMouldCodeSet)
+                    && excludedMouldCodeSet.contains(mouldCode))) {
+                continue;
+            }
+            resultList.add(mouldCode);
+        }
+        return resultList;
+    }
+
+    /**
+     * 读取机台当前实际绑定模具号。
+     *
+     * @param machineCode 运行态机台编码
+     * @return 当前绑定模具号副本；无实际绑定时返回空集合
+     */
+    public synchronized LinkedHashSet<String> resolveMachineBoundMouldCodes(String machineCode) {
+        Set<String> mouldCodeSet = machineBoundMouldCodeMap.get(machineCode);
+        return CollectionUtils.isEmpty(mouldCodeSet)
+                ? new LinkedHashSet<String>(0) : new LinkedHashSet<String>(mouldCodeSet);
+    }
+
+    /**
+     * 判断给定模具是否全部属于 SKU 当前日期下的有效模具关系。
+     *
+     * @param materialCode SKU 编码
+     * @param mouldCodeSet 待校验模具号
+     * @return true-全部有效；false-至少一个模具无有效关系或状态不可用
+     */
+    public synchronized boolean areAllMouldCodesValidForSku(
+            String materialCode,
+            Set<String> mouldCodeSet) {
+        List<String> availableMouldCodeList = skuAvailableMouldCodeMap.get(materialCode);
+        return !CollectionUtils.isEmpty(mouldCodeSet)
+                && !CollectionUtils.isEmpty(availableMouldCodeList)
+                && availableMouldCodeList.containsAll(mouldCodeSet);
+    }
+
+    /**
+     * 按预演确认的精确模具号正式更新机台绑定。
+     *
+     * <p>A 接管时，强制模具就是当前机台可释放的原在机模具；B 正式迁移时，强制模具来自
+     * 预演成功结果。该入口仍校验机台模数、SKU 有效关系和实时占用，防止预演到提交之间
+     * 出现同一模具被两个机台重复占用。</p>
+     *
+     * @param materialCode SKU 编码
+     * @param machineCode 目标机台编码
+     * @param forcedMouldCodeList 预演确认的精确模具号
+     * @return 正式分配结果
+     */
+    public synchronized MouldResourceAllocationResult tryAllocateExact(
+            String materialCode,
+            String machineCode,
+            List<String> forcedMouldCodeList) {
+        MouldResourceAllocationResult allocationResult = resolveExactAllocation(
+                materialCode, machineCode, forcedMouldCodeList);
+        if (!allocationResult.isAllowed()) {
+            return allocationResult;
+        }
+        if (!CollectionUtils.isEmpty(allocationResult.getReleasedMouldCodeList())) {
+            occupiedMouldCodeSet.removeAll(allocationResult.getReleasedMouldCodeList());
+        }
+        occupiedMouldCodeSet.addAll(allocationResult.getAllocatedMouldCodeList());
+        machineBoundMouldCodeMap.put(machineCode,
+                new LinkedHashSet<String>(allocationResult.getAllocatedMouldCodeList()));
+        log.info("模具运行态按置换预演精确绑定, materialCode: {}, machineCode: {}, "
+                        + "releasedMouldCodes: {}, allocatedMouldCodes: {}",
+                materialCode, machineCode, allocationResult.getReleasedMouldCodeList(),
+                allocationResult.getAllocatedMouldCodeList());
+        return allocationResult;
+    }
+
+    /**
+     * B 迁移预演时仅从协调器确认的空闲剩余模具中分配。
+     *
+     * <p>与普通分配不同，本入口不会把候选新机台当前绑定模具视为 B 的可用模具；这些模具在
+     * 预演开始时属于已占用资源，不满足“B 必须携带除转交模具外的剩余可用模具”条件。</p>
+     *
+     * @param materialCode B 物料编码
+     * @param machineCode 候选新机台
+     * @param allowedMouldCodeList 已完成全部排除的空闲剩余模具
+     * @return 正式分配结果
+     */
+    public synchronized MouldResourceAllocationResult tryAllocateFromAllowed(
+            String materialCode,
+            String machineCode,
+            List<String> allowedMouldCodeList) {
+        int requiredMouldQty = resolveRequiredMouldQty(machineCode);
+        List<String> availableMouldCodeList = skuAvailableMouldCodeMap.get(materialCode);
+        List<String> allocatedMouldCodeList = new ArrayList<String>(requiredMouldQty);
+        if (!CollectionUtils.isEmpty(allowedMouldCodeList)
+                && !CollectionUtils.isEmpty(availableMouldCodeList)) {
+            for (String mouldCode : allowedMouldCodeList) {
+                if (!availableMouldCodeList.contains(mouldCode)
+                        || occupiedMouldCodeSet.contains(mouldCode)
+                        || allocatedMouldCodeList.contains(mouldCode)) {
+                    continue;
+                }
+                allocatedMouldCodeList.add(mouldCode);
+                if (allocatedMouldCodeList.size() >= requiredMouldQty) {
+                    break;
+                }
+            }
+        }
+        if (allocatedMouldCodeList.size() < requiredMouldQty) {
+            MouldResourceAllocationResult rejectedResult = MouldResourceAllocationResult.rejected(
+                    requiredMouldQty,
+                    CollectionUtils.isEmpty(availableMouldCodeList) ? 0 : availableMouldCodeList.size(),
+                    0, allocatedMouldCodeList.size(),
+                    Collections.<String>emptyList(),
+                    skuUnavailableMouldCodeMap.get(materialCode),
+                    resolveInsufficientReason(materialCode));
+            rejectedResult.setMachineCode(machineCode);
+            return rejectedResult;
+        }
+        Set<String> releasableMouldCodeSet = machineBoundMouldCodeMap.get(machineCode);
+        List<String> releasedMouldCodeList = CollectionUtils.isEmpty(releasableMouldCodeSet)
+                ? Collections.<String>emptyList()
+                : new ArrayList<String>(releasableMouldCodeSet);
+        MouldResourceAllocationResult allowedResult = MouldResourceAllocationResult.allowed(
+                requiredMouldQty,
+                availableMouldCodeList.size(),
+                0,
+                Math.max(0, allowedMouldCodeList.size() - allocatedMouldCodeList.size()),
+                allocatedMouldCodeList,
+                releasedMouldCodeList);
+        allowedResult.setMachineCode(machineCode);
+        if (!CollectionUtils.isEmpty(releasedMouldCodeList)) {
+            occupiedMouldCodeSet.removeAll(releasedMouldCodeList);
+        }
+        occupiedMouldCodeSet.addAll(allocatedMouldCodeList);
+        machineBoundMouldCodeMap.put(
+                machineCode, new LinkedHashSet<String>(allocatedMouldCodeList));
+        log.info("B 迁移预演仅从空闲剩余模具分配, materialCode: {}, machineCode: {}, "
+                        + "releasedMouldCodes: {}, allocatedMouldCodes: {}",
+                materialCode, machineCode, releasedMouldCodeList, allocatedMouldCodeList);
+        return allowedResult;
+    }
+
+    /**
+     * 计算指定机台使用精确模具号的分配结果。
+     *
+     * @param materialCode SKU 编码
+     * @param machineCode 目标机台编码
+     * @param forcedMouldCodeList 指定模具号
+     * @return 无副作用分配结果
+     */
+    private MouldResourceAllocationResult resolveExactAllocation(
+            String materialCode,
+            String machineCode,
+            List<String> forcedMouldCodeList) {
+        int requiredMouldQty = resolveRequiredMouldQty(machineCode);
+        List<String> availableMouldCodeList = skuAvailableMouldCodeMap.get(materialCode);
+        LinkedHashSet<String> forcedMouldCodeSet = CollectionUtils.isEmpty(forcedMouldCodeList)
+                ? new LinkedHashSet<String>(0)
+                : new LinkedHashSet<String>(forcedMouldCodeList);
+        LinkedHashSet<String> releasableMouldCodeSet = machineBoundMouldCodeMap.get(machineCode);
+        List<String> occupiedForcedMouldCodeList = resolveOccupiedSkuMouldCodeList(
+                new ArrayList<String>(forcedMouldCodeSet), releasableMouldCodeSet);
+        int availableMouldQty = CollectionUtils.isEmpty(availableMouldCodeList)
+                ? 0 : availableMouldCodeList.size();
+        if (forcedMouldCodeSet.size() != requiredMouldQty
+                || CollectionUtils.isEmpty(availableMouldCodeList)
+                || !availableMouldCodeList.containsAll(forcedMouldCodeSet)
+                || !CollectionUtils.isEmpty(occupiedForcedMouldCodeList)) {
+            MouldResourceAllocationResult rejectedResult = MouldResourceAllocationResult.rejected(
+                    requiredMouldQty, availableMouldQty, occupiedForcedMouldCodeList.size(),
+                    resolveFreeValidMouldCodes(materialCode, Collections.<String>emptySet()).size(),
+                    occupiedForcedMouldCodeList, skuUnavailableMouldCodeMap.get(materialCode),
+                    resolveInsufficientReason(materialCode));
+            rejectedResult.setMachineCode(machineCode);
+            return rejectedResult;
+        }
+        List<String> releasedMouldCodeList = CollectionUtils.isEmpty(releasableMouldCodeSet)
+                ? Collections.<String>emptyList() : new ArrayList<String>(releasableMouldCodeSet);
+        MouldResourceAllocationResult allowedResult = MouldResourceAllocationResult.allowed(
+                requiredMouldQty, availableMouldQty, 0,
+                Math.max(0, availableMouldQty - forcedMouldCodeSet.size()),
+                new ArrayList<String>(forcedMouldCodeSet), releasedMouldCodeList);
+        allowedResult.setMachineCode(machineCode);
+        return allowedResult;
+    }
+
+    /**
      * 判断 SKU 是否存在需要进入模具运行态预检的模具关系定义。
      * <p>没有任何模具关系的 SKU 保持原候选筛选语义，由后续正式分配链路暴露基础数据问题；
      * 只要存在关系（包括台账缺失或禁用关系），候选筛选就必须执行实时模具预检。</p>

@@ -130,6 +130,41 @@ class ResultValidationBlockingTest {
         verify(scheduleEventPublisher, never()).publish(any());
     }
 
+    /**
+     * 两台不同物理机台在重叠班次使用同一实体模具时，保存前必须阻断整批结果。
+     */
+    @Test
+    void handle_throwsWhenSameMouldOccupiedByDifferentMachinesAtSameTime() {
+        LhScheduleContext context = new LhScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setBatchNo("LHPC20260413009");
+        context.setScheduleTargetDate(date(2026, 4, 13));
+
+        LhScheduleResult leftResult =
+                buildPlanResult("K1416", "MAT-A", 0, 0, 0);
+        leftResult.setMouldQty(1);
+        leftResult.setMouldCode("MOULD-SHARED");
+        ShiftFieldUtil.setShiftPlanQty(leftResult, 1, 16,
+                dateTime(2026, 4, 13, 6, 0),
+                dateTime(2026, 4, 13, 14, 0));
+        ShiftFieldUtil.syncDailyPlanQty(leftResult);
+
+        LhScheduleResult rightResult =
+                buildPlanResult("K2024", "MAT-B", 0, 0, 0);
+        rightResult.setMouldQty(1);
+        rightResult.setMouldCode("MOULD-SHARED");
+        ShiftFieldUtil.setShiftPlanQty(rightResult, 1, 16,
+                dateTime(2026, 4, 13, 8, 0),
+                dateTime(2026, 4, 13, 14, 0));
+        ShiftFieldUtil.syncDailyPlanQty(rightResult);
+        context.setScheduleResultList(Arrays.asList(leftResult, rightResult));
+
+        assertThrows(ScheduleException.class, () -> handler.handle(context));
+
+        verify(schedulePersistenceService, never()).replaceScheduleAtomically(context);
+        verify(scheduleEventPublisher, never()).publish(any());
+    }
+
     @Test
     void handle_throwsWhenMorningMouldChangePlanExceedsLimit() {
         LhScheduleContext context = new LhScheduleContext();

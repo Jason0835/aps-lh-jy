@@ -6,8 +6,11 @@ import com.zlt.aps.mdm.api.domain.entity.MdmSkuMouldRel;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -95,6 +98,212 @@ public final class LhMouldCodeUtil {
             return null;
         }
         return StringUtils.join(mouldCodeCollection, MOULD_CODE_SEPARATOR);
+    }
+
+    /**
+     * 按 MES 在机记录的新旧顺序归一化模具的唯一在机归属。
+     *
+     * <p>基础数据会按机台回溯最近一条 MES 在机记录；当模具已经转移到新机台时，旧机台的最近
+     * 历史记录仍可能保留同一模具号。此方法按在线日期、更新时间、数据版本依次比较，模具只保留
+     * 在最新记录对应的物理机台上，避免续作初始化把一副实体模具同时登记到两台机台。</p>
+     *
+     * <p>方法会原地更新传入 Map 中的在机模具号；某条记录原本有模具、但全部已被更新记录接管时，
+     * 会移除该机台的过期在机记录，使后续续作和强制重排把该机台按无有效 MES 在机处理。</p>
+     *
+     * @param machineOnlineInfoMap 按机台保留最近记录的 MES 在机信息
+     * @return 各机台被最新记录接管而移除的模具号
+     */
+    public static Map<String, List<String>> normalizeLatestInMachineMouldOwnership(
+            Map<String, LhMachineOnlineInfo> machineOnlineInfoMap) {
+        Map<String, List<String>> removedMouldCodeMap =
+                new LinkedHashMap<String, List<String>>(4);
+        if (CollectionUtils.isEmpty(machineOnlineInfoMap)) {
+            return removedMouldCodeMap;
+        }
+        Map<String, String> mouldOwnerMachineMap =
+                buildLatestInMachineMouldOwnerMap(machineOnlineInfoMap);
+        Iterator<Map.Entry<String, LhMachineOnlineInfo>> iterator =
+                machineOnlineInfoMap.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, LhMachineOnlineInfo> entry = iterator.next();
+            LhMachineOnlineInfo onlineInfo = entry.getValue();
+            if (Objects.isNull(onlineInfo)) {
+                continue;
+            }
+            String machineCode = resolveOnlineMachineCode(entry.getKey(), onlineInfo);
+            LinkedHashSet<String> originalMouldCodeSet =
+                    splitMouldCode(onlineInfo.getInMachineMouldCode());
+            if (CollectionUtils.isEmpty(originalMouldCodeSet)) {
+                continue;
+            }
+            LinkedHashSet<String> retainedMouldCodeSet =
+                    new LinkedHashSet<String>(originalMouldCodeSet.size());
+            List<String> removedMouldCodeList =
+                    new ArrayList<String>(originalMouldCodeSet.size());
+            for (String mouldCode : originalMouldCodeSet) {
+                String ownerMachineCode = mouldOwnerMachineMap.get(mouldCode);
+                if (isSamePhysicalMachine(machineCode, ownerMachineCode)) {
+                    retainedMouldCodeSet.add(mouldCode);
+                } else {
+                    removedMouldCodeList.add(mouldCode);
+                }
+            }
+            if (CollectionUtils.isEmpty(removedMouldCodeList)) {
+                continue;
+            }
+            removedMouldCodeMap.put(machineCode, removedMouldCodeList);
+            if (CollectionUtils.isEmpty(retainedMouldCodeSet)) {
+                iterator.remove();
+                continue;
+            }
+            onlineInfo.setInMachineMouldCode(joinMouldCode(retainedMouldCodeSet));
+        }
+        return removedMouldCodeMap;
+    }
+
+    /**
+     * 构建每副在机模具对应的最新物理机台归属。
+     *
+     * <p>同一机台已由基础数据加载层收敛为一条最近记录，本方法继续跨机台比较记录版本。
+     * 当比较字段完全一致时保留查询结果中的首条记录，保持与基础数据既有排序结果一致。</p>
+     *
+     * @param machineOnlineInfoMap MES 在机信息
+     * @return 模具号到最新归属机台的映射
+     */
+    public static Map<String, String> buildLatestInMachineMouldOwnerMap(
+            Map<String, LhMachineOnlineInfo> machineOnlineInfoMap) {
+        Map<String, String> mouldOwnerMachineMap =
+                new LinkedHashMap<String, String>(16);
+        Map<String, LhMachineOnlineInfo> mouldOwnerInfoMap =
+                new HashMap<String, LhMachineOnlineInfo>(16);
+        if (CollectionUtils.isEmpty(machineOnlineInfoMap)) {
+            return mouldOwnerMachineMap;
+        }
+        for (Map.Entry<String, LhMachineOnlineInfo> entry : machineOnlineInfoMap.entrySet()) {
+            LhMachineOnlineInfo candidateInfo = entry.getValue();
+            if (Objects.isNull(candidateInfo)) {
+                continue;
+            }
+            String candidateMachineCode =
+                    resolveOnlineMachineCode(entry.getKey(), candidateInfo);
+            if (StringUtils.isEmpty(candidateMachineCode)) {
+                continue;
+            }
+            for (String mouldCode : splitMouldCode(candidateInfo.getInMachineMouldCode())) {
+                LhMachineOnlineInfo currentOwnerInfo = mouldOwnerInfoMap.get(mouldCode);
+                if (Objects.nonNull(currentOwnerInfo)
+                        && compareOnlineInfoVersion(candidateInfo, currentOwnerInfo) <= 0) {
+                    continue;
+                }
+                mouldOwnerInfoMap.put(mouldCode, candidateInfo);
+                mouldOwnerMachineMap.put(mouldCode, candidateMachineCode);
+            }
+        }
+        return mouldOwnerMachineMap;
+    }
+
+    /**
+     * 判断历史结果或历史换模计划中的模具是否已被当前 MES 记录转移到其他物理机台。
+     *
+     * @param mouldOwnerMachineMap 当前模具唯一归属 Map
+     * @param machineCode 历史结果或计划的机台编码
+     * @param mouldCodeText 历史结果或计划的模具号
+     * @return true-至少一副模具当前属于其他物理机台；false-无冲突
+     */
+    public static boolean hasInMachineMouldOwnershipConflict(
+            Map<String, String> mouldOwnerMachineMap,
+            String machineCode,
+            String mouldCodeText) {
+        if (CollectionUtils.isEmpty(mouldOwnerMachineMap)
+                || StringUtils.isEmpty(machineCode)
+                || StringUtils.isEmpty(mouldCodeText)) {
+            return false;
+        }
+        for (String mouldCode : splitMouldCode(mouldCodeText)) {
+            String ownerMachineCode = mouldOwnerMachineMap.get(mouldCode);
+            if (StringUtils.isNotEmpty(ownerMachineCode)
+                    && !isSamePhysicalMachine(machineCode, ownerMachineCode)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 解析 MES 在机记录对应的机台编码。
+     *
+     * @param mapMachineCode Map 键中的机台编码
+     * @param onlineInfo MES 在机记录
+     * @return 优先返回实体机台编码，为空时返回 Map 键
+     */
+    private static String resolveOnlineMachineCode(
+            String mapMachineCode,
+            LhMachineOnlineInfo onlineInfo) {
+        return Objects.nonNull(onlineInfo) && StringUtils.isNotEmpty(onlineInfo.getLhCode())
+                ? onlineInfo.getLhCode() : mapMachineCode;
+    }
+
+    /**
+     * 比较两条 MES 在机记录的新旧顺序。
+     *
+     * @param left 待比较记录
+     * @param right 当前最新记录
+     * @return 正数-left 更新；0-版本相同；负数-right 更新
+     */
+    private static int compareOnlineInfoVersion(
+            LhMachineOnlineInfo left,
+            LhMachineOnlineInfo right) {
+        int compareResult = compareNullableDate(
+                left.getOnlineDate(), right.getOnlineDate());
+        if (compareResult != 0) {
+            return compareResult;
+        }
+        compareResult = compareNullableDate(
+                left.getUpdateTime(), right.getUpdateTime());
+        if (compareResult != 0) {
+            return compareResult;
+        }
+        return StringUtils.defaultString(left.getDataVersion())
+                .compareTo(StringUtils.defaultString(right.getDataVersion()));
+    }
+
+    /**
+     * 比较允许为空的日期，非空日期优先且越晚越新。
+     *
+     * @param left 左日期
+     * @param right 右日期
+     * @return 日期比较结果
+     */
+    private static int compareNullableDate(java.util.Date left, java.util.Date right) {
+        if (Objects.equals(left, right)) {
+            return 0;
+        }
+        if (Objects.isNull(left)) {
+            return -1;
+        }
+        if (Objects.isNull(right)) {
+            return 1;
+        }
+        return left.compareTo(right);
+    }
+
+    /**
+     * 判断两个运行态机台编码是否属于同一物理机台。
+     *
+     * @param leftMachineCode 左机台编码
+     * @param rightMachineCode 右机台编码
+     * @return true-同一物理机台；false-不同物理机台
+     */
+    private static boolean isSamePhysicalMachine(
+            String leftMachineCode,
+            String rightMachineCode) {
+        if (StringUtils.isEmpty(leftMachineCode)
+                || StringUtils.isEmpty(rightMachineCode)) {
+            return false;
+        }
+        return StringUtils.equals(
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(leftMachineCode),
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(rightMachineCode));
     }
 
     /**

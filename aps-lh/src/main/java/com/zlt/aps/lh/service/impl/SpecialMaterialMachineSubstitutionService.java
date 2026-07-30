@@ -1013,8 +1013,8 @@ public class SpecialMaterialMachineSubstitutionService {
             Date previewChangeStartTime,
             SubstitutionTypeEnum substitutionType) {
         String machineCode = candidate.getLhMachineCode();
-        SpecialMaterialSubstitutionAttemptSnapshot attemptSnapshot =
-                SpecialMaterialSubstitutionAttemptSnapshot.capture(context, specialSku);
+        ScheduleSubstitutionAttemptSnapshot attemptSnapshot =
+                ScheduleSubstitutionAttemptSnapshot.capture(context, specialSku);
         List<LhScheduleResult> continuationResults =
                 resolveContinuationResultsOnMachine(context, machineCode);
         Map<LhScheduleResult, LhScheduleResult> originalResultStateMap =
@@ -1029,7 +1029,7 @@ public class SpecialMaterialMachineSubstitutionService {
                     previewChangeStartTime, previewRemovedQtyByShift, null, true);
             MachineScheduleDTO machine = context.getMachineScheduleMap().get(machineCode);
             if (Objects.isNull(machine)) {
-                attemptSnapshot.restore(context, specialSku);
+                attemptSnapshot.restore(context);
                 return false;
             }
             machine.setEstimatedEndTime(previewChangeStartTime);
@@ -1044,7 +1044,7 @@ public class SpecialMaterialMachineSubstitutionService {
                     context, specialSku, machineCode, previewChangeStartTime);
             if (Objects.isNull(specialResult)
                     || !isActualChangeTimeValid(context, specialResult, firstPlanDate)) {
-                attemptSnapshot.restore(context, specialSku);
+                attemptSnapshot.restore(context);
                 log.info("特殊材料置换正式排产失败，候选状态已完整恢复, materialCode: {}, "
                                 + "productStatus: {}, machineCode: {}",
                         specialSku.getMaterialCode(), specialSku.getProductStatus(), machineCode);
@@ -1082,7 +1082,7 @@ public class SpecialMaterialMachineSubstitutionService {
                     LhScheduleTimeUtil.formatDateTime(specialResult.getSpecEndTime()));
             return true;
         } catch (Exception ex) {
-            attemptSnapshot.restore(context, specialSku);
+            attemptSnapshot.restore(context);
             log.error("特殊材料置换候选执行异常，已恢复候选前全部运行态, materialCode: {}, "
                             + "productStatus: {}, machineCode: {}",
                     specialSku.getMaterialCode(), specialSku.getProductStatus(), machineCode, ex);

@@ -15,6 +15,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -222,6 +223,123 @@ public class MouldResourceContextTest {
         Assertions.assertFalse(beforeBoarding.isAllowed(), "到货日前不得预占无台账模具");
         Assertions.assertTrue(afterBoarding.isAllowed(), "到货业务日必须刷新为可用模具");
         Assertions.assertEquals(Collections.singletonList("M901"), afterBoarding.getAllocatedMouldCodeList());
+    }
+
+    /**
+     * 用例说明：A 当前只有正在 B 续作机台上使用的共用模具时，空闲有效模具数量必须为零；
+     * B 的剩余模具只能保留未占用、未禁用且未被本次转交的精确模具号。
+     */
+    @Test
+    public void shouldResolveTargetNoFreeMouldAndFilterContinuationRemainingMoulds() {
+        LhScheduleContext context = buildContext(
+                Arrays.asList(
+                        buildRel("SKU-A", "M-SHARED"),
+                        buildRel("SKU-B", "M-SHARED"),
+                        buildRel("SKU-B", "M-FREE"),
+                        buildRel("SKU-B", "M-OCCUPIED"),
+                        buildRel("SKU-B", "M-DISABLED")),
+                Arrays.asList(
+                        buildModel("M-SHARED", 1),
+                        buildModel("M-FREE", 1),
+                        buildModel("M-OCCUPIED", 1),
+                        buildModel("M-DISABLED", 0)),
+                Arrays.asList(
+                        buildMachineWithCurrentMaterial("K1201", 1, "SKU-B"),
+                        buildMachineWithCurrentMaterial("K1202", 1, "SKU-OTHER"),
+                        buildMachine("K1203", 1)));
+        context.getScheduleResultList().add(
+                buildResult("K1201", "SKU-B", "M-SHARED"));
+        context.getScheduleResultList().add(
+                buildResult("K1202", "SKU-OTHER", "M-OCCUPIED"));
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+
+        List<String> targetFreeMouldCodeList =
+                resourceContext.resolveFreeValidMouldCodes(
+                        "SKU-A", Collections.<String>emptySet());
+        List<String> continuationRemainingMouldCodeList =
+                resourceContext.resolveFreeValidMouldCodes(
+                        "SKU-B",
+                        new LinkedHashSet<String>(
+                                Collections.singletonList("M-SHARED")));
+
+        Assertions.assertTrue(targetFreeMouldCodeList.isEmpty(),
+                "A 的共用模具正在 B 续作机台占用时，不得误判为其他可用模具");
+        Assertions.assertEquals(
+                Collections.singletonList("M-FREE"),
+                continuationRemainingMouldCodeList,
+                "B 剩余模具必须排除在机占用、禁用和本次转交模具");
+    }
+
+    /**
+     * 用例说明：B 迁移预演只能使用协调器确认的空闲剩余模具，不能把候选新机台当前绑定、
+     * 可释放的旧模具当作 B 的“剩余可用模具”。
+     */
+    @Test
+    public void shouldAllocateContinuationRelocationOnlyFromAllowedFreeMoulds() {
+        LhScheduleContext context = buildContext(
+                Arrays.asList(
+                        buildRel("SKU-B", "M-FREE"),
+                        buildRel("SKU-B", "M-BOUND")),
+                Arrays.asList(
+                        buildModel("M-FREE", 1),
+                        buildModel("M-BOUND", 1)),
+                Collections.singletonList(
+                        buildMachineWithCurrentMaterial(
+                                "K1301", 1, "SKU-OTHER")));
+        context.getScheduleResultList().add(
+                buildResult("K1301", "SKU-OTHER", "M-BOUND"));
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+
+        MouldResourceAllocationResult allocationResult =
+                resourceContext.tryAllocateFromAllowed(
+                        "SKU-B", "K1301",
+                        Collections.singletonList("M-FREE"));
+
+        Assertions.assertTrue(allocationResult.isAllowed());
+        Assertions.assertEquals(
+                Collections.singletonList("M-FREE"),
+                allocationResult.getAllocatedMouldCodeList());
+        Assertions.assertEquals(
+                Collections.singletonList("M-BOUND"),
+                allocationResult.getReleasedMouldCodeList());
+    }
+
+    /**
+     * 用例说明：B 除转交模具外没有任何空闲有效模具时，迁移模具分配必须失败，
+     * 不能复用转交模具，也不能复用其他机台已占用模具。
+     */
+    @Test
+    public void shouldRejectContinuationRelocationWhenNoRemainingMouldExists() {
+        LhScheduleContext context = buildContext(
+                Arrays.asList(
+                        buildRel("SKU-B", "M-SHARED"),
+                        buildRel("SKU-B", "M-OCCUPIED")),
+                Arrays.asList(
+                        buildModel("M-SHARED", 1),
+                        buildModel("M-OCCUPIED", 1)),
+                Arrays.asList(
+                        buildMachineWithCurrentMaterial("K1401", 1, "SKU-B"),
+                        buildMachineWithCurrentMaterial("K1402", 1, "SKU-OTHER"),
+                        buildMachine("K1403", 1)));
+        context.getScheduleResultList().add(
+                buildResult("K1401", "SKU-B", "M-SHARED"));
+        context.getScheduleResultList().add(
+                buildResult("K1402", "SKU-OTHER", "M-OCCUPIED"));
+        MouldResourceContext resourceContext = MouldResourceContext.from(context);
+        List<String> remainingMouldCodeList =
+                resourceContext.resolveFreeValidMouldCodes(
+                        "SKU-B",
+                        Collections.singleton("M-SHARED"));
+
+        MouldResourceAllocationResult allocationResult =
+                resourceContext.tryAllocateFromAllowed(
+                        "SKU-B", "K1403", remainingMouldCodeList);
+
+        Assertions.assertTrue(remainingMouldCodeList.isEmpty());
+        Assertions.assertFalse(allocationResult.isAllowed());
+        Assertions.assertEquals(
+                MouldResourceSkipReason.MOULD_QTY_NOT_ENOUGH,
+                allocationResult.getSkipReason());
     }
 
     private LhScheduleContext buildContext(List<MdmSkuMouldRel> relList,

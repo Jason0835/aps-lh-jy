@@ -262,7 +262,7 @@ S4.6 生成模具交替计划时，系统 MUST 按机台、接管 SKU、产品�
 | `NewProductionHandler.java` | 修改 | S4.5 写入新增结果前冻结续作在机结果身份 |
 | `LhScheduleContext.java` | 修改 | 保存续作快照、指定机台临时指令和精确置换记录 |
 | `SpecialMaterialMachineSubstitutionService.java` | 修改 | 目标日期、候选排序、预演、局部截断、账本恢复及提交编排 |
-| `SpecialMaterialSubstitutionAttemptSnapshot.java` | 新增 | 保存并恢复候选级排程和资源状态 |
+| `ScheduleSubstitutionAttemptSnapshot.java` | 重命名并扩展 | 保存并恢复特殊材料及共用模具联动候选的排程和资源状态 |
 | `SpecialMaterialSubstitutionRecord.java` | 新增 | 记录实际下机、换模时间及置换双方 SKU |
 | `DailyMachineExpansionPlanner.java` | 修改 | 复用加机台规则测算特殊材料所需台数 |
 | `NewSpecProductionStrategy.java` | 修改 | 支持不回落其他机台的指定机台排产 |

@@ -58,10 +58,11 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
 
         /*
          * S4.5 开始前冻结“排程开始时已在机且仍由原物料续作”的结果身份。
-         * 特殊材料置换发生在 S4.5 完成后，若届时仅按机台或 scheduleType 反推，会把本阶段刚生成的
-         * 新增结果误当成续作候选；因此必须在新增链路写入任何结果之前先保留这份只读快照。
+         * 共用模具联动置换和特殊材料置换都发生在 S4.5 完成后。若届时仅按机台或 scheduleType
+         * 反推，会把本阶段刚生成的新增结果误当成续作候选；因此必须在新增链路写入任何结果之前
+         * 先保留这份只读快照。
          */
-        captureSpecialMaterialContinuationSnapshot(context);
+        captureSubstitutionContinuationSnapshot(context);
 
         try {
             // 获取 S4.5 新增排产策略；特殊材料置换由本 Handler 完成后的独立 S4.5.1 步骤执行。
@@ -137,14 +138,14 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
     }
 
     /**
-     * 冻结特殊材料置换允许使用的续作在机结果。
+     * 冻结全部后置置换允许使用的续作在机结果。
      *
      * <p>同时满足以下条件才进入快照：结果属于续作、机台存在初始在机快照、结果物料与初始在机物料一致。
      * 换活字块结果以及 S4.5 后续新增结果不会进入该集合，从数据来源上保证置换不影响新增排产。</p>
      *
      * @param context 排程上下文
      */
-    private void captureSpecialMaterialContinuationSnapshot(LhScheduleContext context) {
+    private void captureSubstitutionContinuationSnapshot(LhScheduleContext context) {
         context.getSpecialMaterialContinuationResultSnapshot().clear();
         for (LhScheduleResult result : context.getScheduleResultList()) {
             if (Objects.isNull(result)
@@ -161,7 +162,7 @@ public class NewProductionHandler extends AbsScheduleStepHandler {
             }
             context.getSpecialMaterialContinuationResultSnapshot().add(result);
         }
-        log.info("特殊材料置换续作在机快照完成, 工厂: {}, 批次: {}, 续作结果数: {}",
+        log.info("后置置换续作在机快照完成, 工厂: {}, 批次: {}, 续作结果数: {}",
                 context.getFactoryCode(), context.getBatchNo(),
                 context.getSpecialMaterialContinuationResultSnapshot().size());
     }

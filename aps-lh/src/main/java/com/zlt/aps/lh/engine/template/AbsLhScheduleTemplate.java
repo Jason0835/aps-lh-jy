@@ -95,7 +95,11 @@ public abstract class AbsLhScheduleTemplate {
                 return buildInterruptResponse(context);
             }
 
-            // S4.5.1 特殊材料硫化机置换：续作、换活字块、新增排产全部完成后，对仍未排上机台的特殊材料SKU执行兜底置换。
+            /*
+             * S4.5.1 置换后处理：
+             * 先对所有“无空闲模具”的 SKU 执行共用模具 A/B 联动置换，
+             * 再对剩余特殊材料执行原硫化机置换兜底；两类置换都只能使用 S4.5 前冻结的续作机台。
+             */
             context.setCurrentStep(ScheduleStepEnum.S4_5_1_SPECIAL_MATERIAL_SUBSTITUTION.getCode());
             log.info(">>> 步骤 S4.5.1: {}", ScheduleStepEnum.S4_5_1_SPECIAL_MATERIAL_SUBSTITUTION.getDescription());
             doSpecialMaterialSubstitution(context);

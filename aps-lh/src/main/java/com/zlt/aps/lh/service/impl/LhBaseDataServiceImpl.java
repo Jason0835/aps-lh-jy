@@ -49,6 +49,7 @@ import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionChecker;
 import com.zlt.aps.lh.service.ILhBaseDataService;
+import com.zlt.aps.lh.util.LhMouldCodeUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.MachineStatusUtil;
@@ -2454,6 +2455,20 @@ public class LhBaseDataServiceImpl implements ILhBaseDataService {
             }
             // 查询结果已按日期倒序排列，首条即为该机台在追溯窗口内距离T最近的记录。
             machineOnlineInfoMap.putIfAbsent(onlineInfo.getLhCode(), onlineInfo);
+        }
+        /*
+         * 调用统一模具归属解析，跨机台比较各自最近的 MES 记录。
+         * 这是基础数据进入续作、滚动衔接和共用模具置换前的唯一归属收口点：
+         * 若模具已由更新记录转移到其他机台，旧机台不能继续携带该模具进入运行态。
+         */
+        Map<String, List<String>> removedMouldCodeMap =
+                LhMouldCodeUtil.normalizeLatestInMachineMouldOwnership(machineOnlineInfoMap);
+        for (Map.Entry<String, List<String>> entry : removedMouldCodeMap.entrySet()) {
+            log.warn("MES在机模具归属按最新记录收敛, 工厂: {}, 排程T日: {}, 旧机台: {}, "
+                            + "移除模具: {}, 处理结果: {}",
+                    factoryCode, LhScheduleTimeUtil.formatDate(tDay), entry.getKey(), entry.getValue(),
+                    machineOnlineInfoMap.containsKey(entry.getKey())
+                            ? "保留该机台其余最新模具" : "该机台无剩余有效在机模具");
         }
         context.setMachineOnlineInfoMap(machineOnlineInfoMap);
         log.info("MES硫化在机信息加载完成, 回溯窗口: [{} ~ {}], 回溯天数: {}, 命中机台: {}",

@@ -96,7 +96,7 @@ class NewProductionHandlerTest {
      * 验证特殊材料置换快照只冻结排程开始时真实在机的续作结果。
      */
     @Test
-    void captureSpecialMaterialContinuationSnapshot_shouldExcludeNewProductionResult() {
+    void captureSubstitutionContinuationSnapshot_shouldExcludeNewProductionResult() {
         LhScheduleContext context = new LhScheduleContext();
         MachineScheduleDTO initialMachine = new MachineScheduleDTO();
         initialMachine.setMachineCode("K1201");
@@ -116,7 +116,7 @@ class NewProductionHandlerTest {
 
         // 直接调用冻结入口，验证对象身份集合不会把随后生成的新增结果纳入置换范围。
         ReflectionTestUtils.invokeMethod(
-                handler, "captureSpecialMaterialContinuationSnapshot", context);
+                handler, "captureSubstitutionContinuationSnapshot", context);
 
         assertTrue(context.getSpecialMaterialContinuationResultSnapshot()
                 .contains(continuationResult));

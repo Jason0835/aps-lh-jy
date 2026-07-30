@@ -6,10 +6,14 @@ import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuDailyPlanQuotaDTO;
 import com.zlt.aps.lh.api.domain.dto.SkuScheduleDTO;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
+import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
+import com.zlt.aps.lh.api.domain.entity.LhScheduleProcessLog;
 import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.context.EmbryoStockConsumeLedger;
 import com.zlt.aps.lh.context.LhScheduleContext;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
+import com.zlt.aps.lh.engine.strategy.support.EarlyProductionRuntimePlan;
+import com.zlt.aps.lh.engine.strategy.support.SharedMouldSubstitutionRecord;
 import com.zlt.aps.lh.engine.strategy.support.SpecialMaterialSubstitutionRecord;
 
 import java.time.LocalDate;
@@ -21,11 +25,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Collection;
 
 /**
- * 特殊材料单候选置换的内存状态快照。
+ * 排程联动置换单候选的通用内存状态快照。
  *
- * <p>S4.5.1 需要复用现有新增排产主链，而该主链会同时修改排程结果、机台运行态、模具资源、
+ * <p>S4.5.1 的特殊材料置换和共用模具联动置换均需要复用现有新增排产主链，而该主链会同时修改排程结果、机台运行态、模具资源、
  * 换模/首检次数、日计划账本和未排结果。候选失败时仅恢复结果列表无法保证无副作用，因此本快照
  * 在真正截断续作结果前保存本次调用可能触达的全部运行态，并在失败时一次性恢复。</p>
  *
@@ -33,7 +38,7 @@ import java.util.Set;
  *
  * @author APS
  */
-final class SpecialMaterialSubstitutionAttemptSnapshot {
+final class ScheduleSubstitutionAttemptSnapshot {
 
     /** 置换前排程结果对象顺序 */
     private List<LhScheduleResult> scheduleResultList;
@@ -112,14 +117,33 @@ final class SpecialMaterialSubstitutionAttemptSnapshot {
     private Set<String> dynamicSingleEmbryoEndingMaterialSet;
     /** 置换前精确置换成功记录 */
     private List<SpecialMaterialSubstitutionRecord> substitutionRecordList;
+    /** 置换前共用模具联动成功记录 */
+    private List<SharedMouldSubstitutionRecord> sharedMouldSubstitutionRecordList;
+    /** 置换前新增待排 SKU 列表，预演会临时隔离为 A 或 B 单个 SKU。 */
+    private List<SkuScheduleDTO> newSpecSkuList;
+    /** 置换前模具交替计划；换活字块或局部策略不得在失败预演中残留。 */
+    private List<LhMouldChangePlan> mouldChangePlanList;
+    /** 置换前持久化过程日志；预演日志必须随快照回滚。 */
+    private List<LhScheduleProcessLog> scheduleLogList;
+    /** 置换前结果级收尾、共用胎胚错峰和精度前插运行态。 */
+    private Map<LhScheduleResult, Integer> sharedEmbryoReleaseShiftIndexMap;
+    private Map<LhScheduleResult, Integer> sharedEmbryoReleaseShiftQtyMap;
+    private Map<LhScheduleResult, Integer> sharedEmbryoAllowedOverQtyMap;
+    private Map<LhScheduleResult, Integer> endingFillAllowedOverQtyMap;
+    private Set<LhScheduleResult> precisionPreInsertResultSet;
+    private Map<LhScheduleResult, Date> precisionPreInsertInspectionTimeMap;
+    private Map<LhScheduleResult, Date> precisionPreInsertMouldChangeTimeMap;
+    private Map<LhScheduleResult, Integer> precisionPreInsertInspectionShiftIndexMap;
+    /** 置换前提前生产运行视图，预演结束后不能无条件丢弃调用前状态。 */
+    private Map<SkuScheduleDTO, EarlyProductionRuntimePlan> earlyProductionRuntimePlanMap;
     /** 置换前当前排程日期 */
     private Date currentScheduleDate;
-    /** 置换前待排特殊材料 SKU 字段快照 */
-    private SkuScheduleDTO specialSkuState;
-    /** 置换前待排特殊材料 SKU 日计划账本深拷贝 */
-    private Map<LocalDate, SkuDailyPlanQuotaDTO> specialSkuDailyQuotaMap;
+    /** 置换前所有联动 SKU 字段快照，按对象身份保存 A、B 及必要来源 SKU。 */
+    private Map<SkuScheduleDTO, SkuScheduleDTO> skuStateMap;
+    /** 置换前所有联动 SKU 日计划账本深拷贝。 */
+    private Map<SkuScheduleDTO, Map<LocalDate, SkuDailyPlanQuotaDTO>> skuDailyQuotaMap;
 
-    private SpecialMaterialSubstitutionAttemptSnapshot() {
+    private ScheduleSubstitutionAttemptSnapshot() {
     }
 
     /**
@@ -129,11 +153,28 @@ final class SpecialMaterialSubstitutionAttemptSnapshot {
      * @param specialSku 待排特殊材料 SKU
      * @return 可用于失败恢复的状态快照
      */
-    static SpecialMaterialSubstitutionAttemptSnapshot capture(
+    static ScheduleSubstitutionAttemptSnapshot capture(
             LhScheduleContext context,
             SkuScheduleDTO specialSku) {
-        SpecialMaterialSubstitutionAttemptSnapshot snapshot =
-                new SpecialMaterialSubstitutionAttemptSnapshot();
+        List<SkuScheduleDTO> skuList = new ArrayList<SkuScheduleDTO>(1);
+        if (specialSku != null) {
+            skuList.add(specialSku);
+        }
+        return capture(context, skuList);
+    }
+
+    /**
+     * 捕获一次联动置换预演或正式提交前的完整运行态。
+     *
+     * @param context 排程上下文
+     * @param skuCollection 本次可能被修改的 A、B 及来源 SKU
+     * @return 可用于原子恢复的通用快照
+     */
+    static ScheduleSubstitutionAttemptSnapshot capture(
+            LhScheduleContext context,
+            Collection<SkuScheduleDTO> skuCollection) {
+        ScheduleSubstitutionAttemptSnapshot snapshot =
+                new ScheduleSubstitutionAttemptSnapshot();
         snapshot.scheduleResultList = new ArrayList<LhScheduleResult>(context.getScheduleResultList());
         snapshot.scheduleResultStateMap = new IdentityHashMap<LhScheduleResult, LhScheduleResult>(
                 Math.max(16, context.getScheduleResultList().size() * 2));
@@ -226,9 +267,56 @@ final class SpecialMaterialSubstitutionAttemptSnapshot {
         snapshot.substitutionRecordList =
                 new ArrayList<SpecialMaterialSubstitutionRecord>(
                         context.getSpecialMaterialSubstitutionRecordList());
+        snapshot.sharedMouldSubstitutionRecordList =
+                new ArrayList<SharedMouldSubstitutionRecord>(
+                        context.getSharedMouldSubstitutionRecordList());
+        snapshot.newSpecSkuList = new ArrayList<SkuScheduleDTO>(context.getNewSpecSkuList());
+        snapshot.mouldChangePlanList =
+                new ArrayList<LhMouldChangePlan>(context.getMouldChangePlanList());
+        snapshot.scheduleLogList =
+                new ArrayList<LhScheduleProcessLog>(context.getScheduleLogList());
+        snapshot.sharedEmbryoReleaseShiftIndexMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        context.getSharedEmbryoEndingStaggerReleaseShiftIndexMap());
+        snapshot.sharedEmbryoReleaseShiftQtyMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        context.getSharedEmbryoEndingStaggerReleaseShiftQtyMap());
+        snapshot.sharedEmbryoAllowedOverQtyMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        context.getSharedEmbryoEndingStaggerAllowedOverQtyMap());
+        snapshot.endingFillAllowedOverQtyMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        context.getEndingFillAllowedOverQtyMap());
+        snapshot.precisionPreInsertResultSet =
+                java.util.Collections.newSetFromMap(
+                        new IdentityHashMap<LhScheduleResult, Boolean>());
+        snapshot.precisionPreInsertResultSet.addAll(
+                context.getPrecisionPreInsertResultSet());
+        snapshot.precisionPreInsertInspectionTimeMap =
+                new IdentityHashMap<LhScheduleResult, Date>(
+                        context.getPrecisionPreInsertInspectionTimeMap());
+        snapshot.precisionPreInsertMouldChangeTimeMap =
+                new IdentityHashMap<LhScheduleResult, Date>(
+                        context.getPrecisionPreInsertMouldChangeTimeMap());
+        snapshot.precisionPreInsertInspectionShiftIndexMap =
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        context.getPrecisionPreInsertInspectionShiftIndexMap());
+        snapshot.earlyProductionRuntimePlanMap =
+                new IdentityHashMap<SkuScheduleDTO, EarlyProductionRuntimePlan>(
+                        context.getEarlyProductionRuntimePlanMap());
         snapshot.currentScheduleDate = context.getCurrentScheduleDate();
-        snapshot.specialSkuState = copyBean(specialSku, SkuScheduleDTO.class);
-        snapshot.specialSkuDailyQuotaMap = copyDailyQuotaMap(specialSku.getDailyPlanQuotaMap());
+        snapshot.skuStateMap = new IdentityHashMap<SkuScheduleDTO, SkuScheduleDTO>(4);
+        snapshot.skuDailyQuotaMap =
+                new IdentityHashMap<SkuScheduleDTO, Map<LocalDate, SkuDailyPlanQuotaDTO>>(4);
+        if (skuCollection != null) {
+            for (SkuScheduleDTO sku : skuCollection) {
+                if (sku == null || snapshot.skuStateMap.containsKey(sku)) {
+                    continue;
+                }
+                snapshot.skuStateMap.put(sku, copyBean(sku, SkuScheduleDTO.class));
+                snapshot.skuDailyQuotaMap.put(sku, copyDailyQuotaMap(sku.getDailyPlanQuotaMap()));
+            }
+        }
         return snapshot;
     }
 
@@ -236,9 +324,8 @@ final class SpecialMaterialSubstitutionAttemptSnapshot {
      * 恢复候选置换前状态。
      *
      * @param context 排程上下文
-     * @param specialSku 待排特殊材料 SKU
      */
-    void restore(LhScheduleContext context, SkuScheduleDTO specialSku) {
+    void restore(LhScheduleContext context) {
         for (Map.Entry<LhScheduleResult, LhScheduleResult> entry : scheduleResultStateMap.entrySet()) {
             BeanUtil.copyProperties(entry.getValue(), entry.getKey());
         }
@@ -315,10 +402,47 @@ final class SpecialMaterialSubstitutionAttemptSnapshot {
                 new LinkedHashSet<String>(dynamicSingleEmbryoEndingMaterialSet));
         context.setSpecialMaterialSubstitutionRecordList(
                 new ArrayList<SpecialMaterialSubstitutionRecord>(substitutionRecordList));
+        context.setSharedMouldSubstitutionRecordList(
+                new ArrayList<SharedMouldSubstitutionRecord>(sharedMouldSubstitutionRecordList));
+        context.setNewSpecSkuList(new ArrayList<SkuScheduleDTO>(newSpecSkuList));
+        context.setMouldChangePlanList(new ArrayList<LhMouldChangePlan>(mouldChangePlanList));
+        context.setScheduleLogList(new ArrayList<LhScheduleProcessLog>(scheduleLogList));
+        context.setSharedEmbryoEndingStaggerReleaseShiftIndexMap(
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        sharedEmbryoReleaseShiftIndexMap));
+        context.setSharedEmbryoEndingStaggerReleaseShiftQtyMap(
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        sharedEmbryoReleaseShiftQtyMap));
+        context.setSharedEmbryoEndingStaggerAllowedOverQtyMap(
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        sharedEmbryoAllowedOverQtyMap));
+        context.setEndingFillAllowedOverQtyMap(
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        endingFillAllowedOverQtyMap));
+        Set<LhScheduleResult> restoredPrecisionResultSet =
+                java.util.Collections.newSetFromMap(
+                        new IdentityHashMap<LhScheduleResult, Boolean>());
+        restoredPrecisionResultSet.addAll(precisionPreInsertResultSet);
+        context.setPrecisionPreInsertResultSet(restoredPrecisionResultSet);
+        context.setPrecisionPreInsertInspectionTimeMap(
+                new IdentityHashMap<LhScheduleResult, Date>(
+                        precisionPreInsertInspectionTimeMap));
+        context.setPrecisionPreInsertMouldChangeTimeMap(
+                new IdentityHashMap<LhScheduleResult, Date>(
+                        precisionPreInsertMouldChangeTimeMap));
+        context.setPrecisionPreInsertInspectionShiftIndexMap(
+                new IdentityHashMap<LhScheduleResult, Integer>(
+                        precisionPreInsertInspectionShiftIndexMap));
+        context.setEarlyProductionRuntimePlanMap(
+                new IdentityHashMap<SkuScheduleDTO, EarlyProductionRuntimePlan>(
+                        earlyProductionRuntimePlanMap));
         context.setCurrentScheduleDate(currentScheduleDate);
 
-        BeanUtil.copyProperties(specialSkuState, specialSku);
-        specialSku.setDailyPlanQuotaMap(copyDailyQuotaMap(specialSkuDailyQuotaMap));
+        for (Map.Entry<SkuScheduleDTO, SkuScheduleDTO> entry : skuStateMap.entrySet()) {
+            BeanUtil.copyProperties(entry.getValue(), entry.getKey());
+            entry.getKey().setDailyPlanQuotaMap(
+                    copyDailyQuotaMap(skuDailyQuotaMap.get(entry.getKey())));
+        }
 
         /*
          * 模具资源上下文没有暴露可变 Map，恢复排程结果和机台状态后按相同基础数据重新构建，
@@ -326,6 +450,7 @@ final class SpecialMaterialSubstitutionAttemptSnapshot {
          */
         context.setMouldResourceContext(MouldResourceContext.from(context));
         context.clearSpecialMaterialSpecifiedMachineDirective();
+        context.clearScheduleSubstitutionDirective();
     }
 
     private void restoreMachineScheduleMap(LhScheduleContext context) {
@@ -455,7 +580,8 @@ final class SpecialMaterialSubstitutionAttemptSnapshot {
         try {
             target = targetClass.newInstance();
         } catch (InstantiationException | IllegalAccessException ex) {
-            throw new IllegalStateException("特殊材料置换状态快照创建失败: " + targetClass.getSimpleName(), ex);
+            throw new IllegalStateException("排程联动置换状态快照创建失败: "
+                    + targetClass.getSimpleName(), ex);
         }
         BeanUtil.copyProperties(source, target);
         return target;

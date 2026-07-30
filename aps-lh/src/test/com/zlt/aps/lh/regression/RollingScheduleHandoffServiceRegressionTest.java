@@ -4,6 +4,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.zlt.aps.lh.api.domain.dto.MachineScheduleDTO;
+import com.zlt.aps.lh.api.domain.entity.LhMachineOnlineInfo;
 import com.zlt.aps.lh.api.domain.entity.LhMouldChangePlan;
 import com.zlt.aps.lh.api.domain.entity.LhScheduleResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
@@ -228,6 +229,36 @@ class RollingScheduleHandoffServiceRegressionTest {
 
         assertTrue(context.getRollingInheritedScheduleResultList().isEmpty());
         assertTrue(context.getInheritedPlanQtyMap().isEmpty());
+    }
+
+    /**
+     * 当前 MES 已把历史结果使用的模具转移到另一物理机台时，结果和对应换模计划都不得继续继承。
+     */
+    @Test
+    void apply_shouldSkipHistoricalResultWhenMouldOwnedByAnotherMachine() {
+        LhScheduleContext context = newRollingContext();
+        context.setMonthPlanList(Collections.singletonList(buildPlan("MAT-A")));
+        LhScheduleResult previousResult = buildPreviousResult();
+        previousResult.setMouldCode("MOULD-MOVED");
+        context.setPreviousScheduleResultList(
+                Collections.singletonList(previousResult));
+        LhMouldChangePlan previousPlan = buildPreviousTypeBlockPlan();
+        previousPlan.setMouldCode("MOULD-MOVED");
+        context.setPreviousMouldChangePlanList(
+                Collections.singletonList(previousPlan));
+
+        LhMachineOnlineInfo currentOwner = new LhMachineOnlineInfo();
+        currentOwner.setLhCode("M2");
+        currentOwner.setOnlineDate(date(2026, 4, 24));
+        currentOwner.setInMachineMouldCode("MOULD-MOVED");
+        context.getMachineOnlineInfoMap().put("M2", currentOwner);
+
+        service.apply(context);
+
+        assertTrue(context.getRollingInheritedScheduleResultList().isEmpty(),
+                "模具已转移到其他物理机台，旧机台结果不得继续滚动继承");
+        assertTrue(context.getMouldChangePlanList().isEmpty(),
+                "冲突历史结果被跳过时，对应历史换模计划也不得单独遗留");
     }
 
     @Test

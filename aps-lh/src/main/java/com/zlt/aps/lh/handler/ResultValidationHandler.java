@@ -32,6 +32,7 @@ import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.exception.ScheduleErrorCode;
 import com.zlt.aps.lh.exception.ScheduleException;
 import com.zlt.aps.lh.service.impl.SchedulePersistenceService;
+import com.zlt.aps.lh.util.LhMouldCodeUtil;
 import com.zlt.aps.lh.util.LhScheduleTimeUtil;
 import com.zlt.aps.lh.util.LhSingleControlMachineUtil;
 import com.zlt.aps.lh.util.CleaningScheduleRuleUtil;
@@ -1103,6 +1104,11 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
                 throwValidationFailure(context, result, "换模结果 mouldCode 缺失");
             }
         }
+        /*
+         * 调用保存前模具时间轴强校验。置换协调器和各排产主链虽然都会维护模具占用账本，
+         * 但最终结果仍必须独立验证，禁止历史在机快照或滚动继承把同一实体模具并发落到不同机台。
+         */
+        validateConcurrentMouldOccupation(context);
         // 双模 SKU 的 L/R 已在新增、续作及换活字块链路按物理组同步生成。
         // 保存前必须重新校验两侧完整性，禁止后置收尾、降模或释放逻辑拆散双模组后继续落库。
 //        validateWholeSingleControlMachineResults(context);
@@ -1112,6 +1118,156 @@ public class ResultValidationHandler extends AbsScheduleStepHandler {
 //        validateProductionQuantityPolicy(context);
 
         log.info("排程后置校验完成");
+    }
+
+    /**
+     * 校验同一实体模具不能在重叠时间内被不同物理机台同时占用。
+     *
+     * <p>校验以每条结果的实际模具号和有量班次起止时间为准；同一单控物理机台的 L/R
+     * 运行态编码视为同一台设备，不按跨机台冲突处理。发现冲突时直接阻断本批持久化，
+     * 确保共用模具置换及普通续作、新增排产都遵守相同的最终一致性约束。</p>
+     *
+     * @param context 排程上下文
+     */
+    private void validateConcurrentMouldOccupation(LhScheduleContext context) {
+        List<LhScheduleResult> resultList = context.getScheduleResultList();
+        if (CollectionUtils.isEmpty(resultList) || resultList.size() <= 1) {
+            return;
+        }
+        for (int leftIndex = 0; leftIndex < resultList.size(); leftIndex++) {
+            LhScheduleResult leftResult = resultList.get(leftIndex);
+            if (Objects.isNull(leftResult)
+                    || StringUtils.isEmpty(leftResult.getLhMachineCode())
+                    || StringUtils.isEmpty(leftResult.getMouldCode())) {
+                continue;
+            }
+            LinkedHashSet<String> leftMouldCodeSet =
+                    LhMouldCodeUtil.splitMouldCode(leftResult.getMouldCode());
+            if (CollectionUtils.isEmpty(leftMouldCodeSet)) {
+                continue;
+            }
+            for (int rightIndex = leftIndex + 1; rightIndex < resultList.size(); rightIndex++) {
+                LhScheduleResult rightResult = resultList.get(rightIndex);
+                if (!isDifferentPhysicalMachine(leftResult, rightResult)
+                        || StringUtils.isEmpty(rightResult.getMouldCode())) {
+                    continue;
+                }
+                LinkedHashSet<String> sharedMouldCodeSet =
+                        new LinkedHashSet<String>(leftMouldCodeSet);
+                sharedMouldCodeSet.retainAll(
+                        LhMouldCodeUtil.splitMouldCode(rightResult.getMouldCode()));
+                if (CollectionUtils.isEmpty(sharedMouldCodeSet)) {
+                    continue;
+                }
+                String overlapDetail = resolveMouldOccupationOverlapDetail(
+                        leftResult, rightResult, sharedMouldCodeSet);
+                if (StringUtils.isEmpty(overlapDetail)) {
+                    continue;
+                }
+                log.error("排程结果存在跨机台模具重复占用, 批次: {}, 左机台: {}, 左物料: {}, "
+                                + "右机台: {}, 右物料: {}, {}",
+                        context.getBatchNo(), leftResult.getLhMachineCode(),
+                        leftResult.getMaterialCode(), rightResult.getLhMachineCode(),
+                        rightResult.getMaterialCode(), overlapDetail);
+                throwValidationFailure(context, leftResult,
+                        "同一模具被不同机台重复占用，冲突机台["
+                                + rightResult.getLhMachineCode() + "] 物料["
+                                + rightResult.getMaterialCode() + "]，" + overlapDetail);
+            }
+        }
+    }
+
+    /**
+     * 判断两条结果是否属于不同物理机台。
+     *
+     * @param leftResult 左侧结果
+     * @param rightResult 右侧结果
+     * @return true-不同物理机台；false-同一物理机台或结果无效
+     */
+    private boolean isDifferentPhysicalMachine(
+            LhScheduleResult leftResult,
+            LhScheduleResult rightResult) {
+        if (Objects.isNull(leftResult)
+                || Objects.isNull(rightResult)
+                || StringUtils.isEmpty(rightResult.getLhMachineCode())) {
+            return false;
+        }
+        return !StringUtils.equals(
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                        leftResult.getLhMachineCode()),
+                LhSingleControlMachineUtil.resolvePhysicalMachineCode(
+                        rightResult.getLhMachineCode()));
+    }
+
+    /**
+     * 解析两条结果在共用模具上的首个有量班次时间重叠。
+     *
+     * @param leftResult 左侧结果
+     * @param rightResult 右侧结果
+     * @param sharedMouldCodeSet 两条结果共同使用的模具号
+     * @return 冲突明细；没有重叠时返回 null
+     */
+    private String resolveMouldOccupationOverlapDetail(
+            LhScheduleResult leftResult,
+            LhScheduleResult rightResult,
+            Set<String> sharedMouldCodeSet) {
+        for (int leftShiftIndex = 1;
+             leftShiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+             leftShiftIndex++) {
+            Integer leftPlanQty =
+                    ShiftFieldUtil.getShiftPlanQty(leftResult, leftShiftIndex);
+            Date leftStartTime =
+                    ShiftFieldUtil.getShiftStartTime(leftResult, leftShiftIndex);
+            Date leftEndTime =
+                    ShiftFieldUtil.getShiftEndTime(leftResult, leftShiftIndex);
+            if (!isValidMouldOccupationWindow(
+                    leftPlanQty, leftStartTime, leftEndTime)) {
+                continue;
+            }
+            for (int rightShiftIndex = 1;
+                 rightShiftIndex <= LhScheduleConstant.MAX_SHIFT_SLOT_COUNT;
+                 rightShiftIndex++) {
+                Integer rightPlanQty =
+                        ShiftFieldUtil.getShiftPlanQty(rightResult, rightShiftIndex);
+                Date rightStartTime =
+                        ShiftFieldUtil.getShiftStartTime(rightResult, rightShiftIndex);
+                Date rightEndTime =
+                        ShiftFieldUtil.getShiftEndTime(rightResult, rightShiftIndex);
+                if (!isValidMouldOccupationWindow(
+                        rightPlanQty, rightStartTime, rightEndTime)
+                        || !leftStartTime.before(rightEndTime)
+                        || !rightStartTime.before(leftEndTime)) {
+                    continue;
+                }
+                return "模具=" + sharedMouldCodeSet
+                        + "，左班次=" + leftShiftIndex
+                        + "[" + LhScheduleTimeUtil.formatDateTime(leftStartTime)
+                        + " ~ " + LhScheduleTimeUtil.formatDateTime(leftEndTime)
+                        + "]，右班次=" + rightShiftIndex
+                        + "[" + LhScheduleTimeUtil.formatDateTime(rightStartTime)
+                        + " ~ " + LhScheduleTimeUtil.formatDateTime(rightEndTime) + "]";
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 判断班次是否形成有效模具占用窗口。
+     *
+     * @param planQty 班次计划量
+     * @param startTime 班次实际开始时间
+     * @param endTime 班次实际结束时间
+     * @return true-有正计划量且时间有效
+     */
+    private boolean isValidMouldOccupationWindow(
+            Integer planQty,
+            Date startTime,
+            Date endTime) {
+        return Objects.nonNull(planQty)
+                && planQty > 0
+                && Objects.nonNull(startTime)
+                && Objects.nonNull(endTime)
+                && endTime.after(startTime);
     }
 
     /**

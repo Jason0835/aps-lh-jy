@@ -19,6 +19,8 @@ import com.zlt.aps.lh.api.domain.entity.LhUnscheduledResult;
 import com.zlt.aps.lh.api.domain.vo.LhShiftConfigVO;
 import com.zlt.aps.lh.engine.strategy.support.MouldResourceContext;
 import com.zlt.aps.lh.engine.strategy.support.HistoricalReverseSelectionDirective;
+import com.zlt.aps.lh.engine.strategy.support.ScheduleSubstitutionDirective;
+import com.zlt.aps.lh.engine.strategy.support.SharedMouldSubstitutionRecord;
 import com.zlt.aps.lh.engine.strategy.support.SpecialMaterialSubstitutionRecord;
 import com.zlt.aps.lh.engine.strategy.support.EarlyProductionRuntimePlan;
 import com.zlt.aps.lh.component.MonthPlanDateResolver;
@@ -559,6 +561,21 @@ public class LhScheduleContext {
      * <p>S4.6 按实际换模结果精确追加备注，不再使用“机台编码 -> 备注”的粗粒度 Map。</p>
      */
     private List<SpecialMaterialSubstitutionRecord> specialMaterialSubstitutionRecordList = new ArrayList<>();
+    /**
+     * 共用模具联动置换临时排产指令。
+     *
+     * <p>只在 S4.5.1 的单候选预演或正式提交期间设置。新增主链通过该指令区分
+     * “A 原机台无换模接管”和“B 携剩余模具重新选机”，调用结束后必须清空。</p>
+     */
+    private ScheduleSubstitutionDirective scheduleSubstitutionDirective;
+    /**
+     * 共用模具联动置换成功记录。
+     *
+     * <p>记录 A/B、原新机台、转交及迁移模具和完整时间轴，不新增数据库表；
+     * 最终通过排程过程日志持久化审计信息。</p>
+     */
+    private List<SharedMouldSubstitutionRecord> sharedMouldSubstitutionRecordList =
+            new ArrayList<SharedMouldSubstitutionRecord>();
     /** 全量SKU排程信息索引Map，key=materialCode_productStatus，供后置阶段精确查找来源SKU */
     private Map<String, SkuScheduleDTO> allSkuScheduleDtoMap = new LinkedHashMap<>();
     /** SKU减量清单索引集合，key=year+SEP+month+SEP+materialCode+SEP+productStatus（归一化）。S4.2批量加载，S4.3归集后统一过滤命中SKU */
@@ -596,6 +613,72 @@ public class LhScheduleContext {
         }
         return StringUtils.equals(specialMaterialSpecifiedSkuKey,
                 MonthPlanDateResolver.buildMaterialStatusKey(sku.getMaterialCode(), sku.getProductStatus()));
+    }
+
+    /**
+     * 判断当前 SKU 是否命中联动置换临时指令。
+     *
+     * @param sku 待排 SKU
+     * @return true-复用新增主链执行置换；false-执行原新增排产逻辑
+     */
+    public boolean isScheduleSubstitutionSku(SkuScheduleDTO sku) {
+        return Objects.nonNull(scheduleSubstitutionDirective)
+                && scheduleSubstitutionDirective.matches(sku);
+    }
+
+    /**
+     * 解析置换模式指定机台，兼容已有特殊材料指定机台指令。
+     *
+     * @param sku 待排 SKU
+     * @return 指定机台编码；未指定时返回 null
+     */
+    public String resolveSubstitutionSpecifiedMachineCode(SkuScheduleDTO sku) {
+        if (isScheduleSubstitutionSku(sku)) {
+            return scheduleSubstitutionDirective.getSpecifiedMachineCode();
+        }
+        return isSpecialMaterialSpecifiedSku(sku)
+                ? specialMaterialSpecifiedMachineCode : null;
+    }
+
+    /**
+     * 解析置换模式允许的最早切换时间，兼容已有特殊材料置换链。
+     *
+     * @param sku 待排 SKU
+     * @return 最早切换时间；普通新增返回 null
+     */
+    public Date resolveSubstitutionEarliestSwitchTime(SkuScheduleDTO sku) {
+        if (isScheduleSubstitutionSku(sku)) {
+            return scheduleSubstitutionDirective.getEarliestSwitchTime();
+        }
+        return isSpecialMaterialSpecifiedSku(sku)
+                ? specialMaterialEarliestSwitchTime : null;
+    }
+
+    /**
+     * 解析 B 迁移必须精确承接的续作截断尾量。
+     *
+     * @param sku 待排 SKU
+     * @return 正截断尾量；普通新增、特殊材料置换和 A 接管均返回 0
+     */
+    public int resolveSubstitutionExactScheduleQty(SkuScheduleDTO sku) {
+        if (!isScheduleSubstitutionSku(sku)
+                || !scheduleSubstitutionDirective
+                .isContinuationRelocation()) {
+            return 0;
+        }
+        return Math.max(
+                0, scheduleSubstitutionDirective
+                        .getExactScheduleQty());
+    }
+
+    /**
+     * 清空共用模具联动置换临时指令。
+     *
+     * <p>调用处必须放在 finally 中，确保预演失败、正式提交失败和异常分支均不会污染
+     * 后续特殊材料兜底或 S4.6 结果校验。</p>
+     */
+    public void clearScheduleSubstitutionDirective() {
+        scheduleSubstitutionDirective = null;
     }
 
     /**

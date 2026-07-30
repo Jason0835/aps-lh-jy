@@ -280,7 +280,7 @@ public class SpecialMaterialMachineSubstitutionServiceTest {
 
         @SuppressWarnings("unchecked")
         List<MachineScheduleDTO> restrictedCandidates = ReflectionTestUtils.invokeMethod(
-                strategy, "restrictSpecialMaterialSpecifiedMachine",
+                strategy, "restrictSubstitutionCandidates",
                 context, specialSku, Collections.singletonList(otherNewMachine),
                 machineMatchStrategy);
 
@@ -294,7 +294,7 @@ public class SpecialMaterialMachineSubstitutionServiceTest {
                 .thenReturn(SpecifiedMachineMatchResult.failed("模具状态不满足"));
         @SuppressWarnings("unchecked")
         List<MachineScheduleDTO> failedCandidates = ReflectionTestUtils.invokeMethod(
-                strategy, "restrictSpecialMaterialSpecifiedMachine",
+                strategy, "restrictSubstitutionCandidates",
                 context, specialSku, Collections.singletonList(otherNewMachine),
                 machineMatchStrategy);
         Assertions.assertTrue(failedCandidates.isEmpty(),
@@ -392,8 +392,8 @@ public class SpecialMaterialMachineSubstitutionServiceTest {
         specialSku.setTargetScheduleQty(12);
         specialSku.setDailyPlanQuotaMap(
                 new LinkedHashMap<LocalDate, SkuDailyPlanQuotaDTO>(0));
-        SpecialMaterialSubstitutionAttemptSnapshot snapshot =
-                SpecialMaterialSubstitutionAttemptSnapshot.capture(context, specialSku);
+        ScheduleSubstitutionAttemptSnapshot snapshot =
+                ScheduleSubstitutionAttemptSnapshot.capture(context, specialSku);
 
         continuationResult.setClass1PlanQty(0);
         context.getScheduleResultList().clear();
@@ -408,7 +408,7 @@ public class SpecialMaterialMachineSubstitutionServiceTest {
         specialSku.setTargetScheduleQty(0);
 
         // 模拟候选排产失败，恢复必须覆盖排程结果和所有已触达的资源账本。
-        snapshot.restore(context, specialSku);
+        snapshot.restore(context);
 
         Assertions.assertEquals(1, context.getScheduleResultList().size());
         Assertions.assertSame(continuationResult, context.getScheduleResultList().get(0));

@@ -347,6 +347,48 @@ class ScheduleDataWindowRegressionTest {
         assertEquals("MAT-B-LATE", context.getMachineOnlineInfoMap().get("K1502").getMaterialCode());
     }
 
+    /**
+     * 回溯窗口内同一实体模具先后出现在不同机台时，必须以更新的 MES 记录作为唯一归属。
+     * 旧机台的模具全部被接管后应移除过期在机记录，避免强制重排生成跨机台重复模具续作。
+     */
+    @Test
+    void loadMachineOnlineInfo_shouldKeepLatestMachineWhenMouldMovedAcrossMachines() {
+        Date scheduleDate = LhScheduleTimeUtil.clearTime(date(2026, 4, 15));
+
+        LhMachineOnlineInfo currentOwner = new LhMachineOnlineInfo();
+        currentOwner.setOnlineDate(date(2026, 4, 15));
+        currentOwner.setUpdateTime(dateTime(2026, 4, 15, 8, 30, 0));
+        currentOwner.setLhCode("K1416");
+        currentOwner.setMaterialCode("MAT-CURRENT");
+        currentOwner.setInMachineMouldCode("MOULD-101,MOULD-102");
+
+        LhMachineOnlineInfo staleOwner = new LhMachineOnlineInfo();
+        staleOwner.setOnlineDate(date(2026, 4, 12));
+        staleOwner.setUpdateTime(dateTime(2026, 4, 12, 9, 0, 0));
+        staleOwner.setLhCode("K2024");
+        staleOwner.setMaterialCode("MAT-STALE");
+        staleOwner.setInMachineMouldCode("MOULD-101,MOULD-102");
+
+        when(lhMachineOnlineInfoMapper.selectList(any()))
+                .thenReturn(Arrays.asList(currentOwner, staleOwner));
+
+        LhScheduleContext context = newScheduleContext();
+        context.setFactoryCode("FC01");
+        context.setScheduleDate(scheduleDate);
+
+        // 直接调用 MES 在机加载入口，隔离验证“按机台取最近记录后再按模具收敛唯一归属”。
+        ReflectionTestUtils.invokeMethod(
+                lhBaseDataService, "loadMachineOnlineInfo",
+                context, "FC01", scheduleDate, 3);
+
+        assertEquals(1, context.getMachineOnlineInfoMap().size());
+        assertTrue(context.getMachineOnlineInfoMap().containsKey("K1416"));
+        assertTrue(!context.getMachineOnlineInfoMap().containsKey("K2024"),
+                "旧机台的全部模具已被新记录接管，不得继续作为有效在机续作来源");
+        assertEquals("MOULD-101,MOULD-102",
+                context.getMachineOnlineInfoMap().get("K1416").getInMachineMouldCode());
+    }
+
     @Test
     void loadAllBaseData_shouldOrderSameDayOnlineInfoByDataVersion() {
         Date scheduleDate = LhScheduleTimeUtil.clearTime(date(2026, 4, 15));
